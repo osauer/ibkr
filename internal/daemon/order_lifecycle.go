@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strings"
 	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
@@ -40,6 +41,7 @@ func (s *Server) appendOrderLifecycleEvent(ev ibkrlib.OrderLifecycleEvent) {
 		return
 	}
 	s.enrichOrderLifecycleEventFromJournal(&journalEvent)
+	normalizeOrderLifecycleJournalEvent(&journalEvent)
 
 	s.mu.Lock()
 	ep := s.endpoint
@@ -81,6 +83,24 @@ func (s *Server) appendOrderLifecycleEvent(ev ibkrlib.OrderLifecycleEvent) {
 		if err := s.proposalOutcomes.AppendMark(proposalOutcomeFilledFromJournal(journalEvent, submitted, now)); err != nil {
 			s.warnf("append proposal outcome fill: %v", err)
 		}
+	}
+}
+
+func normalizeOrderLifecycleJournalEvent(ev *orderJournalEvent) {
+	if ev == nil {
+		return
+	}
+	if ev.Type != orderJournalEventStatusUpdated || !strings.EqualFold(ev.Status, "Execution") {
+		return
+	}
+	if ev.Quantity > 0 && ev.Filled >= ev.Quantity-1e-9 {
+		ev.Status = "Filled"
+		ev.Remaining = 0
+		ev.SendState = orderSendStateTerminal
+		return
+	}
+	if ev.Remaining > 0 {
+		ev.SendState = orderSendStateBrokerAcknowledged
 	}
 }
 
@@ -210,6 +230,9 @@ func copyOrderJournalIdentityFromView(ev *orderJournalEvent, view rpc.OrderView)
 	}
 	if ev.TIF == "" {
 		ev.TIF = view.TIF
+	}
+	if ev.TriggerMethod == 0 {
+		ev.TriggerMethod = view.TriggerMethod
 	}
 	if view.OutsideRTH {
 		ev.OutsideRTH = true

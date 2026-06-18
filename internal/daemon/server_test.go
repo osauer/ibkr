@@ -243,6 +243,14 @@ func TestOrderPreviewUnaryDeadlineCoversBrokerWhatIf(t *testing.T) {
 	}
 }
 
+func TestHistoryDailyUnaryDeadlineCoversInteractiveHMDS(t *testing.T) {
+	t.Parallel()
+
+	if got := unaryDeadline(rpc.MethodHistoryDaily); got < 50*time.Second || got >= 60*time.Second {
+		t.Fatalf("history.daily deadline = %s, want room for cold contract details + HMDS below the CLI 60s ceiling", got)
+	}
+}
+
 // requestCtx must derive a child context carrying the per-method unary
 // deadline, and must NOT leak that deadline back into the caller's
 // parent context. Tests the actual deadline-attachment behaviour

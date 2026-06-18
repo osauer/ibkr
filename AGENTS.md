@@ -42,6 +42,11 @@ unfamiliar project target instead of relying on duplicated target lists.
 For larger Codex sessions, read `docs/guides/codex-workflow.md` after the
 architecture primers.
 
+For IBKR account/order/protection investigations, first load the repo-local
+`.agents/skills/ibkr/SKILL.md`, then use read-only `ibkr ... --json` surfaces
+before broad code search. Start with status/settings/trading/proposals/orders,
+then inspect code only for gaps the artifacts expose.
+
 The repo has a project `.codex` layer with hooks, rules, and custom agents.
 When those files change, inspect/trust hooks with `/hooks` in the next Codex
 session so broker-adjacent guardrails actually run.

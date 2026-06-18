@@ -5,6 +5,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/osauer/ibkr/internal/rpc"
 )
 
 func TestRunProposalsGroupHelp(t *testing.T) {
@@ -31,5 +33,44 @@ func TestRunProposalsGroupHelp(t *testing.T) {
 				t.Fatalf("stderr=%q, want empty", stderr.String())
 			}
 		})
+	}
+}
+
+func TestRenderProposalsTextShowsTrailSizingFallback(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	renderProposalsText(env, &rpc.TradeProposalSnapshot{
+		Revision:      "sha256:test",
+		PolicyID:      "default",
+		PolicyVersion: 1,
+		Counts:        rpc.TradeProposalCounts{Total: 1, Actionable: 1},
+		Proposals: []rpc.TradeProposal{{
+			Key:       "trailing_stop:PBLS",
+			Bucket:    rpc.TradeProposalBucketTrailingStop,
+			Action:    rpc.OrderActionSell,
+			Quantity:  200,
+			Symbol:    "PBLS",
+			OrderType: rpc.OrderTypeTRAIL,
+			Reason:    "broker-side trailing stop",
+			TrailSizing: &rpc.TradeProposalTrailSizing{
+				Fallback:          true,
+				ChosenPct:         10,
+				PolicyFallbackPct: 10,
+				PolicyMinPct:      6,
+				PolicyMaxPct:      15,
+			},
+		}},
+	})
+
+	got := stdout.String()
+	for _, want := range []string{
+		"Trail sizing:",
+		"10.0% fallback trail used",
+		"dynamic stop unavailable",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendered proposals missing %q:\n%s", want, got)
+		}
 	}
 }

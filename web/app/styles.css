@@ -2183,7 +2183,7 @@ p {
 
 .protection-summary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
   gap: 8px;
   align-items: stretch;
   min-height: 67px;
@@ -2215,8 +2215,12 @@ p {
   line-height: 1.08;
 }
 
-#protectionTheta {
-  color: var(--red);
+.protection-summary b.metric-risk {
+  color: var(--market-red);
+}
+
+.protection-summary b.metric-neutral {
+  color: var(--ink);
 }
 
 #protectionActions {
@@ -2322,6 +2326,11 @@ p {
   color: var(--ink-2);
   font-variant-numeric: tabular-nums;
   font-weight: 650;
+}
+
+.protection-row__trail--fallback {
+  color: var(--orange);
+  font-weight: 760;
 }
 
 .protection-row .protection-row__quote {

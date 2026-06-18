@@ -19,7 +19,11 @@ ibkr app pair
 ```
 
 Scan the QR code or open the printed pairing URL. The URL contains a short-lived
-pairing id plus nonce, not a durable secret.
+pairing id plus nonce, not a durable secret. After the first successful pair,
+the browser keeps a device credential and the app stores a matching device grant
+under the app state directory. Restarting `ibkr app` clears only the in-memory
+session cookie; the paired device should silently mint a fresh session from that
+device grant.
 
 The default app bind is LAN-capable (`0.0.0.0:8765`), so the same app process
 can serve a local browser preview at `http://127.0.0.1:8765` and a phone at the
@@ -49,6 +53,10 @@ ibkr app pair
 ```
 
 The printed pairing URL uses the relay origin and includes a `remote=` route id.
+The route id and connector token are persisted locally and reused across app
+restarts until the relay route TTL expires. This keeps installed iPhone Home
+Screen launches on the stable relay origin instead of forcing a new pair after
+ordinary restarts.
 
 Restart the supervised/shared app in remote mode:
 
@@ -82,6 +90,9 @@ supervised PID and does not start a duplicate. If no app is running, plain
 
 Use `ibkr restart --app` for app-only restart/start workflows, including cases
 where no app is running yet.
+
+`ibkr app restart` is an alias for `ibkr restart --app` for the app-focused
+workflow.
 
 To switch an old local-only app host back to the shared local-preview plus
 phone mode:
@@ -134,7 +145,9 @@ The smoke script:
 The lifecycle smoke starts an isolated app on `127.0.0.1:18765`, pairs without
 QR, disables WebCrypto to exercise the local HTTP fallback credential, runs
 `ibkr restart --app`, and verifies that the same browser context reauthenticates
-and returns to `Live` with an SSE subscriber.
+and returns to `Live` with an SSE subscriber. A stale or consumed pairing URL is
+also recoverable after pairing: the SPA strips the one-time pairing query and
+falls through to the saved device credential before asking for a new QR code.
 
 The script first tries the local Node `playwright` package, then the Codex
 bundled runtime when available. If Playwright's managed Chromium browser is not

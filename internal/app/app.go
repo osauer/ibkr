@@ -61,7 +61,7 @@ func New(opts Options) (*App, error) {
 		opts.PollEvery,
 		opts.CanaryEvery,
 	)
-	relayClient, err := newRelayClient(opts)
+	relayClient, err := newRelayClient(opts, store)
 	if err != nil {
 		return nil, err
 	}
@@ -90,17 +90,39 @@ func New(opts Options) (*App, error) {
 	return app, nil
 }
 
-func newRelayClient(opts Options) (relay.Client, error) {
+func newRelayClient(opts Options, store *state.Store) (relay.Client, error) {
 	if !opts.Remote {
 		return relay.Noop{PublicURL: opts.PublicURL}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	originURL := "http://" + LoopbackAddrForLocalConnect(opts.Addr)
+	var routeID, connectorToken string
+	if store != nil {
+		if route, ok := store.RelayRoute(opts.RemoteURL, time.Now().UTC()); ok {
+			routeID = route.RouteID
+			connectorToken = route.ConnectorToken
+		}
+	}
 	client, err := relay.NewWorker(ctx, relay.WorkerOptions{
-		BaseURL:   opts.RemoteURL,
-		OriginURL: originURL,
-		Version:   opts.Version,
+		BaseURL:              opts.RemoteURL,
+		OriginURL:            originURL,
+		Version:              opts.Version,
+		ResumeRouteID:        routeID,
+		ResumeConnectorToken: connectorToken,
+		OnRoute: func(reg relay.RouteRegistration) error {
+			if store == nil {
+				return nil
+			}
+			return store.SetRelayRoute(state.RelayRoute{
+				RemoteURL:      strings.TrimRight(strings.TrimSpace(opts.RemoteURL), "/"),
+				RouteID:        reg.RouteID,
+				ConnectorToken: reg.ConnectorToken,
+				PublicURL:      reg.PublicURL,
+				ConnectorURL:   reg.ConnectorURL,
+				ExpiresAt:      reg.ExpiresAt,
+			})
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("remote relay: %w", err)

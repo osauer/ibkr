@@ -324,8 +324,12 @@ func formatOrderDraftSummary(draft rpc.OrderDraft) string {
 	if draft.Trail != nil {
 		price = formatOrderTrail(draft.Trail)
 	}
-	return fmt.Sprintf("%s %d %s %s %s %s outside_rth=%v",
+	summary := fmt.Sprintf("%s %d %s %s %s %s outside_rth=%v",
 		draft.Action, draft.Quantity, draft.Contract.Symbol, draft.OrderType, price, draft.TIF, draft.OutsideRTH)
+	if draft.TriggerMethod != 0 {
+		summary += " trigger=" + formatOrderTriggerMethod(draft.TriggerMethod)
+	}
+	return summary
 }
 
 func formatOrderTrail(trail *rpc.OrderTrailSpec) string {

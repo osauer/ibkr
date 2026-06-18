@@ -18,6 +18,7 @@ import (
 
 	mobileapp "github.com/osauer/ibkr/internal/app"
 	"github.com/osauer/ibkr/internal/app/auth"
+	"github.com/osauer/ibkr/internal/cli"
 )
 
 func runApp(args []string) int {
@@ -28,11 +29,19 @@ func runApp(args []string) int {
 			return 0
 		case "pair":
 			return runAppPair(args[1:])
+		case "restart":
+			return runAppRestart(args[1:])
 		case "serve":
 			return runAppServe(args[1:])
 		}
 	}
 	return runAppServe(args)
+}
+
+func runAppRestart(args []string) int {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	return cli.RunRestart(ctx, append([]string{"--app"}, args...), os.Stdout, os.Stderr)
 }
 
 func runAppServe(args []string) int {
@@ -210,6 +219,7 @@ func printAppUsage(w *os.File) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  ibkr app [--addr HOST:PORT] [--public-url URL] [--remote] [--remote-url URL] [--state-dir PATH]")
+	fmt.Fprintln(w, "  ibkr app restart [--addr HOST:PORT] [--public-url URL] [--remote] [--remote-url URL] [--state-dir PATH]")
 	fmt.Fprintln(w, "  ibkr app pair [--addr HOST:PORT] [--public-url URL] [--json]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The app serves a mobile-first PWA, live SSE snapshots,")

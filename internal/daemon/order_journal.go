@@ -74,6 +74,7 @@ type orderJournalEvent struct {
 	Action          string              `json:"action,omitempty"`
 	OrderType       string              `json:"order_type,omitempty"`
 	TIF             string              `json:"tif,omitempty"`
+	TriggerMethod   int                 `json:"trigger_method,omitempty"`
 	OutsideRTH      bool                `json:"outside_rth,omitempty"`
 	Quantity        float64             `json:"quantity,omitempty"`
 	LimitPrice      float64             `json:"limit_price,omitempty"`

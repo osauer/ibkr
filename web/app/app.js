@@ -59,16 +59,24 @@ async function main() {
   await navigator.serviceWorker?.register("/service-worker.js");
   const pair = new URLSearchParams(location.search).get("pair");
   const nonce = new URLSearchParams(location.search).get("nonce");
+  let bootstrapped = false;
   if (pair && nonce) {
     try {
       await completePairing(pair, nonce);
       history.replaceState({}, "", "/");
     } catch (err) {
-      showPairing("Pairing failed: " + err.message);
-      return;
+      history.replaceState({}, "", "/");
+      showPairing("Pairing link expired; opening paired app.");
+      bootstrapped = await bootstrap({ quiet: true });
+      if (!bootstrapped) {
+        showPairing("Pairing link expired. Scan a fresh QR code from `ibkr app pair` on the Mac.");
+        return;
+      }
     }
   }
-  await bootstrap();
+  if (!bootstrapped) {
+    await bootstrap();
+  }
   resetViewportScroll();
   setupMarketSelect();
   setupBottomTabs();
@@ -93,7 +101,7 @@ function setupLiveRefreshLoop() {
 
 async function bootstrap(options = {}) {
   try {
-    const data = await fetchBootstrap();
+    const data = await fetchBootstrap(options);
     if (!data) return false;
     applyBootstrap(data);
     return true;
@@ -105,17 +113,21 @@ async function bootstrap(options = {}) {
   }
 }
 
-async function fetchBootstrap() {
+async function fetchBootstrap(options = {}) {
   let res = await fetch("/api/bootstrap", { credentials: "include" });
   if (res.status === 401) {
     const reauthed = await tryDeviceLogin();
     if (!reauthed) {
-      showPairing("Scan a fresh QR code from `ibkr app pair` on the Mac.");
+      if (!options.quiet) {
+        showPairing("Scan a fresh QR code from `ibkr app pair` on the Mac.");
+      }
       return null;
     }
     res = await fetch("/api/bootstrap", { credentials: "include" });
     if (res.status === 401) {
-      showPairing("Scan a fresh QR code from `ibkr app pair` on the Mac.");
+      if (!options.quiet) {
+        showPairing("Scan a fresh QR code from `ibkr app pair` on the Mac.");
+      }
       return null;
     }
   }
@@ -1902,10 +1914,22 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   const thetaEl = $("protectionTheta");
   thetaEl.textContent = hasNumericValue(theta.value) ? money(theta.value, "") : "--";
   thetaEl.title = theta.title;
+  setMetricTone(thetaEl, hasNumericValue(theta.value) && theta.value > 0 ? "risk" : "neutral");
   const riskExcessCurrency = protectionRiskExcessCurrency(counts);
-  $("protectionRiskExcess").textContent = typeof counts.risk_reduction_excess_notional === "number" && riskExcessCurrency
+  const riskExcessEl = $("protectionRiskExcess");
+  const riskExcess = typeof counts.risk_reduction_excess_notional === "number" && riskExcessCurrency
+    ? counts.risk_reduction_excess_notional
+    : null;
+  riskExcessEl.textContent = hasNumericValue(riskExcess)
     ? compactWholeMoney(counts.risk_reduction_excess_notional, riskExcessCurrency)
     : "--";
+  riskExcessEl.title = hasNumericValue(riskExcess) && riskExcess > 0 ? "Risk-reduction proposal exposure above policy target." : "No risk-reduction proposal exposure above target.";
+  setMetricTone(riskExcessEl, hasNumericValue(riskExcess) && riskExcess > 0 ? "risk" : "neutral");
+  const noStop = protectionNoStopExposureSummary(rows, marketEvents);
+  const noStopEl = $("protectionNoStopExposure");
+  noStopEl.textContent = noStop.text;
+  noStopEl.title = noStop.title;
+  setMetricTone(noStopEl, noStop.risk ? "risk" : "neutral");
   $("protectionActions").textContent = String(counts.actionable ?? rows.length ?? 0);
   renderProtectionExposure();
   renderMarketFlagRail("protectionFlagRail", protectionHeroMarketFlags(rows, marketEvents));
@@ -1931,6 +1955,42 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
 
 function protectionVisibleRows(rows = [], marketEvents = {}) {
   return rows.filter((proposal) => !protectionCoveredByExistingOrder(proposal, marketEvents));
+}
+
+function protectionNoStopExposureSummary(rows = [], marketEvents = {}) {
+  const visible = protectionVisibleRows(rows, marketEvents)
+    .filter((proposal) => proposal.bucket === "trailing_stop");
+  if (visible.length === 0) {
+    return {
+      text: "--",
+      title: "No visible trailing-stop proposals without a matching open protective order.",
+      risk: false,
+    };
+  }
+  const amounts = visible
+    .map((proposal) => protectionProposalNotional(proposal))
+    .filter(({ value }) => hasNumericValue(value) && value > 0);
+  const currencies = [...new Set(amounts.map(({ currency }) => currency).filter(Boolean))];
+  const countText = `${visible.length} ${visible.length === 1 ? "position" : "positions"}`;
+  if (amounts.length === visible.length && currencies.length === 1) {
+    const total = amounts.reduce((sum, row) => sum + row.value, 0);
+    return {
+      text: compactWholeMoney(total, currencies[0]),
+      title: `${countText} without a matching open broker stop; sum of visible trailing-stop proposal notionals.`,
+      risk: total > 0,
+    };
+  }
+  return {
+    text: countText,
+    title: "Visible trailing-stop proposals without a matching open broker stop; dollar sum is unavailable or mixed-currency.",
+    risk: true,
+  };
+}
+
+function protectionProposalNotional(proposal = {}) {
+  const value = firstNumber(proposal.notional);
+  const currency = normalizeCurrency(proposal.contract?.currency || proposal.currency || "");
+  return { value, currency };
 }
 
 function protectionHiddenRowsText(rows = [], marketEvents = {}) {
@@ -1990,9 +2050,9 @@ function renderProtectionTimestamp(proposals = {}) {
   // ([auto_trade].proposal_cadence rides inside the proposal snapshot), so
   // the SPA never hardcodes a twin of daemon policy: one full cycle plus
   // grace — max(3m, cadence/3) — keeps a healthy panel out of "stale"
-  // while a genuinely missed cycle flags within minutes. 2m cadence → 5m
+  // while a genuinely missed cycle flags within minutes. 30s cadence → 4m
   // threshold; a 15m override keeps the historical 20m.
-  const cadence = goDurationMinutes(proposals.auto_trade?.proposal_cadence) ?? 2;
+  const cadence = goDurationMinutes(proposals.auto_trade?.proposal_cadence) ?? 0.5;
   const staleMinutes = Math.ceil(cadence + Math.max(3, cadence / 3));
   renderFreshnessTimestamp("protectionAsOf", proposals.as_of, { staleMinutes });
 }
@@ -2134,6 +2194,9 @@ function protectionRow(proposal) {
   if (metricText) {
     const metric = document.createElement("small");
     metric.className = "protection-row__trail";
+    if (protectionTrailSizingFallback(proposal)) {
+      metric.classList.add("protection-row__trail--fallback");
+    }
     metric.textContent = metricText;
     copy.append(metric);
   }
@@ -2318,6 +2381,8 @@ function protectionMetricText(proposal = {}) {
     }
     const offset = protectionTrailOffsetLabel(trail);
     if (offset) parts.push(offset);
+    const sizing = protectionTrailSizingLabel(proposal.trail_sizing);
+    if (sizing) parts.push(sizing);
     if (hasNumericValue(trail.limit_offset)) {
       parts.push(`limit offset ${numberRead(trail.limit_offset)}`);
     }
@@ -2562,6 +2627,50 @@ function protectionTrailOffsetLabel(trail = {}) {
   if (hasNumericValue(trail.trailing_percent)) return `offset ${pct(trail.trailing_percent)}`;
   if (hasNumericValue(trail.trailing_amount)) return `offset ${numberRead(trail.trailing_amount)}`;
   return "";
+}
+
+function protectionTrailSizingFallback(proposal = {}) {
+  return Boolean(proposal.trail_sizing?.fallback);
+}
+
+function protectionTrailSizingLabel(sizing = {}) {
+  const chosen = Number(sizing.chosen_pct || 0);
+  if (!hasNumericValue(chosen) || chosen <= 0) return "";
+  const range = protectionTrailSizingRangeLabel(sizing);
+  const prefix = range ? `${range}, ` : "";
+  if (sizing.fallback) {
+    return `${prefix}${pct(chosen)} fallback trail used (dynamic stop unavailable)`;
+  }
+  const source = protectionTrailSizingSourceLabel(sizing.selected_by);
+  const max = Number(sizing.policy_max_pct || 0);
+  const capped = sizing.capped && hasNumericValue(max) && max > 0
+    ? `, capped at ${pct(max)}`
+    : "";
+  return `${prefix}chosen ${pct(chosen)} by ${source}${capped}`;
+}
+
+function protectionTrailSizingRangeLabel(sizing = {}) {
+  const min = Number(sizing.policy_min_pct || 0);
+  const max = Number(sizing.policy_max_pct || 0);
+  if (!hasNumericValue(min) || !hasNumericValue(max) || min <= 0 || max <= 0) {
+    return "";
+  }
+  return `range ${pct(min)}-${pct(max)}`;
+}
+
+function protectionTrailSizingSourceLabel(value = "") {
+  switch (String(value || "").trim().toLowerCase()) {
+    case "atr":
+      return "ATR";
+    case "spread_floor":
+      return "spread";
+    case "policy_default":
+      return "policy";
+    case "policy_min":
+      return "policy min";
+    default:
+      return String(value || "policy").replaceAll("_", " ");
+  }
 }
 
 function protectionLiveTrailStop(proposal = {}, trail = {}) {
@@ -6178,6 +6287,12 @@ function compactWholeMoney(value, currency) {
   }
   const amount = new Intl.NumberFormat(undefined, amountOptions).format(value);
   return ccy ? `${amount} ${ccy}` : amount;
+}
+
+function setMetricTone(el, tone = "neutral") {
+  if (!el) return;
+  el.classList.remove("metric-risk", "metric-neutral");
+  el.classList.add(tone === "risk" ? "metric-risk" : "metric-neutral");
 }
 
 function renderSignedMoney(id, value, currency) {

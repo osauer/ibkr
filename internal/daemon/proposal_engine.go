@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
 const (
@@ -47,11 +48,34 @@ type proposalEngine struct {
 	refreshFailStreak int
 	refreshFailSince  time.Time
 	refreshFailCodes  []string
+	trailVolCache     map[string]cachedStockTrailVolatility
 	// kick wakes Run for an immediate refresh (gateway reconnect). Lazily
 	// created under mu by kickCh so tests constructing engines directly
 	// need no extra setup. Buffered: senders never block.
 	kick chan struct{}
 }
+
+type cachedStockTrailVolatility struct {
+	value     stockTrailVolatility
+	fetchedAt time.Time
+}
+
+type stockTrailVolatility struct {
+	ATR14          *float64
+	ATRPct         *float64
+	AsOf           time.Time
+	MissingReasons []string
+}
+
+const (
+	stockTrailSizingMethod       = "atr-spread-policy"
+	stockTrailSizingVersion      = "stock-trail-sizing-v1"
+	stockTrailATRMultiplier      = 1.2
+	stockTrailSpreadMultiplier   = 3.0
+	stockTrailVolatilityDays     = 45
+	stockTrailVolatilityTimeout  = 4 * time.Second
+	stockTrailVolatilityCacheTTL = 4 * time.Hour
+)
 
 type proposalStore struct {
 	currentPath string
@@ -112,20 +136,19 @@ func (s *Server) installProposalEngine() {
 // proposalRefreshRetryBase is the first quick-retry delay after a refresh
 // that failed on a transient session condition (gateway still connecting,
 // account/positions fetch failure, no concrete account identity yet). It
-// doubles per consecutive transient failure and caps at the configured
-// cadence. Without it the startup refresh races the gateway connect and
-// the cached "ibkr connection unavailable" blocker is served for a full
-// cadence (observed 2026-06-11: the SPA protection panel sat on the error
-// for 15 minutes after every `ibkr restart`).
+// doubles per consecutive transient failure and caps at the sustained-outage
+// ceiling. Without it the startup refresh races the gateway connect and the
+// cached "ibkr connection unavailable" blocker is served for a full cadence
+// (observed 2026-06-11: the SPA protection panel sat on the error for
+// 15 minutes after every `ibkr restart`).
 const proposalRefreshRetryBase = 30 * time.Second
 
-// proposalRefreshBackoffCap bounds the sustained-failure retry interval
-// independently of the cadence. With a 2m cadence, capping failure waits
-// at the cadence would mean a blocked attempt (and its warn line) every
-// 2 minutes for the whole length of a gateway outage; capping at 15m keeps
-// outage logs as quiet as the old 15m-cadence behavior. Post-outage
-// recovery latency does not ride on this cap — the gateway reconnect kicks
-// the loop directly (see Kick).
+// proposalRefreshBackoffCap bounds sustained-failure retries independently of
+// the healthy cadence. With a 30s clean cadence, capping failure waits at the
+// cadence would mean a blocked attempt (and its warn line) twice a minute for
+// the whole length of a gateway outage; capping at 15m keeps outage logs quiet.
+// Post-outage recovery latency does not ride on this cap — the gateway
+// reconnect kicks the loop directly (see Kick).
 const proposalRefreshBackoffCap = 15 * time.Minute
 
 func (e *proposalEngine) Run(ctx context.Context) {
@@ -189,8 +212,11 @@ func (e *proposalEngine) kickCh() chan struct{} {
 // The wait <= 0 branch guards shift overflow on absurd streaks, mirroring
 // gammaRetryBackoff.
 func proposalRefreshWait(cadence time.Duration, failures int) time.Duration {
-	if failures <= 0 || cadence <= proposalRefreshRetryBase {
+	if failures <= 0 {
 		return cadence
+	}
+	if cadence <= 0 {
+		cadence = proposalRefreshRetryBase
 	}
 	ceil := max(cadence, proposalRefreshBackoffCap)
 	wait := proposalRefreshRetryBase << (failures - 1)
@@ -454,7 +480,7 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		}
 		sources.MarketEvents = &fp
 	}
-	proposals := e.generate(policy, policyStatus, pos, sources, marketEvents, scope, now)
+	proposals := e.generate(ctx, policy, policyStatus, pos, sources, marketEvents, scope, now)
 	slices.SortStableFunc(proposals, func(a, b rpc.TradeProposal) int {
 		if a.Score > b.Score {
 			return -1
@@ -509,7 +535,7 @@ func (e *proposalEngine) installScoped(snap rpc.TradeProposalSnapshot, scope bro
 	return snap
 }
 
-func (e *proposalEngine) generate(policy protectionPolicy, status rpc.ProtectionPolicyStatus, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, scope brokerStateScope, now time.Time) []rpc.TradeProposal {
+func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, status rpc.ProtectionPolicyStatus, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, scope brokerStateScope, now time.Time) []rpc.TradeProposal {
 	var out []rpc.TradeProposal
 	if policy.Buckets.ThetaHygiene.Enabled {
 		for _, row := range pos.Options {
@@ -538,9 +564,10 @@ func (e *proposalEngine) generate(policy protectionPolicy, status rpc.Protection
 		}
 		if policy.Buckets.TrailingStop.StockETF.Enabled {
 			for _, row := range pos.Stocks {
-				if p, ok := trailingStopStockProposal(policy, status, row, sources, now, stockEnabled, e.resolveRowMinTick(row)); ok {
+				trailSizing := e.stockTrailSizing(ctx, policy.Buckets.TrailingStop.StockETF, row, now)
+				if p, ok := trailingStopStockProposal(policy, status, row, sources, now, stockEnabled, e.resolveRowMinTick(row), trailSizing); ok {
 					applyMarketEventFlagsToProposal(&p, marketEvents)
-					for _, b := range e.duplicateProtectiveBlockers(p) {
+					for _, b := range e.duplicateProtectiveBlockers(p, pos) {
 						proposalBlock(&p, b.Code, b.Message)
 					}
 					if !e.isIgnored(scope, p.Key) {
@@ -576,6 +603,171 @@ func (e *proposalEngine) marketEventsSnapshot(ctx context.Context, pos *rpc.Posi
 	defer cancel()
 	res := e.server.marketEventsForSymbols(eventsCtx, symbols)
 	return &res
+}
+
+func (e *proposalEngine) stockTrailSizing(ctx context.Context, cfg protectionTrailAssetPolicy, row rpc.PositionView, now time.Time) *rpc.TradeProposalTrailSizing {
+	reference, source, refAt := trailingStopReference(row, trailActionForPosition(row.Quantity))
+	vol := e.stockTrailVolatility(ctx, row, now)
+	return buildStockTrailSizing(cfg, row, reference, source, refAt, vol, now)
+}
+
+func trailActionForPosition(qty float64) string {
+	if qty < 0 {
+		return rpc.OrderActionBuy
+	}
+	return rpc.OrderActionSell
+}
+
+func (e *proposalEngine) stockTrailVolatility(ctx context.Context, row rpc.PositionView, now time.Time) stockTrailVolatility {
+	key := stockTrailVolatilityKey(row)
+	if key == "" {
+		return stockTrailVolatility{MissingReasons: []string{"volatility_symbol_missing"}}
+	}
+	e.mu.Lock()
+	if e.trailVolCache != nil {
+		if cached, ok := e.trailVolCache[key]; ok && now.Sub(cached.fetchedAt) < stockTrailVolatilityCacheTTL {
+			e.mu.Unlock()
+			return cached.value
+		}
+	}
+	e.mu.Unlock()
+
+	value := e.fetchStockTrailVolatility(ctx, row, now)
+	e.mu.Lock()
+	if e.trailVolCache == nil {
+		e.trailVolCache = map[string]cachedStockTrailVolatility{}
+	}
+	e.trailVolCache[key] = cachedStockTrailVolatility{value: value, fetchedAt: now}
+	e.mu.Unlock()
+	return value
+}
+
+func (e *proposalEngine) fetchStockTrailVolatility(ctx context.Context, row rpc.PositionView, now time.Time) stockTrailVolatility {
+	if e == nil || e.server == nil {
+		return stockTrailVolatility{MissingReasons: []string{"volatility_daemon_unavailable"}}
+	}
+	c := e.server.gatewayConnector()
+	if c == nil {
+		return stockTrailVolatility{MissingReasons: []string{"volatility_gateway_unavailable"}}
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, stockTrailVolatilityTimeout)
+	defer cancel()
+	contractParams := proposalContractFromPosition(row, positionWireSecType(row.SecType))
+	contract, _, _, err := normaliseStockQuoteContract(contractParams)
+	var bars []ibkrlib.HistoricalBar
+	if err == nil {
+		bars, err = c.FetchHistoricalDailyBarsWithContractCtx(fetchCtx, contract, stockTrailVolatilityDays)
+	}
+	if err != nil {
+		bars, err = c.FetchHistoricalDailyBarsCtx(fetchCtx, row.Symbol, stockTrailVolatilityDays)
+	}
+	if err != nil {
+		return stockTrailVolatility{MissingReasons: []string{"atr_14_unavailable", "history_unavailable"}}
+	}
+	atr := technicalATR(bars, 14)
+	latest, ok := latestTechnicalBar(bars)
+	if atr <= 0 || !ok || latest.Close <= 0 {
+		return stockTrailVolatility{MissingReasons: []string{"atr_14_unavailable"}}
+	}
+	atrPct := atr / latest.Close * 100
+	asOf := now
+	if !latest.Time.IsZero() {
+		asOf = latest.Time
+	}
+	return stockTrailVolatility{ATR14: &atr, ATRPct: &atrPct, AsOf: asOf}
+}
+
+func stockTrailVolatilityKey(row rpc.PositionView) string {
+	if row.ConID != 0 {
+		return "conid:" + strconv.Itoa(row.ConID)
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(row.Symbol))
+	if symbol == "" {
+		return ""
+	}
+	return strings.Join([]string{
+		"symbol",
+		symbol,
+		strings.ToUpper(strings.TrimSpace(row.Currency)),
+		strings.ToUpper(strings.TrimSpace(row.Exchange)),
+		strings.ToUpper(strings.TrimSpace(row.LocalSymbol)),
+		strings.ToUpper(strings.TrimSpace(row.TradingClass)),
+	}, ":")
+}
+
+func buildStockTrailSizing(cfg protectionTrailAssetPolicy, row rpc.PositionView, reference float64, source string, refAt time.Time, vol stockTrailVolatility, now time.Time) *rpc.TradeProposalTrailSizing {
+	fallbackPct := cfg.FallbackPct
+	if fallbackPct <= 0 {
+		fallbackPct = 10
+	}
+	sizing := &rpc.TradeProposalTrailSizing{
+		Method:            stockTrailSizingMethod,
+		Version:           stockTrailSizingVersion,
+		ReferenceSource:   source,
+		ReferenceAsOf:     refAt,
+		PolicyMinPct:      cfg.MinPct,
+		PolicyDefaultPct:  cfg.DefaultPct,
+		PolicyFallbackPct: fallbackPct,
+		PolicyMaxPct:      cfg.MaxPct,
+		ATRMultiplier:     new(stockTrailATRMultiplier),
+		SpreadMultiplier:  new(stockTrailSpreadMultiplier),
+		SpreadPct:         cloneFloat64Ptr(row.SpreadPct),
+		MissingReasons:    append([]string(nil), vol.MissingReasons...),
+		AsOf:              now,
+	}
+	if reference > 0 {
+		sizing.ReferencePrice = new(reference)
+	}
+	if vol.ATR14 != nil && vol.ATRPct != nil && *vol.ATRPct > 0 {
+		sizing.ATR14 = cloneFloat64Ptr(vol.ATR14)
+		sizing.ATRPct = cloneFloat64Ptr(vol.ATRPct)
+		sizing.AsOf = nonZeroTime(vol.AsOf, now)
+		atrCandidate := *vol.ATRPct * stockTrailATRMultiplier
+		sizing.ATRCandidatePct = new(atrCandidate)
+	}
+	if row.SpreadPct != nil && *row.SpreadPct > 0 {
+		spreadFloor := *row.SpreadPct * stockTrailSpreadMultiplier
+		sizing.SpreadFloorPct = new(spreadFloor)
+	}
+	chosen, selected := fallbackPct, "fallback"
+	if sizing.ATRCandidatePct != nil {
+		chosen, selected = cfg.DefaultPct, "policy_default"
+		if *sizing.ATRCandidatePct > chosen {
+			chosen, selected = *sizing.ATRCandidatePct, "atr"
+		}
+	}
+	if sizing.SpreadFloorPct != nil && *sizing.SpreadFloorPct > chosen {
+		chosen, selected = *sizing.SpreadFloorPct, "spread_floor"
+	}
+	if chosen < cfg.MinPct {
+		chosen = cfg.MinPct
+		selected = "policy_min"
+	}
+	if chosen > cfg.MaxPct {
+		chosen = cfg.MaxPct
+		sizing.Capped = true
+	}
+	sizing.ChosenPct = chosen
+	sizing.SelectedBy = selected
+	sizing.Fallback = selected == "fallback"
+	if sizing.Fallback {
+		sizing.DataQuality = "fallback"
+		if len(sizing.MissingReasons) == 0 {
+			sizing.MissingReasons = append(sizing.MissingReasons, "atr_14_unavailable")
+		}
+	} else if len(sizing.MissingReasons) > 0 {
+		sizing.DataQuality = "partial"
+	} else {
+		sizing.DataQuality = "ok"
+	}
+	return sizing
+}
+
+func nonZeroTime(v, fallback time.Time) time.Time {
+	if v.IsZero() {
+		return fallback
+	}
+	return v
 }
 
 func (e *proposalEngine) regimeFingerprint(ctx context.Context) (rpc.Fingerprint, bool) {
@@ -676,7 +868,7 @@ func riskReductionProposal(policy protectionPolicy, status rpc.ProtectionPolicyS
 	return p, true
 }
 
-func trailingStopStockProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, row rpc.PositionView, sources rpc.TradeProposalSourceFingerprints, now time.Time, stockProtectionEnabled bool, minTick float64) (rpc.TradeProposal, bool) {
+func trailingStopStockProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, row rpc.PositionView, sources rpc.TradeProposalSourceFingerprints, now time.Time, stockProtectionEnabled bool, minTick float64, sizingInput ...*rpc.TradeProposalTrailSizing) (rpc.TradeProposal, bool) {
 	secType := strings.ToUpper(strings.TrimSpace(row.SecType))
 	if secType != rpc.SecTypeStock && secType != "STK" && secType != "ETF" || row.Quantity == 0 {
 		return rpc.TradeProposal{}, false
@@ -690,19 +882,33 @@ func trailingStopStockProposal(policy protectionPolicy, status rpc.ProtectionPol
 	if row.Quantity < 0 {
 		action = rpc.OrderActionBuy
 	}
-	reference := trailingStopReferencePrice(row, action)
+	reference, refSource, refAt := trailingStopReference(row, action)
 	if reference <= 0 && stockPositionLooksInactive(row) {
 		return rpc.TradeProposal{}, false
 	}
-	p := baseProposal(policy, status, sources, now, rpc.TradeProposalBucketTrailingStop, row, action, qty, rpc.OrderPositionEffectClose, fmt.Sprintf("broker-side trailing stop at %.1f%% below/above the instrument price", cfg.DefaultPct))
+	sizing := firstStockTrailSizing(sizingInput)
+	if sizing == nil {
+		sizing = buildStockTrailSizing(cfg, row, reference, refSource, refAt, stockTrailVolatility{MissingReasons: []string{"atr_14_unavailable"}}, now)
+	}
+	trailPct := cfg.DefaultPct
+	if sizing.ChosenPct > 0 {
+		trailPct = sizing.ChosenPct
+	}
+	p := baseProposal(policy, status, sources, now, rpc.TradeProposalBucketTrailingStop, row, action, qty, rpc.OrderPositionEffectClose, fmt.Sprintf("broker-side trailing stop at %.1f%% below/above the instrument price", trailPct))
 	p.Contract.MinTick = minTick
 	p.TIF = policy.Buckets.TrailingStop.effectiveTIF()
 	if fractionalRemainder > 0 {
 		p.Details = append(p.Details, fmt.Sprintf("fractional %.4g shares stay unprotected under the integer order path", fractionalRemainder))
 	}
-	applyTrailToProposal(&p, cfg.OrderType, cfg.DefaultPct, reference, action, cfg.LimitOffsetAbs)
+	applyTrailToProposal(&p, cfg.OrderType, trailPct, reference, action, cfg.LimitOffsetAbs)
+	completeTrailSizingFromProposal(sizing, p.Trail)
+	p.TrailSizing = sizing
+	p.TriggerMethod = rpc.OrderTriggerMethodLast
 	p.Score = math.Abs(row.MarketValue)
-	p.Details = append(p.Details, fmt.Sprintf("trail=%.1f%%", cfg.DefaultPct))
+	p.Details = append(p.Details, trailingStopTrailDetail(trailPct, p.Trail, p.Contract.Currency))
+	if detail := trailingStopSizingDetail(p.TrailSizing); detail != "" {
+		p.Details = append(p.Details, detail)
+	}
 	p.Details = append(p.Details, trailingStopTIFDetail(p.TIF, false))
 	if !stockProtectionEnabled {
 		proposalBlock(&p, "stock_protection_disabled", "stock/ETF protection is disabled in platform settings")
@@ -714,6 +920,13 @@ func trailingStopStockProposal(policy protectionPolicy, status rpc.ProtectionPol
 		proposalBlock(&p, "wide_spread", fmt.Sprintf("stock/ETF spread %.1f%% exceeds policy max %.1f%% of mid", *row.SpreadPct, cfg.MaxSpreadPctOfMid))
 	}
 	return p, true
+}
+
+func firstStockTrailSizing(in []*rpc.TradeProposalTrailSizing) *rpc.TradeProposalTrailSizing {
+	if len(in) == 0 {
+		return nil
+	}
+	return cloneTrailSizing(in[0])
 }
 
 func trailingStopOptionProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, row rpc.PositionView, sources rpc.TradeProposalSourceFingerprints, now time.Time, multiLeg bool, minTick float64) (rpc.TradeProposal, bool) {
@@ -732,7 +945,7 @@ func trailingStopOptionProposal(policy protectionPolicy, status rpc.ProtectionPo
 	p.TIF = policy.Buckets.TrailingStop.effectiveTIF()
 	applyTrailToProposal(&p, cfg.OrderType, cfg.DefaultPct, reference, action, cfg.LimitOffsetAbs)
 	p.Score = math.Abs(row.MarketValue)
-	p.Details = append(p.Details, fmt.Sprintf("premium trail=%.1f%%", cfg.DefaultPct))
+	p.Details = append(p.Details, trailingStopPremiumTrailDetail(cfg.DefaultPct, p.Trail, p.Contract.Currency))
 	p.Details = append(p.Details, trailingStopTIFDetail(p.TIF, true))
 	if row.Quantity < 0 && !cfg.AllowShortProfitTrail {
 		proposalBlock(&p, "short_option_trail_disabled", "short-option trailing stops require explicit buy-to-close profit-trail policy")
@@ -807,26 +1020,86 @@ func applyTrailToProposal(p *rpc.TradeProposal, orderType string, pct, reference
 		trail.LimitOffset = cloneFloat64Ptr(&limitOffset)
 	}
 	p.Trail = trail
+	if isTrailOrderType(p.OrderType) {
+		p.LimitPrice = nil
+	}
 }
 
-func trailingStopReferencePrice(row rpc.PositionView, action string) float64 {
+func trailingStopTrailDetail(pct float64, trail *rpc.OrderTrailSpec, currency string) string {
+	return trailingStopTrailDetailWithLabel("trail", pct, trail, currency)
+}
+
+func trailingStopPremiumTrailDetail(pct float64, trail *rpc.OrderTrailSpec, currency string) string {
+	return trailingStopTrailDetailWithLabel("premium trail", pct, trail, currency)
+}
+
+func trailingStopTrailDetailWithLabel(label string, pct float64, trail *rpc.OrderTrailSpec, currency string) string {
+	if trail != nil && trail.TrailingAmount != nil {
+		unit := strings.ToUpper(strings.TrimSpace(currency))
+		if unit == "" {
+			unit = "currency"
+		}
+		return fmt.Sprintf("%s=%.1f%% initial -> fixed %.2f %s broker trail", label, pct, *trail.TrailingAmount, unit)
+	}
+	return fmt.Sprintf("%s=%.1f%%", label, pct)
+}
+
+func trailingStopReference(row rpc.PositionView, action string) (float64, string, time.Time) {
+	at := row.QuotePriceAt
+	if at.IsZero() {
+		at = row.PriceAt
+	}
 	if strings.EqualFold(action, rpc.OrderActionBuy) {
 		if row.Ask != nil && *row.Ask > 0 {
-			return *row.Ask
+			return *row.Ask, "ask", at
 		}
 	} else if row.Bid != nil && *row.Bid > 0 {
-		return *row.Bid
+		return *row.Bid, "bid", at
 	}
 	if row.QuotePrice != nil && *row.QuotePrice > 0 {
-		return *row.QuotePrice
+		source := strings.TrimSpace(row.QuotePriceSource)
+		if source == "" {
+			source = "quote_price"
+		}
+		return *row.QuotePrice, source, row.QuotePriceAt
 	}
 	if row.Mark > 0 {
-		return row.Mark
+		return row.Mark, "mark", row.PriceAt
 	}
 	if row.ValuationMark > 0 {
-		return row.ValuationMark
+		return row.ValuationMark, "valuation_mark", row.PriceAt
 	}
-	return 0
+	return 0, "", time.Time{}
+}
+
+func completeTrailSizingFromProposal(sizing *rpc.TradeProposalTrailSizing, trail *rpc.OrderTrailSpec) {
+	if sizing == nil || trail == nil {
+		return
+	}
+	sizing.ChosenAmount = cloneFloat64Ptr(trail.TrailingAmount)
+	if trail.InitialStopPrice > 0 {
+		sizing.InitialStopPrice = new(trail.InitialStopPrice)
+	}
+}
+
+func trailingStopSizingDetail(sizing *rpc.TradeProposalTrailSizing) string {
+	if sizing == nil {
+		return ""
+	}
+	if sizing.Fallback {
+		fallbackPct := sizing.PolicyFallbackPct
+		if fallbackPct <= 0 {
+			fallbackPct = sizing.ChosenPct
+		}
+		return fmt.Sprintf("trail_sizing=fallback %.1f%%: ATR unavailable, %.1f%% policy fallback used", sizing.ChosenPct, fallbackPct)
+	}
+	if sizing.Capped {
+		return fmt.Sprintf("trail_sizing=%s %.1f%% capped at policy max %.1f%%", sizing.SelectedBy, sizing.ChosenPct, sizing.PolicyMaxPct)
+	}
+	if sizing.SelectedBy != "" {
+		return fmt.Sprintf("trail_sizing=%s %.1f%%", sizing.SelectedBy, sizing.ChosenPct)
+	}
+	return ""
 }
 
 func stockPositionLooksInactive(row rpc.PositionView) bool {
@@ -1192,7 +1465,7 @@ func closeReduceQuantity(position float64) (int, float64) {
 // and a double fill flips the position. Inferred-expired and terminal rows do
 // not count (see inferDayOrderExpiry), so a stale zombie cannot block
 // re-protection forever.
-func (e *proposalEngine) duplicateProtectiveBlockers(p rpc.TradeProposal) []rpc.TradingBlocker {
+func (e *proposalEngine) duplicateProtectiveBlockers(p rpc.TradeProposal, currentPositions ...*rpc.PositionsResult) []rpc.TradingBlocker {
 	if e == nil || e.server == nil {
 		return nil
 	}
@@ -1201,6 +1474,9 @@ func (e *proposalEngine) duplicateProtectiveBlockers(p rpc.TradeProposal) []rpc.
 		// Journal unavailability blocks the write path through the trading
 		// gate on its own; the duplicate check just can't help here.
 		return nil
+	}
+	if len(currentPositions) > 0 && currentPositions[0] != nil {
+		reconcileFlatPositionProtectiveOrders(views, currentPositions[0], e.clock())
 	}
 	for _, v := range views {
 		if !v.Open || !strings.EqualFold(v.Action, p.Action) {
@@ -1301,7 +1577,7 @@ func proposalOrderPreviewParams(prop rpc.TradeProposal, qty, timeoutMs int) rpc.
 		strategy = rpc.OrderStrategyBrokerTrail
 	}
 	trail := cloneTrailSpec(prop.Trail)
-	return rpc.OrderPreviewParams{Action: prop.Action, Contract: prop.Contract, Quantity: qty, OrderType: orderType, Trail: trail, Strategy: strategy, TIF: proposalTIF(prop), OutsideRTH: prop.OutsideRTH, TimeoutMs: timeoutMs, Source: proposalOrderSource}
+	return rpc.OrderPreviewParams{Action: prop.Action, Contract: prop.Contract, Quantity: qty, OrderType: orderType, Trail: trail, TriggerMethod: proposalTriggerMethod(prop), Strategy: strategy, TIF: proposalTIF(prop), OutsideRTH: prop.OutsideRTH, TimeoutMs: timeoutMs, Source: proposalOrderSource}
 }
 
 // proposalTIF normalizes a proposal's TIF for preview params and the
@@ -1312,6 +1588,16 @@ func proposalTIF(prop rpc.TradeProposal) string {
 		return rpc.OrderTIFDay
 	}
 	return tif
+}
+
+func proposalTriggerMethod(prop rpc.TradeProposal) int {
+	if prop.TriggerMethod != rpc.OrderTriggerMethodDefault {
+		return prop.TriggerMethod
+	}
+	if isTrailOrderType(prop.OrderType) && trailTriggerDefaultsToLast(prop.Contract) {
+		return rpc.OrderTriggerMethodLast
+	}
+	return rpc.OrderTriggerMethodDefault
 }
 
 // trailingStopTIFDetail spells out the lifetime consequence of the bucket
@@ -1369,6 +1655,10 @@ func proposalPreviewSafetyBlockers(prop rpc.TradeProposal, preview *rpc.OrderPre
 	}
 	if !strings.EqualFold(preview.Draft.Action, prop.Action) {
 		add("action_drift", fmt.Sprintf("preview action %q does not match proposal action %q", preview.Draft.Action, prop.Action), "Refresh proposals and preview again.")
+	}
+	expectedTriggerMethod := proposalTriggerMethod(prop)
+	if preview.Draft.TriggerMethod != expectedTriggerMethod {
+		add("trigger_method_drift", fmt.Sprintf("preview trigger_method %d does not match proposal trigger_method %d", preview.Draft.TriggerMethod, expectedTriggerMethod), "Refresh proposals and preview again.")
 	}
 	propOrderType := strings.ToUpper(strings.TrimSpace(prop.OrderType))
 	if propOrderType == "" {
@@ -1466,6 +1756,25 @@ func cloneTrailSpec(in *rpc.OrderTrailSpec) *rpc.OrderTrailSpec {
 	return &out
 }
 
+func cloneTrailSizing(in *rpc.TradeProposalTrailSizing) *rpc.TradeProposalTrailSizing {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.ReferencePrice = cloneFloat64Ptr(in.ReferencePrice)
+	out.ChosenAmount = cloneFloat64Ptr(in.ChosenAmount)
+	out.InitialStopPrice = cloneFloat64Ptr(in.InitialStopPrice)
+	out.ATR14 = cloneFloat64Ptr(in.ATR14)
+	out.ATRPct = cloneFloat64Ptr(in.ATRPct)
+	out.ATRMultiplier = cloneFloat64Ptr(in.ATRMultiplier)
+	out.ATRCandidatePct = cloneFloat64Ptr(in.ATRCandidatePct)
+	out.SpreadPct = cloneFloat64Ptr(in.SpreadPct)
+	out.SpreadMultiplier = cloneFloat64Ptr(in.SpreadMultiplier)
+	out.SpreadFloorPct = cloneFloat64Ptr(in.SpreadFloorPct)
+	out.MissingReasons = append([]string(nil), in.MissingReasons...)
+	return &out
+}
+
 func mergeTradingBlockers(first, second []rpc.TradingBlocker) []rpc.TradingBlocker {
 	out := append([]rpc.TradingBlocker(nil), first...)
 	for _, blocker := range second {
@@ -1497,7 +1806,7 @@ func (e *proposalEngine) installSnapshot(snap rpc.TradeProposalSnapshot, show bo
 	e.mu.Unlock()
 	e.replaceSnapshot(snap)
 	// "generated" events and daily outcome marks record new generation
-	// work. At a 2m cadence most refreshes re-derive a revision-identical
+	// work. At a 30s cadence most refreshes re-derive a revision-identical
 	// proposal set; appending per-proposal duplicates would grow the
 	// unbounded trade-proposals.jsonl ~7.5x faster and rescan the outcomes
 	// file per proposal per cycle for nothing. Marks still pass on a date
@@ -1833,6 +2142,8 @@ func cloneProposalSnapshot(in rpc.TradeProposalSnapshot) rpc.TradeProposalSnapsh
 	out := in
 	out.Proposals = append([]rpc.TradeProposal(nil), in.Proposals...)
 	for i := range out.Proposals {
+		out.Proposals[i].Trail = cloneTrailSpec(in.Proposals[i].Trail)
+		out.Proposals[i].TrailSizing = cloneTrailSizing(in.Proposals[i].TrailSizing)
 		out.Proposals[i].Details = append([]string(nil), in.Proposals[i].Details...)
 		out.Proposals[i].MarketFlags = append([]rpc.MarketEventFlag(nil), in.Proposals[i].MarketFlags...)
 		out.Proposals[i].Blockers = append([]rpc.TradingBlocker(nil), in.Proposals[i].Blockers...)

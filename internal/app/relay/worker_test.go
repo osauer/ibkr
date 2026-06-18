@@ -113,6 +113,105 @@ func fakeRegisterJSON(baseURL, routeID string, expiresAt time.Time) []byte {
 		expiresAt.UTC().Format(time.RFC3339))
 }
 
+func TestNewWorkerResumesStoredRoute(t *testing.T) {
+	t.Parallel()
+
+	var got registerRequest
+	var persisted RouteRegistration
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/register", func(wr http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode register request: %v", err)
+		}
+		wr.Header().Set("Content-Type", "application/json")
+		_, _ = wr.Write(fakeRegisterJSON(srv.URL, got.RouteID, time.Now().Add(defaultRouteTTL)))
+	})
+	srv = httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	ctx := t.Context()
+	w, err := NewWorker(ctx, WorkerOptions{
+		BaseURL:              srv.URL,
+		OriginURL:            "http://127.0.0.1:1",
+		HTTPClient:           srv.Client(),
+		ResumeRouteID:        "r_stable",
+		ResumeConnectorToken: "tok-r_stable",
+		OnRoute: func(reg RouteRegistration) error {
+			persisted = reg
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+	if got.RouteID != "r_stable" || got.ConnectorToken != "tok-r_stable" {
+		t.Fatalf("register request = %#v, want stored route credentials", got)
+	}
+	if !strings.Contains(w.PairingURL("https://relay.example/pair.html?pair=p"), "remote=r_stable") {
+		t.Fatalf("worker did not keep resumed route")
+	}
+	if persisted.RouteID != "r_stable" || persisted.ConnectorToken != "tok-r_stable" {
+		t.Fatalf("persisted route = %#v, want resumed route", persisted)
+	}
+}
+
+func TestNewWorkerFallsBackToFreshRouteWhenStoredRouteExpired(t *testing.T) {
+	t.Parallel()
+
+	var requests []registerRequest
+	var persisted RouteRegistration
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/register", func(wr http.ResponseWriter, r *http.Request) {
+		var got registerRequest
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode register request: %v", err)
+		}
+		requests = append(requests, got)
+		if got.RouteID == "r_expired" {
+			wr.Header().Set("Content-Type", "application/json")
+			wr.WriteHeader(http.StatusGone)
+			_, _ = wr.Write([]byte(`{"error":"route expired"}`))
+			return
+		}
+		wr.Header().Set("Content-Type", "application/json")
+		_, _ = wr.Write(fakeRegisterJSON(srv.URL, "r_fresh", time.Now().Add(defaultRouteTTL)))
+	})
+	srv = httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	ctx := t.Context()
+	w, err := NewWorker(ctx, WorkerOptions{
+		BaseURL:              srv.URL,
+		OriginURL:            "http://127.0.0.1:1",
+		HTTPClient:           srv.Client(),
+		ResumeRouteID:        "r_expired",
+		ResumeConnectorToken: "tok-r_expired",
+		OnRoute: func(reg RouteRegistration) error {
+			persisted = reg
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("register requests = %#v, want resume attempt then fresh registration", requests)
+	}
+	if requests[0].RouteID != "r_expired" || requests[1].RouteID != "" {
+		t.Fatalf("register requests = %#v, want expired route then fresh route", requests)
+	}
+	if !strings.Contains(w.PairingURL("https://relay.example/pair.html?pair=p"), "remote=r_fresh") {
+		t.Fatalf("worker did not switch to fresh route after expiry")
+	}
+	if persisted.RouteID != "r_fresh" {
+		t.Fatalf("persisted route = %#v, want fresh route", persisted)
+	}
+}
+
 // acceptAndHold upgrades the connection, calls onAccept, then holds the
 // connection open until the connector closes it (forced cycle or shutdown).
 func acceptAndHold(wr http.ResponseWriter, r *http.Request, onAccept func()) {

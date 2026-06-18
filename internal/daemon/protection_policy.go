@@ -70,6 +70,7 @@ type protectionTrailAssetPolicy struct {
 	Enabled           bool    `toml:"enabled" json:"enabled"`
 	OrderType         string  `toml:"order_type" json:"order_type"`
 	DefaultPct        float64 `toml:"default_pct" json:"default_pct"`
+	FallbackPct       float64 `toml:"fallback_pct" json:"fallback_pct,omitempty"`
 	MinPct            float64 `toml:"min_pct" json:"min_pct"`
 	MaxPct            float64 `toml:"max_pct" json:"max_pct"`
 	MaxSpreadPctOfMid float64 `toml:"max_spread_pct_of_mid" json:"max_spread_pct_of_mid"`
@@ -277,6 +278,7 @@ func defaultProtectionPolicy() protectionPolicy {
 					Enabled:           true,
 					OrderType:         rpc.OrderTypeTRAIL,
 					DefaultPct:        8.0,
+					FallbackPct:       10.0,
 					MinPct:            2.0,
 					MaxPct:            15.0,
 					MaxSpreadPctOfMid: 2.0,
@@ -318,6 +320,9 @@ func applyProtectionPolicyDefaults(p *protectionPolicy, md *toml.MetaData) {
 	}
 	if md != nil && md.IsDefined("buckets", "trailing_stop") && !md.IsDefined("buckets", "trailing_stop", "stock_etf") {
 		p.Buckets.TrailingStop.StockETF = defaults.Buckets.TrailingStop.StockETF
+	}
+	if p.Buckets.TrailingStop.StockETF.FallbackPct == 0 {
+		p.Buckets.TrailingStop.StockETF.FallbackPct = defaults.Buckets.TrailingStop.StockETF.FallbackPct
 	}
 	if md != nil && md.IsDefined("buckets", "trailing_stop") && !md.IsDefined("buckets", "trailing_stop", "options") {
 		p.Buckets.TrailingStop.Options = defaults.Buckets.TrailingStop.Options
@@ -390,6 +395,9 @@ func validateTrailAssetPolicy(prefix string, p protectionTrailAssetPolicy) error
 	}
 	if p.DefaultPct <= 0 || p.MinPct <= 0 || p.MaxPct <= 0 || p.MinPct > p.DefaultPct || p.DefaultPct > p.MaxPct {
 		return fmt.Errorf("%s percent bounds must satisfy 0 < min_pct <= default_pct <= max_pct", prefix)
+	}
+	if p.FallbackPct <= 0 || p.FallbackPct < p.MinPct || p.FallbackPct > p.MaxPct {
+		return fmt.Errorf("%s fallback_pct must satisfy min_pct <= fallback_pct <= max_pct", prefix)
 	}
 	if p.MaxSpreadPctOfMid <= 0 {
 		return fmt.Errorf("%s.max_spread_pct_of_mid must be positive", prefix)

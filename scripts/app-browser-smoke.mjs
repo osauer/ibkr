@@ -533,7 +533,7 @@ async function exerciseUnderlyingPanelFixture(page) {
       purge_id: "purge_ui_fixture",
       base_currency: "USD",
       legs: [{
-        symbol: "MSFT",
+        symbol: "SMOKE",
         sec_type: "STK",
         currency: "USD",
         current_price: 444.12,
@@ -586,7 +586,7 @@ async function exerciseUnderlyingPanelFixture(page) {
   if (!info.winner || !info.loser) {
     throw new Error(`underlyings folded summary is missing winner/loser totals: ${JSON.stringify(info)}`);
   }
-  const row = info.rows.find((item) => item.symbol === "MSFT");
+  const row = info.rows.find((item) => item.symbol === "SMOKE");
   if (!row || !row.virtual) {
     throw new Error(`virtual purge row is missing: ${JSON.stringify(info)}`);
   }

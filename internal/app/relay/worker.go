@@ -37,10 +37,21 @@ const minCycleEvery = time.Minute
 var errRouteExpired = errors.New("remote relay route expired")
 
 type WorkerOptions struct {
-	BaseURL    string
-	OriginURL  string
-	Version    string
-	HTTPClient *http.Client
+	BaseURL              string
+	OriginURL            string
+	Version              string
+	HTTPClient           *http.Client
+	ResumeRouteID        string
+	ResumeConnectorToken string
+	OnRoute              func(RouteRegistration) error
+}
+
+type RouteRegistration struct {
+	RouteID        string
+	PublicURL      string
+	ConnectorURL   string
+	ConnectorToken string
+	ExpiresAt      time.Time
 }
 
 type Worker struct {
@@ -48,6 +59,7 @@ type Worker struct {
 	originURL  string
 	version    string
 	httpClient *http.Client
+	onRoute    func(RouteRegistration) error
 
 	// mu guards the route fields too: register() runs again after a 410
 	// while HTTP handlers concurrently read PairingURL/PublicURL/Status.
@@ -56,13 +68,16 @@ type Worker struct {
 	publicURL    string
 	connectorURL string
 	token        string
+	routeTTL     time.Duration
 	cycleEvery   time.Duration
 	connected    bool
 	message      string
 }
 
 type registerRequest struct {
-	Version string `json:"version,omitempty"`
+	Version        string `json:"version,omitempty"`
+	RouteID        string `json:"route_id,omitempty"`
+	ConnectorToken string `json:"connector_token,omitempty"`
 }
 
 type registerResponse struct {
@@ -104,15 +119,36 @@ func NewWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 		originURL:  originURL,
 		version:    strings.TrimSpace(opts.Version),
 		httpClient: httpClient,
+		onRoute:    opts.OnRoute,
 	}
-	if err := w.register(ctx); err != nil {
-		return nil, err
+	resumeRouteID := strings.TrimSpace(opts.ResumeRouteID)
+	resumeToken := strings.TrimSpace(opts.ResumeConnectorToken)
+	switch {
+	case resumeRouteID != "" && resumeToken != "":
+		if err := w.register(ctx, registerRequest{
+			Version:        w.version,
+			RouteID:        resumeRouteID,
+			ConnectorToken: resumeToken,
+		}); err != nil {
+			if !errors.Is(err, errRouteExpired) {
+				return nil, err
+			}
+			if err := w.register(ctx, registerRequest{Version: w.version}); err != nil {
+				return nil, err
+			}
+		}
+	case resumeRouteID != "" || resumeToken != "":
+		return nil, errors.New("relay resume route requires both route id and connector token")
+	default:
+		if err := w.register(ctx, registerRequest{Version: w.version}); err != nil {
+			return nil, err
+		}
 	}
 	return w, nil
 }
 
-func (w *Worker) register(ctx context.Context) error {
-	body, err := json.Marshal(registerRequest{Version: w.version})
+func (w *Worker) register(ctx context.Context, rrq registerRequest) error {
+	body, err := json.Marshal(rrq)
 	if err != nil {
 		return err
 	}
@@ -128,6 +164,9 @@ func (w *Worker) register(ctx context.Context) error {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		if res.StatusCode == http.StatusGone {
+			return fmt.Errorf("register remote relay: %s: %w", res.Status, errRouteExpired)
+		}
 		return fmt.Errorf("register remote relay: %s: %s", res.Status, strings.TrimSpace(string(msg)))
 	}
 	var rr registerResponse
@@ -137,8 +176,10 @@ func (w *Worker) register(ctx context.Context) error {
 	if rr.RouteID == "" || rr.PublicURL == "" || rr.ConnectorURL == "" || rr.Token == "" {
 		return fmt.Errorf("register remote relay: incomplete response %#v", rr)
 	}
+	ttl := defaultRouteTTL
 	cycle := defaultRouteTTL / 2
-	if ttl := time.Until(rr.ExpiresAt); !rr.ExpiresAt.IsZero() && ttl > 0 {
+	if observedTTL := time.Until(rr.ExpiresAt); !rr.ExpiresAt.IsZero() && observedTTL > 0 {
+		ttl = observedTTL
 		cycle = ttl / 2
 	}
 	cycle = max(cycle, minCycleEvery)
@@ -147,10 +188,20 @@ func (w *Worker) register(ctx context.Context) error {
 	w.publicURL = strings.TrimRight(rr.PublicURL, "/")
 	w.connectorURL = rr.ConnectorURL
 	w.token = rr.Token
+	w.routeTTL = ttl
 	w.cycleEvery = cycle
 	w.connected = false
 	w.message = "registered remote relay route"
 	w.mu.Unlock()
+	if err := w.persistRoute(RouteRegistration{
+		RouteID:        rr.RouteID,
+		PublicURL:      strings.TrimRight(rr.PublicURL, "/"),
+		ConnectorURL:   rr.ConnectorURL,
+		ConnectorToken: rr.Token,
+		ExpiresAt:      rr.ExpiresAt,
+	}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -174,7 +225,7 @@ func (w *Worker) Run(ctx context.Context) {
 			continue // reconnect promptly so the relay-side TTL slides
 		}
 		if errors.Is(err, errRouteExpired) {
-			regErr := w.register(ctx)
+			regErr := w.register(ctx, registerRequest{Version: w.version})
 			if regErr == nil {
 				w.mu.RLock()
 				routeID := w.routeID
@@ -231,6 +282,9 @@ func (w *Worker) connectOnce(ctx context.Context) error {
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "ibkr app relay reconnect")
 	w.setStatus(true, "connected")
+	if err := w.persistRouteExtension(time.Now().UTC()); err != nil {
+		log.Printf("ibkr app relay: persist route extension: %v", err)
+	}
 
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -384,6 +438,39 @@ func (w *Worker) setStatus(connected bool, message string) {
 	defer w.mu.Unlock()
 	w.connected = connected
 	w.message = message
+}
+
+func (w *Worker) persistRoute(reg RouteRegistration) error {
+	if w.onRoute == nil {
+		return nil
+	}
+	return w.onRoute(reg)
+}
+
+func (w *Worker) persistRouteExtension(now time.Time) error {
+	if w.onRoute == nil {
+		return nil
+	}
+	w.mu.RLock()
+	reg := RouteRegistration{
+		RouteID:        w.routeID,
+		PublicURL:      w.publicURL,
+		ConnectorURL:   w.connectorURL,
+		ConnectorToken: w.token,
+		ExpiresAt:      now.Add(w.routeTTLDuration()),
+	}
+	w.mu.RUnlock()
+	if reg.RouteID == "" || reg.ConnectorToken == "" {
+		return nil
+	}
+	return w.onRoute(reg)
+}
+
+func (w *Worker) routeTTLDuration() time.Duration {
+	if w.routeTTL <= 0 {
+		return defaultRouteTTL
+	}
+	return w.routeTTL
 }
 
 func forwardableAppPath(raw string) bool {

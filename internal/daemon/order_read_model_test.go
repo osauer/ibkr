@@ -452,6 +452,74 @@ func TestOrderViewModifyEligibleTrailTIF(t *testing.T) {
 	}
 }
 
+func TestNormalizeExecutionLifecycleFullFillBecomesTerminal(t *testing.T) {
+	t.Parallel()
+	ev := orderJournalEvent{
+		Type:      orderJournalEventStatusUpdated,
+		Status:    "Execution",
+		Quantity:  200,
+		Filled:    200,
+		Remaining: 200,
+		SendState: orderSendStateBrokerAcknowledged,
+	}
+
+	normalizeOrderLifecycleJournalEvent(&ev)
+	if ev.Status != "Filled" || ev.Remaining != 0 || ev.SendState != orderSendStateTerminal {
+		t.Fatalf("event = %+v, want full execution normalized to terminal filled", ev)
+	}
+}
+
+func TestReconcileFlatPositionProtectiveOrderRequiresBrokerTruth(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	views := []rpc.OrderView{{
+		Open:            true,
+		ModifyEligible:  true,
+		CancelEligible:  true,
+		Source:          proposalOrderSource,
+		Symbol:          "PBLS",
+		SecType:         "STK",
+		Action:          rpc.OrderActionSell,
+		OrderType:       rpc.OrderTypeTRAIL,
+		Quantity:        200,
+		Remaining:       200,
+		LifecycleStatus: rpc.OrderLifecycleSubmitted,
+	}}
+
+	reconcileFlatPositionProtectiveOrders(views, &rpc.PositionsResult{}, now)
+	got := views[0]
+	if !got.Open || !got.CancelEligible || got.ModifyEligible || got.LifecycleStatus != rpc.OrderLifecycleUnknownReconcileRequired {
+		t.Fatalf("view = %+v, want open reconcile-required with modify disabled and cancel still visible", got)
+	}
+	if got.ReconciliationState != "position_mismatch" || got.BrokerTruthAsOf.IsZero() || !strings.Contains(got.LastMessage, "broker reconciliation required") {
+		t.Fatalf("reconciliation annotation = %+v, want position_mismatch with broker-truth timestamp", got)
+	}
+}
+
+func TestReconcileCoveredProtectiveOrderLeavesOrderActionable(t *testing.T) {
+	t.Parallel()
+	views := []rpc.OrderView{{
+		Open:            true,
+		ModifyEligible:  true,
+		CancelEligible:  true,
+		Source:          proposalOrderSource,
+		Symbol:          "PBLS",
+		SecType:         "STK",
+		Action:          rpc.OrderActionSell,
+		OrderType:       rpc.OrderTypeTRAIL,
+		Quantity:        200,
+		Remaining:       200,
+		LifecycleStatus: rpc.OrderLifecycleSubmitted,
+	}}
+	pos := &rpc.PositionsResult{Stocks: []rpc.PositionView{{Symbol: "PBLS", SecType: "STK", Quantity: 250}}}
+
+	reconcileFlatPositionProtectiveOrders(views, pos, time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC))
+	got := views[0]
+	if !got.Open || !got.CancelEligible || !got.ModifyEligible || got.LifecycleStatus != rpc.OrderLifecycleSubmitted || got.ReconciliationState != "" {
+		t.Fatalf("view = %+v, want covered protective order left unchanged", got)
+	}
+}
+
 func TestOrderJournalEventFromLifecycle(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 5, 28, 9, 31, 0, 0, time.UTC)

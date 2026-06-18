@@ -441,6 +441,24 @@ func TestOrderPreviewTIFGate(t *testing.T) {
 	if res.Draft.TIF != rpc.OrderTIFGTC {
 		t.Fatalf("draft TIF = %q, want GTC", res.Draft.TIF)
 	}
+	if res.Draft.TriggerMethod != rpc.OrderTriggerMethodLast {
+		t.Fatalf("draft trigger method = %d, want LAST", res.Draft.TriggerMethod)
+	}
+
+	res, err = srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		Action:        "sell",
+		Contract:      rpc.ContractParams{Symbol: "AAPL", SecType: "STK"},
+		Quantity:      10,
+		OrderType:     rpc.OrderTypeTRAIL,
+		Trail:         trail,
+		TriggerMethod: rpc.OrderTriggerMethodBidAsk,
+	})
+	if err != nil {
+		t.Fatalf("explicit trigger TRAIL preview: %v", err)
+	}
+	if res.Draft.TriggerMethod != rpc.OrderTriggerMethodBidAsk {
+		t.Fatalf("explicit trigger method = %d, want BID_ASK", res.Draft.TriggerMethod)
+	}
 
 	if _, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
 		Action:   "sell",
@@ -449,6 +467,15 @@ func TestOrderPreviewTIFGate(t *testing.T) {
 		TIF:      rpc.OrderTIFGTC,
 	}); err == nil || !strings.Contains(err.Error(), "GTC for TRAIL") {
 		t.Fatalf("GTC LMT err = %v, want trail-only GTC rejection", err)
+	}
+
+	if _, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		Action:        "sell",
+		Contract:      rpc.ContractParams{Symbol: "AAPL", SecType: "STK"},
+		Quantity:      10,
+		TriggerMethod: rpc.OrderTriggerMethodLast,
+	}); err == nil || !strings.Contains(err.Error(), "TRAIL and TRAIL LIMIT") {
+		t.Fatalf("LMT trigger method err = %v, want trail-only trigger rejection", err)
 	}
 
 	if _, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{

@@ -71,6 +71,9 @@ func validateModifyDraft(view rpc.OrderView, draft rpc.OrderDraft) error {
 	if !strings.EqualFold(view.TIF, draft.TIF) {
 		return errBadRequest("order modify cannot change time-in-force")
 	}
+	if view.TriggerMethod != draft.TriggerMethod {
+		return errBadRequest("order modify cannot change trigger_method")
+	}
 	if isTrailOrderType(viewType) {
 		if !strings.EqualFold(view.TIF, rpc.OrderTIFDay) && !strings.EqualFold(view.TIF, rpc.OrderTIFGTC) {
 			return errBadRequest("order modify supports DAY or GTC time-in-force for TRAIL orders")

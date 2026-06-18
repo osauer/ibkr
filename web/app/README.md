@@ -29,7 +29,9 @@ ibkr app pair
 
 Scan the QR code. The QR opens a short-lived pairing URL; it is not a permanent
 secret. After pairing, the browser keeps its own device key and connects back to
-the app for bootstrap data and live SSE updates.
+the app for bootstrap data and live SSE updates. Restarting the app should not
+require pairing again: the old session cookie is in-memory, but the browser can
+mint a new session from its saved device key/secret.
 
 Useful while developing or testing:
 
@@ -38,6 +40,7 @@ make app-check
 make app-refresh
 make app-refresh-smoke APP_SMOKE_BROWSER=webkit
 ibkr restart --app --timeout 15s
+ibkr app restart --timeout 15s
 make app-smoke APP_SMOKE_BROWSER=webkit
 make app-lifecycle-smoke APP_SMOKE_BROWSER=webkit
 ```

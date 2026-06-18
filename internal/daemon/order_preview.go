@@ -60,6 +60,7 @@ type orderPreviewReplaceTarget struct {
 	LifecycleStatus string              `json:"lifecycle_status,omitempty"`
 	OrderType       string              `json:"order_type,omitempty"`
 	TIF             string              `json:"tif,omitempty"`
+	TriggerMethod   int                 `json:"trigger_method,omitempty"`
 	Quantity        float64             `json:"quantity,omitempty"`
 	Filled          float64             `json:"filled,omitempty"`
 	Remaining       float64             `json:"remaining,omitempty"`
@@ -300,6 +301,13 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	if tif != rpc.OrderTIFDay && !(tif == rpc.OrderTIFGTC && isTrailOrderType(orderType)) {
 		return nil, errBadRequest("order preview supports DAY time-in-force, or GTC for TRAIL and TRAIL LIMIT orders")
 	}
+	triggerMethod, err := previewOrderTriggerMethod(orderType, contract, p.TriggerMethod)
+	if err != nil {
+		return nil, err
+	}
+	if scope == rpc.OrderTokenScopeModify && p.TriggerMethod == rpc.OrderTriggerMethodDefault {
+		triggerMethod = replaceView.TriggerMethod
+	}
 
 	timeout := orderPreviewTimeout(p.TimeoutMs)
 	quote, err := s.fetchPreviewQuote(ctx, contract, timeout)
@@ -326,18 +334,19 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		now = s.now().UTC()
 	}
 	draft := rpc.OrderDraft{
-		Action:     action,
-		Contract:   contract,
-		Quantity:   p.Quantity,
-		OrderType:  orderType,
-		LimitPrice: limit,
-		Trail:      trail,
-		TIF:        tif,
-		OutsideRTH: p.OutsideRTH,
-		Strategy:   strategy,
-		OrderRef:   previewOrderRef(now),
-		OpenClose:  orderOpenCloseForEffect(position.Effect),
-		Source:     strings.TrimSpace(p.Source),
+		Action:        action,
+		Contract:      contract,
+		Quantity:      p.Quantity,
+		OrderType:     orderType,
+		LimitPrice:    limit,
+		Trail:         trail,
+		TriggerMethod: triggerMethod,
+		TIF:           tif,
+		OutsideRTH:    p.OutsideRTH,
+		Strategy:      strategy,
+		OrderRef:      previewOrderRef(now),
+		OpenClose:     orderOpenCloseForEffect(position.Effect),
+		Source:        strings.TrimSpace(p.Source),
 	}
 	if scope == rpc.OrderTokenScopeModify {
 		if err := validateModifyDraft(replaceView, draft); err != nil {
@@ -395,6 +404,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		Action:         draft.Action,
 		OrderType:      draft.OrderType,
 		TIF:            draft.TIF,
+		TriggerMethod:  draft.TriggerMethod,
 		OutsideRTH:     draft.OutsideRTH,
 		Quantity:       float64(draft.Quantity),
 		LimitPrice:     draft.LimitPrice,
@@ -539,14 +549,15 @@ func previewIBKRContract(contract rpc.ContractParams) *ibkrlib.Contract {
 
 func previewIBKROrder(draft rpc.OrderDraft) *ibkrlib.RawOrder {
 	order := &ibkrlib.RawOrder{
-		Action:     strings.ToUpper(strings.TrimSpace(draft.Action)),
-		TotalQty:   draft.Quantity,
-		OrderType:  strings.ToUpper(strings.TrimSpace(draft.OrderType)),
-		LmtPrice:   draft.LimitPrice,
-		TIF:        strings.ToUpper(strings.TrimSpace(draft.TIF)),
-		OrderRef:   draft.OrderRef,
-		OutsideRth: draft.OutsideRTH,
-		OpenClose:  strings.ToUpper(strings.TrimSpace(draft.OpenClose)),
+		Action:        strings.ToUpper(strings.TrimSpace(draft.Action)),
+		TotalQty:      draft.Quantity,
+		OrderType:     strings.ToUpper(strings.TrimSpace(draft.OrderType)),
+		LmtPrice:      draft.LimitPrice,
+		TIF:           strings.ToUpper(strings.TrimSpace(draft.TIF)),
+		TriggerMethod: draft.TriggerMethod,
+		OrderRef:      draft.OrderRef,
+		OutsideRth:    draft.OutsideRTH,
+		OpenClose:     strings.ToUpper(strings.TrimSpace(draft.OpenClose)),
 	}
 	if draft.Trail != nil {
 		order.TrailStopPrice = draft.Trail.InitialStopPrice
@@ -714,6 +725,45 @@ func normalizePreviewStrategy(strategy string, limit *float64) string {
 func previewSupportedOrderType(orderType string) bool {
 	switch strings.ToUpper(strings.TrimSpace(orderType)) {
 	case rpc.OrderTypeLMT, rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT:
+		return true
+	default:
+		return false
+	}
+}
+
+func previewOrderTriggerMethod(orderType string, contract rpc.ContractParams, requested int) (int, error) {
+	if requested != rpc.OrderTriggerMethodDefault {
+		if !isTrailOrderType(orderType) {
+			return 0, errBadRequest("trigger_method is supported for TRAIL and TRAIL LIMIT orders only")
+		}
+		if !validOrderTriggerMethod(requested) {
+			return 0, errBadRequest("trigger_method must be one of 1, 2, 3, 4, 7, or 8")
+		}
+		return requested, nil
+	}
+	if isTrailOrderType(orderType) && trailTriggerDefaultsToLast(contract) {
+		return rpc.OrderTriggerMethodLast, nil
+	}
+	return rpc.OrderTriggerMethodDefault, nil
+}
+
+func validOrderTriggerMethod(method int) bool {
+	switch method {
+	case rpc.OrderTriggerMethodDoubleBidAsk,
+		rpc.OrderTriggerMethodLast,
+		rpc.OrderTriggerMethodDoubleLast,
+		rpc.OrderTriggerMethodBidAsk,
+		rpc.OrderTriggerMethodLastOrBidAsk,
+		rpc.OrderTriggerMethodMidpoint:
+		return true
+	default:
+		return false
+	}
+}
+
+func trailTriggerDefaultsToLast(contract rpc.ContractParams) bool {
+	switch strings.ToUpper(strings.TrimSpace(contract.SecType)) {
+	case "STK", "STOCK", "ETF":
 		return true
 	default:
 		return false
@@ -1316,6 +1366,7 @@ func replaceTargetFromView(view rpc.OrderView) orderPreviewReplaceTarget {
 		LifecycleStatus: view.LifecycleStatus,
 		OrderType:       view.OrderType,
 		TIF:             view.TIF,
+		TriggerMethod:   view.TriggerMethod,
 		Quantity:        view.Quantity,
 		Filled:          view.Filled,
 		Remaining:       view.Remaining,

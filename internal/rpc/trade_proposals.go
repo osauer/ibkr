@@ -121,6 +121,8 @@ type TradeProposal struct {
 	PositionEffect     string                          `json:"position_effect"`
 	OrderType          string                          `json:"order_type"`
 	Trail              *OrderTrailSpec                 `json:"trail,omitempty"`
+	TrailSizing        *TradeProposalTrailSizing       `json:"trail_sizing,omitempty"`
+	TriggerMethod      int                             `json:"trigger_method,omitempty"`
 	TIF                string                          `json:"tif"`
 	OutsideRTH         bool                            `json:"outside_rth"`
 	Contract           ContractParams                  `json:"contract"`
@@ -140,6 +142,37 @@ type TradeProposal struct {
 	SourceFingerprints TradeProposalSourceFingerprints `json:"source_fingerprints,omitzero"`
 	Blockers           []TradingBlocker                `json:"blockers,omitempty"`
 	CreatedAt          time.Time                       `json:"created_at,omitzero"`
+}
+
+// TradeProposalTrailSizing is the daemon-owned explanation for a protective
+// trail. Percent fields use human units (10.0 means 10%), matching the
+// protection policy TOML and OrderTrailSpec's broker percent convention.
+type TradeProposalTrailSizing struct {
+	Method            string    `json:"method,omitempty"`
+	Version           string    `json:"version,omitempty"`
+	DataQuality       string    `json:"data_quality,omitempty"`
+	SelectedBy        string    `json:"selected_by,omitempty"`
+	Fallback          bool      `json:"fallback,omitempty"`
+	Capped            bool      `json:"capped,omitempty"`
+	ReferencePrice    *float64  `json:"reference_price,omitempty"`
+	ReferenceSource   string    `json:"reference_source,omitempty"`
+	ReferenceAsOf     time.Time `json:"reference_as_of,omitzero"`
+	PolicyMinPct      float64   `json:"policy_min_pct,omitempty"`
+	PolicyDefaultPct  float64   `json:"policy_default_pct,omitempty"`
+	PolicyFallbackPct float64   `json:"policy_fallback_pct,omitempty"`
+	PolicyMaxPct      float64   `json:"policy_max_pct,omitempty"`
+	ChosenPct         float64   `json:"chosen_pct,omitempty"`
+	ChosenAmount      *float64  `json:"chosen_amount,omitempty"`
+	InitialStopPrice  *float64  `json:"initial_stop_price,omitempty"`
+	ATR14             *float64  `json:"atr_14,omitempty"`
+	ATRPct            *float64  `json:"atr_pct,omitempty"`
+	ATRMultiplier     *float64  `json:"atr_multiplier,omitempty"`
+	ATRCandidatePct   *float64  `json:"atr_candidate_pct,omitempty"`
+	SpreadPct         *float64  `json:"spread_pct,omitempty"`
+	SpreadMultiplier  *float64  `json:"spread_multiplier,omitempty"`
+	SpreadFloorPct    *float64  `json:"spread_floor_pct,omitempty"`
+	MissingReasons    []string  `json:"missing_reasons,omitempty"`
+	AsOf              time.Time `json:"as_of,omitzero"`
 }
 
 type TradeProposalSnapshotParams struct {

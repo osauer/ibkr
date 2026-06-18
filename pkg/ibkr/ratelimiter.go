@@ -2,6 +2,7 @@ package ibkr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -57,6 +58,7 @@ type RateLimiterMetrics struct {
 // RateLimitedRequest wraps a request with rate limiting metadata
 type RateLimitedRequest struct {
 	Type       RequestType
+	Context    context.Context
 	SendFunc   func() error
 	ResultChan chan error
 	Timestamp  time.Time
@@ -285,6 +287,13 @@ func (rl *RateLimiter) Submit(reqType RequestType, sendFunc func() error) error 
 	return rl.SubmitWithRetries(reqType, sendFunc, 3)
 }
 
+// SubmitContext submits a request for rate-limited execution and cancels the
+// queue/token wait when ctx is done. The send function should also check ctx
+// if it may block after the limiter admits it.
+func (rl *RateLimiter) SubmitContext(ctx context.Context, reqType RequestType, sendFunc func() error) error {
+	return rl.SubmitWithRetriesContext(ctx, reqType, sendFunc, 3)
+}
+
 // submitTimeout caps how long Submit waits for a queued request to
 // complete before giving up. The cap is type-aware: RequestTypeHistorical
 // must accommodate the slow historicalRate bucket (60 tokens, refills at
@@ -314,12 +323,28 @@ func submitTimeout(reqType RequestType) time.Duration {
 // before v0.16.0 but processRequests never read it (no priority queue was
 // ever wired); removing it killed the dead API in favour of an honest one.
 func (rl *RateLimiter) SubmitWithRetries(reqType RequestType, sendFunc func() error, maxRetries int) error {
+	return rl.SubmitWithRetriesContext(context.Background(), reqType, sendFunc, maxRetries)
+}
+
+// SubmitWithRetriesContext is SubmitWithRetries plus caller-owned
+// cancellation. This matters for interactive historical reads: the historical
+// bucket can legitimately wait minutes during breadth fan-out, but a CLI/RPC
+// request with a 60 s budget must leave that queue promptly when its caller is
+// gone.
+func (rl *RateLimiter) SubmitWithRetriesContext(ctx context.Context, reqType RequestType, sendFunc func() error, maxRetries int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := rl.checkCircuit(reqType); err != nil {
 		return err
 	}
 
 	req := &RateLimitedRequest{
 		Type:       reqType,
+		Context:    ctx,
 		SendFunc:   sendFunc,
 		ResultChan: make(chan error, 1),
 		Timestamp:  time.Now(),
@@ -331,21 +356,29 @@ func (rl *RateLimiter) SubmitWithRetries(reqType RequestType, sendFunc func() er
 	select {
 	case <-rl.ctx.Done():
 		return fmt.Errorf("rate limiter stopped")
+	case <-ctx.Done():
+		return ctx.Err()
 	default:
 	}
 	timeout := submitTimeout(reqType)
 	select {
 	case rl.requestQueue <- req:
 		// Wait for result with timeout
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
 		select {
 		case err := <-req.ResultChan:
 			return err
-		case <-time.After(timeout):
+		case <-timer.C:
 			rl.incrementRejected()
 			return fmt.Errorf("request timeout after %s", timeout)
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-rl.ctx.Done():
 			return fmt.Errorf("rate limiter stopped")
 		}
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-rl.ctx.Done():
 		return fmt.Errorf("rate limiter stopped")
 	default:
@@ -393,7 +426,7 @@ func (rl *RateLimiter) dispatch(req *RateLimitedRequest) {
 	defer rl.wg.Done()
 
 	err := rl.executeRequest(req)
-	if err != nil && req.Retries < req.MaxRetries {
+	if err != nil && rl.shouldRetry(req, err) {
 		req.Retries++
 		// Re-queue with exponential backoff. Honor rl.ctx so a
 		// shutdown mid-backoff doesn't leak a goroutine sleeping
@@ -401,17 +434,28 @@ func (rl *RateLimiter) dispatch(req *RateLimitedRequest) {
 		rl.wg.Add(1)
 		go func(backoff time.Duration) {
 			defer rl.wg.Done()
+			ctx := req.Context
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			timer := time.NewTimer(backoff)
+			defer timer.Stop()
 			select {
-			case <-time.After(backoff):
+			case <-timer.C:
+			case <-ctx.Done():
+				req.ResultChan <- ctx.Err()
+				return
 			case <-rl.ctx.Done():
-				req.ResultChan <- rl.ctx.Err()
+				req.ResultChan <- fmt.Errorf("rate limiter stopped")
 				return
 			}
 			select {
 			case rl.requestQueue <- req:
 				// Re-queued successfully
+			case <-ctx.Done():
+				req.ResultChan <- ctx.Err()
 			case <-rl.ctx.Done():
-				req.ResultChan <- rl.ctx.Err()
+				req.ResultChan <- fmt.Errorf("rate limiter stopped")
 			default:
 				// Queue full, give up
 				req.ResultChan <- fmt.Errorf("retry failed: queue full")
@@ -427,10 +471,15 @@ func (rl *RateLimiter) dispatch(req *RateLimitedRequest) {
 func (rl *RateLimiter) executeRequest(req *RateLimitedRequest) error {
 	rl.incrementTotal()
 
+	ctx, cancel := rl.executionContext(req)
+	defer cancel()
+
 	// Wait for general message rate limit (all requests)
-	if err := rl.messageRate.WaitForTokens(rl.ctx, 1); err != nil {
+	if err := rl.messageRate.WaitForTokens(ctx, 1); err != nil {
 		rl.incrementThrottled()
-		rl.recordRateLimitError()
+		if !isContextDone(err) {
+			rl.recordRateLimitError()
+		}
 		return fmt.Errorf("rate limit cancelled: %w", err)
 	}
 
@@ -438,16 +487,20 @@ func (rl *RateLimiter) executeRequest(req *RateLimitedRequest) error {
 	switch req.Type {
 	case RequestTypeHistorical:
 		// Wait for historical rate limit
-		if err := rl.historicalRate.WaitForTokens(rl.ctx, 1); err != nil {
+		if err := rl.historicalRate.WaitForTokens(ctx, 1); err != nil {
 			rl.incrementThrottled()
-			rl.recordRateLimitError()
+			if !isContextDone(err) {
+				rl.recordRateLimitError()
+			}
 			return fmt.Errorf("historical rate limit: %w", err)
 		}
 
 		// Acquire concurrent slot
-		if err := rl.historicalConcurrent.Acquire(rl.ctx); err != nil {
+		if err := rl.historicalConcurrent.Acquire(ctx); err != nil {
 			rl.incrementThrottled()
-			rl.recordRateLimitError()
+			if !isContextDone(err) {
+				rl.recordRateLimitError()
+			}
 			return fmt.Errorf("historical concurrent limit: %w", err)
 		}
 		defer rl.historicalConcurrent.Release()
@@ -462,9 +515,16 @@ func (rl *RateLimiter) executeRequest(req *RateLimitedRequest) error {
 		// Note: Caller must manage subscription lifecycle with AcquireMarketDataSlot/ReleaseMarketDataSlot
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Execute the actual request
 	err := req.SendFunc()
 	if err != nil {
+		if isContextDone(err) {
+			return err
+		}
 		lower := strings.ToLower(err.Error())
 		if strings.Contains(lower, "error 100") || strings.Contains(lower, "rate limit") {
 			rl.recordRateLimitError()
@@ -476,6 +536,36 @@ func (rl *RateLimiter) executeRequest(req *RateLimitedRequest) error {
 	}
 
 	return err
+}
+
+func (rl *RateLimiter) executionContext(req *RateLimitedRequest) (context.Context, context.CancelFunc) {
+	base := req.Context
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithCancel(base)
+	stop := context.AfterFunc(rl.ctx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
+func (rl *RateLimiter) shouldRetry(req *RateLimitedRequest, err error) bool {
+	if err == nil || req.Retries >= req.MaxRetries {
+		return false
+	}
+	if isContextDone(err) || rl.ctx.Err() != nil {
+		return false
+	}
+	if req.Context != nil && req.Context.Err() != nil {
+		return false
+	}
+	return true
+}
+
+func isContextDone(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // AcquireMarketDataSlot acquires a market data subscription slot

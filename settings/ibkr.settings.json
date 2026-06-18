@@ -26,6 +26,7 @@
       "Bash(ibkr opportunities status*)",
       "Bash(ibkr opportunities list*)",
       "Bash(ibkr opportunities refresh*)",
+      "Bash(ibkr backtest research-opportunity*)",
       "Bash(ibkr settings show*)",
       "Bash(ibkr trading status*)",
       "Bash(ibkr orders open*)",

@@ -153,7 +153,7 @@ type AutoTrade struct {
 	HotReload *bool `toml:"hot_reload"`
 	// ReloadInterval controls how often the daemon checks policy-file changes; default 30s.
 	ReloadInterval duration `toml:"reload_interval"`
-	// ProposalCadence controls how often the daemon refreshes protection proposals; default 2m.
+	// ProposalCadence controls how often the daemon refreshes protection proposals; default 30s.
 	ProposalCadence duration `toml:"proposal_cadence"`
 	// FastPathEnabled allows manual proposal preview/submit to use the immediate
 	// revalidation path; default true so paper protection stops remain usable.
@@ -203,10 +203,10 @@ func (a AutoTrade) WithDefaults() AutoTrade {
 
 // defaultProposalCadence is the protection-proposal refresh interval when
 // [auto_trade].proposal_cadence is unset. A refresh costs one
-// reqAccountSummary round-trip plus cache reads, so 2m keeps the panel
-// near-live without meaningful pacing load; sustained-failure retries are
-// governed separately by the engine's backoff cap.
-const defaultProposalCadence = 2 * time.Minute
+// reqAccountSummary round-trip plus cache reads, so 30s keeps the panel
+// fresh in fast markets while staying predictable; sustained-failure retries
+// are governed separately by the engine's backoff cap.
+const defaultProposalCadence = 30 * time.Second
 
 func (a AutoTrade) ProposalsEnabledResolved() bool {
 	if a.ProposalsEnabled == nil {

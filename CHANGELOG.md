@@ -15,17 +15,20 @@ All notable changes to this project are documented here. The project adheres to 
 - Added typed RPC, daemon refresh/status handlers, config, status subsystem reporting, source fingerprints, ignore state, CLI rendering, and app HTTP routes for Opportunities.
 - Added an `ibkr_opportunities` MCP read tool and regenerated MCP/config references so LLM hosts can discover opportunity snapshots without gaining write authority.
 - Added option exercise wire support and trading-build submission plumbing for the CLI/app preview-then-exercise flow.
+- The app Protection panel now shows "No-stop exposure", a row-backed summary of visible trailing-stop proposals that do not already have a matching open protective order.
 
 ### Changed
 
 - CLI help now groups protection proposals and opportunities under their own command families, keeping portfolio reads separate from broker-write-capable local workflows.
 - The app Opportunities panel hides the normal policy fingerprint in the common healthy state and keeps the detailed policy identity available through status/read surfaces.
 - Protection risk-reduction copy is more compact, with the excess value displayed without redundant prose.
+- Protection proposals now refresh every 30 seconds by default instead of every 2 minutes, while transient failure retries still back off to avoid noisy gateway outages.
 
 ### Fixed
 
 - No-bid option exercise candidates are suppressed instead of showing a theoretical gain that cannot be captured through an executable option sale.
 - Exercise opportunities can now disclose exposure-increasing effects when that is the mechanical result of exercising a held option; the daemon classifies the position effect instead of pretending every exercise is reduce-only.
+- The app Protection headline now colors zero actionable theta neutrally and highlights positive risk-over-target exposure in red.
 
 ## v1.12.0 — 2026-06-12 17:21 CEST
 

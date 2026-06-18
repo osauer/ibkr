@@ -43,6 +43,8 @@ RESTART_TIMEOUT ?= 15s
 
 CLAUDE_DIR ?= $(HOME)/.claude
 SKILL_DIR  ?= $(CLAUDE_DIR)/skills/ibkr
+CODEX_DIR  ?= $(HOME)/.codex
+CODEX_SKILL_DIR ?= $(CODEX_DIR)/skills/ibkr
 SKILL_SRC  ?= skills/ibkr
 
 MAIN_BRANCH ?= main
@@ -429,14 +431,18 @@ test-daemon: ## Run internal/... and test/integration/... under -race (incl. tra
 	./scripts/with-gateway-lock.sh go test -race -count=1 -timeout=420s ./test/integration/...
 	go test -race -timeout=240s -tags trading ./internal/daemon/...
 
-# Install the Claude Code skill bundle directly under ~/.claude/skills/.
+# Install the standalone skill bundle directly under global agent skill roots.
 # Dogfood path only — end users get the skill via `/plugin install ibkr`.
 # Idempotent: re-running updates files in place.
-install-skill: build ## Install SKILL.md to ~/.claude/skills/ibkr/ (dogfood path)
+install-skill: build ## Install SKILL.md to global Claude/Codex skill dirs (dogfood path)
 	install -d $(SKILL_DIR)
 	install -m 0644 $(SKILL_SRC)/SKILL.md $(SKILL_DIR)/SKILL.md
 	install -m 0644 $(SKILL_SRC)/schemas.md $(SKILL_DIR)/schemas.md
+	install -d $(CODEX_SKILL_DIR)
+	install -m 0644 $(SKILL_SRC)/SKILL.md $(CODEX_SKILL_DIR)/SKILL.md
+	install -m 0644 $(SKILL_SRC)/schemas.md $(CODEX_SKILL_DIR)/schemas.md
 	@echo "Installed skill to $(SKILL_DIR)"
+	@echo "Installed skill to $(CODEX_SKILL_DIR)"
 	@echo
 	@echo "Prefer the plugin install path for end users:"
 	@echo "  /plugin marketplace add osauer/ibkr"
@@ -446,8 +452,9 @@ install-skill: build ## Install SKILL.md to ~/.claude/skills/ibkr/ (dogfood path
 	@echo "into your ~/.claude/settings.json by hand (the SKILL frontmatter already"
 	@echo "grants the read patterns when the skill is active)."
 
-uninstall-skill: ## Remove the dogfood skill install at ~/.claude/skills/ibkr/
+uninstall-skill: ## Remove the dogfood skill install from global Claude/Codex skill dirs
 	rm -rf $(SKILL_DIR)
+	rm -rf $(CODEX_SKILL_DIR)
 
 clean: ## Remove bin/ and dist/
 	rm -rf bin dist

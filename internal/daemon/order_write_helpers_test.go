@@ -79,6 +79,9 @@ func TestValidateModifyDraftTrailFrozenFields(t *testing.T) {
 		{"tif change", func(_ *rpc.OrderView, draft *rpc.OrderDraft) {
 			draft.TIF = rpc.OrderTIFDay
 		}, "cannot change time-in-force"},
+		{"trigger method change", func(_ *rpc.OrderView, draft *rpc.OrderDraft) {
+			draft.TriggerMethod = rpc.OrderTriggerMethodLast
+		}, "cannot change trigger_method"},
 		{"action change", func(_ *rpc.OrderView, draft *rpc.OrderDraft) {
 			draft.Action = rpc.OrderActionBuy
 		}, "cannot change action"},

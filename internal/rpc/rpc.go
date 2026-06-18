@@ -2923,6 +2923,14 @@ const (
 	OrderTrailOffsetPercent        = "percent"
 	OrderTrailOffsetAmount         = "amount"
 
+	OrderTriggerMethodDefault      = 0
+	OrderTriggerMethodDoubleBidAsk = 1
+	OrderTriggerMethodLast         = 2
+	OrderTriggerMethodDoubleLast   = 3
+	OrderTriggerMethodBidAsk       = 4
+	OrderTriggerMethodLastOrBidAsk = 7
+	OrderTriggerMethodMidpoint     = 8
+
 	// Request origins for broker writes. Adapters stamp every write request;
 	// the daemon refuses agent-origin writes when the trading gate routes
 	// live. A missing or unknown origin is treated as OrderOriginAgent, so
@@ -2982,28 +2990,32 @@ type OrderPreviewParams struct {
 	OrderType  string          `json:"order_type,omitempty"` // LMT | TRAIL | TRAIL LIMIT
 	LimitPrice *float64        `json:"limit_price,omitempty"`
 	Trail      *OrderTrailSpec `json:"trail,omitempty"`
-	Strategy   string          `json:"strategy,omitempty"` // default patient-limit for stocks/ETFs
-	TIF        string          `json:"tif,omitempty"`      // default DAY
-	OutsideRTH bool            `json:"outside_rth,omitempty"`
-	ReplaceID  string          `json:"replace_id,omitempty"`
-	TimeoutMs  int             `json:"timeout_ms,omitempty"`
-	Source     string          `json:"source,omitempty"`
+	// TriggerMethod is the IBKR stop/trigger method integer. Zero delegates
+	// to IBKR defaults; protective stock/ETF trails default to LAST (2).
+	TriggerMethod int    `json:"trigger_method,omitempty"`
+	Strategy      string `json:"strategy,omitempty"` // default patient-limit for stocks/ETFs
+	TIF           string `json:"tif,omitempty"`      // default DAY
+	OutsideRTH    bool   `json:"outside_rth,omitempty"`
+	ReplaceID     string `json:"replace_id,omitempty"`
+	TimeoutMs     int    `json:"timeout_ms,omitempty"`
+	Source        string `json:"source,omitempty"`
 }
 
 // OrderDraft is the canonical local intent bound into a preview token.
 type OrderDraft struct {
-	Action     string          `json:"action"`
-	Contract   ContractParams  `json:"contract"`
-	Quantity   int             `json:"quantity"`
-	OrderType  string          `json:"order_type"`
-	LimitPrice float64         `json:"limit_price"`
-	Trail      *OrderTrailSpec `json:"trail,omitempty"`
-	TIF        string          `json:"tif"`
-	OutsideRTH bool            `json:"outside_rth"`
-	Strategy   string          `json:"strategy"`
-	OrderRef   string          `json:"order_ref"`
-	OpenClose  string          `json:"open_close,omitempty"`
-	Source     string          `json:"source,omitempty"`
+	Action        string          `json:"action"`
+	Contract      ContractParams  `json:"contract"`
+	Quantity      int             `json:"quantity"`
+	OrderType     string          `json:"order_type"`
+	LimitPrice    float64         `json:"limit_price"`
+	Trail         *OrderTrailSpec `json:"trail,omitempty"`
+	TriggerMethod int             `json:"trigger_method,omitempty"`
+	TIF           string          `json:"tif"`
+	OutsideRTH    bool            `json:"outside_rth"`
+	Strategy      string          `json:"strategy"`
+	OrderRef      string          `json:"order_ref"`
+	OpenClose     string          `json:"open_close,omitempty"`
+	Source        string          `json:"source,omitempty"`
 }
 
 // OrderTrailSpec is the canonical broker-side trailing-stop intent. Percent
@@ -3401,6 +3413,7 @@ type OrderEvent struct {
 	Action          string          `json:"action,omitempty"`
 	OrderType       string          `json:"order_type,omitempty"`
 	TIF             string          `json:"tif,omitempty"`
+	TriggerMethod   int             `json:"trigger_method,omitempty"`
 	OutsideRTH      bool            `json:"outside_rth,omitempty"`
 	Quantity        float64         `json:"quantity,omitempty"`
 	LimitPrice      float64         `json:"limit_price,omitempty"`
@@ -3424,53 +3437,56 @@ type OrderEvent struct {
 // order intent. It is reduced from the append-only journal; broker callbacks
 // remain authoritative for acknowledgement/fill/cancel status.
 type OrderView struct {
-	OrderRef        string          `json:"order_ref,omitempty"`
-	PreviewTokenID  string          `json:"preview_token_id,omitempty"`
-	ReservedOrderID int             `json:"reserved_order_id,omitempty"`
-	ClientID        int             `json:"client_id,omitempty"`
-	PermID          int             `json:"perm_id,omitempty"`
-	Account         string          `json:"account,omitempty"`
-	Endpoint        string          `json:"endpoint,omitempty"`
-	Mode            string          `json:"mode,omitempty"`
-	Source          string          `json:"source,omitempty"`
-	PurgeID         string          `json:"purge_id,omitempty"`
-	LegID           string          `json:"leg_id,omitempty"`
-	BypassPreview   bool            `json:"bypass_preview,omitempty"`
-	Symbol          string          `json:"symbol,omitempty"`
-	SecType         string          `json:"sec_type,omitempty"`
-	ConID           int             `json:"con_id,omitempty"`
-	Exchange        string          `json:"exchange,omitempty"`
-	PrimaryExch     string          `json:"primary_exch,omitempty"`
-	Currency        string          `json:"currency,omitempty"`
-	LocalSymbol     string          `json:"local_symbol,omitempty"`
-	TradingClass    string          `json:"trading_class,omitempty"`
-	Expiry          string          `json:"expiry,omitempty"`
-	Strike          float64         `json:"strike,omitempty"`
-	Right           string          `json:"right,omitempty"`
-	Multiplier      int             `json:"multiplier,omitempty"`
-	Action          string          `json:"action,omitempty"`
-	OrderType       string          `json:"order_type,omitempty"`
-	TIF             string          `json:"tif,omitempty"`
-	OutsideRTH      bool            `json:"outside_rth,omitempty"`
-	Quantity        float64         `json:"quantity,omitempty"`
-	LimitPrice      float64         `json:"limit_price,omitempty"`
-	Trail           *OrderTrailSpec `json:"trail,omitempty"`
-	OpenClose       string          `json:"open_close,omitempty"`
-	Status          string          `json:"status,omitempty"`
-	LifecycleStatus string          `json:"lifecycle_status"`
-	Filled          float64         `json:"filled,omitempty"`
-	Remaining       float64         `json:"remaining,omitempty"`
-	AvgFillPrice    float64         `json:"avg_fill_price,omitempty"`
-	LastFillPrice   float64         `json:"last_fill_price,omitempty"`
-	WhyHeld         string          `json:"why_held,omitempty"`
-	MktCapPrice     float64         `json:"mkt_cap_price,omitempty"`
-	SendState       string          `json:"send_state,omitempty"`
-	LastEvent       string          `json:"last_event,omitempty"`
-	LastMessage     string          `json:"last_message,omitempty"`
-	UpdatedAt       time.Time       `json:"updated_at,omitzero"`
-	Open            bool            `json:"open"`
-	ModifyEligible  bool            `json:"modify_eligible"`
-	CancelEligible  bool            `json:"cancel_eligible"`
+	OrderRef            string          `json:"order_ref,omitempty"`
+	PreviewTokenID      string          `json:"preview_token_id,omitempty"`
+	ReservedOrderID     int             `json:"reserved_order_id,omitempty"`
+	ClientID            int             `json:"client_id,omitempty"`
+	PermID              int             `json:"perm_id,omitempty"`
+	Account             string          `json:"account,omitempty"`
+	Endpoint            string          `json:"endpoint,omitempty"`
+	Mode                string          `json:"mode,omitempty"`
+	Source              string          `json:"source,omitempty"`
+	PurgeID             string          `json:"purge_id,omitempty"`
+	LegID               string          `json:"leg_id,omitempty"`
+	BypassPreview       bool            `json:"bypass_preview,omitempty"`
+	Symbol              string          `json:"symbol,omitempty"`
+	SecType             string          `json:"sec_type,omitempty"`
+	ConID               int             `json:"con_id,omitempty"`
+	Exchange            string          `json:"exchange,omitempty"`
+	PrimaryExch         string          `json:"primary_exch,omitempty"`
+	Currency            string          `json:"currency,omitempty"`
+	LocalSymbol         string          `json:"local_symbol,omitempty"`
+	TradingClass        string          `json:"trading_class,omitempty"`
+	Expiry              string          `json:"expiry,omitempty"`
+	Strike              float64         `json:"strike,omitempty"`
+	Right               string          `json:"right,omitempty"`
+	Multiplier          int             `json:"multiplier,omitempty"`
+	Action              string          `json:"action,omitempty"`
+	OrderType           string          `json:"order_type,omitempty"`
+	TIF                 string          `json:"tif,omitempty"`
+	TriggerMethod       int             `json:"trigger_method,omitempty"`
+	OutsideRTH          bool            `json:"outside_rth,omitempty"`
+	Quantity            float64         `json:"quantity,omitempty"`
+	LimitPrice          float64         `json:"limit_price,omitempty"`
+	Trail               *OrderTrailSpec `json:"trail,omitempty"`
+	OpenClose           string          `json:"open_close,omitempty"`
+	Status              string          `json:"status,omitempty"`
+	LifecycleStatus     string          `json:"lifecycle_status"`
+	Filled              float64         `json:"filled,omitempty"`
+	Remaining           float64         `json:"remaining,omitempty"`
+	AvgFillPrice        float64         `json:"avg_fill_price,omitempty"`
+	LastFillPrice       float64         `json:"last_fill_price,omitempty"`
+	WhyHeld             string          `json:"why_held,omitempty"`
+	MktCapPrice         float64         `json:"mkt_cap_price,omitempty"`
+	SendState           string          `json:"send_state,omitempty"`
+	LastEvent           string          `json:"last_event,omitempty"`
+	LastMessage         string          `json:"last_message,omitempty"`
+	ReconciliationState string          `json:"reconciliation_state,omitempty"`
+	BrokerTruthAsOf     time.Time       `json:"broker_truth_as_of,omitzero"`
+	UpdatedAt           time.Time       `json:"updated_at,omitzero"`
+	Open                bool            `json:"open"`
+	ModifyEligible      bool            `json:"modify_eligible"`
+	CancelEligible      bool            `json:"cancel_eligible"`
 }
 
 type OrdersOpenResult struct {

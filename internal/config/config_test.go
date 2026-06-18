@@ -71,8 +71,8 @@ func TestLoad_MissingFileGivesFullAuto(t *testing.T) {
 	if res.AutoTrade.ReloadIntervalDuration() != 30*time.Second {
 		t.Errorf("auto_trade reload_interval = %v, want 30s", res.AutoTrade.ReloadIntervalDuration())
 	}
-	if res.AutoTrade.ProposalCadenceDuration() != 2*time.Minute {
-		t.Errorf("auto_trade proposal_cadence = %v, want 2m", res.AutoTrade.ProposalCadenceDuration())
+	if res.AutoTrade.ProposalCadenceDuration() != 30*time.Second {
+		t.Errorf("auto_trade proposal_cadence = %v, want 30s", res.AutoTrade.ProposalCadenceDuration())
 	}
 	if !res.Opportunities.EnabledResolved() {
 		t.Error("opportunities should default enabled")

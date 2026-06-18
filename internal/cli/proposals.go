@@ -224,12 +224,45 @@ func renderProposalsText(env *Env, snap *rpc.TradeProposalSnapshot) {
 			head += " " + formatOrderTrail(p.Trail)
 		}
 		fmt.Fprintf(out, "  %s  %s  [%s]\n", head, p.Reason, state)
+		if sizing := formatProposalTrailSizing(p.TrailSizing); sizing != "" {
+			fmt.Fprintf(out, "      Trail sizing: %s\n", sizing)
+		}
 		for _, d := range p.Details {
 			fmt.Fprintf(out, "      %s\n", d)
 		}
 		printTradingBlockers(out, "      ", p.Blockers)
 	}
 	fmt.Fprintln(out)
+}
+
+func formatProposalTrailSizing(sizing *rpc.TradeProposalTrailSizing) string {
+	if sizing == nil {
+		return ""
+	}
+	chosen := sizing.ChosenPct
+	if chosen <= 0 {
+		return ""
+	}
+	rangeText := ""
+	if sizing.PolicyMinPct > 0 && sizing.PolicyMaxPct > 0 {
+		rangeText = fmt.Sprintf("dynamic range %.1f-%.1f%%, ", sizing.PolicyMinPct, sizing.PolicyMaxPct)
+	}
+	if sizing.Fallback {
+		fallback := sizing.PolicyFallbackPct
+		if fallback <= 0 {
+			fallback = chosen
+		}
+		return fmt.Sprintf("%s%.1f%% fallback trail used (dynamic stop unavailable; %.1f%% policy fallback)", rangeText, chosen, fallback)
+	}
+	source := strings.TrimSpace(sizing.SelectedBy)
+	if source == "" {
+		source = "policy"
+	}
+	suffix := ""
+	if sizing.Capped && sizing.PolicyMaxPct > 0 {
+		suffix = fmt.Sprintf(", capped at %.1f%%", sizing.PolicyMaxPct)
+	}
+	return fmt.Sprintf("%schosen %.1f%% by %s%s", rangeText, chosen, source, suffix)
 }
 
 func renderProposalPreviewText(env *Env, res *rpc.TradeProposalPreviewResult) {

@@ -24,7 +24,7 @@ var skillExcluded = map[string]string{
 	"setup":    "interactive first-run wizard",
 	"update":   "binary self-update is a human decision",
 	"purge":    "destructive emergency workflow, deliberately human-only",
-	"backtest": "offline research harness, deliberately out of the skill",
+	"backtest": "offline research harness; only the read-only research-opportunity subcommand is allowlisted explicitly",
 }
 
 // forbiddenAllowPrefixes are invocation shapes that must never be
