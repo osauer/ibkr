@@ -1849,10 +1849,6 @@ func sanitizeProposalPreviewForProposal(in *rpc.OrderPreviewResult, prop rpc.Tra
 	return &rpc.TradeProposalOrderPreview{PreviewTokenID: in.PreviewTokenID, PreviewTokenScope: in.PreviewTokenScope, PreviewTokenExpiresAt: in.PreviewTokenExpiresAt, TokenMinted: in.TokenMinted, SubmitEligible: in.SubmitEligible, Mode: in.Mode, Account: in.Account, Endpoint: in.Endpoint, ClientID: in.ClientID, Draft: in.Draft, Quote: in.Quote, Position: in.Position, ExecutionSemantics: cloneExecutionSemantics(prop.ExecutionSemantics), StopRisk: cloneStopRisk(prop.StopRisk), Notional: in.Notional, MaxNotional: in.MaxNotional, WhatIf: in.WhatIf, Warnings: append([]rpc.DataWarning(nil), in.Warnings...), AsOf: in.AsOf}
 }
 
-func sanitizeProposalPreview(in *rpc.OrderPreviewResult) *rpc.TradeProposalOrderPreview {
-	return sanitizeProposalPreviewForProposal(in, rpc.TradeProposal{})
-}
-
 func (e *proposalEngine) installSnapshot(snap rpc.TradeProposalSnapshot, show bool) {
 	e.mu.Lock()
 	prevRevision := e.snapshot.Revision

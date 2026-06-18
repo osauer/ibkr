@@ -299,12 +299,7 @@ func appendCoverageCode(codes []string, code string) []string {
 }
 
 func containsCoverageCode(codes []string, code string) bool {
-	for _, got := range codes {
-		if got == code {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(codes, code)
 }
 
 func addFloatPtr(current *float64, next float64) *float64 {
