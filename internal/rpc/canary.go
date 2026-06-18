@@ -83,20 +83,21 @@ type CanaryMarketIndicator struct {
 }
 
 type CanaryPortfolioSummary struct {
-	BaseCurrency         string             `json:"base_currency,omitempty"`
-	NetLiquidation       float64            `json:"net_liquidation,omitempty"`
-	CushionPct           *float64           `json:"cushion_pct,omitempty"`
-	LookAheadCushionPct  *float64           `json:"look_ahead_cushion_pct,omitempty"`
-	GrossExposurePctNLV  *float64           `json:"gross_exposure_pct_nlv,omitempty"`
-	NetDeltaPctNLV       *float64           `json:"net_delta_pct_nlv,omitempty"`
-	GrossDeltaPctNLV     *float64           `json:"gross_delta_pct_nlv,omitempty"`
-	LargestExposure      string             `json:"largest_exposure,omitempty"`
-	LargestExposurePct   *float64           `json:"largest_exposure_pct_nlv,omitempty"`
-	LargestDeltaExposure string             `json:"largest_delta_exposure,omitempty"`
-	LargestDeltaPctNLV   *float64           `json:"largest_delta_pct_nlv,omitempty"`
-	DailyPnLPct          *float64           `json:"daily_pnl_pct,omitempty"`
-	OptionGreeks         string             `json:"option_greeks,omitempty"`
-	HeldStress           []CanaryHeldStress `json:"held_stress,omitempty"`
+	BaseCurrency         string                     `json:"base_currency,omitempty"`
+	NetLiquidation       float64                    `json:"net_liquidation,omitempty"`
+	CushionPct           *float64                   `json:"cushion_pct,omitempty"`
+	LookAheadCushionPct  *float64                   `json:"look_ahead_cushion_pct,omitempty"`
+	GrossExposurePctNLV  *float64                   `json:"gross_exposure_pct_nlv,omitempty"`
+	NetDeltaPctNLV       *float64                   `json:"net_delta_pct_nlv,omitempty"`
+	GrossDeltaPctNLV     *float64                   `json:"gross_delta_pct_nlv,omitempty"`
+	LargestExposure      string                     `json:"largest_exposure,omitempty"`
+	LargestExposurePct   *float64                   `json:"largest_exposure_pct_nlv,omitempty"`
+	LargestDeltaExposure string                     `json:"largest_delta_exposure,omitempty"`
+	LargestDeltaPctNLV   *float64                   `json:"largest_delta_pct_nlv,omitempty"`
+	DailyPnLPct          *float64                   `json:"daily_pnl_pct,omitempty"`
+	OptionGreeks         string                     `json:"option_greeks,omitempty"`
+	ProtectionCoverage   *ProtectionCoverageSummary `json:"protection_coverage,omitempty"`
+	HeldStress           []CanaryHeldStress         `json:"held_stress,omitempty"`
 }
 
 // CanaryHeldStress is a bounded, positions-only explanation of stress inside

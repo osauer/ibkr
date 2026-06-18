@@ -440,7 +440,8 @@ func renderPortfolioSummaryTo(env *Env, out io.Writer, r *rpc.PositionsResult) {
 	p := r.Portfolio
 	hasGreeks := p.EffectiveDelta != nil || p.DailyTheta != nil || p.Gamma != nil || p.Vega != nil
 	hasFX := p.FXSensitivityPerPct != nil
-	if !hasGreeks && !hasFX {
+	hasProtection := r.ProtectionCoverage != nil
+	if !hasGreeks && !hasFX && !hasProtection {
 		return
 	}
 	fmt.Fprintln(out, heroSummaryStyle(env, "Summary"))
@@ -514,6 +515,9 @@ func renderPortfolioSummaryTo(env *Env, out io.Writer, r *rpc.PositionsResult) {
 		val := padLeftVisible(formatMoneyBare(*p.FXSensitivityPerPct), valueWidth)
 		fmt.Fprintf(out, "  %-*s  %s  %s per +1%% FX\n",
 			labelWidth, "FX sensitivity", val, base)
+	}
+	if r.ProtectionCoverage != nil {
+		fmt.Fprintf(out, "  %-*s  %s\n", labelWidth, "Protection coverage", formatProtectionCoverageEvidence(r.ProtectionCoverage))
 	}
 	fmt.Fprintln(out)
 }
