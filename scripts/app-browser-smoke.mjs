@@ -149,6 +149,7 @@ try {
   const canaryDetail = await exerciseCanaryDetail(page);
   const marketContext = await exerciseMarketContext(page);
   const portfolioDetail = await exercisePortfolioDetail(page);
+  const protectionRiskRendering = await exerciseProtectionRiskRendering(page);
   const alertHistory = await exerciseAlertHistory(page);
   const openOrders = await exerciseOpenOrders(page);
   const debugTools = await assertDebugToolsRemoved(page, baseURL);
@@ -186,6 +187,7 @@ try {
     canary_detail: canaryDetail,
     market_context: marketContext,
     portfolio_detail: portfolioDetail,
+    protection_risk_rendering: protectionRiskRendering,
     alert_history: alertHistory,
     open_orders: openOrders,
     debug_tools: debugTools,
@@ -811,6 +813,138 @@ async function exercisePortfolioDetail(page) {
     return document.getElementById("portfolioPanel")?.dataset.open === "false" && panel && panel.hidden;
   }, { timeout: 5000 });
   return { opens: true, summary, rows: detail.rows, delta: hero.delta };
+}
+
+async function exerciseProtectionRiskRendering(page) {
+  await page.evaluate(() => {
+    const positionsCoverage = {
+      status: "review",
+      counts: { unprotected: 1, orphaned_order: 1 },
+      unprotected_notional_base: 123,
+      unprotected_notional_base_currency: "USD",
+      by_underlying: [{
+        underlying: "SMOKE",
+        state: "unprotected",
+        position_quantity: 10,
+        unprotected_quantity: 10,
+        unprotected_notional_base: 123,
+        unprotected_notional_base_currency: "USD",
+      }],
+      largest_unprotected: [{
+        underlying: "SMOKE",
+        state: "unprotected",
+        unprotected_notional_base: 123,
+        unprotected_notional_base_currency: "USD",
+      }],
+      orphaned_orders: [{
+        symbol: "OLD",
+        order_type: "TRAIL",
+        remaining: 100,
+        reconciliation_state: "position_mismatch",
+      }],
+    };
+    const canaryCoverage = {
+      status: "review",
+      counts: { unprotected: 1 },
+      unprotected_notional_base: 999,
+      unprotected_notional_base_currency: "USD",
+      largest_unprotected: [{
+        underlying: "CANARY",
+        state: "unprotected",
+        unprotected_notional_base: 999,
+        unprotected_notional_base_currency: "USD",
+      }],
+    };
+    const apply = globalThis.__ibkrSmoke?.applySnapshotPatch;
+    if (!apply) {
+      throw new Error("smoke snapshot patch hook is unavailable");
+    }
+    apply({
+      account: { base_currency: "USD" },
+      positions: {
+        portfolio: { base_currency: "USD" },
+        protection_coverage: positionsCoverage,
+      },
+      canary: {
+        portfolio_fit: "low",
+        portfolio: { protection_coverage: canaryCoverage },
+        protection_coverage: canaryCoverage,
+      },
+      proposals: {
+        as_of: new Date().toISOString(),
+        counts: { total: 1, actionable: 1, trailing_stop: 1 },
+        proposals: [{
+          key: "smoke-trail",
+          revision: "smoke",
+          bucket: "trailing_stop",
+          state: "generated",
+          symbol: "SMOKE",
+          sec_type: "STK",
+          action: "SELL",
+          quantity: 10,
+          max_quantity: 10,
+          position_quantity: 10,
+          position_effect: "close",
+          order_type: "TRAIL",
+          tif: "GTC",
+          contract: { symbol: "SMOKE", sec_type: "STK", currency: "USD" },
+          trail: { trailing_percent: 10, initial_stop_price: 90 },
+          execution_semantics: {
+            reference_side: "bid",
+            trigger_method_label: "last",
+            trigger_effect: "market_order_when_triggered",
+            price_guarantee: "stop_price_is_not_execution_price",
+          },
+          stop_risk: {
+            estimated_loss_base: 100,
+            base_currency: "USD",
+            estimated_loss_pct_nlv: 0.5,
+            gap_scenario: {
+              gap_pct: 7.5,
+              estimated_loss_base: 145,
+              estimated_loss_pct_nlv: 0.7,
+            },
+          },
+          stop_ladder: [{
+            label: "policy chosen",
+            stop_price: 90,
+            estimated_loss_base: 100,
+          }],
+        }],
+      },
+    }, { protectionOpen: true, portfolioDetailOpen: true, canaryDetailOpen: true });
+  });
+  await page.waitForFunction(() => {
+    const portfolio = document.getElementById("portfolioDetailList")?.textContent?.toLowerCase() || "";
+    const canary = document.getElementById("canaryDetailGrid")?.textContent?.toLowerCase() || "";
+    return document.querySelector(".protection-row__risk-ticket") &&
+      portfolio.includes("protection coverage") &&
+      canary.includes("protection coverage");
+  }, { timeout: 5000 });
+  const info = await page.evaluate(() => ({
+    noStop: document.getElementById("protectionNoStopExposure")?.textContent?.trim() || "",
+    riskTicket: document.querySelector(".protection-row__risk-ticket")?.textContent?.replace(/\s+/g, " ").trim() || "",
+    portfolioDetail: document.getElementById("portfolioDetailList")?.textContent?.replace(/\s+/g, " ").trim() || "",
+    canaryDetail: document.getElementById("canaryDetailGrid")?.textContent?.replace(/\s+/g, " ").trim() || "",
+  }));
+  if (!info.noStop.includes("123") || info.noStop.includes("999")) {
+    throw new Error(`Protection no-stop exposure should use positions.protection_coverage, not Canary context: ${JSON.stringify(info)}`);
+  }
+  for (const text of ["trigger bid / last", "est. loss", "7.5% gap", "trigger becomes market"]) {
+    if (!info.riskTicket.includes(text)) {
+      throw new Error(`Protection risk ticket missing ${JSON.stringify(text)}: ${JSON.stringify(info.riskTicket)}`);
+    }
+  }
+  const portfolioDetailLower = info.portfolioDetail.toLowerCase();
+  for (const text of ["protection coverage", "largest unprotected", "stale protective orders"]) {
+    if (!portfolioDetailLower.includes(text)) {
+      throw new Error(`Portfolio protection coverage detail missing ${JSON.stringify(text)}: ${JSON.stringify(info.portfolioDetail)}`);
+    }
+  }
+  if (!info.canaryDetail.toLowerCase().includes("protection coverage")) {
+    throw new Error(`Canary detail does not include protection coverage context: ${JSON.stringify(info.canaryDetail)}`);
+  }
+  return info;
 }
 
 async function exerciseAlertHistory(page) {

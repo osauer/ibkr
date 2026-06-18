@@ -270,6 +270,8 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function stockProtectionSettingEnabled()",
 		"function protectionMetricText(proposal = {})",
 		"function protectionRiskTicket(proposal = {}, metricText = \"\")",
+		"function protectionCoverageFromPositions(snap = state.snapshot || {})",
+		"function canaryProtectionCoverageFor(snap = state.snapshot || {}, canary = snap.canary || {})",
 		"function protectionCoverageDetailFact(coverage = null, baseCurrency = \"\")",
 		"function protectionCoverageCanaryLine(canary = {}, snap = state.snapshot || {})",
 		`? compactWholeMoney(counts.risk_reduction_excess_notional, riskExcessCurrency)`,
@@ -294,6 +296,8 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		`fetch("/api/proposals", { credentials: "include", cache: "no-store" })`,
 		"function renderOpportunitiesPanel(opportunities = {})",
 		"function opportunityMetricRow(opportunity = {})",
+		"function opportunityPostExerciseRiskMetrics(opportunity = {})",
+		"function opportunityPostExerciseRiskChangeLabel(risk = {})",
 		"function opportunityPreviewGate(opportunity = {})",
 		"function opportunitySubmitGate(opportunity = {}, previewResult = null)",
 		"function previewOpportunityExercise(opportunity)",
@@ -484,6 +488,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		".opportunities-summary",
 		".opportunity-row",
 		".opportunity-row__metric--gain",
+		".opportunity-row__metric--risk",
 		".opportunity-preview",
 		".opportunity-exercise",
 	} {
@@ -754,13 +759,17 @@ func TestAppJSRendersProtectionCoverageAndRiskTickets(t *testing.T) {
 	}
 	js := string(appData)
 
+	currentCoverage := jsFunctionBlock(t, js, "currentProtectionCoverage")
+	if !strings.Contains(currentCoverage, "protectionCoverageFromPositions(state.snapshot || {})") || strings.Contains(currentCoverage, "canary") {
+		t.Fatalf("currentProtectionCoverage must use positions coverage only, got:\n%s", currentCoverage)
+	}
 	riskTicket := jsFunctionBlock(t, js, "protectionRiskTicketParts")
 	for _, want := range []string{
 		"proposal.execution_semantics",
 		"proposal.stop_risk",
 		"trigger ${trigger}",
 		"est. loss ${loss}",
-		"5% gap ${gap}",
+		"protectionStopRiskGapName",
 		"protectionExecutionWarningLabel",
 	} {
 		if !strings.Contains(riskTicket, want) {
@@ -803,6 +812,7 @@ func TestAppJSRendersProtectionCoverageAndRiskTickets(t *testing.T) {
 	}
 	canaryLine := jsFunctionBlock(t, js, "protectionCoverageCanaryLine")
 	for _, want := range []string{
+		"canaryProtectionCoverageFor(snap, canary)",
 		"Protection coverage: ${headline}",
 		"largest unprotected",
 		"protectionCoverageStaleText(coverage)",

@@ -38,6 +38,13 @@ const (
 	ExercisePositionEffectIncrease = "increase"
 	ExercisePositionEffectFlip     = "flip"
 	ExercisePositionEffectUnknown  = "unknown"
+
+	ExerciseRiskChangeClosed    = "closed"
+	ExerciseRiskChangeReduced   = "reduced"
+	ExerciseRiskChangeOpened    = "opened"
+	ExerciseRiskChangeIncreased = "increased"
+	ExerciseRiskChangeFlipped   = "flipped"
+	ExerciseRiskChangeUnknown   = "unknown"
 )
 
 type OpportunityPolicyStatus struct {
@@ -119,6 +126,7 @@ type Opportunity struct {
 	UnderlyingQuantityBefore float64                       `json:"underlying_quantity_before"`
 	UnderlyingQuantityAfter  float64                       `json:"underlying_quantity_after"`
 	UnderlyingShareChange    float64                       `json:"underlying_share_change"`
+	PostExerciseRisk         *OpportunityPostExerciseRisk  `json:"post_exercise_risk,omitempty"`
 	Contract                 ContractParams                `json:"contract"`
 	UnderlyingContract       ContractParams                `json:"underlying_contract"`
 	ExpectedGain             float64                       `json:"expected_gain,omitempty"`
@@ -137,6 +145,29 @@ type Opportunity struct {
 	SourceFingerprints       OpportunitySourceFingerprints `json:"source_fingerprints,omitzero"`
 	Blockers                 []TradingBlocker              `json:"blockers,omitempty"`
 	CreatedAt                time.Time                     `json:"created_at,omitzero"`
+}
+
+// OpportunityPostExerciseRisk is advisory context for what exercising a long
+// option would do to the underlying stock/ETF exposure. It does not authorize
+// or block submit; preview/submit gates remain daemon-owned and broker-gated.
+type OpportunityPostExerciseRisk struct {
+	Underlying                      string   `json:"underlying,omitempty"`
+	BeforeQuantity                  float64  `json:"before_quantity"`
+	AfterQuantity                   float64  `json:"after_quantity"`
+	ShareChange                     float64  `json:"share_change"`
+	PositionEffect                  string   `json:"position_effect,omitempty"`
+	RiskChange                      string   `json:"risk_change,omitempty"`
+	RiskOpened                      bool     `json:"risk_opened,omitempty"`
+	RiskIncreased                   bool     `json:"risk_increased,omitempty"`
+	RiskFlipped                     bool     `json:"risk_flipped,omitempty"`
+	ProtectionReviewNeeded          bool     `json:"protection_review_needed"`
+	ProtectionReviewReason          string   `json:"protection_review_reason,omitempty"`
+	ProtectionCoverageState         string   `json:"protection_coverage_state,omitempty"`
+	CurrentProtectedQuantity        float64  `json:"current_protected_quantity,omitempty"`
+	CurrentUnprotectedQuantity      float64  `json:"current_unprotected_quantity,omitempty"`
+	CurrentUnprotectedNotionalBase  *float64 `json:"current_unprotected_notional_base,omitempty"`
+	UnprotectedNotionalBaseCurrency string   `json:"unprotected_notional_base_currency,omitempty"`
+	WarningCodes                    []string `json:"warning_codes,omitempty"`
 }
 
 type OpportunitySnapshotParams struct {

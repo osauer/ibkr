@@ -53,6 +53,38 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+installSmokeHooks();
+
+function installSmokeHooks() {
+  const smoke = globalThis.__ibkrSmoke;
+  if (!smoke || smoke.applySnapshotPatch) return;
+  smoke.applySnapshotPatch = (patch = {}, ui = {}) => {
+    const current = state.snapshot || {};
+    state.snapshot = {
+      ...current,
+      ...patch,
+      account: patch.account ? { ...(current.account || {}), ...patch.account } : current.account,
+      positions: patch.positions ? {
+        ...(current.positions || {}),
+        ...patch.positions,
+        portfolio: patch.positions.portfolio ? { ...(current.positions?.portfolio || {}), ...patch.positions.portfolio } : current.positions?.portfolio,
+      } : current.positions,
+      canary: patch.canary ? {
+        ...(current.canary || {}),
+        ...patch.canary,
+        portfolio: patch.canary.portfolio ? { ...(current.canary?.portfolio || {}), ...patch.canary.portfolio } : current.canary?.portfolio,
+      } : current.canary,
+      proposals: patch.proposals ? { ...(current.proposals || {}), ...patch.proposals } : current.proposals,
+      opportunities: patch.opportunities ? { ...(current.opportunities || {}), ...patch.opportunities } : current.opportunities,
+    };
+    for (const key of ["protectionOpen", "portfolioDetailOpen", "canaryDetailOpen", "opportunitiesOpen"]) {
+      if (Object.prototype.hasOwnProperty.call(ui, key)) state[key] = Boolean(ui[key]);
+    }
+    renderAll();
+    return true;
+  };
+}
+
 async function main() {
   resetViewportScroll();
   setupBottomTabs();
@@ -1997,13 +2029,17 @@ function protectionProposalNotional(proposal = {}) {
 }
 
 function currentProtectionCoverage() {
-  const snap = state.snapshot || {};
-  return protectionCoverageFor(snap, snap.canary || {});
+  return protectionCoverageFromPositions(state.snapshot || {});
 }
 
-function protectionCoverageFor(snap = state.snapshot || {}, canary = snap.canary || {}) {
+function protectionCoverageFromPositions(snap = state.snapshot || {}) {
+  const coverage = snap.positions?.protection_coverage;
+  return protectionCoverageHasData(coverage) ? coverage : null;
+}
+
+function canaryProtectionCoverageFor(snap = state.snapshot || {}, canary = snap.canary || {}) {
   const candidates = [
-    snap.positions?.protection_coverage,
+    protectionCoverageFromPositions(snap),
     canary.portfolio?.protection_coverage,
     canary.protection_coverage,
   ];
@@ -2573,11 +2609,12 @@ function protectionRiskTicket(proposal = {}, metricText = "") {
   if (protectionTrailSizingFallback(proposal)) {
     ticket.classList.add("protection-row__trail--fallback");
   }
-  for (const part of parts) {
+  parts.forEach((part, index) => {
+    if (index > 0) ticket.append(document.createTextNode(" · "));
     const item = document.createElement("span");
     item.textContent = part;
     ticket.append(item);
-  }
+  });
   const title = protectionRiskTicketTitle(proposal);
   if (title) ticket.title = title;
   return ticket;
@@ -2591,7 +2628,7 @@ function protectionRiskTicketParts(proposal = {}, metricText = "") {
   const loss = protectionStopRiskLossLabel(proposal.stop_risk);
   if (loss) parts.push(`est. loss ${loss}`);
   const gap = protectionStopRiskGapLabel(proposal.stop_risk);
-  if (gap) parts.push(`5% gap ${gap}`);
+  if (gap) parts.push(`${protectionStopRiskGapName(proposal.stop_risk?.gap_scenario)} ${gap}`);
   const warning = protectionExecutionWarningLabel(proposal.execution_semantics);
   if (warning) parts.push(warning);
   return parts;
@@ -2625,6 +2662,12 @@ function protectionStopRiskGapLabel(risk = {}) {
     : risk.currency || state.snapshot?.account?.base_currency || "USD";
   const pctNLV = hasNumericValue(gap.estimated_loss_pct_nlv) ? ` (${pct(gap.estimated_loss_pct_nlv)} NLV)` : "";
   return `${compactWholeMoney(Math.abs(value), currency)}${pctNLV}`;
+}
+
+function protectionStopRiskGapName(gap = {}) {
+  if (hasNumericValue(gap?.gap_pct)) return `${pct(gap.gap_pct)} gap`;
+  const label = cleanDetail(String(gap?.label || "").replaceAll("_", " "));
+  return label && label !== "--" ? label : "gap scenario";
 }
 
 function protectionExecutionWarningLabel(semantics = {}) {
@@ -3607,16 +3650,44 @@ function opportunityMetricRow(opportunity = {}) {
   }
   const effect = String(opportunity.position_effect || "").trim();
   if (effect) metrics.push(["effect", `effect ${labelize(effect)}`]);
+  const postExerciseRisk = opportunityPostExerciseRiskMetrics(opportunity);
+  metrics.push(...postExerciseRisk);
   if (metrics.length === 0) return null;
   const wrap = document.createElement("small");
   wrap.className = "opportunity-row__metrics";
   for (const [kind, text] of metrics) {
     const item = document.createElement("span");
-    item.className = `opportunity-row__metric${kind === "gain" ? " opportunity-row__metric--gain" : ""}`;
+    item.className = `opportunity-row__metric${kind === "gain" ? " opportunity-row__metric--gain" : ""}${kind === "review" || kind === "risk" ? " opportunity-row__metric--risk" : ""}`;
     item.textContent = text;
     wrap.append(item);
   }
   return wrap;
+}
+
+function opportunityPostExerciseRiskMetrics(opportunity = {}) {
+  const risk = opportunity.post_exercise_risk || null;
+  if (!risk) return [];
+  const metrics = [];
+  const underlying = normalizeSymbol(risk.underlying || opportunity.underlying_contract?.symbol || opportunity.symbol || "");
+  metrics.push(["exposure", `${underlying || "underlying"} ${numberRead(risk.before_quantity)}→${numberRead(risk.after_quantity)} sh`]);
+  const riskChange = opportunityPostExerciseRiskChangeLabel(risk);
+  if (riskChange) metrics.push(["risk", riskChange]);
+  if (risk.protection_review_needed) {
+    metrics.push(["review", "protection review"]);
+  } else if (risk.protection_coverage_state) {
+    metrics.push(["coverage", `coverage ${labelize(risk.protection_coverage_state)}`]);
+  }
+  return metrics;
+}
+
+function opportunityPostExerciseRiskChangeLabel(risk = {}) {
+  if (risk.risk_opened) return "risk opened";
+  if (risk.risk_increased) return "risk increased";
+  if (risk.risk_flipped) return "risk flipped";
+  const change = String(risk.risk_change || "").toLowerCase();
+  if (change === "reduced") return "risk reduced";
+  if (change === "closed") return "risk closed";
+  return change && change !== "unknown" ? `risk ${labelize(change)}` : "";
 }
 
 function opportunityPreviewGate(opportunity = {}) {
@@ -4026,7 +4097,7 @@ function portfolioExplanation(canary, snap = state.snapshot || {}) {
 }
 
 function protectionCoverageCanaryLine(canary = {}, snap = state.snapshot || {}) {
-  const coverage = protectionCoverageFor(snap, canary);
+  const coverage = canaryProtectionCoverageFor(snap, canary);
   if (!protectionCoverageHasData(coverage)) return "";
   const baseCurrency = protectionCoverageBaseCurrency(coverage, snap.account?.base_currency || "");
   const headline = protectionCoverageHeadline(coverage, baseCurrency, { sensitive: true });
