@@ -73,6 +73,24 @@ func TestBuildProtectionCoverageUnprotectedNoOrder(t *testing.T) {
 	}
 }
 
+func TestBuildProtectionCoverageDoesNotCountPlainLimitClose(t *testing.T) {
+	t.Parallel()
+	pos := protectionCoverageTestPositions("MSFT", 100, 10_000, 50_000)
+	order := protectionCoverageTestOrder("MSFT", rpc.OrderActionSell, 100)
+	order.OrderType = rpc.OrderTypeLMT
+	order.LimitPrice = 120
+
+	got := buildProtectionCoverage(pos, []rpc.OrderView{order}, true, "", time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC))
+
+	row := requireProtectionCoverageRow(t, got, "MSFT")
+	if row.State != rpc.ProtectionCoverageStateUnprotected || row.ProtectedQuantity != 0 || row.UnprotectedQuantity != 100 {
+		t.Fatalf("row = %+v, want plain close limit not counted as stop protection", row)
+	}
+	if len(row.Orders) != 0 || got.Counts.Covered != 0 || got.Counts.Unprotected != 1 {
+		t.Fatalf("summary = %+v row=%+v, want unprotected with no counted LMT order", got, row)
+	}
+}
+
 func TestBuildProtectionCoverageReconcileRequiredNotCounted(t *testing.T) {
 	t.Parallel()
 	pos := protectionCoverageTestPositions("MSFT", 100, 10_000, 50_000)
