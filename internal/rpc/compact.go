@@ -23,27 +23,28 @@ const (
 )
 
 type CanaryAlertResult struct {
-	AsOf               time.Time                `json:"as_of"`
-	Fingerprint        Fingerprint              `json:"fingerprint"`
-	SourceFingerprints CanarySourceFingerprints `json:"source_fingerprints,omitzero"`
-	SourceHealth       []CompactSourceHealth    `json:"source_health,omitempty"`
-	Action             string                   `json:"action,omitempty"`
-	MarketConfirmation string                   `json:"market_confirmation,omitempty"`
-	PortfolioFit       string                   `json:"portfolio_fit,omitempty"`
-	InputHealth        string                   `json:"input_health,omitempty"`
-	Direction          risk.SignalDirection     `json:"direction,omitempty"`
-	Severity           risk.SignalSeverity      `json:"severity"`
-	PlannerModeHint    risk.PlannerMode         `json:"planner_mode_hint,omitempty"`
-	PlannerReadiness   risk.PlannerReadiness    `json:"planner_readiness,omitempty"`
-	Summary            string                   `json:"summary"`
-	PrimaryDrivers     []risk.SignalID          `json:"primary_drivers,omitempty"`
-	Portfolio          CanaryPortfolioSummary   `json:"portfolio"`
-	Market             CanaryMarketSummary      `json:"market"`
-	OptionHealth       OptionHealthSummary      `json:"option_health"`
-	SPYHedgeOffsetPct  *float64                 `json:"spy_hedge_offset_pct,omitempty"`
-	Flags              []CanaryAlertFlag        `json:"flags,omitempty"`
-	Warnings           []string                 `json:"warnings,omitempty"`
-	NotExecution       string                   `json:"not_execution"`
+	AsOf               time.Time                  `json:"as_of"`
+	Fingerprint        Fingerprint                `json:"fingerprint"`
+	SourceFingerprints CanarySourceFingerprints   `json:"source_fingerprints,omitzero"`
+	SourceHealth       []CompactSourceHealth      `json:"source_health,omitempty"`
+	Action             string                     `json:"action,omitempty"`
+	MarketConfirmation string                     `json:"market_confirmation,omitempty"`
+	PortfolioFit       string                     `json:"portfolio_fit,omitempty"`
+	InputHealth        string                     `json:"input_health,omitempty"`
+	Direction          risk.SignalDirection       `json:"direction,omitempty"`
+	Severity           risk.SignalSeverity        `json:"severity"`
+	PlannerModeHint    risk.PlannerMode           `json:"planner_mode_hint,omitempty"`
+	PlannerReadiness   risk.PlannerReadiness      `json:"planner_readiness,omitempty"`
+	Summary            string                     `json:"summary"`
+	PrimaryDrivers     []risk.SignalID            `json:"primary_drivers,omitempty"`
+	Portfolio          CanaryPortfolioSummary     `json:"portfolio"`
+	Market             CanaryMarketSummary        `json:"market"`
+	OptionHealth       OptionHealthSummary        `json:"option_health"`
+	ProtectionCoverage *ProtectionCoverageSummary `json:"protection_coverage,omitempty"`
+	SPYHedgeOffsetPct  *float64                   `json:"spy_hedge_offset_pct,omitempty"`
+	Flags              []CanaryAlertFlag          `json:"flags,omitempty"`
+	Warnings           []string                   `json:"warnings,omitempty"`
+	NotExecution       string                     `json:"not_execution"`
 }
 
 type CanaryAlertFlag struct {
@@ -89,14 +90,15 @@ type RegimeMonitorIndicator struct {
 }
 
 type PositionsRiskResult struct {
-	DataType          string                 `json:"data_type,omitempty"`
-	AsOf              time.Time              `json:"as_of"`
-	AccountID         string                 `json:"account_id,omitempty"`
-	Portfolio         *PositionsPortfolio    `json:"portfolio,omitempty"`
-	TopExposure       []UnderlyingExposure   `json:"top_exposure,omitempty"`
-	OptionHealth      OptionHealthSummary    `json:"option_health"`
-	SPYHedgeOffsetPct *float64               `json:"spy_hedge_offset_pct,omitempty"`
-	FlaggedOptionLegs []OptionRiskLegSummary `json:"flagged_option_legs,omitempty"`
+	DataType           string                     `json:"data_type,omitempty"`
+	AsOf               time.Time                  `json:"as_of"`
+	AccountID          string                     `json:"account_id,omitempty"`
+	Portfolio          *PositionsPortfolio        `json:"portfolio,omitempty"`
+	TopExposure        []UnderlyingExposure       `json:"top_exposure,omitempty"`
+	OptionHealth       OptionHealthSummary        `json:"option_health"`
+	ProtectionCoverage *ProtectionCoverageSummary `json:"protection_coverage,omitempty"`
+	SPYHedgeOffsetPct  *float64                   `json:"spy_hedge_offset_pct,omitempty"`
+	FlaggedOptionLegs  []OptionRiskLegSummary     `json:"flagged_option_legs,omitempty"`
 }
 
 type OptionHealthSummary struct {
@@ -170,6 +172,7 @@ func CompactCanaryAlert(c *CanaryResult, positions *PositionsResult) CanaryAlert
 		health, legs := optionHealthAndFlaggedLegs(*positions, defaultRiskExposureLimit)
 		out.OptionHealth = health
 		out.OptionHealth.FlaggedLegsReturned = len(legs)
+		out.ProtectionCoverage = positions.ProtectionCoverage
 		out.SPYHedgeOffsetPct = spyHedgeOffsetPct(*positions)
 	}
 	return out
@@ -217,13 +220,14 @@ func CompactPositionsRisk(p *PositionsResult, topN int) PositionsRiskResult {
 	health, legs := optionHealthAndFlaggedLegs(*p, topN)
 	health.FlaggedLegsReturned = len(legs)
 	out := PositionsRiskResult{
-		DataType:          p.DataType,
-		AsOf:              p.AsOf,
-		AccountID:         p.AccountID,
-		Portfolio:         p.Portfolio,
-		OptionHealth:      health,
-		SPYHedgeOffsetPct: spyHedgeOffsetPct(*p),
-		FlaggedOptionLegs: legs,
+		DataType:           p.DataType,
+		AsOf:               p.AsOf,
+		AccountID:          p.AccountID,
+		Portfolio:          p.Portfolio,
+		OptionHealth:       health,
+		ProtectionCoverage: p.ProtectionCoverage,
+		SPYHedgeOffsetPct:  spyHedgeOffsetPct(*p),
+		FlaggedOptionLegs:  legs,
 	}
 	if p.Portfolio != nil {
 		out.TopExposure = append([]UnderlyingExposure(nil), p.Portfolio.ExposureBase...)
