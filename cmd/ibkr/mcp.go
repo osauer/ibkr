@@ -140,7 +140,7 @@ func printMCPUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "{")
 	fmt.Fprintln(w, `  "mcpServers": {`)
-	fmt.Fprintln(w, `    "ibkr": { "command": "/ABSOLUTE/PATH/TO/ibkr", "args": ["mcp"] }`)
+	fmt.Fprintln(w, `    "ibkr": { "command": "/ABSOLUTE/PATH/TO/ibkr", "args": ["mcp"] },`)
 	fmt.Fprintln(w, `    "ibkr-monitor": { "command": "/ABSOLUTE/PATH/TO/ibkr", "args": ["mcp", "--profile", "monitor"] }`)
 	fmt.Fprintln(w, "  }")
 	fmt.Fprintln(w, "}")

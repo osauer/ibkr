@@ -15,6 +15,8 @@ Always include these qualifiers:
 - Requires IB Gateway or TWS running locally.
 - Requires an IBKR Pro account; IBKR Lite does not include TWS API access.
 - The plugin/skill does not ship the binary; users install `ibkr` separately.
+- The Claude Code marketplace source is `claude-plugin/`, which bundles the
+  canonical skill, hooks, and plugin-local `.mcp.json` for `ibkr mcp`.
 - Current bundled CLI and MCP releases expose analysis, sizing, and preview-only stock/ETF order drafts, but no place/modify/cancel broker-write interface.
 - Trading builds, if published, are experimental, as-is, and separate from the stable read-only release channel. Do not promote them through MCP marketplaces until the execution, approval, and safety metadata are reviewed for that channel.
 - Data returned by MCP tools can include account-sensitive balances, positions, and P&L.
@@ -24,6 +26,7 @@ Always include these qualifiers:
 Current package:
 
 - `.claude-plugin/plugin.json` describes the plugin.
+- `claude-plugin/.mcp.json` declares the Claude Code plugin MCP server.
 - `.claude-plugin/marketplace.json` exposes the self-hosted marketplace.
 - `skills/ibkr/SKILL.md` teaches Claude the current analysis, sizing, and preview-only workflow.
 - `hooks/hooks.json` allows preview/status order reads, blocks broker-write Bash calls, and starts the install/version warning hook.

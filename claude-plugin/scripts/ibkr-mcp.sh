@@ -1,0 +1,1 @@
+../../scripts/ibkr-mcp.sh

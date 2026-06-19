@@ -8,11 +8,20 @@ This page is for the human installing the plugin and wondering *"what can I actu
 
 ## Setup
 
-The plugin manifest (`.claude-plugin/plugin.json`) is registered when you install via the Claude Code marketplace. Confirm it's wired:
+The Claude Code plugin is registered when you install via the marketplace. It
+carries the `ibkr` skill, safety hooks, and plugin-local MCP server config for
+`ibkr mcp`; install the `ibkr` binary separately. Confirm it's wired:
 
 ```sh
-ibkr status                   # daemon health, gateway connection, data freshness
+claude plugin details ibkr@ibkr   # Skills (1), Hooks (2), MCP servers (1)
+claude mcp list                   # plugin:ibkr:ibkr connected
+ibkr status                       # daemon health, gateway connection, data freshness
 ```
+
+Direct skill installs also work in Claude Code when `SKILL.md` is copied under
+`~/.claude/skills/<name>/`, but that creates only a skill command. Use the
+plugin path for normal IBKR installs because the MCP tools and safety hooks are
+plugin components.
 
 The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ enriched `ibkr watch` by default or read-only `ibkr watch --list` when `include_quotes` is false, `ibkr_gamma` ↔ `ibkr gamma`, `ibkr_market_events` ↔ `ibkr market-events`, `ibkr_order_preview` ↔ `ibkr order preview`, etc. — while local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
 

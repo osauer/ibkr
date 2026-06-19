@@ -146,9 +146,9 @@ claude plugin marketplace add osauer/ibkr
 claude plugin install ibkr@ibkr
 ```
 
-The plugin carries a skill, a `PreToolUse` hook that permits preview/status order reads, blocks shell command chaining, and refuses broker-write verbs unless the daemon reports a paper-ready trading state — live, disabled, blocked, and unknown states are always refused (failing closed if `jq` is missing from PATH) — and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read and preview-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, merge `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand — it is permissions-only: read/preview patterns are allowed, and broker-write verbs plus destructive purge/daemon maintenance carry explicit deny rules.
+The plugin carries a skill, Claude Code MCP server config for `ibkr mcp`, a `PreToolUse` hook that permits preview/status order reads, blocks shell command chaining, and refuses broker-write verbs unless the daemon reports a paper-ready trading state — live, disabled, blocked, and unknown states are always refused (failing closed if `jq` is missing from PATH) — and a `SessionStart` hint when the binary isn't installed. The skill's `allowed-tools` pre-allows the read and preview-only patterns once the skill activates. For a global allowlist that fires *before* the skill activates, merge `settings/ibkr.settings.json` into `~/.claude/settings.json` by hand — it is permissions-only: read/preview patterns are allowed, and broker-write verbs plus destructive purge/daemon maintenance carry explicit deny rules.
 
-**The plugin doesn't ship the binary.** It only carries the skill, hooks, and manifest — you still need the `ibkr` binary on PATH from [Install](#install). The two have independent release cadences and independent update paths:
+**The plugin doesn't ship the binary.** It carries the skill, hooks, MCP launcher config, and manifest — you still need the `ibkr` binary from [Install](#install). The MCP launcher looks at `IBKR_BIN`, the plugin's local development `bin/ibkr`, `PATH`, `~/.local/bin/ibkr`, Homebrew, and `/usr/local/bin/ibkr`. The binary and plugin have independent release cadences and independent update paths:
 
 ```sh
 # Binary release (new MCP tool descriptions are baked into the binary):
