@@ -273,6 +273,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	// prev-close-only probe for stock rows while still feeding the same
 	// prev-close cache options use as their underlying anchor.
 	s.prewarmStockQuoteSummaries(ctx, c, res.Stocks)
+	flagZeroValueStockPositions(res.Stocks)
 	s.fillDailyChange(res.Stocks)
 	// Options group with their underlying so stock prev close feeds the
 	// option's underlying field too — useful as a contextual anchor even
@@ -364,6 +365,9 @@ func (s *Server) prewarmStockQuoteSummaries(ctx context.Context, c *ibkrlib.Conn
 		if sym == "" || seen[sym] {
 			continue
 		}
+		if !shouldPrewarmStockQuote(stocks[i]) {
+			continue
+		}
 		seen[sym] = true
 		jobs = append(jobs, job{
 			index: i,
@@ -426,6 +430,10 @@ func (s *Server) prewarmStockQuoteSummaries(ctx context.Context, c *ibkrlib.Conn
 		p.WarningDetails = q.WarningDetails
 		p.SessionContext = q.SessionContext
 	})
+}
+
+func shouldPrewarmStockQuote(p rpc.PositionView) bool {
+	return !stockPositionLooksInactive(p)
 }
 
 func (s *Server) snapshotHeldStockQuote(ctx context.Context, c *ibkrlib.Connector, contract rpc.ContractParams, timeout time.Duration) (rpc.Quote, bool) {
@@ -947,6 +955,25 @@ func flagOptionMarkOutsideBidAsk(options []rpc.PositionView) {
 			Message:  "Option valuation mark is outside the bid/ask range.",
 			Impact:   "The account mark may be stale, model-derived, or not currently executable.",
 			Action:   "Refresh during the regular option session and compare option_bid/option_ask before using the mark.",
+		})
+	}
+}
+
+func flagZeroValueStockPositions(stocks []rpc.PositionView) {
+	for i := range stocks {
+		p := &stocks[i]
+		if !stockPositionLooksInactive(*p) || positionWarningHasCode(p.WarningDetails, "zero_value_stock_position") {
+			continue
+		}
+		p.Stale = true
+		p.StaleReason = "zero-value portfolio row; likely inactive or defunct"
+		p.WarningDetails = append(p.WarningDetails, rpc.DataWarning{
+			Code:     "zero_value_stock_position",
+			Scope:    p.Symbol,
+			Severity: "data_quality",
+			Message:  "Held stock position has nonzero quantity but zero mark and zero market value.",
+			Impact:   "Treat as defunct or not currently quoteable; it is excluded from quote enrichment and portfolio delta, but remains visible as account position truth.",
+			Action:   "Reconcile the bankrupt/delisted holding with broker records before using it in risk or protection workflows.",
 		})
 	}
 }

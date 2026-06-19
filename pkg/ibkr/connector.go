@@ -159,9 +159,10 @@ func (c *Connector) DataFarmStatuses() []DataFarmStatus {
 // scaffolding was subtracted in favour of a one-client-one-connection
 // design.
 type ConnectorConfig struct {
-	ServiceName       string
-	PreferredClientID int
-	BaseConfig        *ConnectionConfig
+	ServiceName             string
+	PreferredClientID       int
+	BaseConfig              *ConnectionConfig
+	InactiveSymbolStorePath string
 }
 
 // Subscription represents a market data subscription.
@@ -496,6 +497,11 @@ func NewConnector(config *ConnectorConfig) *Connector {
 		pnl:               newPnLCache(),
 	}
 	c.fetchContractDetails = c.FetchContractDetails
+	if path := strings.TrimSpace(config.InactiveSymbolStorePath); path != "" {
+		if err := c.useInactiveSymbolStore(context.Background(), newFileInactiveSymbolStore(path)); err != nil {
+			c.logWarn("Failed to load inactive symbol store %s: %v", path, err)
+		}
+	}
 	return c
 }
 
@@ -2816,6 +2822,9 @@ func (c *Connector) seedContractCacheFromPositions(positions map[string]*RawPosi
 		if pos == nil {
 			continue
 		}
+		if isZeroValueStockPosition(pos) {
+			continue
+		}
 		contract := pos.Contract
 		if contract.ConID == 0 {
 			continue
@@ -3201,8 +3210,8 @@ func accountSummaryShowsPositions(summary map[string]string) bool {
 // Right, Strike) instead of re-parsing an encoded symbol.
 //
 // Filters out zero-quantity stale rows, degenerate STK placeholders
-// (ConID == 0), and any stock symbols currently flagged inactive by
-// the connector.
+// (ConID == 0), and inactive stock rows only when the broker is not
+// reporting a zero-value held position that should remain visible.
 func (c *Connector) GetCachedPositions() ([]*RawPosition, error) {
 	if !c.isConnected() {
 		return nil, nil
@@ -3226,7 +3235,7 @@ func (c *Connector) GetCachedPositions() ([]*RawPosition, error) {
 		if pos.Contract.SecType == "STK" && pos.Contract.ConID == 0 {
 			continue
 		}
-		if pos.Contract.SecType == "STK" && c.IsSymbolInactive(pos.Contract.Symbol) {
+		if pos.Contract.SecType == "STK" && c.IsSymbolInactive(pos.Contract.Symbol) && !isZeroValueStockPosition(pos) {
 			continue
 		}
 		result = append(result, pos)
@@ -3238,6 +3247,16 @@ func (c *Connector) GetCachedPositions() ([]*RawPosition, error) {
 		c.maybeResubscribeAccountUpdates()
 	}
 	return result, nil
+}
+
+func isZeroValueStockPosition(pos *RawPosition) bool {
+	if pos == nil || !strings.EqualFold(pos.Contract.SecType, "STK") {
+		return false
+	}
+	if pos.Position == 0 {
+		return false
+	}
+	return pos.MarketPrice <= 0 && math.Abs(pos.MarketValue) < 1e-9
 }
 
 // RefreshPositions issues a one-shot reqPositions request, waits for
