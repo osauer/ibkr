@@ -17,6 +17,10 @@ func defaultTradingStatePath(filename string) (string, error) {
 	return filepath.Join(home, ".local", "state", "ibkr", filename), nil
 }
 
+func defaultInactiveSymbolStorePath() (string, error) {
+	return defaultTradingStatePath("inactive-symbols.json")
+}
+
 func ensurePrivateStateDir(path string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

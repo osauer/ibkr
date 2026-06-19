@@ -212,6 +212,25 @@ func TestBuildPortfolioAggregatesExcludesZombieStocks(t *testing.T) {
 	}
 }
 
+func TestZeroValueStockPositionSkipsQuotePrewarmButStaysVisible(t *testing.T) {
+	stocks := []rpc.PositionView{
+		{Symbol: "HGENQ", SecType: "STK", Quantity: 20000, Mark: 0, ValuationMark: 0, MarketValue: 0, Currency: "USD"},
+	}
+	if shouldPrewarmStockQuote(stocks[0]) {
+		t.Fatal("zero-value stock position should not trigger quote prewarm")
+	}
+	flagZeroValueStockPositions(stocks)
+	if len(stocks) != 1 || stocks[0].Symbol != "HGENQ" {
+		t.Fatalf("zero-value stock position should remain visible, got %+v", stocks)
+	}
+	if !stocks[0].Stale || stocks[0].StaleReason == "" {
+		t.Fatalf("zero-value stock should be marked stale with reason: %+v", stocks[0])
+	}
+	if !positionWarningHasCode(stocks[0].WarningDetails, "zero_value_stock_position") {
+		t.Fatalf("zero-value warning missing: %+v", stocks[0].WarningDetails)
+	}
+}
+
 // TestBuildPortfolioAggregatesMixedCurrencyDollarDelta: a position book
 // with both EUR and USD underlyings must flag DollarDeltaCurrency as
 // "MIX" so callers don't apply one FX rate.

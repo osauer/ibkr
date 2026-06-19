@@ -3,6 +3,7 @@ package ibkr
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"testing"
 	"time"
 )
@@ -75,6 +76,85 @@ func TestGetCachedPositionsHealsDeadPortfolioStream(t *testing.T) {
 	}
 	if got := frames(); got != 2 {
 		t.Fatalf("poll at throttle boundary sent %d reqAcctData frames, want 2", got)
+	}
+}
+
+func TestGetCachedPositionsKeepsZeroValueStockPositionsVisible(t *testing.T) {
+	c, conn, _ := newAcctResubscribeRig(t)
+	conn.positionsMu.Lock()
+	conn.positions = map[string]*RawPosition{
+		"AMD": {
+			Contract:    Contract{ConID: 4391, Symbol: "AMD", SecType: "STK", Currency: "USD"},
+			Position:    20,
+			MarketPrice: 100,
+			MarketValue: 2000,
+		},
+		"HGENQ": {
+			Contract:      Contract{ConID: 12345, Symbol: "HGENQ", SecType: "STK", Currency: "USD"},
+			Position:      20000,
+			MarketPrice:   0,
+			MarketValue:   0,
+			AverageCost:   0.33,
+			UnrealizedPNL: -6600,
+		},
+	}
+	conn.positionsMu.Unlock()
+
+	positions, err := c.GetCachedPositions()
+	if err != nil {
+		t.Fatalf("GetCachedPositions: %v", err)
+	}
+	if len(positions) != 2 {
+		t.Fatalf("positions len = %d, want AMD and HGENQ: %+v", len(positions), positions)
+	}
+	if c.IsSymbolInactive("HGENQ") {
+		t.Fatal("zero-value stock position must stay visible and must not be marked inactive without broker definition evidence")
+	}
+	c.contractMu.RLock()
+	_, cached := c.contractCache["HGENQ"]
+	c.contractMu.RUnlock()
+	if cached {
+		t.Fatal("zero-value stock position must not seed contract cache for quote routing")
+	}
+}
+
+func TestGetCachedPositionsKeepsPersistedInactiveHeldZeroValueStockVisible(t *testing.T) {
+	c, conn, _ := newAcctResubscribeRig(t)
+	if err := c.useInactiveSymbolStore(context.Background(), &stubInactiveStore{
+		load: map[string]inactiveSymbolState{
+			"HGENQ": {
+				reason:   "No security definition has been found for the request",
+				markedAt: time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("useInactiveSymbolStore: %v", err)
+	}
+	conn.positionsMu.Lock()
+	conn.positions = map[string]*RawPosition{
+		"HGENQ": {
+			Contract:      Contract{ConID: 12345, Symbol: "HGENQ", SecType: "STK", Currency: "USD"},
+			Position:      20000,
+			MarketPrice:   0,
+			MarketValue:   0,
+			AverageCost:   0.33,
+			UnrealizedPNL: -6600,
+		},
+	}
+	conn.positionsMu.Unlock()
+
+	positions, err := c.GetCachedPositions()
+	if err != nil {
+		t.Fatalf("GetCachedPositions: %v", err)
+	}
+	if len(positions) != 1 || positions[0].Contract.Symbol != "HGENQ" {
+		t.Fatalf("held inactive zero-value stock should remain visible, got %+v", positions)
+	}
+	c.contractMu.RLock()
+	_, cached := c.contractCache["HGENQ"]
+	c.contractMu.RUnlock()
+	if cached {
+		t.Fatal("held inactive zero-value stock must not seed contract cache for quote routing")
 	}
 }
 

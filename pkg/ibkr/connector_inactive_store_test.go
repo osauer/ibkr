@@ -2,6 +2,8 @@ package ibkr
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -97,5 +99,91 @@ func TestConnectorNeverPersistsCashRoutes(t *testing.T) {
 	}
 	if !conn.IsSymbolInactive("USD.EUR") {
 		t.Fatal("in-memory suppression of the FX route should still apply")
+	}
+}
+
+func TestFileInactiveSymbolStoreRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state", "inactive-symbols.json")
+	store := newFileInactiveSymbolStore(path)
+	markedAt := time.Date(2026, time.June, 19, 7, 0, 0, 0, time.UTC)
+
+	if err := store.SaveInactiveSymbol(ctx, "hgenq", inactiveSymbolState{
+		reason:   "No security definition has been found for the request",
+		markedAt: markedAt,
+	}); err != nil {
+		t.Fatalf("SaveInactiveSymbol: %v", err)
+	}
+
+	records, err := store.LoadInactiveSymbols(ctx)
+	if err != nil {
+		t.Fatalf("LoadInactiveSymbols: %v", err)
+	}
+	got, ok := records["HGENQ"]
+	if !ok {
+		t.Fatalf("expected HGENQ record, got %+v", records)
+	}
+	if got.reason != "No security definition has been found for the request" {
+		t.Fatalf("reason = %q", got.reason)
+	}
+	if !got.markedAt.Equal(markedAt) {
+		t.Fatalf("markedAt = %s, want %s", got.markedAt, markedAt)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatalf("stat store: %v", err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("store mode = %o, want 600", info.Mode().Perm())
+	}
+	if info, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Fatalf("stat store dir: %v", err)
+	} else if info.Mode().Perm() != 0o700 {
+		t.Fatalf("store dir mode = %o, want 700", info.Mode().Perm())
+	}
+}
+
+func TestFileInactiveSymbolStoreSkipsTransientAndCashRoutes(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "inactive-symbols.json")
+	store := newFileInactiveSymbolStore(path)
+
+	if err := store.SaveInactiveSymbol(ctx, "SPY", inactiveSymbolState{
+		reason:   "Temporary data outage",
+		markedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveInactiveSymbol transient: %v", err)
+	}
+	if err := store.SaveInactiveSymbol(ctx, "USD|CASH|IDEALPRO|IDEALPRO|EUR||", inactiveSymbolState{
+		reason:   "No security definition has been found for the request",
+		markedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveInactiveSymbol CASH route: %v", err)
+	}
+	records, err := store.LoadInactiveSymbols(ctx)
+	if err != nil {
+		t.Fatalf("LoadInactiveSymbols: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected no persisted records, got %+v", records)
+	}
+}
+
+func TestNewConnectorLoadsInactiveSymbolsFromConfiguredPath(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "inactive-symbols.json")
+	store := newFileInactiveSymbolStore(path)
+	if err := store.SaveInactiveSymbol(ctx, "HGENQ", inactiveSymbolState{
+		reason:   "No security definition has been found for the request",
+		markedAt: time.Date(2026, time.June, 19, 7, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("SaveInactiveSymbol: %v", err)
+	}
+
+	conn := NewConnector(&ConnectorConfig{
+		BaseConfig:              DefaultConfig(),
+		PreferredClientID:       1,
+		InactiveSymbolStorePath: path,
+	})
+	if !conn.IsSymbolInactive("hgenq") {
+		t.Fatal("expected connector to preload HGENQ from inactive symbol store")
 	}
 }
