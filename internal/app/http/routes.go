@@ -245,10 +245,6 @@ func (h *handler) settingsSnapshot(ctx context.Context) *rpc.PlatformSettings {
 		snap := h.deps.Live.Snapshot()
 		return snap.Settings
 	}
-	snap := h.deps.Live.Snapshot()
-	if snap.Settings != nil {
-		settings.MarketData = snap.Settings.MarketData
-	}
 	return settings
 }
 
@@ -257,10 +253,6 @@ func (h *handler) handleGetSettings(w nethttp.ResponseWriter, r *nethttp.Request
 	if err != nil {
 		writeDaemonSettingsError(w, err)
 		return
-	}
-	snap := h.deps.Live.Snapshot()
-	if snap.Settings != nil {
-		settings.MarketData = snap.Settings.MarketData
 	}
 	writeJSON(w, settings)
 }
@@ -278,10 +270,6 @@ func (h *handler) handlePatchSettings(w nethttp.ResponseWriter, r *nethttp.Reque
 	if err != nil {
 		writeDaemonSettingsError(w, err)
 		return
-	}
-	snap := h.deps.Live.Snapshot()
-	if snap.Settings != nil {
-		settings.MarketData = snap.Settings.MarketData
 	}
 	writeJSON(w, settings)
 }

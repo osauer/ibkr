@@ -15,8 +15,8 @@ Only user preferences owned by `ibkr` belong in this file:
 - optional experimental trading-limit overrides
 
 TOML/config/build still own gateway endpoint, account, client ID, trading
-enablement, trading mode, live acknowledgements, MCP trading mode, and whether
-write-capable trading code exists.
+enablement, trading mode, and whether write-capable trading code exists. MCP
+broker writes are not exposed as a local setting.
 
 ## Contract
 

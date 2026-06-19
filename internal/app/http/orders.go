@@ -9,7 +9,9 @@ import (
 )
 
 type orderModifyPreviewRequest struct {
-	Action     string              `json:"action,omitempty"`
+	Action string `json:"action,omitempty"`
+	// Contract is accepted for wire compatibility with older paired-app
+	// drafts, but modify previews always bind to the current OrderView.
 	Contract   *rpc.ContractParams `json:"contract,omitempty"`
 	Quantity   int                 `json:"quantity"`
 	OrderType  string              `json:"order_type,omitempty"`
@@ -128,13 +130,7 @@ func modifyPreviewParamsFromRequest(order rpc.OrderView, req orderModifyPreviewR
 	if req.Quantity <= 0 {
 		return rpc.OrderPreviewParams{}, fmt.Errorf("quantity must be positive")
 	}
-	contract := rpc.ContractParams{
-		Symbol:  strings.TrimSpace(order.Symbol),
-		SecType: strings.TrimSpace(order.SecType),
-	}
-	if req.Contract != nil {
-		contract = *req.Contract
-	}
+	contract := orderViewContractParams(order)
 	if strings.TrimSpace(contract.Symbol) == "" {
 		return rpc.OrderPreviewParams{}, fmt.Errorf("contract symbol required")
 	}
@@ -191,6 +187,23 @@ func modifyPreviewParamsFromRequest(order rpc.OrderView, req orderModifyPreviewR
 		ReplaceID:  order.OrderRef,
 		TimeoutMs:  5000,
 	}, nil
+}
+
+func orderViewContractParams(order rpc.OrderView) rpc.ContractParams {
+	return rpc.ContractParams{
+		ConID:        order.ConID,
+		Symbol:       strings.TrimSpace(order.Symbol),
+		SecType:      strings.TrimSpace(order.SecType),
+		Exchange:     strings.TrimSpace(order.Exchange),
+		PrimaryExch:  strings.TrimSpace(order.PrimaryExch),
+		Currency:     strings.TrimSpace(order.Currency),
+		LocalSymbol:  strings.TrimSpace(order.LocalSymbol),
+		TradingClass: strings.TrimSpace(order.TradingClass),
+		Expiry:       strings.TrimSpace(order.Expiry),
+		Strike:       order.Strike,
+		Right:        strings.TrimSpace(order.Right),
+		Multiplier:   order.Multiplier,
+	}
 }
 
 func defaultString(value, fallback string) string {

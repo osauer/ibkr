@@ -181,7 +181,6 @@ func renderProposalStatusText(env *Env, st *rpc.AutoTradeStatus) {
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "IBKR Protection Proposals  %s\n", env.statusBadge(statusConcern{Text: strings.ToUpper(nonEmpty(st.Policy.Status, "unknown")), Level: statusConcernNotice}))
 	statusRow(env, out, "Proposals", fmt.Sprint(st.ProposalsEnabled))
-	statusRow(env, out, "Auto submit", fmt.Sprint(st.AutoSubmit))
 	statusRow(env, out, "Fast path", fmt.Sprint(st.FastPathEnabled))
 	statusRow(env, out, "Policy", fmt.Sprintf("%s v%d %s", st.Policy.PolicyID, st.Policy.PolicyVersion, st.Policy.Fingerprint.Key))
 	if len(st.Blockers) > 0 {

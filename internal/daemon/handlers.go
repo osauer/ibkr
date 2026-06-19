@@ -1293,163 +1293,151 @@ func buildPortfolioAggregates(stocks, options []rpc.PositionView) *rpc.Positions
 }
 
 func buildPortfolioAggregatesWithBase(stocks, options []rpc.PositionView, baseCcy string) *rpc.PositionsPortfolio {
-	p := &rpc.PositionsPortfolio{}
-	baseCcy = normCcy(baseCcy)
-
-	// Greeks aggregation: only option positions contribute Greeks
-	// directly; stocks fold in as raw share equivalents below.
-	var effDelta, dollarDelta, dollarDeltaBase, daily, dailyThetaBase, gamma, vega float64
-	var haveDelta, haveDollarDelta, haveDollarDeltaBase, missingDollarDeltaBase bool
-	var haveTheta, haveThetaBase, missingThetaBase, haveGamma, haveVega bool
-	greeksCovered := 0
-	// Per-aggregate currency tracking. dollarCcy/thetaCcy follow the same
-	// "single ISO when every contributor agrees, MIX otherwise" rule.
-	// Tracked separately because the contributing leg sets can differ:
-	// a leg can report theta without delta (some IBKR ticks land partial),
-	// so a uniform dollarCcy doesn't necessarily mean a uniform thetaCcy.
-	dollarCcy, thetaCcy := "", ""
-	dollarMixed, thetaMixed := false, false
+	acc := newPortfolioAggregateAccumulator(baseCcy)
 	for _, o := range options {
-		p.GreeksTotal++
-		mult := optionMultiplier(o)
-		legCcy := normCcy(o.Currency)
-		if o.Delta != nil {
-			effDelta += *o.Delta * o.Quantity * float64(mult)
-			haveDelta = true
-			// Dollar delta needs a spot. Prefer the model-computation
-			// underlying captured alongside the Greeks (kept in lockstep
-			// so the dollar figure is consistent with the delta it was
-			// computed against). Fall back to the underlying's prev close
-			// only when the leg's Greeks tick didn't carry a spot —
-			// honest stand-in on a quiet day, but apples-to-oranges
-			// after any overnight gap.
-			spot := 0.0
-			if o.Underlying != nil && *o.Underlying > 0 {
-				spot = *o.Underlying
-			} else if o.PrevClose != nil && *o.PrevClose > 0 {
-				spot = *o.PrevClose
-			}
-			if spot > 0 {
-				localDollarDelta := *o.Delta * o.Quantity * float64(mult) * spot
-				dollarDelta += localDollarDelta
-				haveDollarDelta = true
-				if rate, ok := positionBaseRate(o, baseCcy); ok {
-					dollarDeltaBase += localDollarDelta * rate
-					haveDollarDeltaBase = true
-				} else {
-					missingDollarDeltaBase = true
-				}
-				if dollarCcy == "" {
-					dollarCcy = legCcy
-				} else if legCcy != dollarCcy {
-					dollarMixed = true
-				}
-			}
-		}
-		if o.Theta != nil {
-			localTheta := *o.Theta * o.Quantity * float64(mult)
-			daily += localTheta
-			haveTheta = true
-			if rate, ok := positionBaseRate(o, baseCcy); ok {
-				dailyThetaBase += localTheta * rate
-				haveThetaBase = true
-			} else {
-				missingThetaBase = true
-			}
-			if thetaCcy == "" {
-				thetaCcy = legCcy
-			} else if legCcy != thetaCcy {
-				thetaMixed = true
-			}
-		}
-		if o.Gamma != nil {
-			gamma += *o.Gamma * o.Quantity * float64(mult)
-			haveGamma = true
-		}
-		if o.Vega != nil {
-			vega += *o.Vega * o.Quantity * float64(mult)
-			haveVega = true
-		}
-		if o.Delta != nil || o.Theta != nil || o.Gamma != nil || o.Vega != nil {
-			greeksCovered++
-		}
+		acc.addOption(o)
+	}
+	for _, st := range stocks {
+		acc.addStock(st)
+	}
+	return acc.portfolio()
+}
+
+type portfolioAggregateAccumulator struct {
+	baseCcy string
+	p       rpc.PositionsPortfolio
+
+	effectiveDelta float64
+	dollarDelta    float64
+	dailyTheta     float64
+	gamma          float64
+	vega           float64
+
+	dollarDeltaBase convertedSum
+	dailyThetaBase  convertedSum
+
+	haveEffectiveDelta bool
+	haveDollarDelta    bool
+	haveDailyTheta     bool
+	haveGamma          bool
+	haveVega           bool
+
+	dollarDeltaCcy   string
+	dollarDeltaMixed bool
+	dailyThetaCcy    string
+	dailyThetaMixed  bool
+}
+
+func newPortfolioAggregateAccumulator(baseCcy string) *portfolioAggregateAccumulator {
+	return &portfolioAggregateAccumulator{baseCcy: normCcy(baseCcy)}
+}
+
+func (a *portfolioAggregateAccumulator) addOption(o rpc.PositionView) {
+	a.p.GreeksTotal++
+	mult := float64(optionMultiplier(o))
+	if o.Delta != nil {
+		a.effectiveDelta += *o.Delta * o.Quantity * mult
+		a.haveEffectiveDelta = true
+	}
+	if localDollarDelta, ok := positionDollarDelta(o, true); ok {
+		a.addDollarDelta(localDollarDelta, o)
+	}
+	if o.Theta != nil {
+		a.addDailyTheta(*o.Theta*o.Quantity*mult, o)
+	}
+	if o.Gamma != nil {
+		a.gamma += *o.Gamma * o.Quantity * mult
+		a.haveGamma = true
+	}
+	if o.Vega != nil {
+		a.vega += *o.Vega * o.Quantity * mult
+		a.haveVega = true
+	}
+	if positionHasGreek(o) {
+		a.p.GreeksCoverage++
+	}
+}
+
+func (a *portfolioAggregateAccumulator) addStock(st rpc.PositionView) {
+	localDollarDelta, ok := positionDollarDelta(st, false)
+	if !ok {
+		return
 	}
 	// Stock legs add raw share-equivalent exposure to effective + dollar
-	// delta (delta=1 for stock by definition). Stocks with mark=0 are
-	// excluded — these are delisted-but-IBKR-still-reports zombies (e.g.
-	// HGENQ) that the gateway streams via msgPortfolioValue with no live
-	// quote. Including them inflates effective_delta by their full share
-	// count on the first call after daemon start (before market-data
-	// probe flags them inactive), then drops on the second call when the
-	// inactive flag kicks in. Filtering on mark==0 keeps the aggregate
-	// stable across calls — the position row still renders with mark=0,
-	// which is the honest answer.
-	for _, st := range stocks {
-		if st.Mark <= 0 {
-			continue
-		}
-		effDelta += st.Quantity
-		haveDelta = true
-		localDollarDelta := st.Quantity * st.Mark
-		dollarDelta += localDollarDelta
-		haveDollarDelta = true
-		if rate, ok := positionBaseRate(st, baseCcy); ok {
-			dollarDeltaBase += localDollarDelta * rate
-			haveDollarDeltaBase = true
-		} else {
-			missingDollarDeltaBase = true
-		}
-		ccy := normCcy(st.Currency)
-		if dollarCcy == "" {
-			dollarCcy = ccy
-		} else if ccy != dollarCcy {
-			dollarMixed = true
-		}
-	}
+	// delta (delta=1 for stock by definition). positionDollarDelta rejects
+	// mark=0 zombie rows so this aggregate stays stable across calls.
+	a.effectiveDelta += st.Quantity
+	a.haveEffectiveDelta = true
+	a.addDollarDelta(localDollarDelta, st)
+}
 
-	if haveDelta {
-		v := effDelta
-		p.EffectiveDelta = &v
-	}
-	if haveDollarDelta {
-		v := dollarDelta
-		p.DollarDelta = &v
-		if dollarMixed {
-			p.DollarDeltaCurrency = "MIX"
-		} else {
-			p.DollarDeltaCurrency = dollarCcy
-		}
-	}
-	if haveDollarDeltaBase && !missingDollarDeltaBase {
-		v := dollarDeltaBase
-		p.DollarDeltaBase = &v
-		p.DollarDeltaBaseCurrency = baseCcy
-	}
-	if haveTheta {
-		v := daily
-		p.DailyTheta = &v
-		if thetaMixed {
-			p.DailyThetaCurrency = "MIX"
-		} else {
-			p.DailyThetaCurrency = thetaCcy
-		}
-	}
-	if haveThetaBase && !missingThetaBase {
-		v := dailyThetaBase
-		p.DailyThetaBase = &v
-		p.DailyThetaBaseCurrency = baseCcy
-	}
-	if haveGamma {
-		v := gamma
-		p.Gamma = &v
-	}
-	if haveVega {
-		v := vega
-		p.Vega = &v
-	}
-	p.GreeksCoverage = greeksCovered
+func (a *portfolioAggregateAccumulator) addDollarDelta(value float64, row rpc.PositionView) {
+	a.dollarDelta += value
+	a.haveDollarDelta = true
+	a.dollarDeltaBase.add(value, row, a.baseCcy)
+	trackAggregateCurrency(&a.dollarDeltaCcy, &a.dollarDeltaMixed, row.Currency)
+}
 
-	return p
+func (a *portfolioAggregateAccumulator) addDailyTheta(value float64, row rpc.PositionView) {
+	a.dailyTheta += value
+	a.haveDailyTheta = true
+	a.dailyThetaBase.add(value, row, a.baseCcy)
+	trackAggregateCurrency(&a.dailyThetaCcy, &a.dailyThetaMixed, row.Currency)
+}
+
+func (a *portfolioAggregateAccumulator) portfolio() *rpc.PositionsPortfolio {
+	if a.haveEffectiveDelta {
+		v := a.effectiveDelta
+		a.p.EffectiveDelta = &v
+	}
+	if a.haveDollarDelta {
+		v := a.dollarDelta
+		a.p.DollarDelta = &v
+		if a.dollarDeltaMixed {
+			a.p.DollarDeltaCurrency = "MIX"
+		} else {
+			a.p.DollarDeltaCurrency = a.dollarDeltaCcy
+		}
+		if v := a.dollarDeltaBase.ptr(); v != nil {
+			a.p.DollarDeltaBase = v
+			a.p.DollarDeltaBaseCurrency = a.baseCcy
+		}
+	}
+	if a.haveDailyTheta {
+		v := a.dailyTheta
+		a.p.DailyTheta = &v
+		if a.dailyThetaMixed {
+			a.p.DailyThetaCurrency = "MIX"
+		} else {
+			a.p.DailyThetaCurrency = a.dailyThetaCcy
+		}
+		if v := a.dailyThetaBase.ptr(); v != nil {
+			a.p.DailyThetaBase = v
+			a.p.DailyThetaBaseCurrency = a.baseCcy
+		}
+	}
+	if a.haveGamma {
+		v := a.gamma
+		a.p.Gamma = &v
+	}
+	if a.haveVega {
+		v := a.vega
+		a.p.Vega = &v
+	}
+	return &a.p
+}
+
+func positionHasGreek(row rpc.PositionView) bool {
+	return row.Delta != nil || row.Theta != nil || row.Gamma != nil || row.Vega != nil
+}
+
+func trackAggregateCurrency(current *string, mixed *bool, ccy string) {
+	ccy = normCcy(ccy)
+	if *current == "" {
+		*current = ccy
+	} else if ccy != *current {
+		*mixed = true
+	}
 }
 
 // optionMultiplier returns the contract multiplier used to scale a per-

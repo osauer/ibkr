@@ -25,14 +25,6 @@ func NormalizeMarket(v string) (Market, bool) {
 	}
 }
 
-// SupportedMarkets returns the stable market ids a user can ask for.
-func SupportedMarkets() []Market {
-	return []Market{MarketUSEquity, MarketUSOptions, MarketDEXetra}
-}
-
-// MaxDays returns the maximum horizon accepted by Query.
-func MaxDays() int { return maxDays }
-
 // Calendar is the official-calendar query engine.
 type Calendar struct {
 	clock func() time.Time
@@ -104,29 +96,6 @@ func (c *Calendar) SessionAt(market Market, at time.Time) (Session, error) {
 		return Session{}, err
 	}
 	return res.Session, nil
-}
-
-// Coverage returns the embedded coverage window and whether it satisfies the
-// default 400-day forward horizon from the calendar's clock.
-func (c *Calendar) Coverage(market Market) (CoverageStatus, error) {
-	spec, ok := specs[market]
-	if !ok {
-		return CoverageStatus{}, fmt.Errorf("unsupported market %q", market)
-	}
-	loc, err := time.LoadLocation(spec.timezone)
-	if err != nil {
-		return CoverageStatus{}, err
-	}
-	end, err := time.ParseInLocation("2006-01-02", spec.coverageEnd, loc)
-	if err != nil {
-		return CoverageStatus{}, err
-	}
-	need := localDate(c.clock().In(loc)).AddDate(0, 0, maxDays)
-	return CoverageStatus{
-		Start: spec.coverageStart,
-		End:   spec.coverageEnd,
-		OK:    !end.Before(need),
-	}, nil
 }
 
 func (c *Calendar) queryTime(q Query, loc *time.Location) (time.Time, error) {

@@ -447,7 +447,6 @@ p {
   min-width: 0;
 }
 
-.tab-panel--positions,
 .tab-panel--alerts,
 .tab-panel--settings {
   display: grid;

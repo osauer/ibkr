@@ -517,9 +517,6 @@ func NewConnection(config *ConnectionConfig) *Connection {
 		serverVersion:       0,
 		useTLS:              config.UseTLS,
 	}
-	if val, ok := lookupEnvBool("IBKR_LOG_WIRE_HEX"); ok {
-		conn.logWireHex = val
-	}
 
 	// Use shared wire interceptor if provided, otherwise create per-connection (legacy)
 	if config.WireInterceptor != nil {

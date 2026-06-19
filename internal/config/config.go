@@ -128,25 +128,13 @@ type Trading struct {
 	AllowStockShort bool `toml:"allow_stock_short"`
 	// AllowOptionSellToOpen permits option sell-to-open previews when true. Default false.
 	AllowOptionSellToOpen bool `toml:"allow_option_sell_to_open"`
-	// AllowOptionMarketOrders permits option market orders when true. Default false; first trading release still blocks this.
-	AllowOptionMarketOrders bool `toml:"allow_option_market_orders"`
 	// PaperSmokeMaxAge is how long a paper trading smoke remains acceptable for live enablement. Defaults to 168h.
 	PaperSmokeMaxAge duration `toml:"paper_smoke_max_age"`
-	// MCPEnabled controls whether MCP write tools may progress beyond preview/status. Default false.
-	MCPEnabled bool `toml:"mcp_enabled"`
-	// MCPMode selects MCP scope: "preview" (default), "paper-write", or "live-write".
-	MCPMode string `toml:"mcp_mode"`
-	// MCPNonceTTL controls how long CLI-minted human nonces remain valid. Defaults to 5m.
-	MCPNonceTTL duration `toml:"mcp_nonce_ttl"`
 }
 
 type AutoTrade struct {
 	// ProposalsEnabled controls whether the daemon may produce advisory protection proposals; default true, and proposals are not broker orders unless separately submitted by an explicitly enabled trading path.
 	ProposalsEnabled *bool `toml:"proposals_enabled"`
-	// Enabled controls the experimental auto-trade supervisor; default false, and stable builds remain preview/read-only unless trading config and build capability allow more.
-	Enabled bool `toml:"enabled"`
-	// AutoSubmit allows the experimental supervisor to submit eligible proposals automatically; default false and ignored unless trading writes are explicitly enabled.
-	AutoSubmit bool `toml:"auto_submit"`
 	// PolicyFile points to the local protection-policy TOML; default ~/.config/ibkr/policies/protection-policy.toml.
 	PolicyFile string `toml:"policy_file"`
 	// HotReload controls whether policy changes are reloaded while the daemon runs; default true.
@@ -178,10 +166,6 @@ const (
 	TradingModeDisabled = "disabled"
 	TradingModePaper    = "paper"
 	TradingModeLive     = "live"
-
-	MCPModePreview    = "preview"
-	MCPModePaperWrite = "paper-write"
-	MCPModeLiveWrite  = "live-write"
 )
 
 func (a AutoTrade) WithDefaults() AutoTrade {
@@ -304,12 +288,6 @@ func (t Trading) WithDefaults() Trading {
 	if t.PaperSmokeMaxAge == 0 {
 		t.PaperSmokeMaxAge = duration(168 * time.Hour)
 	}
-	if t.MCPMode == "" {
-		t.MCPMode = MCPModePreview
-	}
-	if t.MCPNonceTTL == 0 {
-		t.MCPNonceTTL = duration(5 * time.Minute)
-	}
 	return t
 }
 
@@ -325,14 +303,6 @@ func (t Trading) PaperSmokeMaxAgeDuration() time.Duration {
 		return 168 * time.Hour
 	}
 	return t.PaperSmokeMaxAge.Std()
-}
-
-// MCPNonceTTLDuration returns the resolved MCP human-nonce lifetime.
-func (t Trading) MCPNonceTTLDuration() time.Duration {
-	if t.MCPNonceTTL == 0 {
-		return 5 * time.Minute
-	}
-	return t.MCPNonceTTL.Std()
 }
 
 // SPX holds the SPX-related daemon knobs. Currently just the members
@@ -466,8 +436,8 @@ func Load(path string) (*Config, error) {
 		keys := make([]string, len(undecoded))
 		for i, k := range undecoded {
 			keys[i] = k.String()
-			if removedKeys[keys[i]] {
-				return nil, fmt.Errorf("config %s: key %s was removed: live trading needs only [trading].mode = \"live\" plus the [gateway] pins — delete this key", path, keys[i])
+			if msg, ok := removedKeys[keys[i]]; ok {
+				return nil, fmt.Errorf("config %s: key %s was removed: %s", path, keys[i], msg)
 			}
 		}
 		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [auto_trade], [opportunities], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
@@ -479,10 +449,17 @@ func Load(path string) (*Config, error) {
 // load kills the autospawned daemon and with it every CLI command, so a
 // leftover key from an older schema deserves "removed, delete it" rather
 // than the generic unknown-key message.
-var removedKeys = map[string]bool{
-	"trading.allow_live":        true,
-	"trading.live_ack_account":  true,
-	"trading.live_ack_endpoint": true,
+var removedKeys = map[string]string{
+	"trading.allow_live":        "live trading needs only [trading].mode = \"live\" plus the [gateway] pins — delete this key",
+	"trading.live_ack_account":  "live trading needs only [trading].mode = \"live\" plus the [gateway] pins — delete this key",
+	"trading.live_ack_endpoint": "live trading needs only [trading].mode = \"live\" plus the [gateway] pins — delete this key",
+
+	"trading.allow_option_market_orders": "option market orders are not a supported local knob — delete this key",
+	"trading.mcp_enabled":                "MCP broker-write controls are not exposed — delete this key",
+	"trading.mcp_mode":                   "MCP broker-write controls are not exposed — delete this key",
+	"trading.mcp_nonce_ttl":              "MCP human nonces are not a supported surface — delete this key",
+	"auto_trade.enabled":                 "autonomous auto-trading is not a supported config surface — delete this key",
+	"auto_trade.auto_submit":             "autonomous submit is not a supported config surface — delete this key",
 }
 
 // Resolve applies daemon-level defaults and returns the Resolved view.

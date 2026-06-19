@@ -63,7 +63,7 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 		AccountOrigin:  originPinnedOrAuto(cfg.Gateway.Account != ""),
 		ClientID:       clientID,
 		ClientIDOrigin: originPinnedOrDefault(cfg.Gateway.ClientID != nil),
-		MCPTrading:     tradingMCPStatus(tr),
+		MCPTrading:     rpc.TradingMCPDisabled,
 		LiveOverride:   rpc.TradingLiveOverrideBlocked,
 	}
 	if status.PortOrigin == "" {
@@ -341,20 +341,6 @@ func accountModeForStatus(port int, account string) string {
 		return rpc.AccountModeLive
 	default:
 		return rpc.AccountModeUnknown
-	}
-}
-
-func tradingMCPStatus(tr config.Trading) string {
-	if !tr.MCPEnabled {
-		return rpc.TradingMCPDisabled
-	}
-	switch tr.MCPMode {
-	case config.MCPModePaperWrite:
-		return rpc.TradingMCPPaper
-	case config.MCPModeLiveWrite:
-		return rpc.TradingMCPLive
-	default:
-		return rpc.TradingMCPPreview
 	}
 }
 

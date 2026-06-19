@@ -31,10 +31,6 @@ max_option_contracts = 5
 
 allow_stock_short = false
 allow_option_sell_to_open = false
-allow_option_market_orders = false
-
-# MCP broker writes stay disabled in the preview template.
-mcp_enabled = false
 
 # Live experiments require deliberate live acknowledgement fields. This
 # template does not include a live override. Add live fields only after

@@ -132,12 +132,6 @@ func (s *Store) load() error {
 	return nil
 }
 
-func (s *Store) Snapshot() Data {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return copyData(s.data)
-}
-
 func (s *Store) AlertSettings() AlertSettings {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -342,16 +336,6 @@ func (s *Store) SetRelayRoute(route RelayRoute) error {
 	return s.save()
 }
 
-func (s *Store) ClearRelayRoute(remoteURL string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.data.RelayRoute == nil || s.data.RelayRoute.RemoteURL != remoteURL {
-		return nil
-	}
-	s.data.RelayRoute = nil
-	return s.save()
-}
-
 func (s *Store) save() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
@@ -377,25 +361,4 @@ func validAlertMode(mode string) bool {
 	default:
 		return false
 	}
-}
-
-func copyData(in Data) Data {
-	out := in
-	out.Devices = append([]DeviceGrant(nil), in.Devices...)
-	out.PushSubscriptions = append([]PushSubscription(nil), in.PushSubscriptions...)
-	out.AlertHistory = append([]AlertRecord(nil), in.AlertHistory...)
-	out.ProposalAudit = append([]ProposalAuditItem(nil), in.ProposalAudit...)
-	if in.VAPID != nil {
-		v := *in.VAPID
-		out.VAPID = &v
-	}
-	if in.LastPush != nil {
-		p := *in.LastPush
-		out.LastPush = &p
-	}
-	if in.RelayRoute != nil {
-		r := *in.RelayRoute
-		out.RelayRoute = &r
-	}
-	return out
 }

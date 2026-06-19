@@ -50,11 +50,10 @@ type platformStockProtectionSettingsData struct {
 }
 
 type platformTradingSettingsData struct {
-	MaxNotional             *float64 `json:"max_notional,omitempty"`
-	MaxOptionContracts      *int     `json:"max_option_contracts,omitempty"`
-	AllowStockShort         *bool    `json:"allow_stock_short,omitempty"`
-	AllowOptionSellToOpen   *bool    `json:"allow_option_sell_to_open,omitempty"`
-	AllowOptionMarketOrders *bool    `json:"allow_option_market_orders,omitempty"`
+	MaxNotional           *float64 `json:"max_notional,omitempty"`
+	MaxOptionContracts    *int     `json:"max_option_contracts,omitempty"`
+	AllowStockShort       *bool    `json:"allow_stock_short,omitempty"`
+	AllowOptionSellToOpen *bool    `json:"allow_option_sell_to_open,omitempty"`
 	// Freeze is the runtime trading brake: true blocks every new broker
 	// write (place/modify/purge/restore/proposals) via
 	// brokerWriteAuthorization while cancels stay allowed. Unlike the
@@ -335,12 +334,6 @@ func applyTradingSettingsPatch(next *platformSettingsData, raw json.RawMessage, 
 						return errBadRequest("trading.limits.allow_option_sell_to_open must be true, false, or null")
 					}
 					next.Trading.AllowOptionSellToOpen = v
-				case "allow_option_market_orders":
-					v, err := nullableBool(lraw)
-					if err != nil {
-						return errBadRequest("trading.limits.allow_option_market_orders must be true, false, or null")
-					}
-					next.Trading.AllowOptionMarketOrders = v
 				default:
 					return errBadRequest("unknown settings field trading.limits." + lkey)
 				}
@@ -430,21 +423,18 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 			Account:              settingsString(status.Account, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [gateway].account in config.toml"),
 			Endpoint:             settingsString(status.Endpoint, rpc.SettingsAccessRead, rpc.SettingsSourceObserved, "observed from daemon gateway discovery/config"),
 			ClientID:             settingsInt(status.ClientID, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [gateway].client_id in config.toml"),
-			MCPTrading:           settingsString(status.MCPTrading, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [trading].mcp_* in config.toml"),
+			MCPTrading:           settingsString(status.MCPTrading, rpc.SettingsAccessRead, rpc.SettingsSourceBuild, "MCP broker-write controls are not exposed"),
 			LiveOverride:         settingsString(status.LiveOverride, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, `computed from [trading].mode and active blockers; "ready" only on an unblocked live route`),
 			BuildWritesAvailable: settingsBool(orderWritesAvailable, rpc.SettingsAccessRead, rpc.SettingsSourceBuild, "controlled by the ibkr build"),
 			Limits: rpc.TradingLimitSettings{
-				MaxNotional:             settingsFloat(trading.MaxNotional, limitAccess, limitSource(data.Trading.MaxNotional != nil), limitReason),
-				MaxOptionContracts:      settingsInt(trading.MaxOptionContracts, limitAccess, limitSource(data.Trading.MaxOptionContracts != nil), limitReason),
-				AllowStockShort:         settingsBool(trading.AllowStockShort, limitAccess, limitSource(data.Trading.AllowStockShort != nil), limitReason),
-				AllowOptionSellToOpen:   settingsBool(trading.AllowOptionSellToOpen, limitAccess, limitSource(data.Trading.AllowOptionSellToOpen != nil), limitReason),
-				AllowOptionMarketOrders: settingsBool(trading.AllowOptionMarketOrders, limitAccess, limitSource(data.Trading.AllowOptionMarketOrders != nil), limitReason),
+				MaxNotional:           settingsFloat(trading.MaxNotional, limitAccess, limitSource(data.Trading.MaxNotional != nil), limitReason),
+				MaxOptionContracts:    settingsInt(trading.MaxOptionContracts, limitAccess, limitSource(data.Trading.MaxOptionContracts != nil), limitReason),
+				AllowStockShort:       settingsBool(trading.AllowStockShort, limitAccess, limitSource(data.Trading.AllowStockShort != nil), limitReason),
+				AllowOptionSellToOpen: settingsBool(trading.AllowOptionSellToOpen, limitAccess, limitSource(data.Trading.AllowOptionSellToOpen != nil), limitReason),
 			},
 		},
 		AutoTrade: rpc.PlatformAutoTradeSettings{
 			ProposalsEnabled: settingsBool(autoTrade.ProposalsEnabledResolved(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].proposals_enabled in config.toml"),
-			Enabled:          settingsBool(autoTrade.Enabled, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "future autonomous gate; set [auto_trade].enabled in config.toml"),
-			AutoSubmit:       settingsBool(autoTrade.AutoSubmit, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "future autonomous submit gate; set [auto_trade].auto_submit in config.toml"),
 			FastPathEnabled:  settingsBool(autoTrade.FastPathEnabledResolved(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].fast_path_enabled in config.toml"),
 			PolicyFile:       settingsString(autoTrade.PolicyFile, rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].policy_file in config.toml"),
 			HotReload:        settingsBool(autoTrade.HotReloadEnabled(), rpc.SettingsAccessRead, rpc.SettingsSourceConfig, "set [auto_trade].hot_reload in config.toml"),
@@ -535,9 +525,6 @@ func (s *Server) effectiveTradingConfig() config.Trading {
 	}
 	if data.Trading.AllowOptionSellToOpen != nil {
 		tr.AllowOptionSellToOpen = *data.Trading.AllowOptionSellToOpen
-	}
-	if data.Trading.AllowOptionMarketOrders != nil {
-		tr.AllowOptionMarketOrders = *data.Trading.AllowOptionMarketOrders
 	}
 	return tr
 }

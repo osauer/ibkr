@@ -155,17 +155,6 @@ func (r *Refresher) State() RefreshState {
 	return r.state
 }
 
-// LastFetch returns the wall-clock time of the most recent
-// successful fetch, or zero when none has completed yet. Used by
-// tests; the status surface uses the loaded list's `as_of` instead
-// (cleaner separation between "what's on disk" and "when did we
-// last talk to Wikipedia").
-func (r *Refresher) LastFetch() time.Time {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.lastFetch
-}
-
 // Run starts the daemon-internal refresh loop: a daily 02:30 ET
 // ticker plus a startup catch-up if the loaded file's session date
 // is earlier than today. Returns when ctx is cancelled. A no-op when

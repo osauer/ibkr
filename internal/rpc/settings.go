@@ -96,8 +96,6 @@ type PlatformTradingSettings struct {
 
 type PlatformAutoTradeSettings struct {
 	ProposalsEnabled SettingsBool   `json:"proposals_enabled"`
-	Enabled          SettingsBool   `json:"enabled"`
-	AutoSubmit       SettingsBool   `json:"auto_submit"`
 	FastPathEnabled  SettingsBool   `json:"fast_path_enabled"`
 	PolicyFile       SettingsString `json:"policy_file"`
 	HotReload        SettingsBool   `json:"hot_reload"`
@@ -106,11 +104,10 @@ type PlatformAutoTradeSettings struct {
 }
 
 type TradingLimitSettings struct {
-	MaxNotional             SettingsFloat `json:"max_notional"`
-	MaxOptionContracts      SettingsInt   `json:"max_option_contracts"`
-	AllowStockShort         SettingsBool  `json:"allow_stock_short"`
-	AllowOptionSellToOpen   SettingsBool  `json:"allow_option_sell_to_open"`
-	AllowOptionMarketOrders SettingsBool  `json:"allow_option_market_orders"`
+	MaxNotional           SettingsFloat `json:"max_notional"`
+	MaxOptionContracts    SettingsInt   `json:"max_option_contracts"`
+	AllowStockShort       SettingsBool  `json:"allow_stock_short"`
+	AllowOptionSellToOpen SettingsBool  `json:"allow_option_sell_to_open"`
 }
 
 type PlatformMarketDataSetting struct {

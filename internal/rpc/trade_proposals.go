@@ -55,8 +55,6 @@ type AutoTradeStatus struct {
 	AsOf             time.Time              `json:"as_of,omitzero"`
 	Trading          TradingStatus          `json:"trading"`
 	ProposalsEnabled bool                   `json:"proposals_enabled"`
-	Enabled          bool                   `json:"enabled"`
-	AutoSubmit       bool                   `json:"auto_submit"`
 	FastPathEnabled  bool                   `json:"fast_path_enabled"`
 	HotReload        bool                   `json:"hot_reload"`
 	ReloadInterval   string                 `json:"reload_interval,omitempty"`

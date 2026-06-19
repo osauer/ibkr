@@ -531,8 +531,6 @@ function tradingLimitMeta(limits = {}) {
 function renderProtectionSettings(autoTrade = {}, status = {}) {
   const proposals = autoTrade.proposals_enabled || {};
   const fastPath = autoTrade.fast_path_enabled || {};
-  const autoEnabled = autoTrade.enabled || {};
-  const autoSubmit = autoTrade.auto_submit || {};
   const policy = status.policy || {};
   const hotReload = autoTrade.hot_reload || {};
   const cadence = autoTrade.proposal_cadence?.value || status.proposal_cadence || "";
@@ -540,8 +538,6 @@ function renderProtectionSettings(autoTrade = {}, status = {}) {
   $("settingsProtectionStatus").textContent = proposals.value === false ? "Proposals off" : "Manual proposals on";
   $("settingsProtectionMeta").textContent = [
     fastPath.value === false ? "fast path off" : "fast path on",
-    autoEnabled.value ? "auto enabled" : "auto off",
-    autoSubmit.value ? "submit on" : "submit off",
     cadence ? `cadence ${cadence}` : "",
   ].filter(Boolean).join(" / ") || "Config-owned";
   $("settingsPolicyStatus").textContent = policy.policy_id
@@ -1967,7 +1963,7 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   renderMarketFlagRail("protectionFlagRail", protectionHeroMarketFlags(rows, marketEvents));
   const autoButton = $("protectionAutoButton");
   autoButton.disabled = true;
-  autoButton.title = autoTrade.auto_submit ? "Autonomous submit is not available in MVP" : "Manual confirmation required";
+  autoButton.title = "Manual confirmation required";
   const reason = protectionReason(proposals, autoTrade);
   const reasonEl = $("protectionReason");
   const refreshReason = protectionSnapshotRefreshReason();
@@ -6294,10 +6290,18 @@ function orderIsTrail(order) {
 
 function orderCancelGate(order, trading) {
   if (!orderIdentity(order)) return { ready: false, reason: "Order id unavailable" };
-  if (!trading.can_write) return { ready: false, reason: "Broker writes are not enabled by trading.status" };
+  if (!tradingCancelAllowed(trading)) return { ready: false, reason: protectionWriteUnavailableReason(trading) };
+  if (!trading.mode || !trading.account) return { ready: false, reason: "Broker account and mode are unavailable" };
   if ("cancel_eligible" in order && order.cancel_eligible !== true) return { ready: false, reason: "This order is not cancel eligible" };
   if (order.open === false) return { ready: false, reason: "Only open orders can be cancelled" };
   return { ready: true, reason: "Cancel this journal-backed open order after confirmation" };
+}
+
+function tradingCancelAllowed(trading = {}) {
+  if (trading.can_write) return true;
+  const blockers = trading.write_blockers || trading.blockers || [];
+  if (blockers.length === 0) return false;
+  return blockers.every((blocker) => String(blocker?.code || "").toLowerCase() === "trading_frozen");
 }
 
 function modifyPreviewBody(order, edit) {

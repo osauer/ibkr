@@ -1545,164 +1545,167 @@ func rowGamma(now time.Time, r rpc.RegimeGammaZero) regimeRow {
 	row := regimeRow{name: gammaRowLabel(r), cluster: "dealer_gamma", status: r.Status, asOf: asOfLabel(r.AsOf, r.Status), streak: streakMarker(r.Streak)}
 	switch r.Status {
 	case rpc.RegimeStatusComputing:
-		row.value = ""
-		eta := r.Envelope.EtaSeconds
-		note := fmt.Sprintf("building  %ds ETA", eta)
-		if r.Envelope.Progress > 0 {
-			note += fmt.Sprintf(" · %d%%", r.Envelope.Progress)
-		}
-		// If the in-flight compute is a retry of a recent failure,
-		// surface the prior error context so the user sees what's
-		// being re-attempted instead of a clean "first call of the
-		// NY session" message that hides the previous abort.
-		if r.Envelope.RetryOfErrorAt != nil && r.Envelope.RetryOfErrorSummary != "" {
-			row.reason = "retrying last failed gamma refresh"
-		} else {
-			row.reason = "building dealer-gamma snapshot"
-		}
-		row.stateNote = note
-		return row
+		return rowGammaComputing(row, r)
 	case rpc.RegimeStatusError:
 		row.value = ""
 		row.stateNote = ifNonEmpty(r.Envelope.Error, "compute failed")
 		row.reason = "retry on the next regime call"
 		return row
 	case rpc.RegimeStatusUnavailable:
-		row.value = ""
-		row.stateNote = "unavailable"
-		if r.Envelope.Status == rpc.GammaZeroStatusCold {
-			row.reason = "no gamma snapshot yet"
-		} else {
-			row.reason = "gamma snapshot unavailable"
-		}
-		return row
+		return rowGammaUnavailable(row, r)
 	case rpc.RegimeStatusOK:
-		c := r.Envelope.Result
-		if c == nil {
-			row.value = "—"
-			row.stateNote = "envelope missing payload"
-			return row
-		}
-		gammaRankable := gammaComputedExplicitlyRankable(c)
-		if !gammaRankable {
-			row.reason = regimeGammaNoVoteReason(c)
-		} else if c.Quality != nil && c.Quality.RankabilityReason != "" {
-			row.reason = regimeGammaQualityReason(c.Quality)
-		}
-		// Gamma's two scalars are always modelled (zero_gamma via the
-		// BS sweep) or derived (|Γ|·OI sum from observed OI+IV); the
-		// row will carry "· modelled" regardless of ranking.
-		row.quality = qualityTag(now, r.ZeroGammaQuality, r.GammaTotalAbsQuality)
-		if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
-			row.value = formatRegimeGammaAgreement(c)
-			if c.GammaTotalAbs > 0 {
-				row.value += fmt.Sprintf("  |GEX| %.1fbn", c.GammaTotalAbs/1e9)
-			}
-			if gammaRankable {
-				row.band = rankableGammaCombinedRegimeBand(c)
-			} else {
-				row.band = bandUnranked
-			}
-			switch row.band {
-			case bandGreen:
-				row.reason = regimeGammaCombinedReason(c, bandGreen)
-			case bandRed:
-				row.reason = regimeGammaCombinedReason(c, bandRed)
-			case bandYellow:
-				row.reason = regimeGammaCombinedReason(c, bandYellow)
-			default:
-				if row.reason == "" {
-					row.reason = "no usable dealer-gamma profile"
-				}
-			}
-			return row
-		}
-		// Three rendering paths:
-		//
-		//  1. A real crossing exists in the swept window → band on the
-		//     gap from spot.
-		//  2. No crossing, but the swept profile is one-signed → band
-		//     on the sign (long-γ across window = stabilizing regime;
-		//     short-γ across window = amplifying regime). The compute
-		//     has already determined this; it's a strong regime
-		//     statement, not "unavailable".
-		//  3. No crossing AND no signal (empty profile) → stay
-		//     unranked; this is the genuine no-data path.
-		if c.ZeroGamma != nil && c.GapPct != nil {
-			sign := "+"
-			if *c.GapPct < 0 {
-				sign = ""
-			}
-			row.value = fmt.Sprintf("spot %.2f → γ-zero %.2f  %s%.1f%%",
-				c.SpotUnderlying, *c.ZeroGamma, sign, *c.GapPct)
-			// Annotate horizon disagreement when the renderer would
-			// otherwise mask it. "diverge" is the high-information
-			// case: near vs term γ-zero straddle spot, meaning the
-			// combined headline number cancels the real signal.
-			if note := horizonAgreementNote(r.HorizonAgreement, c); note != "" {
-				row.value += "  " + note
-			}
-			switch {
-			case *c.GapPct > gammaGapYellow:
-				if gammaRankable {
-					row.band, row.reason = bandGreen, "spot >2% above γ-zero"
-				} else {
-					row.band = bandUnranked
-				}
-			case *c.GapPct >= -gammaGapYellow:
-				if gammaRankable {
-					row.band, row.reason = bandYellow, "spot within ±2% of γ-zero"
-				} else {
-					row.band = bandUnranked
-				}
-			default:
-				if gammaRankable {
-					row.band, row.reason = bandRed, "spot below γ-zero"
-				} else {
-					row.band = bandUnranked
-				}
-			}
-			return row
-		}
-		// No crossing. The compute's GammaSign tells us which side of
-		// zero the whole swept profile landed on — that IS the regime
-		// statement the renderer should surface. Magnitude (|Γ|·OI) is
-		// the convention-free co-primary; rendered inline only when it
-		// landed non-zero so the no-aggregator-data case (zero from
-		// either an empty profile or a v2 daemon) doesn't paint a
-		// misleading "$0.0bn" in the value cell.
-		mag := ""
-		if c.GammaTotalAbs > 0 {
-			mag = fmt.Sprintf("  |GEX| %.1fbn", c.GammaTotalAbs/1e9)
-		}
-		spotPrefix := fmt.Sprintf("spot %.2f · ", c.SpotUnderlying)
-		switch c.GammaSign {
-		case "positive":
-			row.value = fmt.Sprintf("%slong-γ%s", spotPrefix, mag)
-			if gammaRankable {
-				row.band = bandGreen
-				row.reason = "dealer long-γ · stabilizing"
-			} else {
-				row.band = bandUnranked
-			}
-		case "negative":
-			row.value = fmt.Sprintf("%sshort-γ%s", spotPrefix, mag)
-			if gammaRankable {
-				row.band = bandRed
-				row.reason = "dealer short-γ · amplifying"
-			} else {
-				row.band = bandUnranked
-			}
-		default:
-			// "no_data" or empty: genuine no-signal case.
-			row.value = fmt.Sprintf("spot %.2f", c.SpotUnderlying)
-			row.band = bandUnranked
-			row.reason = "sweep produced no signed profile"
-		}
-		return row
+		return rowGammaOK(now, row, r)
 	}
 	row.value = "—"
 	row.stateNote = string(r.Status)
+	return row
+}
+
+func rowGammaComputing(row regimeRow, r rpc.RegimeGammaZero) regimeRow {
+	row.value = ""
+	eta := r.Envelope.EtaSeconds
+	note := fmt.Sprintf("building  %ds ETA", eta)
+	if r.Envelope.Progress > 0 {
+		note += fmt.Sprintf(" · %d%%", r.Envelope.Progress)
+	}
+	// If the in-flight compute is a retry of a recent failure, surface
+	// the prior error context instead of a clean first-call message.
+	if r.Envelope.RetryOfErrorAt != nil && r.Envelope.RetryOfErrorSummary != "" {
+		row.reason = "retrying last failed gamma refresh"
+	} else {
+		row.reason = "building dealer-gamma snapshot"
+	}
+	row.stateNote = note
+	return row
+}
+
+func rowGammaUnavailable(row regimeRow, r rpc.RegimeGammaZero) regimeRow {
+	row.value = ""
+	row.stateNote = "unavailable"
+	if r.Envelope.Status == rpc.GammaZeroStatusCold {
+		row.reason = "no gamma snapshot yet"
+	} else {
+		row.reason = "gamma snapshot unavailable"
+	}
+	return row
+}
+
+func rowGammaOK(now time.Time, row regimeRow, r rpc.RegimeGammaZero) regimeRow {
+	c := r.Envelope.Result
+	if c == nil {
+		row.value = "—"
+		row.stateNote = "envelope missing payload"
+		return row
+	}
+	gammaRankable := gammaComputedExplicitlyRankable(c)
+	row.reason = rowGammaInitialReason(c, gammaRankable)
+	// Gamma's two scalars are always modelled (zero_gamma via the BS
+	// sweep) or derived (|Γ|·OI sum from observed OI+IV); the row will
+	// carry "· modelled" regardless of ranking.
+	row.quality = qualityTag(now, r.ZeroGammaQuality, r.GammaTotalAbsQuality)
+	if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
+		return rowGammaCombined(row, c, gammaRankable)
+	}
+	if c.ZeroGamma != nil && c.GapPct != nil {
+		return rowGammaCrossing(row, r, c, gammaRankable)
+	}
+	return rowGammaSignedProfile(row, c, gammaRankable)
+}
+
+func rowGammaInitialReason(c *rpc.GammaZeroComputed, gammaRankable bool) string {
+	if !gammaRankable {
+		return regimeGammaNoVoteReason(c)
+	}
+	if c.Quality != nil && c.Quality.RankabilityReason != "" {
+		return regimeGammaQualityReason(c.Quality)
+	}
+	return ""
+}
+
+func rowGammaCombined(row regimeRow, c *rpc.GammaZeroComputed, gammaRankable bool) regimeRow {
+	row.value = formatRegimeGammaAgreement(c)
+	if c.GammaTotalAbs > 0 {
+		row.value += fmt.Sprintf("  |GEX| %.1fbn", c.GammaTotalAbs/1e9)
+	}
+	if gammaRankable {
+		row.band = rankableGammaCombinedRegimeBand(c)
+	} else {
+		row.band = bandUnranked
+	}
+	switch row.band {
+	case bandGreen:
+		row.reason = regimeGammaCombinedReason(c, bandGreen)
+	case bandRed:
+		row.reason = regimeGammaCombinedReason(c, bandRed)
+	case bandYellow:
+		row.reason = regimeGammaCombinedReason(c, bandYellow)
+	default:
+		if row.reason == "" {
+			row.reason = "no usable dealer-gamma profile"
+		}
+	}
+	return row
+}
+
+func rowGammaCrossing(row regimeRow, r rpc.RegimeGammaZero, c *rpc.GammaZeroComputed, gammaRankable bool) regimeRow {
+	sign := "+"
+	if *c.GapPct < 0 {
+		sign = ""
+	}
+	row.value = fmt.Sprintf("spot %.2f → γ-zero %.2f  %s%.1f%%",
+		c.SpotUnderlying, *c.ZeroGamma, sign, *c.GapPct)
+	// Annotate horizon disagreement when the renderer would otherwise
+	// mask it. "diverge" is the high-information case: near vs term
+	// γ-zero straddle spot, meaning the headline cancels the real signal.
+	if note := horizonAgreementNote(r.HorizonAgreement, c); note != "" {
+		row.value += "  " + note
+	}
+	row.band = bandUnranked
+	if !gammaRankable {
+		return row
+	}
+	switch {
+	case *c.GapPct > gammaGapYellow:
+		row.band, row.reason = bandGreen, "spot >2% above γ-zero"
+	case *c.GapPct >= -gammaGapYellow:
+		row.band, row.reason = bandYellow, "spot within ±2% of γ-zero"
+	default:
+		row.band, row.reason = bandRed, "spot below γ-zero"
+	}
+	return row
+}
+
+func rowGammaSignedProfile(row regimeRow, c *rpc.GammaZeroComputed, gammaRankable bool) regimeRow {
+	// No crossing. GammaSign tells us which side of zero the whole swept
+	// profile landed on. Magnitude is rendered only when non-zero so an
+	// empty profile or v2 daemon does not paint a misleading "$0.0bn".
+	mag := ""
+	if c.GammaTotalAbs > 0 {
+		mag = fmt.Sprintf("  |GEX| %.1fbn", c.GammaTotalAbs/1e9)
+	}
+	spotPrefix := fmt.Sprintf("spot %.2f · ", c.SpotUnderlying)
+	switch c.GammaSign {
+	case "positive":
+		row.value = fmt.Sprintf("%slong-γ%s", spotPrefix, mag)
+		if gammaRankable {
+			row.band = bandGreen
+			row.reason = "dealer long-γ · stabilizing"
+		} else {
+			row.band = bandUnranked
+		}
+	case "negative":
+		row.value = fmt.Sprintf("%sshort-γ%s", spotPrefix, mag)
+		if gammaRankable {
+			row.band = bandRed
+			row.reason = "dealer short-γ · amplifying"
+		} else {
+			row.band = bandUnranked
+		}
+	default:
+		row.value = fmt.Sprintf("spot %.2f", c.SpotUnderlying)
+		row.band = bandUnranked
+		row.reason = "sweep produced no signed profile"
+	}
 	return row
 }
 

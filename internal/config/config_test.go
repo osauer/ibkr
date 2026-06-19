@@ -50,20 +50,8 @@ func TestLoad_MissingFileGivesFullAuto(t *testing.T) {
 	if res.Trading.PaperSmokeMaxAgeDuration() != 168*time.Hour {
 		t.Errorf("trading paper_smoke_max_age = %v, want 168h", res.Trading.PaperSmokeMaxAgeDuration())
 	}
-	if res.Trading.MCPMode != MCPModePreview {
-		t.Errorf("trading mcp_mode = %q, want %q", res.Trading.MCPMode, MCPModePreview)
-	}
-	if res.Trading.MCPNonceTTLDuration() != 5*time.Minute {
-		t.Errorf("trading mcp_nonce_ttl = %v, want 5m", res.Trading.MCPNonceTTLDuration())
-	}
 	if !res.AutoTrade.ProposalsEnabledResolved() {
 		t.Error("manual proposals should default enabled")
-	}
-	if res.AutoTrade.Enabled {
-		t.Error("autonomous auto_trade should default disabled")
-	}
-	if res.AutoTrade.AutoSubmit {
-		t.Error("auto_submit should default disabled")
 	}
 	if !res.AutoTrade.FastPathEnabledResolved() {
 		t.Error("manual fast path should default enabled")
@@ -115,11 +103,7 @@ max_notional = 25000
 max_option_contracts = 3
 allow_stock_short = true
 allow_option_sell_to_open = true
-allow_option_market_orders = false
 paper_smoke_max_age = "24h"
-mcp_enabled = true
-mcp_mode = "live-write"
-mcp_nonce_ttl = "2m"
 
 [opportunities]
 enabled = false
@@ -184,15 +168,6 @@ timeout    = "30s"
 	}
 	if res.Trading.PaperSmokeMaxAgeDuration() != 24*time.Hour {
 		t.Errorf("Trading.PaperSmokeMaxAge = %v, want 24h", res.Trading.PaperSmokeMaxAgeDuration())
-	}
-	if !res.Trading.MCPEnabled {
-		t.Error("Trading.MCPEnabled should parse true")
-	}
-	if res.Trading.MCPMode != MCPModeLiveWrite {
-		t.Errorf("Trading.MCPMode = %q, want %q", res.Trading.MCPMode, MCPModeLiveWrite)
-	}
-	if res.Trading.MCPNonceTTLDuration() != 2*time.Minute {
-		t.Errorf("Trading.MCPNonceTTL = %v, want 2m", res.Trading.MCPNonceTTLDuration())
 	}
 	if res.Opportunities.EnabledResolved() {
 		t.Error("Opportunities.Enabled should parse false")
@@ -314,6 +289,42 @@ func TestLoad_RemovedLiveAckKeys_TargetedError(t *testing.T) {
 		if strings.Contains(msg, "unknown key") {
 			t.Errorf("error %q for %q must use the targeted message, not the generic unknown-key one", msg, key)
 		}
+	}
+}
+
+func TestLoad_RemovedNoOpKnobs_TargetedError(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"option market orders", "[trading]\nallow_option_market_orders = true\n"},
+		{"mcp enabled", "[trading]\nmcp_enabled = true\n"},
+		{"mcp mode", "[trading]\nmcp_mode = \"paper-write\"\n"},
+		{"mcp nonce ttl", "[trading]\nmcp_nonce_ttl = \"2m\"\n"},
+		{"auto trade enabled", "[auto_trade]\nenabled = true\n"},
+		{"auto submit", "[auto_trade]\nauto_submit = true\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("expected removed-key error, got nil")
+			}
+			msg := err.Error()
+			for _, want := range []string{"was removed", "delete this key"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error %q must mention %q", msg, want)
+				}
+			}
+			if strings.Contains(msg, "unknown key") {
+				t.Errorf("error %q must use the targeted message, not the generic unknown-key one", msg)
+			}
+		})
 	}
 }
 

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -965,44 +964,6 @@ func (s *opportunityStore) AppendEvent(ev opportunityEvent) error {
 		return fmt.Errorf("append opportunity event: %w", err)
 	}
 	return nil
-}
-
-func (s *opportunityStore) LoadEvents(limit int) ([]opportunityEvent, error) {
-	if s == nil || s.eventsPath == "" {
-		return nil, fmt.Errorf("opportunity events path is empty")
-	}
-	f, err := os.Open(s.eventsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("open opportunity events %s: %w", s.eventsPath, err)
-	}
-	defer func() { _ = f.Close() }()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxFrameBytes)
-	var events []opportunityEvent
-	line := 0
-	for scanner.Scan() {
-		line++
-		raw := strings.TrimSpace(scanner.Text())
-		if raw == "" {
-			continue
-		}
-		var ev opportunityEvent
-		if err := json.Unmarshal([]byte(raw), &ev); err != nil {
-			return nil, fmt.Errorf("parse opportunity event line %d: %w", line, err)
-		}
-		events = append(events, ev)
-		if limit > 0 && len(events) > limit {
-			copy(events, events[1:])
-			events = events[:limit]
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan opportunity events: %w", err)
-	}
-	return events, nil
 }
 
 func shortStableHash(raw string) string {
