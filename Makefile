@@ -42,6 +42,8 @@ PREFIX ?= $(HOME)/.local
 RESTART_TIMEOUT ?= 15s
 
 CLAUDE_DIR ?= $(HOME)/.claude
+CLAUDE_PLUGIN_ID ?= ibkr@ibkr
+CLAUDE_PLUGIN_MARKETPLACE ?= $(CURDIR)
 SKILL_DIR  ?= $(CLAUDE_DIR)/skills/ibkr
 CODEX_DIR  ?= $(HOME)/.codex
 CODEX_SKILL_DIR ?= $(CODEX_DIR)/skills/ibkr
@@ -54,7 +56,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -451,6 +453,27 @@ install-skill: build ## Install SKILL.md to global Claude/Codex skill dirs (dogf
 	@echo "For a global Bash(ibkr ...) allowlist, copy settings/ibkr.settings.json"
 	@echo "into your ~/.claude/settings.json by hand (the SKILL frontmatter already"
 	@echo "grants the read patterns when the skill is active)."
+	@if command -v claude >/dev/null 2>&1; then \
+		echo; \
+		echo "Refreshing the Claude Code plugin from this checkout so MCP tools/hooks update too..."; \
+		$(MAKE) --no-print-directory install-plugin-refresh; \
+	else \
+		echo; \
+		echo "Claude CLI not on PATH; skipped Claude Code plugin refresh."; \
+	fi
+
+install-plugin: build install-plugin-refresh ## Install/update the Claude Code plugin from this checkout (dogfood path)
+
+install-plugin-refresh:
+	@command -v claude >/dev/null 2>&1 || { echo "claude CLI not on PATH; install Claude Code first" >&2; exit 1; }
+	claude plugin validate .
+	claude plugin marketplace add "$(CLAUDE_PLUGIN_MARKETPLACE)"
+	@if claude plugin list --json 2>/dev/null | grep -q '"id": "$(CLAUDE_PLUGIN_ID)"'; then \
+		claude plugin uninstall "$(CLAUDE_PLUGIN_ID)"; \
+	fi
+	claude plugin install "$(CLAUDE_PLUGIN_ID)"
+	@echo "Installed Claude Code plugin $(CLAUDE_PLUGIN_ID) from $(CLAUDE_PLUGIN_MARKETPLACE)"
+	@echo "Restart Claude Code or run /reload-plugins to load plugin MCP servers."
 
 uninstall-skill: ## Remove the dogfood skill install from global Claude/Codex skill dirs
 	rm -rf $(SKILL_DIR)

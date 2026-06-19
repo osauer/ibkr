@@ -651,7 +651,7 @@
           <a class="button" href="https://github.com/osauer/ibkr">View on GitHub</a>
           <a class="button" href="reference/mcp-tools.html">Read MCP tools</a>
         </div>
-        <p class="install-note">Claude Desktop: review the Mac prerequisites, install the MCPB from the setup page, restart Claude, and keep IB Gateway or TWS running locally. Claude Code: install the plugin, then install the local <code>ibkr</code> binary.</p>
+        <p class="install-note">Claude Desktop: review the Mac prerequisites, install the MCPB from the setup page, restart Claude, and keep IB Gateway or TWS running locally. Claude Code: install the plugin for the skill, hooks, and MCP server config, then install the local <code>ibkr</code> binary.</p>
         <p class="disclaimer">ibkr is analysis software, not financial advice — nothing it shows or says is a recommendation to buy or sell any security.</p>
       </div>
       <div class="hero-media">
@@ -853,8 +853,8 @@
     <section class="wrap install" id="install" aria-labelledby="install-title">
       <div>
         <div class="section-head">
-          <h2 id="install-title">Install for Claude Desktop or shell.</h2>
-          <p>Claude Desktop users should start with the guided install page. Claude Code users can install the plugin plus the local binary. Shell and generic MCP users can install the CLI and configure a local stdio server.</p>
+          <h2 id="install-title">Install for Claude Desktop, Claude Code, or shell.</h2>
+          <p>Claude Desktop users should start with the guided install page. Claude Code users install the plugin for the skill, hooks, and MCP server config, plus the local binary. Shell and generic MCP users can install the CLI and configure a local stdio server.</p>
         </div>
         <p>Prerequisites: IB Gateway 10.37+ or TWS running locally, plus an IBKR Pro account with TWS API access. IBKR Lite does not include TWS API access.</p>
         <p><a class="button primary" href="claude-desktop-interactive-brokers/">Claude Desktop Install</a></p>
@@ -863,6 +863,7 @@
       <pre><code># Claude Code plugin
 /plugin marketplace add osauer/ibkr
 /plugin install ibkr@ibkr
+# restart Claude Code or run /reload-plugins after install/update
 
 # Shell, Cursor, Continue, Zed, generic MCP hosts
 curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
