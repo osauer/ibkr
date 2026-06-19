@@ -73,10 +73,3 @@ type Result struct {
 	Session       Session
 	Sessions      []Session
 }
-
-// CoverageStatus summarizes how far the embedded official schedules extend.
-type CoverageStatus struct {
-	Start string
-	End   string
-	OK    bool
-}

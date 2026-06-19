@@ -151,78 +151,104 @@ func canaryHeldStressSummaries(acct rpc.AccountResult, pos rpc.PositionsResult, 
 	if acct.NetLiquidation <= 0 {
 		return nil
 	}
-	builders := map[string]*rpc.CanaryHeldStress{}
-	order := []string{}
-	ensure := func(underlying string) *rpc.CanaryHeldStress {
-		underlying = strings.ToUpper(strings.TrimSpace(underlying))
-		if underlying == "" {
-			return nil
-		}
-		if s := builders[underlying]; s != nil {
-			return s
-		}
-		builders[underlying] = &rpc.CanaryHeldStress{Underlying: underlying}
-		order = append(order, underlying)
-		return builders[underlying]
-	}
+	builder := newCanaryHeldStressBuilder(acct.NetLiquidation)
+	builder.addPortfolioExposures(pos.Portfolio)
+	builder.addUnderlyingGroups(pos.ByUnderlying)
+	builder.addStockRows(pos.Stocks)
+	builder.addOptionRows(canaryOptionsByUnderlying(pos), now)
+	return builder.rows(marketEvents)
+}
 
-	if pos.Portfolio != nil {
-		for _, e := range pos.Portfolio.ExposureBase {
-			s := ensure(e.Underlying)
-			if s == nil {
-				continue
-			}
-			canarySetFloatPtrIfNil(&s.MarketValuePctNLV, e.MarketValuePctNLV)
-			if s.DeltaPctNLV == nil && e.DollarDeltaBase != nil {
-				v := math.Abs(*e.DollarDeltaBase) / acct.NetLiquidation * 100
-				s.DeltaPctNLV = &v
-			}
-			if s.DailyPnLPctNLV == nil && e.DailyPnLBase != nil {
-				v := *e.DailyPnLBase / acct.NetLiquidation * 100
-				s.DailyPnLPctNLV = &v
-			}
+type canaryHeldStressBuilder struct {
+	netLiquidation float64
+	rowsBySymbol   map[string]*rpc.CanaryHeldStress
+	order          []string
+}
+
+func newCanaryHeldStressBuilder(netLiquidation float64) *canaryHeldStressBuilder {
+	return &canaryHeldStressBuilder{
+		netLiquidation: netLiquidation,
+		rowsBySymbol:   map[string]*rpc.CanaryHeldStress{},
+	}
+}
+
+func (b *canaryHeldStressBuilder) ensure(underlying string) *rpc.CanaryHeldStress {
+	underlying = strings.ToUpper(strings.TrimSpace(underlying))
+	if underlying == "" {
+		return nil
+	}
+	if s := b.rowsBySymbol[underlying]; s != nil {
+		return s
+	}
+	b.rowsBySymbol[underlying] = &rpc.CanaryHeldStress{Underlying: underlying}
+	b.order = append(b.order, underlying)
+	return b.rowsBySymbol[underlying]
+}
+
+func (b *canaryHeldStressBuilder) addPortfolioExposures(portfolio *rpc.PositionsPortfolio) {
+	if portfolio == nil {
+		return
+	}
+	for _, e := range portfolio.ExposureBase {
+		s := b.ensure(e.Underlying)
+		if s == nil {
+			continue
+		}
+		canarySetFloatPtrIfNil(&s.MarketValuePctNLV, e.MarketValuePctNLV)
+		if s.DeltaPctNLV == nil && e.DollarDeltaBase != nil {
+			v := math.Abs(*e.DollarDeltaBase) / b.netLiquidation * 100
+			s.DeltaPctNLV = &v
+		}
+		if s.DailyPnLPctNLV == nil && e.DailyPnLBase != nil {
+			v := *e.DailyPnLBase / b.netLiquidation * 100
+			s.DailyPnLPctNLV = &v
 		}
 	}
+}
 
-	for _, group := range pos.ByUnderlying {
-		s := ensure(group.Underlying)
+func (b *canaryHeldStressBuilder) addUnderlyingGroups(groups []rpc.PositionGroup) {
+	for _, group := range groups {
+		s := b.ensure(group.Underlying)
 		if s == nil {
 			continue
 		}
 		canarySetFloatPtrIfNil(&s.MarketValuePctNLV, group.GroupMarketValuePctNLV)
 		if s.MarketValuePctNLV == nil && group.GroupMarketValueBase != nil {
-			v := *group.GroupMarketValueBase / acct.NetLiquidation * 100
+			v := *group.GroupMarketValueBase / b.netLiquidation * 100
 			s.MarketValuePctNLV = &v
 		}
 		if s.DeltaPctNLV == nil && group.GroupDollarDeltaBase != nil {
-			v := math.Abs(*group.GroupDollarDeltaBase) / acct.NetLiquidation * 100
+			v := math.Abs(*group.GroupDollarDeltaBase) / b.netLiquidation * 100
 			s.DeltaPctNLV = &v
 		}
 		if s.DailyPnLPctNLV == nil && group.GroupDailyPnLBase != nil {
-			v := *group.GroupDailyPnLBase / acct.NetLiquidation * 100
+			v := *group.GroupDailyPnLBase / b.netLiquidation * 100
 			s.DailyPnLPctNLV = &v
 		}
 		s.LiquidityFlags = canaryUniqueFlags(s.LiquidityFlags, canaryHeldStockLiquidityFlags(group.Stock)...)
 	}
+}
 
-	for i := range pos.Stocks {
-		stock := &pos.Stocks[i]
-		s := ensure(stock.Symbol)
+func (b *canaryHeldStressBuilder) addStockRows(stocks []rpc.PositionView) {
+	for i := range stocks {
+		stock := &stocks[i]
+		s := b.ensure(stock.Symbol)
 		if s == nil {
 			continue
 		}
 		if s.MarketValuePctNLV == nil && stock.MarketValueBase != nil {
-			v := *stock.MarketValueBase / acct.NetLiquidation * 100
+			v := *stock.MarketValueBase / b.netLiquidation * 100
 			s.MarketValuePctNLV = &v
 		}
 		if s.DailyPnLPctNLV == nil && stock.DailyPnLBase != nil {
-			v := *stock.DailyPnLBase / acct.NetLiquidation * 100
+			v := *stock.DailyPnLBase / b.netLiquidation * 100
 			s.DailyPnLPctNLV = &v
 		}
 		s.LiquidityFlags = canaryUniqueFlags(s.LiquidityFlags, canaryHeldStockLiquidityFlags(stock)...)
 	}
+}
 
-	optionsByUnderlying := canaryOptionsByUnderlying(pos)
+func (b *canaryHeldStressBuilder) addOptionRows(optionsByUnderlying map[string][]rpc.PositionView, now time.Time) {
 	optionUnderlyings := make([]string, 0, len(optionsByUnderlying))
 	for underlying := range optionsByUnderlying {
 		optionUnderlyings = append(optionUnderlyings, underlying)
@@ -230,17 +256,19 @@ func canaryHeldStressSummaries(acct rpc.AccountResult, pos rpc.PositionsResult, 
 	slices.Sort(optionUnderlyings)
 	for _, underlying := range optionUnderlyings {
 		options := optionsByUnderlying[underlying]
-		s := ensure(underlying)
+		s := b.ensure(underlying)
 		if s == nil {
 			continue
 		}
-		canaryApplyHeldOptionStress(s, options, now, acct.NetLiquidation)
+		canaryApplyHeldOptionStress(s, options, now, b.netLiquidation)
 		s.LiquidityFlags = canaryUniqueFlags(s.LiquidityFlags, canaryHeldOptionLiquidityFlags(options)...)
 	}
+}
 
+func (b *canaryHeldStressBuilder) rows(marketEvents rpc.MarketEventsResult) []rpc.CanaryHeldStress {
 	out := []rpc.CanaryHeldStress{}
-	for _, underlying := range order {
-		s := builders[underlying]
+	for _, underlying := range b.order {
+		s := b.rowsBySymbol[underlying]
 		s.MarketFlags = canaryHeldMarketFlags(underlying, marketEvents)
 		s.MaterialReasons = canaryHeldStressMaterialReasons(*s)
 		s.SignalIDs = canaryHeldStressSignalIDs(*s)

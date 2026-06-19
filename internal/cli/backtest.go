@@ -2556,6 +2556,16 @@ func (a *opportunityBacktestAccumulator) add(row OpportunityBacktestRowResult) {
 	} else {
 		a.metrics.NonOpportunity++
 	}
+	a.addOpportunitySplit(row)
+	a.addOpportunitySignalContext(row)
+	a.addOpportunityCandidate(row)
+	if row.SignalFired {
+		a.addOpportunitySignal(row)
+	}
+	a.addOpportunityClassification(row)
+}
+
+func (a *opportunityBacktestAccumulator) addOpportunitySplit(row OpportunityBacktestRowResult) {
 	switch {
 	case row.Holdout:
 		a.metrics.HoldoutObservations++
@@ -2572,12 +2582,18 @@ func (a *opportunityBacktestAccumulator) add(row OpportunityBacktestRowResult) {
 	default:
 		a.metrics.TuningObservations++
 	}
+}
+
+func (a *opportunityBacktestAccumulator) addOpportunitySignalContext(row OpportunityBacktestRowResult) {
 	if row.SignalContextBlocked {
 		a.metrics.SignalContextBlocked++
 		if row.Holdout {
 			a.metrics.HoldoutSignalContextBlocked++
 		}
 	}
+}
+
+func (a *opportunityBacktestAccumulator) addOpportunityCandidate(row OpportunityBacktestRowResult) {
 	if candidateCostPct := opportunityExecutionCostPct(row.Trade); candidateCostPct != nil {
 		candidateNetExcess := row.Outcome.ExcessReturnPct - *candidateCostPct
 		a.metrics.CostedCandidates++
@@ -2609,72 +2625,88 @@ func (a *opportunityBacktestAccumulator) add(row OpportunityBacktestRowResult) {
 			}
 		}
 	}
-	if row.SignalFired {
-		a.metrics.SignalFired++
-		if row.Holdout {
-			a.metrics.HoldoutSignalFired++
-		}
-		if a.signalInstruments == nil {
-			a.signalInstruments = map[string]int{}
-		}
-		if a.signalClusters == nil {
-			a.signalClusters = map[string]int{}
-		}
-		instrument := cleanOpportunityBacktestInstrument(row.Trade.Instrument)
-		cluster := cleanBacktestCluster(row.MarketCluster)
-		a.signalInstruments[instrument]++
-		a.signalClusters[cluster]++
-		if row.Holdout {
-			if a.holdoutSignalInstruments == nil {
-				a.holdoutSignalInstruments = map[string]int{}
-			}
-			if a.holdoutSignalClusters == nil {
-				a.holdoutSignalClusters = map[string]int{}
-			}
-			a.holdoutSignalInstruments[instrument]++
-			a.holdoutSignalClusters[cluster]++
-		}
-		if row.PositiveExcess {
-			a.metrics.PositiveExcess++
-		} else {
-			a.metrics.NegativeExcess++
-		}
-		a.forwardReturn += row.Outcome.ForwardReturnPct
-		a.benchmarkReturn += row.Outcome.BenchmarkReturnPct
-		a.excessReturn += row.Outcome.ExcessReturnPct
-		a.adverseExcursion += row.Outcome.MaxAdverseExcursionPct
-		a.favorableExcursion += row.Outcome.MaxFavorableExcursionPct
-		a.excessReturns = append(a.excessReturns, row.Outcome.ExcessReturnPct)
-		if row.NetExcessReturnPct != nil {
-			a.metrics.CostedSignalFired++
-			if row.ExecutionCostPct != nil {
-				a.executionCost += *row.ExecutionCostPct
-			}
-			if row.PositiveNetExcess != nil && *row.PositiveNetExcess {
-				a.metrics.PositiveNetExcess++
-			} else {
-				a.metrics.NegativeNetExcess++
-			}
-			a.netExcessReturn += *row.NetExcessReturnPct
-			a.netExcessReturns = append(a.netExcessReturns, *row.NetExcessReturnPct)
-			if row.Holdout {
-				a.metrics.HoldoutCostedSignalFired++
-				if row.PositiveNetExcess != nil && *row.PositiveNetExcess {
-					a.metrics.HoldoutPositiveNetExcess++
-				} else {
-					a.metrics.HoldoutNegativeNetExcess++
-				}
-				a.holdoutNetExcessReturn += *row.NetExcessReturnPct
-				a.holdoutNetExcessReturns = append(a.holdoutNetExcessReturns, *row.NetExcessReturnPct)
-			}
-		} else {
-			a.metrics.MissingCostSignalFired++
-			if row.Holdout {
-				a.metrics.HoldoutMissingCostSignalFired++
-			}
-		}
-		a.outcomeCount++
+}
+
+func (a *opportunityBacktestAccumulator) addOpportunitySignal(row OpportunityBacktestRowResult) {
+	a.metrics.SignalFired++
+	if row.Holdout {
+		a.metrics.HoldoutSignalFired++
 	}
+	a.addOpportunitySignalConcentration(row)
+	a.addOpportunityGrossSignal(row)
+	a.addOpportunityNetSignal(row)
+	a.outcomeCount++
+}
+
+func (a *opportunityBacktestAccumulator) addOpportunitySignalConcentration(row OpportunityBacktestRowResult) {
+	if a.signalInstruments == nil {
+		a.signalInstruments = map[string]int{}
+	}
+	if a.signalClusters == nil {
+		a.signalClusters = map[string]int{}
+	}
+	instrument := cleanOpportunityBacktestInstrument(row.Trade.Instrument)
+	cluster := cleanBacktestCluster(row.MarketCluster)
+	a.signalInstruments[instrument]++
+	a.signalClusters[cluster]++
+	if row.Holdout {
+		if a.holdoutSignalInstruments == nil {
+			a.holdoutSignalInstruments = map[string]int{}
+		}
+		if a.holdoutSignalClusters == nil {
+			a.holdoutSignalClusters = map[string]int{}
+		}
+		a.holdoutSignalInstruments[instrument]++
+		a.holdoutSignalClusters[cluster]++
+	}
+}
+
+func (a *opportunityBacktestAccumulator) addOpportunityGrossSignal(row OpportunityBacktestRowResult) {
+	if row.PositiveExcess {
+		a.metrics.PositiveExcess++
+	} else {
+		a.metrics.NegativeExcess++
+	}
+	a.forwardReturn += row.Outcome.ForwardReturnPct
+	a.benchmarkReturn += row.Outcome.BenchmarkReturnPct
+	a.excessReturn += row.Outcome.ExcessReturnPct
+	a.adverseExcursion += row.Outcome.MaxAdverseExcursionPct
+	a.favorableExcursion += row.Outcome.MaxFavorableExcursionPct
+	a.excessReturns = append(a.excessReturns, row.Outcome.ExcessReturnPct)
+}
+
+func (a *opportunityBacktestAccumulator) addOpportunityNetSignal(row OpportunityBacktestRowResult) {
+	if row.NetExcessReturnPct == nil {
+		a.metrics.MissingCostSignalFired++
+		if row.Holdout {
+			a.metrics.HoldoutMissingCostSignalFired++
+		}
+		return
+	}
+	a.metrics.CostedSignalFired++
+	if row.ExecutionCostPct != nil {
+		a.executionCost += *row.ExecutionCostPct
+	}
+	if row.PositiveNetExcess != nil && *row.PositiveNetExcess {
+		a.metrics.PositiveNetExcess++
+	} else {
+		a.metrics.NegativeNetExcess++
+	}
+	a.netExcessReturn += *row.NetExcessReturnPct
+	a.netExcessReturns = append(a.netExcessReturns, *row.NetExcessReturnPct)
+	if row.Holdout {
+		a.metrics.HoldoutCostedSignalFired++
+		if row.PositiveNetExcess != nil && *row.PositiveNetExcess {
+			a.metrics.HoldoutPositiveNetExcess++
+		} else {
+			a.metrics.HoldoutNegativeNetExcess++
+		}
+		a.holdoutNetExcessReturn += *row.NetExcessReturnPct
+		a.holdoutNetExcessReturns = append(a.holdoutNetExcessReturns, *row.NetExcessReturnPct)
+	}
+}
+
+func (a *opportunityBacktestAccumulator) addOpportunityClassification(row OpportunityBacktestRowResult) {
 	switch {
 	case row.TruePositive:
 		a.metrics.TruePositive++

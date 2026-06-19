@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: config.md sha256:a4fe8135f2432b01dd9e2842daef5fbb7dddf8f44186d9a95acb4f4f112fd933 -->
+<!-- md-source: config.md sha256:2298f5d2d2fc6c51f36b04f8e2b0c86c6f261754738c4b2a2528dba318a80188 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -164,8 +164,6 @@
 <table>
 <thead><tr><th>Section</th><th>Field</th><th>Type</th><th>Description</th></tr></thead>
 <tbody>
-<tr><td><code>[auto_trade]</code></td><td><code>auto_submit</code></td><td><code>bool</code></td><td>AutoSubmit allows the experimental supervisor to submit eligible proposals automatically; default false and ignored unless trading writes are explicitly enabled.</td></tr>
-<tr><td><code>[auto_trade]</code></td><td><code>enabled</code></td><td><code>bool</code></td><td>Enabled controls the experimental auto-trade supervisor; default false, and stable builds remain preview/read-only unless trading config and build capability allow more.</td></tr>
 <tr><td><code>[auto_trade]</code></td><td><code>fast_path_enabled</code></td><td><code>*bool</code></td><td>FastPathEnabled allows manual proposal preview/submit to use the immediate revalidation path; default true so paper protection stops remain usable.</td></tr>
 <tr><td><code>[auto_trade]</code></td><td><code>hot_reload</code></td><td><code>*bool</code></td><td>HotReload controls whether policy changes are reloaded while the daemon runs; default true.</td></tr>
 <tr><td><code>[auto_trade]</code></td><td><code>policy_file</code></td><td><code>string</code></td><td>PolicyFile points to the local protection-policy TOML; default ~/.config/ibkr/policies/protection-policy.toml.</td></tr>
@@ -186,14 +184,10 @@
 <tr><td><code>[opportunities]</code></td><td><code>refresh_cadence</code></td><td><code>duration</code></td><td>RefreshCadence controls how often the daemon refreshes opportunities; default 2m.</td></tr>
 <tr><td><code>[opportunities]</code></td><td><code>reload_interval</code></td><td><code>duration</code></td><td>ReloadInterval controls how often the daemon checks the opportunity policy file for changes; default 30s.</td></tr>
 <tr><td><code>[spx]</code></td><td><code>members_auto_refresh</code></td><td><code>*bool</code></td><td>MembersAutoRefresh controls whether the daemon refreshes the S&amp;P 500 constituent list from Wikipedia daily at 02:30 ET (default true; set false to pin the embedded baseline) — overridden symmetrically by the <code>IBKR_SPX_MEMBERS_AUTO_REFRESH</code> env var (<code>1</code> force-on, <code>0</code> force-off).</td></tr>
-<tr><td><code>[trading]</code></td><td><code>allow_option_market_orders</code></td><td><code>bool</code></td><td>AllowOptionMarketOrders permits option market orders when true.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>allow_option_sell_to_open</code></td><td><code>bool</code></td><td>AllowOptionSellToOpen permits option sell-to-open previews when true.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>allow_stock_short</code></td><td><code>bool</code></td><td>AllowStockShort permits stock short/opening flip previews when true.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>max_notional</code></td><td><code>float64</code></td><td>MaxNotional caps risk-increasing (opening/adding/flipping) equity/ETF order notional before broker WhatIf; reduce-only orders are exempt, bounded by the position itself; default 10000 in account currency.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>max_option_contracts</code></td><td><code>int</code></td><td>MaxOptionContracts caps risk-increasing single-leg option quantity; reduce-only orders are exempt, bounded by the position itself; default 5.</td></tr>
-<tr><td><code>[trading]</code></td><td><code>mcp_enabled</code></td><td><code>bool</code></td><td>MCPEnabled controls whether MCP write tools may progress beyond preview/status.</td></tr>
-<tr><td><code>[trading]</code></td><td><code>mcp_mode</code></td><td><code>string</code></td><td>MCPMode selects MCP scope: &#34;preview&#34; (default), &#34;paper-write&#34;, or &#34;live-write&#34;.</td></tr>
-<tr><td><code>[trading]</code></td><td><code>mcp_nonce_ttl</code></td><td><code>duration</code></td><td>MCPNonceTTL controls how long CLI-minted human nonces remain valid.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>mode</code></td><td><code>string</code></td><td>Mode selects the local order-entry state: &#34;disabled&#34; (default), &#34;paper&#34;, or &#34;live&#34;.</td></tr>
 <tr><td><code>[trading]</code></td><td><code>paper_smoke_max_age</code></td><td><code>duration</code></td><td>PaperSmokeMaxAge is how long a paper trading smoke remains acceptable for live enablement.</td></tr>
 </tbody>

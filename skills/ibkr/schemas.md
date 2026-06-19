@@ -1803,7 +1803,7 @@ reject writes after every local gate passes. The MCP twin is
   "account_origin": "pinned",
   "client_id": 15,
   "client_id_origin": "pinned",
-  "mcp_trading": "preview-only",
+  "mcp_trading": "disabled",
   "can_preview": true,
   "can_write": true,
   "open_orders": 2,
@@ -1825,8 +1825,8 @@ Field meanings:
   `account_origin` is `pinned` or `auto`. `client_id` /
   `client_id_origin` (`pinned` or `default`) — the API client ID the
   daemon connects with.
-- `mcp_trading` — how much of the order surface MCP exposes:
-  `disabled` | `preview-only` | `paper-write` | `live-write`.
+- `mcp_trading` — currently `disabled`; MCP broker-write controls are
+  not exposed.
 - `can_preview` — order entry is enabled and no blockers are active;
   gates `order preview` / `ibkr_order_preview`.
 - `can_write` — true only when the full broker-write authorization
@@ -2155,8 +2155,6 @@ returns snapshots; status is CLI-only).
   "as_of": "2026-06-11T15:10:00Z",
   "trading": { "...": "TradingStatus — same shape as trading-status" },
   "proposals_enabled": true,
-  "enabled": false,
-  "auto_submit": false,
   "fast_path_enabled": true,
   "hot_reload": true,
   "reload_interval": "30s",
@@ -2185,9 +2183,6 @@ Field meanings:
 - `proposals_enabled` — the manual proposal-generation gate
   (`[auto_trade].proposals_enabled`). When false, a `proposals_disabled`
   blocker is added.
-- `enabled` / `auto_submit` — future autonomous gates. Both must remain
-  false in MVP; setting either adds an `autonomous_not_available` /
-  `auto_submit_not_available` blocker rather than activating anything.
 - `fast_path_enabled` — one-confirm preview+submit support for
   snapshot-backed proposals (currently trailing stops).
 - `hot_reload`, `reload_interval`, `proposal_cadence` — policy-file hot
@@ -2377,8 +2372,8 @@ read-only cells or how to change them.
                  "reason": "observed from daemon gateway discovery/config"},
     "client_id": {"value": 15, "access": "read", "source": "config",
                   "reason": "set [gateway].client_id in config.toml"},
-    "mcp_trading": {"value": "preview-only", "access": "read", "source": "config",
-                    "reason": "set [trading].mcp_* in config.toml"},
+    "mcp_trading": {"value": "disabled", "access": "read", "source": "build",
+                    "reason": "MCP broker-write controls are not exposed"},
     "live_override": {"value": "blocked", "access": "read", "source": "config",
                       "reason": "computed from [trading].mode and active blockers; \"ready\" only on an unblocked live route"},
     "build_writes_available": {"value": true, "access": "read", "source": "build",
@@ -2387,17 +2382,12 @@ read-only cells or how to change them.
       "max_notional": {"value": 25000, "access": "write", "source": "runtime"},
       "max_option_contracts": {"value": 10, "access": "write", "source": "config"},
       "allow_stock_short": {"value": false, "access": "write", "source": "config"},
-      "allow_option_sell_to_open": {"value": false, "access": "write", "source": "config"},
-      "allow_option_market_orders": {"value": false, "access": "write", "source": "config"}
+      "allow_option_sell_to_open": {"value": false, "access": "write", "source": "config"}
     }
   },
   "auto_trade": {
     "proposals_enabled": {"value": true, "access": "read", "source": "config",
                           "reason": "set [auto_trade].proposals_enabled in config.toml"},
-    "enabled": {"value": false, "access": "read", "source": "config",
-                "reason": "future autonomous gate; set [auto_trade].enabled in config.toml"},
-    "auto_submit": {"value": false, "access": "read", "source": "config",
-                    "reason": "future autonomous submit gate; set [auto_trade].auto_submit in config.toml"},
     "fast_path_enabled": {"value": true, "access": "read", "source": "config",
                           "reason": "set [auto_trade].fast_path_enabled in config.toml"},
     "policy_file": {"value": "protection-policy.toml", "access": "read", "source": "config",
@@ -2441,21 +2431,21 @@ Field meanings:
   broker write (place/modify/purge/restore/proposal submits) while
   cancels stay allowed; it engages even when order entry is otherwise
   misconfigured. Human-only on live routes.
-- `trading.mode`, `account`, `client_id`, `mcp_trading`,
-  `live_override` — read-only mirrors of config (the same values
-  trading-status reports); `trading.endpoint` is `observed` from
-  discovery/config. `build_writes_available` mirrors the build
-  capability.
-- `trading.limits.*` — the five runtime safety limits. `access` is
+- `trading.mode`, `account`, `client_id`, `live_override` — read-only
+  mirrors of config (the same values trading-status reports);
+  `trading.mcp_trading` and `build_writes_available` mirror build
+  capability; `trading.endpoint` is `observed` from discovery/config.
+- `trading.limits.*` — the four runtime safety limits. `access` is
   `write` only on a trading-capable build with `[trading].mode` set to
   paper or live; otherwise `read` with the reason in each cell. `source`
   is `runtime` when a runtime override is in effect, else `config`
   (config defaults). On a live route, agent-origin sessions cannot
   change them at all — a human must edit limits from an interactive
   terminal.
-- `auto_trade.*` — read-only config mirrors of the proposal-engine gates
-  (the same values [proposals-status](#proposals-status) reports as
-  plain booleans/strings).
+- `auto_trade.*` — read-only config mirrors of the manual
+  proposal-engine gates (the same values
+  [proposals-status](#proposals-status) reports as plain
+  booleans/strings).
 - `market_data.quality` — observed feed quality, never stored
   entitlements: `status` is `ok` | `delayed` | `degraded` (some decision
   surface reported degraded data quality) | `unknown` (nothing observed

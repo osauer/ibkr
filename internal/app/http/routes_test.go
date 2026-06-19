@@ -157,6 +157,51 @@ func TestSettingsGetPatchRequiresAuthAndRejectsReadOnly(t *testing.T) {
 	}
 }
 
+func TestSettingsRoutesKeepDaemonMarketDataQualityAuthority(t *testing.T) {
+	t.Parallel()
+	liveSvc := live.New(routeSettingsStatusClient{status: "live-snapshot"}, time.Minute, time.Minute)
+	liveSvc.PollOnce(t.Context())
+	h := &handler{deps: Dependencies{
+		Daemon: routeSettingsStatusClient{status: "daemon-authority"},
+		Live:   liveSvc,
+	}}
+	assertDaemonStatus := func(t *testing.T, label string, settings *rpc.PlatformSettings) {
+		t.Helper()
+		if settings == nil {
+			t.Fatalf("%s settings missing", label)
+		}
+		if got := settings.MarketData.Quality.Status; got != "daemon-authority" {
+			t.Fatalf("%s market-data quality status = %q, want daemon-authority", label, got)
+		}
+	}
+
+	assertDaemonStatus(t, "snapshot", h.settingsSnapshot(t.Context()))
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	getRes := httptest.NewRecorder()
+	h.handleGetSettings(getRes, getReq)
+	if getRes.Code != http.StatusOK {
+		t.Fatalf("settings get status=%d, want 200; body=%s", getRes.Code, getRes.Body.String())
+	}
+	var got rpc.PlatformSettings
+	if err := json.NewDecoder(getRes.Body).Decode(&got); err != nil {
+		t.Fatalf("decode get settings: %v", err)
+	}
+	assertDaemonStatus(t, "get", &got)
+
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader([]byte(`{}`)))
+	patchRes := httptest.NewRecorder()
+	h.handlePatchSettings(patchRes, patchReq)
+	if patchRes.Code != http.StatusOK {
+		t.Fatalf("settings patch status=%d, want 200; body=%s", patchRes.Code, patchRes.Body.String())
+	}
+	got = rpc.PlatformSettings{}
+	if err := json.NewDecoder(patchRes.Body).Decode(&got); err != nil {
+		t.Fatalf("decode patch settings: %v", err)
+	}
+	assertDaemonStatus(t, "patch", &got)
+}
+
 func TestClearAlertHistory(t *testing.T) {
 	t.Parallel()
 	handler := newTestHandler(t).Handler()
@@ -364,6 +409,50 @@ func TestOrderWriteHTTPAdapters(t *testing.T) {
 	handler.ServeHTTP(modifyRes, modifyReq)
 	if modifyRes.Code != http.StatusOK {
 		t.Fatalf("modify status=%d, want 200; body=%s", modifyRes.Code, modifyRes.Body.String())
+	}
+}
+
+func TestOrderPreviewModifyUsesOrderViewContract(t *testing.T) {
+	t.Parallel()
+	client := &routeModifyPreviewContractClient{order: routeModifyPreviewOrderView()}
+	handler := newTestHandlerWithClient(t, client).Handler()
+	cookie := routeSessionCookie(t, handler)
+
+	body := bytes.NewReader([]byte(`{
+		"action":"SELL",
+		"contract":{
+			"symbol":"MSFT",
+			"sec_type":"STK",
+			"exchange":"NYSE",
+			"primary_exchange":"NASDAQ",
+			"currency":"USD",
+			"local_symbol":"MSFT",
+			"trading_class":"NMS"
+		},
+		"quantity":1,
+		"limit_price":151.25,
+		"tif":"DAY"
+	}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/orders/ord-1/preview-modify", body)
+	req.AddCookie(cookie)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("preview-modify status=%d, want 200; body=%s", res.Code, res.Body.String())
+	}
+	want := rpc.ContractParams{
+		ConID:        29622935,
+		Symbol:       "SAP",
+		SecType:      "STK",
+		Exchange:     "SMART",
+		PrimaryExch:  "IBIS",
+		Currency:     "EUR",
+		LocalSymbol:  "SAP",
+		TradingClass: "SAP",
+		Multiplier:   1,
+	}
+	if got := client.previewParams.Contract; got != want {
+		t.Fatalf("preview modify contract = %#v, want current order contract %#v", got, want)
 	}
 }
 
@@ -789,6 +878,25 @@ func (routeFakeClient) Settings(context.Context) (*rpc.PlatformSettings, error) 
 	}, nil
 }
 
+type routeSettingsStatusClient struct {
+	routeFakeClient
+	status string
+}
+
+func (c routeSettingsStatusClient) Settings(ctx context.Context) (*rpc.PlatformSettings, error) {
+	settings, err := c.routeFakeClient.Settings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	settings.MarketData.Quality.Status = c.status
+	settings.MarketData.Quality.Summary = c.status
+	return settings, nil
+}
+
+func (c routeSettingsStatusClient) UpdateSettings(ctx context.Context, _ json.RawMessage) (*rpc.PlatformSettings, error) {
+	return c.Settings(ctx)
+}
+
 func (routeFakeClient) UpdateSettings(_ context.Context, patch json.RawMessage) (*rpc.PlatformSettings, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(patch, &obj); err != nil {
@@ -916,6 +1024,21 @@ type routeWriteFakeClient struct {
 // blocker on its cancel path).
 type routeFrozenFakeClient struct {
 	routeWriteFakeClient
+}
+
+type routeModifyPreviewContractClient struct {
+	routeWriteFakeClient
+	order         rpc.OrderView
+	previewParams rpc.OrderPreviewParams
+}
+
+func (c *routeModifyPreviewContractClient) OrderStatus(context.Context, rpc.OrderStatusParams) (*rpc.OrderStatusResult, error) {
+	return &rpc.OrderStatusResult{Found: true, Order: c.order, AsOf: time.Now().UTC()}, nil
+}
+
+func (c *routeModifyPreviewContractClient) OrderPreview(ctx context.Context, params rpc.OrderPreviewParams) (*rpc.OrderPreviewResult, error) {
+	c.previewParams = params
+	return c.routeWriteFakeClient.OrderPreview(ctx, params)
 }
 
 func (routeFrozenFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
@@ -1064,6 +1187,19 @@ func routeOpenOrderView() rpc.OrderView {
 		Open:            true,
 		UpdatedAt:       time.Now().UTC(),
 	}
+}
+
+func routeModifyPreviewOrderView() rpc.OrderView {
+	order := routeOpenOrderView()
+	order.Symbol = "SAP"
+	order.ConID = 29622935
+	order.Exchange = "SMART"
+	order.PrimaryExch = "IBIS"
+	order.Currency = "EUR"
+	order.LocalSymbol = "SAP"
+	order.TradingClass = "SAP"
+	order.Multiplier = 1
+	return order
 }
 
 func newRouteTestKey(t *testing.T) *ecdsa.PrivateKey {

@@ -182,7 +182,7 @@ $ ibkr size --symbol AAPL --entry 207.50 --stop 202.50 --risk-pct 1
 
 ### Mobile app
 
-`ibkr app` serves a paired PWA for iPhone-sized checks when you are away from the desk: daemon status, account and positions, market context, canary state, alerts, and settings. The app has Monitor, Positions (coming later), Alerts, and Settings tabs; Settings can toggle purge/restore write actions and shows trading/build/market-data state. Start it on the Mac running TWS or IB Gateway, then run `ibkr app pair` and scan the QR code.
+`ibkr app` serves a paired PWA for iPhone-sized checks when you are away from the desk: daemon status, account and positions, market context, canary state, alerts, and settings. The app has Monitor, Alerts, and Settings tabs; Settings can toggle purge/restore write actions and shows trading/build/market-data state. Start it on the Mac running TWS or IB Gateway, then run `ibkr app pair` and scan the QR code.
 
 For access away from the LAN without router setup, run `ibkr app --remote` to use the Cloudflare Worker relay at `remote.osauer.dev`, then run `ibkr app pair` as usual.
 
@@ -232,7 +232,7 @@ For normal read-only use, no config file is required. The daemon TCP-probes `400
 
 `config.toml` means "active local overrides." Create it only when you want to pin something. Anything present in this file is binding; anything omitted stays auto-detected. Default path: `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`.
 
-[Runtime platform preferences](docs/design/platform-settings.md) are daemon-owned and live at `$XDG_STATE_HOME/ibkr/platform-settings.json`, falling back to `~/.local/state/ibkr/platform-settings.json`. This file stores ibkr-owned preferences only, such as `features.purge_restore.enabled`; gateway pins, trading mode, account, client ID, and MCP trading mode stay in TOML/build-controlled surfaces.
+[Runtime platform preferences](docs/design/platform-settings.md) are daemon-owned and live at `$XDG_STATE_HOME/ibkr/platform-settings.json`, falling back to `~/.local/state/ibkr/platform-settings.json`. This file stores ibkr-owned preferences only, such as `features.purge_restore.enabled`; gateway pins, trading mode, account, and client ID stay in TOML-controlled surfaces, while MCP broker writes are build-owned and disabled.
 
 For example, this read-only config pins TWS live and leaves everything else automatic:
 

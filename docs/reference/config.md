@@ -8,8 +8,6 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 
 | Section | Field | Type | Description |
 |---------|-------|------|-------------|
-| `[auto_trade]` | `auto_submit` | `bool` | AutoSubmit allows the experimental supervisor to submit eligible proposals automatically; default false and ignored unless trading writes are explicitly enabled. |
-| `[auto_trade]` | `enabled` | `bool` | Enabled controls the experimental auto-trade supervisor; default false, and stable builds remain preview/read-only unless trading config and build capability allow more. |
 | `[auto_trade]` | `fast_path_enabled` | `*bool` | FastPathEnabled allows manual proposal preview/submit to use the immediate revalidation path; default true so paper protection stops remain usable. |
 | `[auto_trade]` | `hot_reload` | `*bool` | HotReload controls whether policy changes are reloaded while the daemon runs; default true. |
 | `[auto_trade]` | `policy_file` | `string` | PolicyFile points to the local protection-policy TOML; default ~/.config/ibkr/policies/protection-policy.toml. |
@@ -30,14 +28,10 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 | `[opportunities]` | `refresh_cadence` | `duration` | RefreshCadence controls how often the daemon refreshes opportunities; default 2m. |
 | `[opportunities]` | `reload_interval` | `duration` | ReloadInterval controls how often the daemon checks the opportunity policy file for changes; default 30s. |
 | `[spx]` | `members_auto_refresh` | `*bool` | MembersAutoRefresh controls whether the daemon refreshes the S&P 500 constituent list from Wikipedia daily at 02:30 ET (default true; set false to pin the embedded baseline) — overridden symmetrically by the `IBKR_SPX_MEMBERS_AUTO_REFRESH` env var (`1` force-on, `0` force-off). |
-| `[trading]` | `allow_option_market_orders` | `bool` | AllowOptionMarketOrders permits option market orders when true. |
 | `[trading]` | `allow_option_sell_to_open` | `bool` | AllowOptionSellToOpen permits option sell-to-open previews when true. |
 | `[trading]` | `allow_stock_short` | `bool` | AllowStockShort permits stock short/opening flip previews when true. |
 | `[trading]` | `max_notional` | `float64` | MaxNotional caps risk-increasing (opening/adding/flipping) equity/ETF order notional before broker WhatIf; reduce-only orders are exempt, bounded by the position itself; default 10000 in account currency. |
 | `[trading]` | `max_option_contracts` | `int` | MaxOptionContracts caps risk-increasing single-leg option quantity; reduce-only orders are exempt, bounded by the position itself; default 5. |
-| `[trading]` | `mcp_enabled` | `bool` | MCPEnabled controls whether MCP write tools may progress beyond preview/status. |
-| `[trading]` | `mcp_mode` | `string` | MCPMode selects MCP scope: "preview" (default), "paper-write", or "live-write". |
-| `[trading]` | `mcp_nonce_ttl` | `duration` | MCPNonceTTL controls how long CLI-minted human nonces remain valid. |
 | `[trading]` | `mode` | `string` | Mode selects the local order-entry state: "disabled" (default), "paper", or "live". |
 | `[trading]` | `paper_smoke_max_age` | `duration` | PaperSmokeMaxAge is how long a paper trading smoke remains acceptable for live enablement. |
 

@@ -101,11 +101,28 @@ func TestAppJSTradingStateUsesSnapshotCanWrite(t *testing.T) {
 		"canWriteUnderlyings",
 		"underlyingWriteReason",
 		"orderModifyGate",
-		"orderCancelGate",
 	} {
 		body := jsFunctionBlock(t, js, name)
 		if !strings.Contains(body, "can_write") {
 			t.Fatalf("%s must use can_write", name)
+		}
+	}
+	cancelGate := jsFunctionBlock(t, js, "orderCancelGate")
+	if strings.Contains(cancelGate, "can_write") {
+		t.Fatalf("orderCancelGate must not gate directly on can_write; tradingCancelAllowed mirrors cancel policy")
+	}
+	if !strings.Contains(cancelGate, "tradingCancelAllowed(trading)") {
+		t.Fatalf("orderCancelGate must use tradingCancelAllowed for freeze-aware cancel policy")
+	}
+	for _, want := range []string{"trading.mode", "trading.account"} {
+		if !strings.Contains(cancelGate, want) {
+			t.Fatalf("orderCancelGate must require %s for broker confirmation", want)
+		}
+	}
+	cancelAllowed := jsFunctionBlock(t, js, "tradingCancelAllowed")
+	for _, want := range []string{"trading.can_write", "write_blockers", "trading_frozen"} {
+		if !strings.Contains(cancelAllowed, want) {
+			t.Fatalf("tradingCancelAllowed must include %s in cancel readiness policy", want)
 		}
 	}
 	for _, old := range []string{"local_gate", "can_transmit", "can_modify", "can_cancel", "preview_required"} {
@@ -404,7 +421,6 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		`id="appScroll"`,
 		`id="bottomTabs"`,
 		`data-tab="monitor"`,
-		`data-tab="positions" aria-disabled="true" disabled`,
 		`data-tab="alerts"`,
 		`data-tab="settings"`,
 		`id="accountPanel"`,

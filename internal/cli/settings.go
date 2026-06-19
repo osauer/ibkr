@@ -168,8 +168,6 @@ func settingsPatchFromAssignment(raw string) (json.RawMessage, error) {
 		return marshalPatch([]string{"trading", "limits", "allow_stock_short"}, value)
 	case "trading.limits.allow_option_sell_to_open":
 		return marshalPatch([]string{"trading", "limits", "allow_option_sell_to_open"}, value)
-	case "trading.limits.allow_option_market_orders":
-		return marshalPatch([]string{"trading", "limits", "allow_option_market_orders"}, value)
 	case "regime.journal.enabled":
 		if value != nil {
 			if _, ok := value.(bool); !ok {

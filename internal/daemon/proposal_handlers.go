@@ -87,8 +87,6 @@ func (s *Server) autoTradeStatus() rpc.AutoTradeStatus {
 		AsOf:             now,
 		Trading:          trading,
 		ProposalsEnabled: cfg.ProposalsEnabledResolved(),
-		Enabled:          cfg.Enabled,
-		AutoSubmit:       cfg.AutoSubmit,
 		FastPathEnabled:  cfg.FastPathEnabledResolved(),
 		HotReload:        cfg.HotReloadEnabled(),
 		ReloadInterval:   cfg.ReloadIntervalDuration().String(),
@@ -97,12 +95,6 @@ func (s *Server) autoTradeStatus() rpc.AutoTradeStatus {
 	}
 	if !out.ProposalsEnabled {
 		out.Blockers = append(out.Blockers, rpc.TradingBlocker{Code: "proposals_disabled", Message: "manual proposals are disabled by config"})
-	}
-	if out.Enabled {
-		out.Blockers = append(out.Blockers, rpc.TradingBlocker{Code: "autonomous_not_available", Message: "autonomous auto-trade is not implemented in MVP"})
-	}
-	if out.AutoSubmit {
-		out.Blockers = append(out.Blockers, rpc.TradingBlocker{Code: "auto_submit_not_available", Message: "auto_submit must remain false in MVP"})
 	}
 	if policy.Status == rpc.ProtectionPolicyStatusDrift || policy.Status == rpc.ProtectionPolicyStatusError {
 		out.Blockers = append(out.Blockers, policy.Blockers...)

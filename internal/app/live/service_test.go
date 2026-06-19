@@ -70,6 +70,9 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	if snap.Settings == nil || !snap.Settings.Features.PurgeRestore.Enabled.Value {
 		t.Fatalf("settings missing from snapshot: %#v", snap.Settings)
 	}
+	if got := snap.Settings.MarketData.Quality.Status; got != "unknown" {
+		t.Fatalf("settings market-data quality status = %q, want daemon-owned unknown", got)
+	}
 
 	seen := map[string]bool{}
 	for range 14 {

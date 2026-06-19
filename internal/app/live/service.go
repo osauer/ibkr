@@ -309,7 +309,6 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		errors = append(errors, sourceErr("settings", err, now))
 		snap.Sources["settings"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
 	} else {
-		settings.MarketData.Quality = marketDataQualityFromSnapshot(snap, now)
 		snap.Settings = settings
 		snap.Sources["settings"] = SourceMeta{UpdatedAt: now}
 		if s.changed("settings", settings) {
@@ -938,48 +937,6 @@ func clonePlatformSettings(in *rpc.PlatformSettings) *rpc.PlatformSettings {
 	out.MarketData.Quality.QuoteCounts = maps.Clone(in.MarketData.Quality.QuoteCounts)
 	out.MarketData.Quality.DataQuality = append([]rpc.DataQualityHealth(nil), in.MarketData.Quality.DataQuality...)
 	return &out
-}
-
-func marketDataQualityFromSnapshot(snap Snapshot, now time.Time) rpc.PlatformMarketDataQuality {
-	out := rpc.PlatformMarketDataQuality{
-		Status:     "unknown",
-		Summary:    "no observed market-data snapshot yet",
-		Access:     rpc.SettingsAccessRead,
-		Source:     rpc.SettingsSourceObserved,
-		Reason:     "observed from live quote/status surfaces; entitlements are never stored",
-		ObservedAt: now,
-	}
-	if snap.Status != nil {
-		out.DataQuality = append(out.DataQuality, snap.Status.DataQuality...)
-	}
-	counts := map[string]int{}
-	if snap.Quotes != nil {
-		for _, q := range snap.Quotes.Quotes {
-			key := strings.TrimSpace(q.DataType)
-			if key == "" {
-				key = rpc.MarketDataLive
-			}
-			counts[key]++
-		}
-	}
-	if len(counts) > 0 {
-		out.QuoteCounts = counts
-	}
-	switch {
-	case len(out.DataQuality) > 0:
-		out.Status = "degraded"
-		out.Summary = "observed decision surfaces report degraded data quality"
-	case len(counts) == 0:
-		out.Status = "unknown"
-		out.Summary = "no quote feed state observed yet"
-	case counts[rpc.MarketDataDelayed] > 0 || counts[rpc.MarketDataDelayedFrozen] > 0:
-		out.Status = "delayed"
-		out.Summary = "one or more observed quotes are delayed"
-	default:
-		out.Status = "ok"
-		out.Summary = "observed quotes look live or usable"
-	}
-	return out
 }
 
 func cloneMarketQuotes(in *MarketQuotes) *MarketQuotes {
