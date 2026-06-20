@@ -1787,10 +1787,10 @@ Field meanings:
 
 ## trading-status
 
-`ibkr trading status --json` — local order-entry readiness. This surface is
-deliberately separate from broker permission: TWS / IB Gateway can still
-reject writes after every local gate passes. The MCP twin is
-`ibkr_trading_status`.
+`ibkr trading status --json` — local order-entry readiness. This surface
+includes connected-gateway readiness and is deliberately separate from broker
+permission: TWS / IB Gateway can still reject writes after every local gate
+passes. The MCP twin is `ibkr_trading_status`.
 
 ```json
 {
@@ -1827,11 +1827,11 @@ Field meanings:
   daemon connects with.
 - `mcp_trading` — currently `disabled`; MCP broker-write controls are
   not exposed.
-- `can_preview` — order entry is enabled and no blockers are active;
-  gates `order preview` / `ibkr_order_preview`.
+- `can_preview` — order entry is enabled, the gateway is connected, and no
+  blockers are active; gates `order preview` / `ibkr_order_preview`.
 - `can_write` — true only when the full broker-write authorization
-  passes (trading-capable build, writable order journal, not frozen, no
-  blockers). When `can_write` is false while `blocked` is false,
+  passes (connected gateway, trading-capable build, writable order journal,
+  not frozen, no blockers). When `can_write` is false while `blocked` is false,
   `write_blockers[]` carries the write-only reasons — e.g.
   `order_writes_unavailable` (read-only build) or `trading_frozen` (the
   runtime brake; cancels stay allowed while frozen).
@@ -1843,7 +1843,7 @@ Field meanings:
   `gateway_account_unpinned`, `gateway_account_not_concrete` (the
   aggregate account "All" is never writable), `gateway_account_mismatch`,
   `gateway_client_id_unpinned`, `gateway_client_id_mismatch`,
-  `paper_endpoint_unconfirmed`, `live_endpoint_unconfirmed`,
+  `gateway_unavailable`, `paper_endpoint_unconfirmed`, `live_endpoint_unconfirmed`,
   `order_journal_unavailable`, and `invalid_mode`. Always render
   `action` — under stress it is the difference between a dead end and
   the next command to run.
@@ -1858,9 +1858,8 @@ Field meanings:
   release gate, not a runtime live blocker.
 - `live_override` — `blocked` | `ready`. `ready` only on live mode with
   zero blockers (the simplified pins+mode gate; there is no ack or
-  typed-confirmation field). Independently of this, live routes refuse
-  agent-origin writes outright at place/modify time; only cancel is
-  exempt.
+  typed-confirmation field). Agent-origin paper and live writes use the
+  same broker-write gate; origin remains journaled audit metadata.
 
 ## orders-open
 
@@ -1904,7 +1903,16 @@ state; the daemon never requests a broker open-order snapshot.
       "cancel_eligible": true
     }
   ],
-  "as_of": "2026-06-11T15:04:02Z"
+  "as_of": "2026-06-11T15:04:02Z",
+  "account": "DU1234567",
+  "mode": "paper",
+  "last_local_event_at": "2026-06-11T15:02:11Z",
+  "not_broker_statement": "local order journal only; not an IBKR Activity Statement, trade confirmation, execution report, or historical broker audit",
+  "limitations": [
+    "Reduced from the daemon's local append-only order journal for the current broker account/mode only.",
+    "May miss manual orders, other-client orders, broker activity while the daemon was offline, and rows outside the selected account/mode scope.",
+    "Broker callbacks remain authoritative when journaled; absence of a local event is not proof that no broker activity occurred."
+  ]
 }
 ```
 
@@ -1915,6 +1923,10 @@ Field meanings:
   account/mode**: paper/test journal rows are intentionally not returned
   while connected live and vice versa. This is not a historical audit
   across old accounts or modes.
+- `account`, `mode`, `last_local_event_at`, `not_broker_statement`, and
+  `limitations[]` disclose the local-journal scope and freshness. Treat
+  these rows as daemon evidence, not a broker statement or complete
+  historical audit.
 - Identity trio — `order_ref` (local ref), `reserved_order_id` (IBKR API
   order ID, integer), `perm_id` (IBKR permanent ID, integer). Any of the
   three is a valid `ibkr order status` lookup id. `preview_token_id` is
@@ -2059,7 +2071,16 @@ journal-backed order plus its full audit trail. The MCP twin is
       "send_state": "broker_acknowledged"
     }
   ],
-  "as_of": "2026-06-11T15:04:02Z"
+  "as_of": "2026-06-11T15:04:02Z",
+  "account": "DU1234567",
+  "mode": "paper",
+  "last_local_event_at": "2026-06-11T15:02:11Z",
+  "not_broker_statement": "local order journal only; not an IBKR Activity Statement, trade confirmation, execution report, or historical broker audit",
+  "limitations": [
+    "Reduced from the daemon's local append-only order journal for the current broker account/mode only.",
+    "May miss manual orders, other-client orders, broker activity while the daemon was offline, and rows outside the selected account/mode scope.",
+    "Broker callbacks remain authoritative when journaled; absence of a local event is not proof that no broker activity occurred."
+  ]
 }
 ```
 
@@ -2069,8 +2090,11 @@ Field meanings:
   ID / permanent ID. Matching honors the current broker account/mode
   scope, so `found: false` can mean "belongs to a different account or
   paper/live session", not only "unknown id".
-- `found: false` → `order` and `events` are omitted; only `as_of`
-  remains.
+- `found: false` → `order` and `events` are omitted; `as_of`, scope,
+  source, and limitations remain so callers can distinguish "not locally
+  known in this account/mode" from broker-grade absence.
+- `account`, `mode`, `last_local_event_at`, `not_broker_statement`, and
+  `limitations[]` have the same meaning as [orders-open](#orders-open).
 - `order` — the same `OrderView` shape documented under
   [orders-open](#orders-open), including terminal rows that `orders
   open` no longer lists.
@@ -2217,8 +2241,9 @@ Field meanings:
 - `warnings[]` — structured `{code, scope, severity, message, impact,
   action}` rows, same shape as other surfaces' `warning_details`.
 
-Live routes refuse agent-origin place/modify regardless of token
-validity; only cancel is exempt from the origin block.
+Place/modify/cancel require a ready broker-write route and the relevant
+preview token or open-order eligibility; agent-origin and human-origin
+requests share the same daemon gate and journal their origin.
 
 ## proposals-status
 
@@ -2517,9 +2542,8 @@ Field meanings:
   `write` only on a trading-capable build with `[trading].mode` set to
   paper or live; otherwise `read` with the reason in each cell. `source`
   is `runtime` when a runtime override is in effect, else `config`
-  (config defaults). On a live route, agent-origin sessions cannot
-  change them at all — a human must edit limits from an interactive
-  terminal.
+  (config defaults). On a live route, agent-origin sessions cannot change
+  them at all — a human must edit limits from an interactive terminal.
 - `auto_trade.*` — read-only config mirrors of the manual
   proposal-engine gates (the same values
   [proposals-status](#proposals-status) reports as plain

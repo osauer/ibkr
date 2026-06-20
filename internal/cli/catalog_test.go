@@ -44,7 +44,7 @@ func TestCatalogValueFlagsDriveHoisting(t *testing.T) {
 		"date", "next", "input", "min-price", "min-volume", "min-dollar-volume",
 		"min-dte", "max-dte", "target-dte", "class",
 		"account", "preview-token", "strategy", "tif", "replace-order",
-		"order-type", "trail-percent", "trail-amount", "initial-stop", "limit-offset",
+		"order-type", "trail-percent", "trail-amount", "initial-stop", "limit-offset", "trigger-method",
 		"addr", "public-url", "state-dir", "config", "socket",
 		"profile", "view", "wait",
 	} {
@@ -56,5 +56,27 @@ func TestCatalogValueFlagsDriveHoisting(t *testing.T) {
 		if isValueFlag(name) {
 			t.Fatalf("isValueFlag(%q)=true, want false", name)
 		}
+	}
+}
+
+func TestOrderCatalogFlagsMatchHandlers(t *testing.T) {
+	t.Parallel()
+	specs := map[string]CommandSpec{}
+	for _, spec := range Catalog() {
+		specs[spec.Name] = spec
+	}
+	hasFlag := func(command, flag string) bool {
+		for _, f := range specs[command].Flags {
+			if f.Name == flag {
+				return true
+			}
+		}
+		return false
+	}
+	if hasFlag("orders", "account") {
+		t.Fatal("orders catalog advertises --account, but orders handlers do not parse it")
+	}
+	if !hasFlag("order", "trigger-method") {
+		t.Fatal("order catalog missing --trigger-method")
 	}
 }

@@ -148,6 +148,46 @@ func TestRenderOrdersHistoryTextShowsLocalLimitations(t *testing.T) {
 	}
 }
 
+func TestRenderOrdersOpenTextShowsScopeAndLimitations(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	renderOrdersOpenText(env, &rpc.OrdersOpenResult{
+		Orders:             []rpc.OrderView{},
+		Account:            "U1234567",
+		Mode:               rpc.AccountModeLive,
+		LastLocalEventAt:   time.Date(2026, 6, 18, 13, 0, 0, 0, time.UTC),
+		NotBrokerStatement: "local order journal only; not an IBKR Activity Statement",
+		Limitations:        []string{"local journal only"},
+	})
+	out := stdout.String()
+	for _, want := range []string{"Scope", "U1234567 live", "Latest local event", "Source", "not an IBKR Activity Statement", "Limitations:", "local journal only"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("open text missing %q: %s", want, out)
+		}
+	}
+}
+
+func TestRenderOrderStatusTextNotFoundShowsScopeAndLimitations(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	renderOrderStatusText(env, &rpc.OrderStatusResult{
+		Found:              false,
+		Account:            "DU1234567",
+		Mode:               rpc.AccountModePaper,
+		LastLocalEventAt:   time.Date(2026, 6, 18, 13, 0, 0, 0, time.UTC),
+		NotBrokerStatement: "local order journal only; not an IBKR Activity Statement",
+		Limitations:        []string{"local journal only"},
+	}, "missing-order")
+	out := stdout.String()
+	for _, want := range []string{"NOT FOUND", "DU1234567 paper", "Latest local event", "Source", "Limitations:", "No locally tracked order matched missing-order"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status text missing %q: %s", want, out)
+		}
+	}
+}
+
 type ordersHistoryCall struct {
 	method string
 	params rpc.OrdersHistoryParams

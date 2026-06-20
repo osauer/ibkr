@@ -2934,8 +2934,8 @@ const (
 	OrderTriggerMethodMidpoint     = 8
 
 	// Request origins for broker writes. Adapters stamp every write request;
-	// the daemon refuses agent-origin writes when the trading gate routes
-	// live. A missing or unknown origin is treated as OrderOriginAgent, so
+	// the daemon journals origin for audit and may apply origin-specific
+	// policy. A missing or unknown origin is treated as OrderOriginAgent, so
 	// new adapters must opt in to a human origin.
 	OrderOriginAgent        = "agent"
 	OrderOriginHumanTTY     = "human-tty"
@@ -3135,8 +3135,8 @@ type OrderPreviewResult struct {
 type OrderPlaceParams struct {
 	PreviewToken string `json:"preview_token"`
 	TimeoutMs    int    `json:"timeout_ms,omitempty"`
-	// Origin identifies who is asking (OrderOrigin*); live routes refuse
-	// agent origins.
+	// Origin identifies who is asking (OrderOrigin*) for audit and any
+	// origin-specific policy.
 	Origin string `json:"origin,omitempty"`
 }
 
@@ -3503,15 +3503,25 @@ type OrderView struct {
 }
 
 type OrdersOpenResult struct {
-	Orders []OrderView `json:"orders"`
-	AsOf   time.Time   `json:"as_of"`
+	Orders             []OrderView `json:"orders"`
+	AsOf               time.Time   `json:"as_of"`
+	Account            string      `json:"account,omitempty"`
+	Mode               string      `json:"mode,omitempty"`
+	LastLocalEventAt   time.Time   `json:"last_local_event_at,omitzero"`
+	NotBrokerStatement string      `json:"not_broker_statement"`
+	Limitations        []string    `json:"limitations"`
 }
 
 type OrderStatusResult struct {
-	Found  bool         `json:"found"`
-	Order  OrderView    `json:"order,omitzero"`
-	Events []OrderEvent `json:"events,omitempty"`
-	AsOf   time.Time    `json:"as_of"`
+	Found              bool         `json:"found"`
+	Order              OrderView    `json:"order,omitzero"`
+	Events             []OrderEvent `json:"events,omitempty"`
+	AsOf               time.Time    `json:"as_of"`
+	Account            string       `json:"account,omitempty"`
+	Mode               string       `json:"mode,omitempty"`
+	LastLocalEventAt   time.Time    `json:"last_local_event_at,omitzero"`
+	NotBrokerStatement string       `json:"not_broker_statement"`
+	Limitations        []string     `json:"limitations"`
 }
 
 type OrdersHistoryRow struct {

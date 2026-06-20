@@ -195,9 +195,9 @@ func init() {
 		{"scan", "Run a scanner preset or an ad-hoc scan; dump the gateway catalog with `scan params`", "ibkr scan <preset> | ibkr scan list | ibkr scan params [--instrument STK] [--raw] | ibkr scan --type SCANCODE --exchange LOCATIONCODE [--instrument STK|STOCK.EU] [--limit N] [--min-price 5] [--require-live] [--json]", runScan},
 		{"size", "Fixed-fractional position sizing pegged to live NLV", "ibkr size --symbol SYM --entry F --stop F [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]", runSize},
 		{"trading", "Local trading gate status and configuration", "ibkr trading status [--json] | ibkr trading paper-smoke [--timeout 30s] [--json]", runTrading},
-		{"settings", "Runtime platform preferences and observed read-only state", "ibkr settings show [--json] | ibkr settings set features.purge_restore.enabled=true|false|null | features.stock_protection.enabled=true|false|null | trading.freeze=true|false|null", runSettings},
+		{"settings", "Runtime platform preferences and observed read-only state", "ibkr settings show [--json] | ibkr settings set <supported-key>=true|false|null|number", runSettings},
 		{"orders", "Read current-context local order lifecycle state without transmitting orders", "ibkr orders open [--json] | ibkr orders history [--since YYYY-MM-DD|RFC3339] [--until YYYY-MM-DD|RFC3339] [--limit N] [--event-limit N] [--json]", runOrders},
-		{"order", "Preview, paper-place, modify, cancel, or inspect gated orders", "ibkr order preview buy|sell SYMBOL QTY [--limit PRICE|--order-type TRAIL --trail-percent PCT] [--json] | ibkr order preview buy|sell SYMBOL YYYYMMDD C|P STRIKE QTY [--order-type TRAIL-LIMIT --trail-percent PCT --limit-offset PRICE] [--json] | ibkr order place --preview-token TOKEN [--json] | ibkr order modify ID --preview-token TOKEN [--json] | ibkr order cancel ID [--json] | ibkr order status ID [--json]", runOrder},
+		{"order", "Preview, place, modify, cancel, or inspect gated orders", "ibkr order preview buy|sell SYMBOL QTY [--limit PRICE|--order-type TRAIL --trail-percent PCT --trigger-method 2] [--json] | ibkr order preview buy|sell SYMBOL YYYYMMDD C|P STRIKE QTY [--order-type TRAIL-LIMIT --trail-percent PCT --limit-offset PRICE] [--json] | ibkr order place --preview-token TOKEN [--json] | ibkr order modify ID --preview-token TOKEN [--json] | ibkr order cancel ID [--json] | ibkr order status ID [--json]", runOrder},
 		{"app", "Run the paired mobile PWA application layer", "ibkr app [--addr HOST:PORT] | ibkr app pair", nil}, // dispatched in cmd/ibkr/main.go — long-lived app server
 		{"mcp", "Run the stdio MCP server for local AI clients", "ibkr mcp", nil},                                                                                   // dispatched in cmd/ibkr/main.go — long-lived stdio server
 		{"daemon", "Run the stateful gateway daemon (normally autospawned)", "ibkr daemon [--foreground] [--config PATH] [--socket PATH] [--log PATH|stderr]", nil}, // dispatched in cmd/ibkr/main.go — long-lived daemon
@@ -244,7 +244,7 @@ func Commands() []Command {
 // pointer, since users discovering the tool need to know that every
 // subcommand has its own flag list.
 func PrintUsage(w io.Writer) {
-	fmt.Fprintln(w, "ibkr — Interactive Brokers CLI (read-only)")
+	fmt.Fprintln(w, "ibkr — Interactive Brokers CLI (broker writes are gated)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage: ibkr <subcommand> [flags] [args]")
 	fmt.Fprintln(w)

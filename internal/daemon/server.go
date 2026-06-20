@@ -316,6 +316,7 @@ type Server struct {
 	orderPreviewWhatIf         func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error)
 	purgeRefreshPositions      func() ([]*ibkrlib.RawPosition, error)
 	orderWritesEnabled         func() bool
+	gatewayReadyForTrading     func() bool
 	orderReserveBrokerID       func(context.Context) (int, error)
 	orderPlaceBroker           func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error
 	orderCancelBroker          func(context.Context, int) error

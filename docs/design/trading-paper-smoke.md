@@ -77,7 +77,7 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
 |---|---|---|---|---|
 | Paper-smoke evidence | daemon `trading.paper_smoke` run (place→ack→cancel→confirm observed in-daemon) | `trading-readiness.json` v1: `paper_smoke{…}` + new `mac` | `ibkr trading status` (`PaperSmoke*` fields), live blockers | missing/stale/mismatch → live blocked (unchanged) |
 | Evidence integrity | HMAC-SHA256 with the order-token key (`order-preview-key`), domain-separated prefix `ibkr-paper-smoke-v1\|` | `paper_smoke.mac` (base64url) | new status `unsigned`, blocker `paper_smoke_unsigned` | missing/invalid MAC → live blocked; hand-written JSON era ends |
-| Smoke invocation origin | invoking adapter (CLI `DetectWriteOrigin`) | `origin` on `TradingPaperSmokeParams` | refusal error text | non-human origin → refused daemon-side (no override) |
+| Smoke invocation origin | invoking adapter (CLI `DetectWriteOrigin`) | `origin` on `TradingPaperSmokeParams` | order journal origin | automated origins allowed; smoke transmits only on paper |
 | Live human confirmation (SPA) — **removed in v1.10.0** | ~~typed input in the PWA, verbatim `live/<account>`~~ the typed phrase, `live_confirmation` field, and `live_confirmation_required` blocker were removed end-to-end in v1.10.0; the app HTTP layer now rejects the field as an unknown field on every broker-write route | server-validated `confirm_account`/`confirm_mode` on every HTTP write (unchanged) | single-click after preview; purge keeps its typed confirm | mismatched confirm fields → write refused |
 | Smoke order lifecycle | broker callbacks via order journal read model | `SendState=broker_acknowledged`, `LifecycleStatus ∈ {pre_submitted, submitted}` then `cancelled` | result fields `ack_lifecycle_status`, `cancel_lifecycle_status` | timeout → `result=failed` evidence (fail closed) |
 
@@ -88,10 +88,10 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
 One synchronous RPC; the daemon itself observes the whole round-trip (the CLI
 never relays lifecycle claims — otherwise evidence would trust the client):
 
-1. **Origin gate:** `originIsHuman(p.Origin)` required. Agents are refused
-   outright (`live_agent_origin_blocked`-style error). Rationale: this command
-   mints the last live precondition; paper openness for agents does not
-   extend to producing live-gate evidence.
+1. **Origin metadata:** paper-smoke is open to automated origins and journals
+   origin through the normal order path. As of 2026-06-10 the evidence is a
+   release-pipeline quality gate, not a runtime live precondition; the smoke
+   itself transmits only on the paper route.
 2. **Route gate:** `status.Mode == paper` required (refuse on live — the smoke
    must never transmit on a live gate), status unblocked, broker write
    authorization allowed. One smoke at a time (`TryLock` → "already running").

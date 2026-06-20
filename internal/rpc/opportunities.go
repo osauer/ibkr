@@ -190,6 +190,7 @@ type OpportunityExercisePreviewResult struct {
 	Accepted              bool             `json:"accepted"`
 	Opportunity           Opportunity      `json:"opportunity"`
 	PreviewTokenID        string           `json:"preview_token_id,omitempty"`
+	TokenMinted           bool             `json:"token_minted"`
 	PreviewTokenExpiresAt time.Time        `json:"preview_token_expires_at,omitzero"`
 	SubmitEligible        bool             `json:"submit_eligible"`
 	Blockers              []TradingBlocker `json:"blockers,omitempty"`

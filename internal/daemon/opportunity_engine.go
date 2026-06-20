@@ -638,15 +638,18 @@ func (e *opportunityEngine) Preview(ctx context.Context, p rpc.OpportunityExerci
 	if !auth.Allowed {
 		blockers = mergeTradingBlockers(blockers, auth.Blockers)
 	}
-	tokenID := opportunityPreviewTokenID(opp, qty)
+	submitEligible := len(blockers) == 0
 	res := rpc.OpportunityExercisePreviewResult{
-		Accepted:              len(opp.Blockers) == 0 && qty > 0 && qty <= opp.MaxQuantity,
-		Opportunity:           opp,
-		PreviewTokenID:        tokenID,
-		PreviewTokenExpiresAt: now.Add(5 * time.Minute),
-		SubmitEligible:        len(blockers) == 0,
-		Blockers:              blockers,
-		AsOf:                  now,
+		Accepted:       submitEligible,
+		Opportunity:    opp,
+		SubmitEligible: submitEligible,
+		TokenMinted:    submitEligible,
+		Blockers:       blockers,
+		AsOf:           now,
+	}
+	if submitEligible {
+		res.PreviewTokenID = opportunityPreviewTokenID(opp, qty)
+		res.PreviewTokenExpiresAt = now.Add(5 * time.Minute)
 	}
 	return res, nil
 }

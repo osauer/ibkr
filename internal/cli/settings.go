@@ -11,6 +11,10 @@ import (
 )
 
 func runSettings(ctx context.Context, env *Env, args []string) int {
+	if len(args) == 1 && helpArg(args[0]) {
+		printSettingsUsage(env)
+		return 0
+	}
 	sub := "show"
 	if idx := settingsSubcommandIndex(args); idx >= 0 {
 		sub = args[idx]
@@ -71,12 +75,13 @@ func runSettingsShow(ctx context.Context, env *Env, args []string) int {
 
 func runSettingsSet(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "settings set")
+	fs.Usage = func() { printSettingsSetUsage(env) }
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
 	if fs.NArg() != 1 {
-		return fail(env, "settings set: usage is `ibkr settings set key=value`")
+		return fail(env, "settings set: usage is `ibkr settings set key=value`; run `ibkr settings set --help` for supported keys")
 	}
 	patch, err := settingsPatchFromAssignment(fs.Arg(0))
 	if err != nil {
@@ -176,8 +181,43 @@ func settingsPatchFromAssignment(raw string) (json.RawMessage, error) {
 		}
 		return marshalPatch([]string{"regime", "journal", "enabled"}, value)
 	default:
-		return nil, fmt.Errorf("unsupported setting key %q", key)
+		return nil, fmt.Errorf("unsupported setting key %q (supported: %s)", key, strings.Join(supportedSettingsKeys(), ", "))
 	}
+}
+
+func supportedSettingsKeys() []string {
+	return []string{
+		"features.purge_restore.enabled",
+		"features.stock_protection.enabled",
+		"trading.freeze",
+		"trading.limits.max_notional",
+		"trading.limits.max_option_contracts",
+		"trading.limits.allow_stock_short",
+		"trading.limits.allow_option_sell_to_open",
+		"regime.journal.enabled",
+	}
+}
+
+func printSettingsUsage(env *Env) {
+	fmt.Fprintln(env.Stdout, "ibkr settings — Runtime platform preferences and observed read-only state")
+	fmt.Fprintln(env.Stdout)
+	fmt.Fprintln(env.Stdout, "Usage: ibkr settings show [--json]")
+	fmt.Fprintln(env.Stdout, "       ibkr settings set <supported-key>=true|false|null|number [--json]")
+	fmt.Fprintln(env.Stdout)
+	fmt.Fprintln(env.Stdout, "Run `ibkr settings set --help` for supported keys.")
+}
+
+func printSettingsSetUsage(env *Env) {
+	fmt.Fprintln(env.Stdout, "ibkr settings set — update a daemon-owned runtime setting")
+	fmt.Fprintln(env.Stdout)
+	fmt.Fprintln(env.Stdout, "Usage: ibkr settings set <supported-key>=true|false|null|number [--json]")
+	fmt.Fprintln(env.Stdout)
+	fmt.Fprintln(env.Stdout, "Supported keys:")
+	for _, key := range supportedSettingsKeys() {
+		fmt.Fprintf(env.Stdout, "  - %s\n", key)
+	}
+	fmt.Fprintln(env.Stdout)
+	fmt.Fprintln(env.Stdout, "The daemon still decides writability from each field's access/source metadata.")
 }
 
 func parseSettingsValue(raw string) (any, error) {

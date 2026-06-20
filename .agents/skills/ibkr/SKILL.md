@@ -1,9 +1,9 @@
 ---
 name: ibkr
-description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, opportunity, offline opportunity backtest/research diagnostics, settings/freeze, order-preview, order-status, and order-history questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read-only and never runs broker writes; live agent-origin broker writes are blocked daemon-side.
+description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, opportunity, offline opportunity backtest/research diagnostics, settings/freeze, order-preview, order-status, and order-history questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read/preview-first by default; explicit broker-write requests must use the gated CLI path and report the returned artifact.
 ---
 
-Updated: 2026-06-19 12:16 CEST
+Updated: 2026-06-20 00:00 CEST
 
 ## Contract
 
@@ -37,11 +37,13 @@ query/export, trade confirmation, commission ledger, closed-position ledger, or
 broker-grade historical audit. Prefer `ibkr orders open` for current working
 orders and `ibkr order status ID` for one order's full local audit trail.
 
-The MCP surface remains read-oriented for agents. Paper-account broker writes
-are open to agents through the gated CLI flow; live agent-origin broker writes
-are hard-blocked daemon-side. Never attempt live broker writes, live-trading
-enablement, or destructive purge execution from an agent session. Order preview
-can mint a local token; `token_minted` is not the same as `submit_eligible`.
+The MCP surface remains read-oriented for agents. Explicit broker writes,
+including live writes, are allowed only through the gated CLI flow: trading
+status must be write-ready, preview tokens and broker checks must pass, and the
+CLI JSON result is the artifact. Never attempt live-trading enablement, settings
+freeze changes, or destructive daemon maintenance from an agent session. Order
+preview can mint a local token; `token_minted` is not the same as
+`submit_eligible`.
 
 ## Output Discipline
 

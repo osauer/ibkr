@@ -28,7 +28,7 @@ func (s *Server) handleOrdersOpen(ctx context.Context, req *rpc.Request) (*rpc.O
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
 	}
-	views, _, err := s.loadOrderViewsReconciled(ctx)
+	views, eventsByKey, err := s.loadOrderViewsReconciled(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +43,15 @@ func (s *Server) handleOrdersOpen(ctx context.Context, req *rpc.Request) (*rpc.O
 		}
 	}
 	sortOrderViews(out)
-	return &rpc.OrdersOpenResult{Orders: out, AsOf: s.orderNow()}, nil
+	return &rpc.OrdersOpenResult{
+		Orders:             out,
+		AsOf:               s.orderNow(),
+		Account:            scope.Account,
+		Mode:               scope.Mode,
+		LastLocalEventAt:   latestScopedOrderEventAt(views, eventsByKey, scope),
+		NotBrokerStatement: orderHistoryNotBrokerStatement(),
+		Limitations:        orderHistoryLimitations(),
+	}, nil
 }
 
 func (s *Server) handleOrdersHistory(_ context.Context, req *rpc.Request) (*rpc.OrdersHistoryResult, error) {
@@ -148,14 +156,28 @@ func (s *Server) handleOrderStatus(ctx context.Context, req *rpc.Request) (*rpc.
 			continue
 		}
 		events := append([]rpc.OrderEvent{}, eventsByKey[orderViewKey(view)]...)
+		lastLocalEventAt := latestOrderEventAt(events)
 		return &rpc.OrderStatusResult{
-			Found:  true,
-			Order:  view,
-			Events: events,
-			AsOf:   s.orderNow(),
+			Found:              true,
+			Order:              view,
+			Events:             events,
+			AsOf:               s.orderNow(),
+			Account:            scope.Account,
+			Mode:               scope.Mode,
+			LastLocalEventAt:   lastLocalEventAt,
+			NotBrokerStatement: orderHistoryNotBrokerStatement(),
+			Limitations:        orderHistoryLimitations(),
 		}, nil
 	}
-	return &rpc.OrderStatusResult{Found: false, AsOf: s.orderNow()}, nil
+	return &rpc.OrderStatusResult{
+		Found:              false,
+		AsOf:               s.orderNow(),
+		Account:            scope.Account,
+		Mode:               scope.Mode,
+		LastLocalEventAt:   latestScopedOrderEventAt(views, eventsByKey, scope),
+		NotBrokerStatement: orderHistoryNotBrokerStatement(),
+		Limitations:        orderHistoryLimitations(),
+	}, nil
 }
 
 func orderHistoryRange(p rpc.OrdersHistoryParams, now time.Time) (time.Time, time.Time, error) {
@@ -277,6 +299,26 @@ func latestOrderHistoryEventAt(row rpc.OrdersHistoryRow) time.Time {
 		return time.Time{}
 	}
 	return row.Events[len(row.Events)-1].At
+}
+
+func latestScopedOrderEventAt(views []rpc.OrderView, eventsByKey map[string][]rpc.OrderEvent, scope brokerStateScope) time.Time {
+	var latest time.Time
+	for _, view := range views {
+		if !orderViewMatchesBrokerScope(view, scope) {
+			continue
+		}
+		if at := latestOrderEventAt(eventsByKey[orderViewKey(view)]); at.After(latest) {
+			latest = at
+		}
+	}
+	return latest
+}
+
+func latestOrderEventAt(events []rpc.OrderEvent) time.Time {
+	if len(events) == 0 {
+		return time.Time{}
+	}
+	return events[len(events)-1].At
 }
 
 func orderHistoryNotBrokerStatement() string {

@@ -57,6 +57,7 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 	trailAmount := fs.Float64("trail-amount", 0, "broker trail offset amount")
 	initialStop := fs.Float64("initial-stop", 0, "optional initial broker trail stop price; omitted means use live bid/ask")
 	limitOffset := fs.Float64("limit-offset", 0, "TRAIL LIMIT offset from the dynamic stop")
+	triggerMethod := fs.Int("trigger-method", 0, "IBKR stop trigger method for TRAIL/TRAIL-LIMIT: 1,2,3,4,7,8")
 	tif := fs.String("tif", "", "time in force: DAY (default), or GTC for TRAIL/TRAIL-LIMIT")
 	outsideRTH := fs.Bool("outside-rth", false, "allow outside regular trading hours when supported")
 	replaceID := fs.String("replace-order", "", "preview a replacement for an existing open order ref/order-id/perm-id")
@@ -111,6 +112,9 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 	if err != nil {
 		return fail(env, "order preview: %v", err)
 	}
+	if err := validatePreviewTriggerMethod(*triggerMethod); err != nil {
+		return fail(env, "order preview: %v", err)
+	}
 	var trail *rpc.OrderTrailSpec
 	if orderType == rpc.OrderTypeTRAIL || orderType == rpc.OrderTypeTRAILLIMIT {
 		trail = &rpc.OrderTrailSpec{
@@ -162,17 +166,18 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 		}
 	}
 	params := rpc.OrderPreviewParams{
-		Action:     strings.ToUpper(strings.TrimSpace(rest[0])),
-		Contract:   contract,
-		Quantity:   qty,
-		OrderType:  orderType,
-		LimitPrice: limitPtr,
-		Trail:      trail,
-		Strategy:   strings.TrimSpace(*strategy),
-		TIF:        strings.ToUpper(strings.TrimSpace(*tif)),
-		OutsideRTH: *outsideRTH,
-		ReplaceID:  strings.TrimSpace(*replaceID),
-		TimeoutMs:  int(timeout.Milliseconds()),
+		Action:        strings.ToUpper(strings.TrimSpace(rest[0])),
+		Contract:      contract,
+		Quantity:      qty,
+		OrderType:     orderType,
+		LimitPrice:    limitPtr,
+		Trail:         trail,
+		TriggerMethod: *triggerMethod,
+		Strategy:      strings.TrimSpace(*strategy),
+		TIF:           strings.ToUpper(strings.TrimSpace(*tif)),
+		OutsideRTH:    *outsideRTH,
+		ReplaceID:     strings.TrimSpace(*replaceID),
+		TimeoutMs:     int(timeout.Milliseconds()),
 	}
 	if params.Contract.Currency == "" && params.Contract.Market == "" && params.Contract.Exchange == "" && params.Contract.PrimaryExch == "" {
 		params.Contract.Currency = "USD"
@@ -186,6 +191,15 @@ func runOrderPreview(ctx context.Context, env *Env, args []string) int {
 	}
 	renderOrderPreviewText(env, &res)
 	return 0
+}
+
+func validatePreviewTriggerMethod(value int) error {
+	switch value {
+	case 0, 1, 2, 3, 4, 7, 8:
+		return nil
+	default:
+		return fmt.Errorf("trigger method must be one of 1, 2, 3, 4, 7, or 8")
+	}
 }
 
 func previewCLIOrderType(raw string, hasTrail, hasLimitOffset bool) (string, error) {

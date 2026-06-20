@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/osauer/ibkr/internal/cli"
+	"github.com/osauer/ibkr/internal/dial"
 	"github.com/osauer/ibkr/internal/risk"
 	"github.com/osauer/ibkr/internal/rpc"
 )
@@ -170,6 +175,50 @@ func TestNormalizeMCPPreviewOrderTypeRejectsLMTTrailContradiction(t *testing.T) 
 	}
 }
 
+func TestOrderPreviewSchemaIncludesRouteAndReplaceFields(t *testing.T) {
+	t.Parallel()
+	tool, ok := lookupTool("ibkr_order_preview")
+	if !ok {
+		t.Fatal("missing ibkr_order_preview tool")
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.JSONSchema, &schema); err != nil {
+		t.Fatalf("decode schema: %v", err)
+	}
+	for _, prop := range []string{"exchange", "primary_exchange", "currency", "replace_id", "trigger_method"} {
+		if _, ok := schema.Properties[prop]; !ok {
+			t.Fatalf("ibkr_order_preview schema missing %s", prop)
+		}
+	}
+}
+
+func TestOrderPreviewHandlerForwardsRouteAndReplaceFields(t *testing.T) {
+	t.Parallel()
+	tool, ok := lookupTool("ibkr_order_preview")
+	if !ok {
+		t.Fatal("missing ibkr_order_preview tool")
+	}
+	conn, calls := startMCPOrderPreviewFakeConn(t, rpc.OrderPreviewResult{PreviewTokenID: "tok", TokenMinted: true})
+	defer conn.Close()
+	args := json.RawMessage(`{"action":"sell","symbol":"AAPL","quantity":1,"order_type":"TRAIL","trailing_percent":2,"trigger_method":4,"exchange":"SMART","primary_exchange":"NASDAQ","currency":"USD","replace_id":"ibkr-123"}`)
+	if _, err := tool.Handler(context.Background(), conn, args); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	call := <-calls
+	if call.method != rpc.MethodOrderPreview {
+		t.Fatalf("method = %s, want %s", call.method, rpc.MethodOrderPreview)
+	}
+	p := call.params
+	if p.TriggerMethod != 4 || p.ReplaceID != "ibkr-123" {
+		t.Fatalf("params trigger/replace = %d/%q, want 4/ibkr-123", p.TriggerMethod, p.ReplaceID)
+	}
+	if p.Contract.Exchange != "SMART" || p.Contract.PrimaryExch != "NASDAQ" || p.Contract.Currency != "USD" {
+		t.Fatalf("contract route = %+v, want SMART/NASDAQ/USD", p.Contract)
+	}
+}
+
 func TestToolsHaveDirectoryAnnotations(t *testing.T) {
 	t.Parallel()
 	for _, tool := range Tools {
@@ -177,6 +226,46 @@ func TestToolsHaveDirectoryAnnotations(t *testing.T) {
 			t.Errorf("tool %s missing Title; Anthropic directory submissions require human-readable tool titles", tool.Name)
 		}
 	}
+}
+
+type mcpOrderPreviewCall struct {
+	method string
+	params rpc.OrderPreviewParams
+}
+
+func startMCPOrderPreviewFakeConn(t *testing.T, result rpc.OrderPreviewResult) (*dial.Conn, <-chan mcpOrderPreviewCall) {
+	t.Helper()
+	socketPath := filepath.Join("/tmp", fmt.Sprintf("ibkr-mcp-order-preview-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen fake daemon: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	calls := make(chan mcpOrderPreviewCall, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		var req rpc.Request
+		if err := json.NewDecoder(c).Decode(&req); err != nil {
+			return
+		}
+		var params rpc.OrderPreviewParams
+		_ = json.Unmarshal(req.Params, &params)
+		calls <- mcpOrderPreviewCall{method: req.Method, params: params}
+		raw, _ := json.Marshal(result)
+		_ = json.NewEncoder(c).Encode(rpc.Response{ID: req.ID, Ok: true, Result: raw})
+	}()
+
+	conn, err := dial.Connect(socketPath)
+	if err != nil {
+		t.Fatalf("connect fake daemon: %v", err)
+	}
+	return conn, calls
 }
 
 // TestInitializeAndToolsList walks the MCP handshake without touching the

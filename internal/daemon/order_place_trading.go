@@ -56,9 +56,9 @@ func (s *Server) currentBrokerWriteAuthorization() brokerWriteAuthorization {
 	return s.brokerWriteAuthorization(s.currentTradingStatus())
 }
 
-// brokerWriteAuthorizationForRequest is the request-time write gate: the
-// origin-agnostic authorization (which also feeds trading-status CanWrite)
-// plus the live origin policy for this specific request.
+// brokerWriteAuthorizationForRequest is the request-time write gate. It starts
+// from the origin-agnostic authorization that also feeds trading-status
+// CanWrite; origin remains available for policy hooks and audit journaling.
 func (s *Server) brokerWriteAuthorizationForRequest(origin string) brokerWriteAuthorization {
 	auth := s.currentBrokerWriteAuthorization()
 	if s == nil {

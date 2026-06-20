@@ -34,7 +34,7 @@ For the v1 stable line, only the latest minor release receives security fixes. O
 
 ## Threat model
 
-`ibkr` is structurally no-broker-write: the order surface is limited to local preview/status reads, and the daemon cannot place, modify, cancel, or transmit broker orders in the default build (see [README §Safety](README.md#safety)). The daemon listens only on a Unix-domain socket in the user's runtime directory, never on a TCP port. It speaks to a locally-running IB Gateway or TWS over loopback. No market data, credentials, or account state leave the local machine via this code.
+`ibkr` default builds are structurally no-broker-write: the order surface is limited to local preview/status reads, and the daemon cannot place, modify, cancel, or transmit broker orders unless built with the trading capability (see [README §Safety](README.md#safety)). The daemon listens only on a Unix-domain socket in the user's runtime directory, never on a TCP port. It speaks to a locally-running IB Gateway or TWS over loopback. No market data, credentials, or account state leave the local machine via this code.
 
 Reports that demonstrate a deviation from any of those properties — a successful place / modify / cancel / trade reaching the gateway, a daemon listener on a non-loopback or non-Unix socket, or data egress beyond the local IB Gateway — take priority.
 
@@ -42,24 +42,24 @@ Reports that demonstrate a deviation from any of those properties — a successf
 
 Builds with the `trading` tag accept broker writes behind a layered gate
 (see `docs/design/agent-origin-gating.md`). Every write request carries an
-origin; when the trading gate routes **live**, agent-origin requests are
-refused with no override. Paper routes are origin-free so agent sessions
-can exercise the full order path against paper TWS. Live human writes ride
-on the structural gates: a submit-eligible preview token per write, the
-gateway pins cross-checked against the connected session, and the runtime
-`trading.freeze` switch. (The typed `live/<account>` confirmation and the
-config acknowledgement keys were removed 2026-06-11 as same-file
-duplication that only slowed live order entry.)
+origin for audit and any origin-specific policy; agent-origin paper and live
+writes use the same structural gates as human writes: a submit-eligible
+preview token per write, pinned gateway/account/mode checked against the
+connected session, a trading-capable build, a writable local journal, broker
+WhatIf/eligibility checks where applicable, and the runtime `trading.freeze`
+switch. (The typed `live/<account>` confirmation and the config
+acknowledgement keys were removed 2026-06-11 as same-file duplication that
+only slowed live order entry.)
 
 Honest limits of this interlock:
 
 - It is a **safety interlock, not a security boundary**. Origin is asserted
   by the calling process; any same-uid process can forge it, call the daemon
   socket directly, or edit the config.
-- **Cancel is exempt** from the live agent block (refusing a cancel can
-  strand a worse position), but note the asymmetry: cancelling a protective
-  stop *removes* protection. Cancels journal their origin; a future
-  tightening can restrict agent cancels to agent-placed orders.
+- **Cancel remains freeze-exempt** (refusing a cancel can strand a worse
+  position), but note the asymmetry: cancelling a protective stop *removes*
+  protection. Cancels journal their origin; a future tightening can restrict
+  agent cancels to agent-placed orders.
 - An agent driving the paired PWA inherits the `human-paired-device` origin;
   pairing approval on the phone is the human act that scopes that risk. Its
   live submits are gated by the same preview-token and server-validated

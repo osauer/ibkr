@@ -9,10 +9,12 @@ import (
 
 // DetectWriteOrigin classifies this process for broker-write authorization.
 // Any agent marker or a non-TTY stdin classifies as agent; nothing can force
-// a human classification — the daemon treats unknown origins as agent, and
-// live routes refuse agent-origin writes outright.
+// a human classification. The daemon treats unknown origins as agent for
+// audit and any origin-specific policy, while broker-write readiness still
+// comes from trading mode, pins, preview tokens, freeze state, and broker
+// checks.
 func DetectWriteOrigin(stdin io.Reader) string {
-	// docgen:env IBKR_AGENT_CONTEXT | When set (any value), broker writes from this process are classified as agent-origin. The variable can only restrict: no environment variable can claim a human origin, and live routes refuse agent-origin writes.
+	// docgen:env IBKR_AGENT_CONTEXT | When set (any value), broker writes from this process are classified as agent-origin for audit and origin-specific policy. The variable can only restrict: no environment variable can claim a human origin.
 	if os.Getenv("IBKR_AGENT_CONTEXT") != "" ||
 		os.Getenv("CLAUDECODE") != "" ||
 		os.Getenv("CLAUDE_CODE_ENTRYPOINT") != "" ||

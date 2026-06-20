@@ -22,7 +22,10 @@ market-data semantics.
 
 ## Safety Invariants
 
-- Codex cannot place, modify, cancel, close, submit, or transmit broker orders.
+- Agentic sessions may place, modify, cancel, close, submit, or transmit broker
+  orders only through the gated broker-write paths; connected-gateway
+  readiness, trading mode, pins, preview tokens, freeze state, journal
+  availability, and broker checks remain binding.
 - Preview tokens are not submit eligibility. Report both fields separately.
 - Trading capability and mode remain operator-owned config/build state, not
   inferred daemon policy.
