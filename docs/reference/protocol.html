@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: protocol.md sha256:4afef50dc34a879292c6accb917e0ff920ba0874c91fd714d15e0dc906d36d1d -->
+<!-- md-source: protocol.md sha256:7220321f6681fcaf351f9607dee04b73bb747abcd192fa11415b13a7fe7e2ad9 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -160,7 +160,7 @@
 <h1 id="tws-protocol-coverage">TWS protocol coverage</h1>
 <p>Last reviewed: 2026-06-11 08:17 CEST</p>
 <p><code>pkg/ibkr</code> is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the <code>ibkr</code> binary, daemon, CLI, and MCP server need.</p>
-<p>Order-writing methods exist only for wire-format completeness and downstream forks. Default builds return <code>pkg/ibkr.ErrTradingDisabled</code> before any order write reaches the socket; intentionally order-capable forks must rebuild with <code>-tags trading</code>. The shipped daemon, CLI, MCP server, and Claude plugin expose no order interface.</p>
+<p>Order-writing methods exist only in trading-capable builds. Default builds return <code>pkg/ibkr.ErrTradingDisabled</code> before any order write reaches the socket. Trading builds expose gated daemon/CLI order paths behind trading status, pinned account/mode, preview-token, freeze, journal, and broker checks; the MCP server remains preview/read-oriented and does not expose place/modify/cancel tools.</p>
 <h2 id="semantic-fingerprints">Semantic fingerprints</h2>
 <p>Decision surfaces that are useful to monitors expose a semantic <code>fingerprint</code> object:</p>
 <pre><code>{&#34;version&#34;: &#34;canary-fp-v1&#34;, &#34;key&#34;: &#34;sha256:...&#34;}</code></pre>

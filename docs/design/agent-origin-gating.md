@@ -1,27 +1,26 @@
 # Agent-origin gating for broker writes
 
-Updated: 2026-06-11 08:15 CEST (live-gate simplification: the typed
-`live/<account>` human confirmation described below was removed; the
-agent-origin hard block, origin detection, journaling, and MCP redaction all
-stand. See CHANGELOG. Earlier: 2026-06-10 09:12 CEST.)
-Status: implemented; confirmation layer since removed
+Updated: 2026-06-20 00:00 CEST (policy flip: live agent-origin broker writes
+are allowed through the same gated broker-write paths as human writes; origin
+remains audit metadata and an extension point. Earlier: 2026-06-11 08:15 CEST.)
+Status: implemented
 
 Contract per `docs/templates/daemon-cli-trading-contract.md`.
 
 ## Scope
 
-- **Goal:** order placement originating from AI-agent contexts is hard-blocked
-  when the trading gate routes live, with no override flag; humans keep the
-  live path (since 2026-06-11 with no per-write typed ritual — live order
-  entry is latency-sensitive). Paper stays fully open to agents so protection
-  flows can be tested end-to-end.
+- **Goal:** every broker write carries origin metadata for audit and future
+  origin-specific policy, while agent-origin paper and live writes are allowed
+  only through the existing gated broker-write paths. Trading capability,
+  route pins, preview tokens, freeze state, broker WhatIf/eligibility, and the
+  local journal remain the authorization boundary.
 - **User-facing command/tool/API:** `ibkr proposals submit`, `ibkr order
   place|modify`, `ibkr purge … / purge restore --execute`, app HTTP write
   endpoints, MCP `ibkr_order_preview` (token redaction only).
 - **Owner layer:** origin *detection* is adapter-owned (CLI process state, app
-  pairing); origin *enforcement* is daemon policy in the broker-write
-  authorization choke point. Config/build stay the owners of trading
-  capability; origin is request metadata, never persisted config.
+  pairing); broker-write authorization is daemon policy in the broker-write
+  choke point. Config/build stay the owners of trading capability; origin is
+  request metadata, never persisted config.
 - **Existing behavior:** RPC envelope carries no caller identity; CLI, MCP
   server, and any same-uid process are indistinguishable on the daemon socket.
   Claude/Codex hook layers gate some Bash verbs client-side only.
@@ -30,8 +29,8 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
 
 | Concept | Authoritative source | Typed field/contract | Renderer/tool | Fallback / unavailable |
 |---|---|---|---|---|
-| Request origin | invoking adapter at call time | `origin` field on broker-write params (`agent`, `human-tty`, `human-paired-device`) | journaled per order event; surfaced in blockers | missing/unknown → treated as `agent` (fail closed) |
-| Origin policy | daemon `brokerWriteAuthorization` | blocker `live_agent_origin_blocked` | `ibkr trading status`, submit/place errors | n/a — no config knob, no override |
+| Request origin | invoking adapter at call time | `origin` field on broker-write params (`agent`, `human-tty`, `human-paired-device`) | journaled per order event; available to policy hooks | missing/unknown → treated as `agent` for audit |
+| Broker-write policy | daemon `brokerWriteAuthorization` | `can_write`, `write_blockers`, submit/place errors | `ibkr trading status`, write responses | connected gateway plus config/build/pins/freeze/journal/broker checks decide |
 | ~~Live human confirmation~~ | removed 2026-06-11 | was: typed `live/<account>` ack, compared verbatim | — | human origins write on live with preview token + pins only |
 | Agent detection (CLI) | process env + stdin | env markers `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_SANDBOX`, `OPENAI_CODEX`, or `IBKR_AGENT_CONTEXT=1`, or `!isatty(stdin)` | n/a | any marker or non-TTY → `agent` |
 | App origin | paired-device auth in `internal/app` | app sets `human-paired-device` on daemon calls | SPA | unauthenticated callers never reach writes |
@@ -42,40 +41,40 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
    can only force the *more restrictive* classification (`agent`); there is no
    env/flag that yields `human-tty`. Gets `// docgen:env` comment.
 2. **RPC**: `Origin string` added to `OrderPlaceParams`, `OrderModifyParams`,
-   `OrderCancelParams` (journaled, not enforced — see exemption),
+   `OrderCancelParams` (journaled),
    `TradeProposalSubmitParams`, `PurgeExecuteParams`,
    `PurgeRestoreExecuteParams`, and platform-settings update params for
    `[trading]` limit keys.
 3. **Daemon**: `brokerWriteAuthorization` (single choke point used by place,
-   modify, proposal submit, purge execute, restore execute) refuses when the
-   gate routes **live** and origin ≠ human: blocker `live_agent_origin_blocked`,
-   action text explains agents may operate paper only. Paper: no origin check.
-   **Cancel is exempt** (strictly risk-reducing); origin still journaled.
-   Trading-limit settings writes (`max_notional`, `max_option_contracts`,
-   `allow_stock_short`, `allow_option_sell_to_open`) refuse agent origin when
-   mode is live.
+   modify, proposal submit, purge execute, restore execute) authorizes writes
+   from all origins using connected-gateway readiness, trading mode, build
+   capability, gateway/account/client pins, journal availability, freeze state,
+   preview tokens, and broker checks.
+   **Cancel is freeze-exempt** (strictly risk-reducing); origin still
+   journaled. Trading-limit settings writes (`max_notional`,
+   `max_option_contracts`, `allow_stock_short`,
+   `allow_option_sell_to_open`) still refuse agent origin when mode is live.
 4. **MCP**: `ibkr_order_preview` redacts the raw `preview_token` (returns
    `preview_token_id` only), aligning with the proposal surface's
    `sanitizeProposalPreview`. Closes the mint-over-MCP → redeem-over-Bash
-   laundering path in both modes; paper agents preview/place via CLI.
+   laundering path in both modes; agents place/modify through the gated CLI
+   token path.
 5. **Journal**: every write attempt records `origin`, giving the audit trail
    for "who placed this".
 6. **Hook layer (client-side, defense in depth, this repo's plugin):**
-   `hooks/ibkr-pre-tool-use.sh` already gates write verbs on live
-   `trading status --json` paper-readiness; it gains: composition ban narrowed
-   to write-verb invocations (read-only `ibkr … --json | jq` stays usable),
-   and ships to the installed plugin (cache today, release next).
+   `hooks/ibkr-pre-tool-use.sh` gates write verbs on `trading status --json`
+   readiness for paper or live routes; it bans shell composition only for
+   write-verb invocations so read-only `ibkr … --json | jq` stays usable.
 
 ## Safety invariants (supersedes the template's blanket line)
 
-- Agent-origin requests cannot place, modify, close, submit, or transmit
-  broker orders **when the trading gate routes live** — enforced daemon-side,
-  no override. (Replaces "Codex cannot place… orders", which paper-mode
-  testing intentionally relaxes; `docs/templates/daemon-cli-trading-contract.md`
-  is updated in the same change.)
-- Paper-mode agent writes remain gated by the full existing stack: build tag,
-  `mode=paper`, pinned port/account/client-id, DU-account paper gate at
-  `pkg/ibkr`, single-use WhatIf-accepted preview tokens.
+- Agent-origin requests may place, modify, close, submit, or transmit broker
+  orders only when the full broker-write gate passes. There is no origin-only
+  live hard block.
+- Paper and live agent writes remain gated by the full existing stack: trading
+  build, mode, connected gateway, pinned port/account/client-id, route
+  confirmation, single-use WhatIf-accepted preview tokens where applicable,
+  journal availability, and `trading.freeze`.
 - Preview tokens are not submit eligibility; both fields stay separate.
 - Origin is honest-by-construction for compliant agents and is an interlock,
   not a security boundary: a same-uid adversary can forge params or edit
@@ -97,25 +96,24 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
 
 ## Before/After artifact
 
-Before: `ibkr trading status --json` (can_write=true, paper), agent-context
-`ibkr proposals submit … --json` succeeds on paper.
-After: same paper submit still succeeds (agent, paper); a simulated live gate
-(unit-level: gate fixture with `route=live`) refuses agent origin with
-`live_agent_origin_blocked`; `ibkr trading status --json` unchanged.
-Live-gateway artifact impossible on this machine (no live session configured);
-covered by unit tests on the authorization function.
+Before: a simulated live gate refused agent origin with an origin-only blocker
+before preview.
+After: paper and live origins share the same base authorization; unit fixtures
+assert no origin blocker, and proposal submit reaches preview/WhatIf before any
+broker transmit attempt.
 
 ## Verification
 
-- Unit: authorization matrix (origin × mode × verb incl. cancel exemption),
-  CLI origin detection (env/TTY), MCP redaction, settings gating.
+- Unit: authorization matrix (origin × mode × verb incl. cancel freeze
+  exemption), CLI origin detection (env/TTY), MCP redaction, settings gating,
+  hook composition/readiness gates.
 - `make check` (incl. docs-regen for the env var + MCP description), and a
   `-tags trading` test leg so the enforced path actually compiles under CI.
 - `make smoke` vs paper TWS; paper E2E proposals submit as agent (must pass).
 
 ## Rollback
 
-- Revert: rpc params fields, daemon authorization branch, CLI env detection,
-  MCP redaction, hook script. No runtime state: origin is per-request metadata;
-  journal entries with origin are additive. User-facing change reverts to
-  "agents indistinguishable from humans" (pre-change behavior).
+- Revert: daemon origin policy hook, CLI env detection, MCP redaction, hook
+  script. No runtime state: origin is per-request metadata; journal entries
+  with origin are additive. User-facing change reverts to hard-blocking
+  agent-origin live writes.

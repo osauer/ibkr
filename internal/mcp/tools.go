@@ -50,7 +50,7 @@ var Tools = []Tool{
 	{
 		Name:        "ibkr_trading_status",
 		Title:       "IBKR Trading Status",
-		Description: "Local trading status: whether order entry is disabled, paper-ready, live-ready, or blocked; includes pinned endpoint/account/client-ID evidence, preview requirement, explicit `can_preview` and `can_write` booleans, MCP write mode, live override status, open-order count, and concrete blockers. Use before any order preview/place/modify/cancel request or when the user asks whether ibkr can trade. This tool does NOT place, modify, or cancel orders; it only reports readiness. For portfolio state use `ibkr_positions`; for account cash/margin use `ibkr_account`; for market context use `ibkr_quote`, `ibkr_chain`, or `ibkr_regime`.",
+		Description: "Local trading status: whether order entry is disabled, paper-ready, live-ready, or blocked; includes connected-gateway readiness, pinned endpoint/account/client-ID evidence, preview requirement, explicit `can_preview` and `can_write` booleans, MCP write mode, live override status, open-order count, and concrete blockers. Use before any order preview/place/modify/cancel request or when the user asks whether ibkr can trade; `can_preview`/`can_write` are false while TWS/IB Gateway is disconnected or still handshaking. This tool does NOT place, modify, or cancel orders; it only reports readiness. For portfolio state use `ibkr_positions`; for account cash/margin use `ibkr_account`; for market context use `ibkr_quote`, `ibkr_chain`, or `ibkr_regime`.",
 		JSONSchema:  schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, _ json.RawMessage) (json.RawMessage, error) {
 			var res rpc.TradingStatus
@@ -76,7 +76,7 @@ var Tools = []Tool{
 	{
 		Name:        "ibkr_orders_open",
 		Title:       "IBKR Open Orders",
-		Description: "Read current broker account/mode open-order lifecycle state without placing, modifying, cancelling, or transmitting any broker order. Use after an order preview/place flow to inspect what the daemon believes is still open for the currently connected broker context, or when the user asks for open orders. Paper/test journal rows are intentionally not returned while connected to live, and live rows are intentionally not returned while connected to paper. This tool is read-only and does not place orders; it only reports journal/broker-callback state. It is NOT for historical audit across old accounts or modes, NOT for creating a new preview token (use `ibkr_order_preview`), and NOT for submitting, modifying, or cancelling an order.",
+		Description: "Read current broker account/mode open-order lifecycle state without placing, modifying, cancelling, or transmitting any broker order. Use after an order preview/place flow to inspect what the daemon believes is still open for the currently connected broker context, or when the user asks for open orders. Results include account/mode scope, latest local event time, and local-journal limitations; paper/test journal rows are intentionally not returned while connected to live, and live rows are intentionally not returned while connected to paper. This tool is read-only and does not place orders; it only reports local journal plus observed broker-callback state. It is NOT an IBKR Activity Statement or complete broker open-order audit, NOT for historical audit across old accounts or modes, NOT for creating a new preview token (use `ibkr_order_preview`), and NOT for submitting, modifying, or cancelling an order.",
 		JSONSchema:  schemaObject(nil, nil),
 		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
 			var in rpc.OrdersOpenParams
@@ -115,7 +115,7 @@ var Tools = []Tool{
 	{
 		Name:        "ibkr_order_status",
 		Title:       "IBKR Order Status",
-		Description: "Read one locally journaled order's lifecycle and audit events by order ref, IBKR order ID, or permanent ID. Use when the user asks what happened to a specific order or needs the daemon's latest broker-callback evidence. This tool is read-only: it does NOT place, modify, cancel, preview, transmit, or confirm an order. For the open-order list use `ibkr_orders_open`; for a new tokenized preview use `ibkr_order_preview`.",
+		Description: "Read one locally journaled order's lifecycle and audit events by order ref, IBKR order ID, or permanent ID. Use when the user asks what happened to a specific order or needs the daemon's latest broker-callback evidence. Results include account/mode scope, latest local event time, and local-journal limitations; not found can mean the id belongs to another account/mode or was never locally observed. This tool is read-only and local-journal based: it does NOT place, modify, cancel, preview, transmit, or confirm an order, and it is NOT an IBKR Activity Statement or complete broker audit. For the open-order list use `ibkr_orders_open`; for a new tokenized preview use `ibkr_order_preview`.",
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"id": schemaString("order identifier to inspect: local order_ref such as ibkr-20260528-093000, IBKR order ID, or permanent ID"),
 		}, []string{"id"}),
@@ -134,7 +134,7 @@ var Tools = []Tool{
 	{
 		Name:         "ibkr_order_preview",
 		Title:        "IBKR Order Preview",
-		Description:  "Preview a locally gated stock/ETF or single-leg option LMT, TRAIL, or TRAIL LIMIT order and mint a short-lived local preview token without placing, modifying, cancelling, or transmitting any broker order. Use only after `ibkr_trading_status` shows the local trading gate is ready. Defaults are order_type `LMT`, strategy `patient-limit`, TIF `DAY`, and `outside_rth=false`; providing trail fields defaults order_type to `TRAIL`, or `TRAIL LIMIT` when limit_offset is present. TIF `GTC` is accepted for TRAIL and TRAIL LIMIT drafts only — protective stops meant to survive the session close — while LMT stays DAY-only. Stock/ETF TRAIL and TRAIL LIMIT drafts default `trigger_method` to 2 (IBKR LAST) unless explicitly supplied. Option trails are option-premium based, not underlying-driven, and require explicit expiry/right/strike. This tool validates the local trading gate, pinned endpoint/account/client ID, supported order type, the risk-increasing size caps (max notional and max option contracts bind opening/adding/flipping orders only; reduce-only close/reduce orders are exempt, bounded by the position itself, and the result then omits `max_notional`), stock short/flip policy, option sell-to-open policy, and broker WhatIf availability, then returns quote inputs, position effect, `token_minted`, and `submit_eligible`. For IBKR percent trails, `trailing_percent: 2` means 2%, not 0.02. `TRAIL LIMIT` uses `limit_offset`; do not send a LMT limit price with broker trail orders. `token_minted=true` means the local preview artifact exists; `submit_eligible=true` only when IBKR accepted a non-transmitting WhatIf for the exact draft. If broker WhatIf is unavailable or rejected, `submit_eligible=false` and compatibility field `executable=false`. It does NOT submit an order and returns only the redacted `preview_token_id`, never the raw submit-capable token; broker writes require a separate place/modify/cancel path with its own origin-gated token, and live routes refuse agent-origin writes outright. For protection proposals use the proposal flow; for market context without token minting use `ibkr_quote` or `ibkr_chain`; for holdings use `ibkr_positions`; for cash/margin use `ibkr_account`.",
+		Description:  "Preview a locally gated stock/ETF or single-leg option LMT, TRAIL, or TRAIL LIMIT order and mint a short-lived local preview token without placing, modifying, cancelling, or transmitting any broker order. Use only after `ibkr_trading_status` shows the local trading gate is ready. Defaults are order_type `LMT`, strategy `patient-limit`, TIF `DAY`, and `outside_rth=false`; providing trail fields defaults order_type to `TRAIL`, or `TRAIL LIMIT` when limit_offset is present. TIF `GTC` is accepted for TRAIL and TRAIL LIMIT drafts only — protective stops meant to survive the session close — while LMT stays DAY-only. Stock/ETF TRAIL and TRAIL LIMIT drafts default `trigger_method` to 2 (IBKR LAST) unless explicitly supplied. Option trails are option-premium based, not underlying-driven, and require explicit expiry/right/strike. This tool validates the local trading gate, pinned endpoint/account/client ID, supported order type, the risk-increasing size caps (max notional and max option contracts bind opening/adding/flipping orders only; reduce-only close/reduce orders are exempt, bounded by the position itself, and the result then omits `max_notional`), stock short/flip policy, option sell-to-open policy, and broker WhatIf availability, then returns quote inputs, position effect, `token_minted`, and `submit_eligible`. For IBKR percent trails, `trailing_percent: 2` means 2%, not 0.02. `TRAIL LIMIT` uses `limit_offset`; do not send a LMT limit price with broker trail orders. `token_minted=true` means the local preview artifact exists; `submit_eligible=true` only when IBKR accepted a non-transmitting WhatIf for the exact draft. If broker WhatIf is unavailable or rejected, `submit_eligible=false` and compatibility field `executable=false`. It does NOT submit an order and returns only the redacted `preview_token_id`, never the raw submit-capable token; broker writes require a separate place/modify/cancel path with its own gated token. For protection proposals use the proposal flow; for market context without token minting use `ibkr_quote` or `ibkr_chain`; for holdings use `ibkr_positions`; for cash/margin use `ibkr_account`.",
 		ReadOnlyHint: new(false),
 		JSONSchema: schemaObject(map[string]json.RawMessage{
 			"action":             schemaEnum([]string{"buy", "sell"}, "order side; buy increases or closes short exposure, sell reduces/closes long exposure unless the local policy allows the opening effect"),
@@ -157,6 +157,10 @@ var Tools = []Tool{
 			"outside_rth":        json.RawMessage(`{"type":"boolean","description":"whether the draft allows outside regular trading hours. Default false; option protection previews should keep this false."}`),
 			"timeout_ms":         json.RawMessage(`{"type":"integer","minimum":100,"description":"quote snapshot timeout; default 5000 ms"}`),
 			"market":             json.RawMessage(`{"type":"string","enum":["us","de"],"description":"optional stock routing shortcut; omit or use \"us\" for SMART/USD, use \"de\" for German/Xetra EUR equities via SMART with primary_exchange=IBIS"}`),
+			"exchange":           schemaString("optional IBKR exchange or venue override, such as SMART or IBIS"),
+			"primary_exchange":   schemaString("optional IBKR primary-exchange hint when routing through SMART, such as IBIS for German/Xetra listings"),
+			"currency":           schemaString("optional contract currency override, such as USD or EUR"),
+			"replace_id":         schemaString("optional existing open order ref, order ID, or permanent ID to preview a replacement draft"),
 		}, []string{"action", "symbol", "quantity"}),
 		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
 			var in struct {
@@ -180,6 +184,10 @@ var Tools = []Tool{
 				OutsideRTH       bool     `json:"outside_rth"`
 				TimeoutMs        int      `json:"timeout_ms"`
 				Market           string   `json:"market"`
+				Exchange         string   `json:"exchange"`
+				PrimaryExchange  string   `json:"primary_exchange"`
+				Currency         string   `json:"currency"`
+				ReplaceID        string   `json:"replace_id"`
 			}
 			if err := unmarshalArgs(args, &in); err != nil {
 				return nil, err
@@ -214,14 +222,16 @@ var Tools = []Tool{
 			params := rpc.OrderPreviewParams{
 				Action: strings.ToUpper(strings.TrimSpace(in.Action)),
 				Contract: rpc.ContractParams{
-					Symbol:     strings.ToUpper(strings.TrimSpace(in.Symbol)),
-					SecType:    secType,
-					Market:     strings.TrimSpace(in.Market),
-					Currency:   "USD",
-					Expiry:     strings.TrimSpace(in.Expiry),
-					Right:      strings.ToUpper(strings.TrimSpace(in.Right)),
-					Strike:     in.Strike,
-					Multiplier: multiplier,
+					Symbol:      strings.ToUpper(strings.TrimSpace(in.Symbol)),
+					SecType:     secType,
+					Market:      strings.TrimSpace(in.Market),
+					Exchange:    strings.ToUpper(strings.TrimSpace(in.Exchange)),
+					PrimaryExch: strings.ToUpper(strings.TrimSpace(in.PrimaryExchange)),
+					Currency:    strings.ToUpper(strings.TrimSpace(in.Currency)),
+					Expiry:      strings.TrimSpace(in.Expiry),
+					Right:       strings.ToUpper(strings.TrimSpace(in.Right)),
+					Strike:      in.Strike,
+					Multiplier:  multiplier,
 				},
 				Quantity:      in.Quantity,
 				OrderType:     orderType,
@@ -231,9 +241,13 @@ var Tools = []Tool{
 				Strategy:      strings.TrimSpace(in.Strategy),
 				TIF:           strings.ToUpper(strings.TrimSpace(in.TIF)),
 				OutsideRTH:    in.OutsideRTH,
+				ReplaceID:     strings.TrimSpace(in.ReplaceID),
 				TimeoutMs:     in.TimeoutMs,
 			}
-			if strings.EqualFold(params.Contract.Market, "de") {
+			if params.Contract.Currency == "" && params.Contract.Market == "" && params.Contract.Exchange == "" && params.Contract.PrimaryExch == "" {
+				params.Contract.Currency = "USD"
+			}
+			if params.Contract.Currency == "" && strings.EqualFold(params.Contract.Market, "de") {
 				params.Contract.Currency = "EUR"
 			}
 			if err := conn.Call(ctx, rpc.MethodOrderPreview, params, &res); err != nil {
@@ -242,8 +256,8 @@ var Tools = []Tool{
 			// Raw submit-capable tokens never cross MCP (matching the
 			// proposal surface's sanitizeProposalPreview): the token ID is
 			// enough to correlate with CLI and journal evidence, and an
-			// agent must mint its own token through the origin-gated CLI
-			// path to place even a paper order.
+			// agent must mint its own token through the gated CLI path
+			// before any place/modify write.
 			res.PreviewToken = ""
 			return json.Marshal(res)
 		},

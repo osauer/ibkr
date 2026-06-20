@@ -2,10 +2,17 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/internal/dial"
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
@@ -107,4 +114,91 @@ func TestHoistFlagsKeepsReplaceOrderValue(t *testing.T) {
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("hoistFlags = %#v, want %#v", got, want)
 	}
+}
+
+func TestRunOrderPreviewForwardsTriggerAndRouteFields(t *testing.T) {
+	t.Parallel()
+	conn, calls := startOrderPreviewFakeConn(t, rpc.OrderPreviewResult{PreviewTokenID: "tok", TokenMinted: true})
+	defer conn.Close()
+
+	var stdout, stderr bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &stderr, Conn: conn}
+	code := Run(context.Background(), env, "order", []string{
+		"preview", "sell", "AAPL", "1",
+		"--order-type", "TRAIL",
+		"--trail-percent", "2",
+		"--trigger-method", "4",
+		"--exchange", "SMART",
+		"--primary", "NASDAQ",
+		"--currency", "USD",
+		"--replace-order", "ibkr-123",
+		"--json",
+	})
+	if code != 0 {
+		t.Fatalf("order preview exit=%d stderr=%s", code, stderr.String())
+	}
+	call := <-calls
+	if call.method != rpc.MethodOrderPreview {
+		t.Fatalf("method = %s, want %s", call.method, rpc.MethodOrderPreview)
+	}
+	p := call.params
+	if p.TriggerMethod != 4 || p.ReplaceID != "ibkr-123" {
+		t.Fatalf("params trigger/replace = %d/%q, want 4/ibkr-123", p.TriggerMethod, p.ReplaceID)
+	}
+	if p.Contract.Exchange != "SMART" || p.Contract.PrimaryExch != "NASDAQ" || p.Contract.Currency != "USD" {
+		t.Fatalf("contract route = %+v, want SMART/NASDAQ/USD", p.Contract)
+	}
+}
+
+func TestRunOrderPreviewRejectsInvalidTriggerMethodBeforeDial(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &stderr}
+	code := runOrderPreview(context.Background(), env, []string{"--trigger-method", "9", "buy", "AAPL", "1"})
+	if code != 1 {
+		t.Fatalf("order preview exit=%d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "trigger method") {
+		t.Fatalf("stderr missing trigger method error: %s", stderr.String())
+	}
+}
+
+type orderPreviewCall struct {
+	method string
+	params rpc.OrderPreviewParams
+}
+
+func startOrderPreviewFakeConn(t *testing.T, result rpc.OrderPreviewResult) (*dial.Conn, <-chan orderPreviewCall) {
+	t.Helper()
+	socketPath := filepath.Join("/tmp", fmt.Sprintf("ibkr-cli-order-preview-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen fake daemon: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	calls := make(chan orderPreviewCall, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		var req rpc.Request
+		if err := json.NewDecoder(c).Decode(&req); err != nil {
+			return
+		}
+		var params rpc.OrderPreviewParams
+		_ = json.Unmarshal(req.Params, &params)
+		calls <- orderPreviewCall{method: req.Method, params: params}
+		raw, _ := json.Marshal(result)
+		_ = json.NewEncoder(c).Encode(rpc.Response{ID: req.ID, Ok: true, Result: raw})
+	}()
+
+	conn, err := dial.Connect(socketPath)
+	if err != nil {
+		t.Fatalf("connect fake daemon: %v", err)
+	}
+	return conn, calls
 }

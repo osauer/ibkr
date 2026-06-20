@@ -110,10 +110,8 @@ func TestOrderPlaceOriginPolicy(t *testing.T) {
 		t.Fatalf("send-attempted journal event = %+v, want origin=agent stamped", sendEvent)
 	}
 
-	// Live: agent origin yields the hard blocker in the request-time gate;
-	// a human origin clears the origin layer with no further ritual (other
-	// live-readiness blockers remain, which is fine — we assert only the
-	// origin codes here).
+	// Live: all origins inherit the same base broker-write gate. Origin is
+	// still journaled for audit, but agent is not a separate live blocker.
 	liveSrv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModeLive})
 	hasCode := func(blockers []rpc.TradingBlocker, code string) bool {
 		for _, b := range blockers {
@@ -124,8 +122,8 @@ func TestOrderPlaceOriginPolicy(t *testing.T) {
 		return false
 	}
 	agentAuth := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginAgent)
-	if agentAuth.Allowed || !hasCode(agentAuth.Blockers, "live_agent_origin_blocked") {
-		t.Fatalf("live agent auth = %+v, want live_agent_origin_blocked", agentAuth.Blockers)
+	if hasCode(agentAuth.Blockers, "live_agent_origin_blocked") {
+		t.Fatalf("live agent auth = %+v, want no origin blockers", agentAuth.Blockers)
 	}
 	humanAuth := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginHumanTTY)
 	if hasCode(humanAuth.Blockers, "live_agent_origin_blocked") {
@@ -134,6 +132,9 @@ func TestOrderPlaceOriginPolicy(t *testing.T) {
 	pairedAuth := liveSrv.brokerWriteAuthorizationForRequest(rpc.OrderOriginPairedDevice)
 	if hasCode(pairedAuth.Blockers, "live_agent_origin_blocked") {
 		t.Fatalf("live paired-device auth = %+v, want no origin blockers", pairedAuth.Blockers)
+	}
+	if len(agentAuth.Blockers) != len(humanAuth.Blockers) || len(agentAuth.Blockers) != len(pairedAuth.Blockers) {
+		t.Fatalf("live origin auth blockers differ: agent=%+v human=%+v paired=%+v", agentAuth.Blockers, humanAuth.Blockers, pairedAuth.Blockers)
 	}
 }
 

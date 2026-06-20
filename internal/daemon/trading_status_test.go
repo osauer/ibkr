@@ -152,7 +152,8 @@ func TestTradingStatusReadyPaperPreviewCapability(t *testing.T) {
 			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
 			Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
 		},
-		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		orderJournal:           newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		gatewayReadyForTrading: func() bool { return true },
 	}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU1234567", PortOrigin: discover.OriginPinned})
 
@@ -183,7 +184,8 @@ func TestTradingStatusPrefersPinnedAccountOverEndpointAggregate(t *testing.T) {
 			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
 			Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
 		},
-		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		orderJournal:           newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		gatewayReadyForTrading: func() bool { return true },
 	}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 7497, ClientID: 31, Account: "All", PortOrigin: discover.OriginPinned})
 
@@ -195,21 +197,21 @@ func TestTradingStatusPrefersPinnedAccountOverEndpointAggregate(t *testing.T) {
 	}
 }
 
-func TestTradingStatusLiveReadyWithPinsOnly(t *testing.T) {
+func TestTradingStatusLiveReadyWithPinsAndConnectedGateway(t *testing.T) {
 	t.Parallel()
 	port := 4001
 	clientID := 31
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
 		Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
-	}, orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl"))}
+	}, orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")), gatewayReadyForTrading: func() bool { return true }}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 31, Account: "U1234567", PortOrigin: discover.OriginPinned})
 
 	// Live-gate simplification 2026-06-11: mode="live" plus the gateway pins
 	// on a live-looking endpoint is the whole config gate — no allow_live,
 	// no ack keys.
 	if st.Blocked {
-		t.Fatalf("live status with pins should be ready, got blockers %+v", st.Blockers)
+		t.Fatalf("live status with pins and connected gateway should be ready, got blockers %+v", st.Blockers)
 	}
 	if st.LiveOverride != rpc.TradingLiveOverrideReady {
 		t.Fatalf("LiveOverride = %q, want ready", st.LiveOverride)
@@ -223,6 +225,27 @@ func TestTradingStatusLiveReadyWithPinsOnly(t *testing.T) {
 	}
 	if st.PaperSmoke != tradingPaperSmokeStatusMissing {
 		t.Fatalf("paper-smoke status should still be reported informationally, got %q", st.PaperSmoke)
+	}
+}
+
+func TestTradingStatusBlocksWhenGatewayUnavailable(t *testing.T) {
+	t.Parallel()
+	port := 4001
+	clientID := 31
+	srv := &Server{cfg: &config.Resolved{
+		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
+		Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
+	}, orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl"))}
+	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 31, Account: "U1234567", PortOrigin: discover.OriginPinned})
+
+	if !hasTradingBlocker(st, "gateway_unavailable") {
+		t.Fatalf("missing gateway unavailable blocker in %+v", st.Blockers)
+	}
+	if st.CanPreview || st.CanWrite {
+		t.Fatalf("gateway-unavailable status should not allow preview/write: %+v", st)
+	}
+	if st.LiveOverride == rpc.TradingLiveOverrideReady {
+		t.Fatalf("gateway-unavailable live status must not report live override ready: %+v", st)
 	}
 }
 
@@ -263,10 +286,11 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
 			Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
 		},
-		version:          "test-version",
-		now:              func() time.Time { return now },
-		tradingReadiness: store,
-		orderJournal:     newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		version:                "test-version",
+		now:                    func() time.Time { return now },
+		tradingReadiness:       store,
+		orderJournal:           newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		gatewayReadyForTrading: func() bool { return true },
 	}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 31, Account: "U1234567", PortOrigin: discover.OriginPinned})
 

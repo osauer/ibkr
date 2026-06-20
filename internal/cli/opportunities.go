@@ -218,9 +218,11 @@ func renderOpportunitiesText(env *Env, snap *rpc.OpportunitySnapshot) {
 func renderOpportunityPreviewText(env *Env, res *rpc.OpportunityExercisePreviewResult) {
 	out := env.Stdout
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Opportunity Exercise Preview  accepted=%v submit_eligible=%v\n", res.Accepted, res.SubmitEligible)
+	fmt.Fprintf(out, "Opportunity Exercise Preview  accepted=%v token_minted=%v submit_eligible=%v\n", res.Accepted, res.TokenMinted, res.SubmitEligible)
 	statusRow(env, out, "Opportunity", res.Opportunity.Key)
-	statusRow(env, out, "Token ID", res.PreviewTokenID)
+	if res.PreviewTokenID != "" {
+		statusRow(env, out, "Token ID", res.PreviewTokenID)
+	}
 	statusRow(env, out, "Exercise", opportunityExerciseSummary(res.Opportunity))
 	statusRow(env, out, "Expected gain", formatMoneyCcy(res.Opportunity.ExpectedGain, res.Opportunity.ExpectedGainCurrency))
 	statusRow(env, out, "Position", fmt.Sprintf("%.4g -> %.4g (%s)", res.Opportunity.UnderlyingQuantityBefore, res.Opportunity.UnderlyingQuantityAfter, res.Opportunity.PositionEffect))

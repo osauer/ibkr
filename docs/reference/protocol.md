@@ -4,7 +4,7 @@ Last reviewed: 2026-06-11 08:17 CEST
 
 `pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the `ibkr` binary, daemon, CLI, and MCP server need.
 
-Order-writing methods exist only for wire-format completeness and downstream forks. Default builds return `pkg/ibkr.ErrTradingDisabled` before any order write reaches the socket; intentionally order-capable forks must rebuild with `-tags trading`. The shipped daemon, CLI, MCP server, and Claude plugin expose no order interface.
+Order-writing methods exist only in trading-capable builds. Default builds return `pkg/ibkr.ErrTradingDisabled` before any order write reaches the socket. Trading builds expose gated daemon/CLI order paths behind trading status, pinned account/mode, preview-token, freeze, journal, and broker checks; the MCP server remains preview/read-oriented and does not expose place/modify/cancel tools.
 
 ## Semantic fingerprints
 

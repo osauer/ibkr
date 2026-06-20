@@ -1401,32 +1401,30 @@ func TestTrailingStopSubmitBlocksStaleRevisionBeforePreview(t *testing.T) {
 	}
 }
 
-func TestTrailingStopSubmitBlocksLiveAgentOriginBeforePreview(t *testing.T) {
+func TestTrailingStopSubmitLiveAgentUsesGatedPreview(t *testing.T) {
 	t.Parallel()
+	if !orderWritesAvailable {
+		t.Skip("live-agent submit preview path requires trading build")
+	}
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModeLive, MaxNotional: 10_000})
 	livePort := 4001
 	srv.cfg.Gateway.Port = &livePort
 	srv.cfg.Gateway.Account = "U1234567"
 	srv.endpoint.Port = livePort
 	srv.endpoint.Account = "U1234567"
-	srv.orderPreviewQuote = func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error) {
-		t.Fatal("live agent-origin submit must block before preview quote")
-		return rpc.OrderQuoteSnapshot{}, nil
-	}
-	srv.orderPreviewPositionImpact = func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error) {
-		t.Fatal("live agent-origin submit must block before preview position")
-		return rpc.OrderPositionImpact{}, nil
-	}
+	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
+	srv.orderPreviewPositionImpact = fixedPreviewPosition(1, 0, rpc.OrderPositionEffectClose)
+	var whatIfReached bool
 	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
-		t.Fatal("live agent-origin submit must block before broker WhatIf preview")
-		return rpc.OrderWhatIfResult{}, nil
+		whatIfReached = true
+		return rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusRejected, Available: true, RequiredForSubmit: true, Message: "test rejection"}, nil
 	}
 	srv.orderReserveBrokerID = func(context.Context) (int, error) {
-		t.Fatal("live agent-origin submit must block before reserving broker order id")
+		t.Fatal("non-submit-eligible preview must block before reserving broker order id")
 		return 0, nil
 	}
 	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
-		t.Fatal("live agent-origin submit must block before broker place")
+		t.Fatal("non-submit-eligible preview must block before broker place")
 		return nil
 	}
 	now := time.Date(2026, 6, 9, 13, 0, 0, 0, time.UTC)
@@ -1453,15 +1451,23 @@ func TestTrailingStopSubmitBlocksLiveAgentOriginBeforePreview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submit err = %v", err)
 	}
-	if res.Accepted || res.Preview != nil || res.Place != nil || !hasBlocker(res.Blockers, "live_agent_origin_blocked") {
-		t.Fatalf("submit = %+v, want live_agent_origin_blocked before preview/place", res)
+	if !whatIfReached {
+		t.Fatalf("live agent-origin submit did not reach gated WhatIf preview; result=%+v", res)
+	}
+	if res.Accepted || res.Preview == nil || res.Place != nil || !hasBlocker(res.Blockers, "preview_not_submit_eligible") {
+		t.Fatalf("submit = %+v, want preview_not_submit_eligible after gated preview", res)
 	}
 	events, err := srv.orderJournal.LoadEvents(0)
 	if err != nil {
 		t.Fatalf("LoadEvents: %v", err)
 	}
-	if len(events) != 0 {
-		t.Fatalf("order journal events = %+v, want none before live-agent blocker", events)
+	if len(events) == 0 {
+		t.Fatalf("order journal events = %+v, want preview evidence before submit blocker", events)
+	}
+	for _, ev := range events {
+		if ev.Type == orderJournalEventSendAttempted {
+			t.Fatalf("order journal events = %+v, want no send attempt after rejected WhatIf", events)
+		}
 	}
 }
 

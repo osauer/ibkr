@@ -112,7 +112,8 @@ func TestRenderOpportunityPreviewText(t *testing.T) {
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	renderOpportunityPreviewText(env, &rpc.OpportunityExercisePreviewResult{
 		Accepted:       true,
-		SubmitEligible: false,
+		TokenMinted:    true,
+		SubmitEligible: true,
 		PreviewTokenID: "opprev-1",
 		AsOf:           time.Now(),
 		Opportunity: rpc.Opportunity{
@@ -142,21 +143,44 @@ func TestRenderOpportunityPreviewText(t *testing.T) {
 				CurrentUnprotectedQuantity: 0,
 			},
 		},
-		Blockers: []rpc.TradingBlocker{{Code: "live_agent_origin_blocked", Message: "live broker writes from agent-origin callers are blocked"}},
 	})
 	got := stdout.String()
 	for _, want := range []string{
-		"Opportunity Exercise Preview  accepted=true submit_eligible=false",
+		"Opportunity Exercise Preview  accepted=true token_minted=true submit_eligible=true",
 		"Token ID",
 		"opprev-1",
 		"Expected gain",
 		"Post-exercise risk",
 		"risk increased",
 		"protection review needed",
-		"live_agent_origin_blocked: live broker writes from agent-origin callers are blocked",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("opportunity preview render missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestRenderOpportunityPreviewTextBlockedOmitsToken(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	renderOpportunityPreviewText(env, &rpc.OpportunityExercisePreviewResult{
+		Accepted:       false,
+		TokenMinted:    false,
+		SubmitEligible: false,
+		Opportunity:    rpc.Opportunity{Key: "option_exercise:key", Action: rpc.OpportunityActionExercise, Quantity: 1, Symbol: "AAPL"},
+		Blockers:       []rpc.TradingBlocker{{Code: "trading_frozen", Message: "trading writes are frozen"}},
+	})
+	got := stdout.String()
+	for _, want := range []string{
+		"Opportunity Exercise Preview  accepted=false token_minted=false submit_eligible=false",
+		"trading_frozen: trading writes are frozen",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("opportunity blocked preview render missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Token ID") {
+		t.Fatalf("blocked preview rendered token line:\n%s", got)
 	}
 }

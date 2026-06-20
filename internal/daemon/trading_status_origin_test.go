@@ -13,33 +13,23 @@ func TestLiveOriginBlockersMatrix(t *testing.T) {
 	paper := rpc.TradingStatus{Mode: config.TradingModePaper, Account: "DU1234567"}
 
 	cases := []struct {
-		name     string
-		status   rpc.TradingStatus
-		origin   string
-		wantCode string
+		name   string
+		status rpc.TradingStatus
+		origin string
 	}{
 		{name: "paper agent unrestricted", status: paper, origin: rpc.OrderOriginAgent},
 		{name: "paper empty origin unrestricted", status: paper, origin: ""},
-		{name: "live agent hard-blocked", status: live, origin: rpc.OrderOriginAgent, wantCode: "live_agent_origin_blocked"},
-		{name: "live empty origin fails closed as agent", status: live, origin: "", wantCode: "live_agent_origin_blocked"},
-		{name: "live unknown origin fails closed as agent", status: live, origin: "human-definitely", wantCode: "live_agent_origin_blocked"},
-		{name: "live human passes with no confirmation", status: live, origin: rpc.OrderOriginHumanTTY},
-		{name: "live paired device passes with no confirmation", status: live, origin: rpc.OrderOriginPairedDevice},
+		{name: "live agent inherits base gates", status: live, origin: rpc.OrderOriginAgent},
+		{name: "live empty origin inherits base gates", status: live, origin: ""},
+		{name: "live unknown origin inherits base gates", status: live, origin: "human-definitely"},
+		{name: "live human inherits base gates", status: live, origin: rpc.OrderOriginHumanTTY},
+		{name: "live paired device inherits base gates", status: live, origin: rpc.OrderOriginPairedDevice},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			blockers := liveOriginBlockers(tc.status, tc.origin)
-			if tc.wantCode == "" {
-				if len(blockers) != 0 {
-					t.Fatalf("liveOriginBlockers = %+v, want none", blockers)
-				}
-				return
-			}
-			if len(blockers) != 1 || blockers[0].Code != tc.wantCode {
-				t.Fatalf("liveOriginBlockers = %+v, want single %s", blockers, tc.wantCode)
-			}
-			if blockers[0].Action == "" {
-				t.Fatalf("blocker %s has no remediation action", tc.wantCode)
+			if len(blockers) != 0 {
+				t.Fatalf("liveOriginBlockers = %+v, want none", blockers)
 			}
 		})
 	}

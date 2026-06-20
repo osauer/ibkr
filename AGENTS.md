@@ -18,10 +18,12 @@ independent, dispatch them to fresh-context worktree agents instead of
 grinding them through a large main context — base worktrees on local main,
 not origin/main.
 
-Trading safety: paper-account broker writes are open to agents; live writes
-are hard-blocked daemon-side by origin checks, and the trading freeze switch
-(`ibkr settings set trading.freeze=true`) is human-only. Never weaken these
-guardrails in code, config, or hooks without an explicit human go.
+Trading safety: paper and live broker writes are open to agents only through
+the existing gated broker-write paths: pinned gateway/account/mode, preview
+tokens, broker WhatIf/eligibility, local journaling, and daemon authorization
+must all pass. The trading freeze switch (`ibkr settings set
+trading.freeze=true`) is human-only. Never weaken these guardrails in code,
+config, or hooks without an explicit human go.
 
 Public marketing/site pages for `osauer.dev/ibkr` are deployed from this
 product repo's GitHub Pages config, currently `main:/docs` with

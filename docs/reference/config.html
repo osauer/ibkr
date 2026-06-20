@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: config.md sha256:2298f5d2d2fc6c51f36b04f8e2b0c86c6f261754738c4b2a2528dba318a80188 -->
+<!-- md-source: config.md sha256:a3e1b0ea64ff226dd6618cddd576064b00324f392a7c4db8d693fe3358827cf3 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -197,7 +197,7 @@
 <table>
 <thead><tr><th>Variable</th><th>Description</th></tr></thead>
 <tbody>
-<tr><td><code>IBKR_AGENT_CONTEXT</code></td><td>When set (any value), broker writes from this process are classified as agent-origin. The variable can only restrict: no environment variable can claim a human origin, and live routes refuse agent-origin writes.</td></tr>
+<tr><td><code>IBKR_AGENT_CONTEXT</code></td><td>When set (any value), broker writes from this process are classified as agent-origin for audit and origin-specific policy. The variable can only restrict: no environment variable can claim a human origin.</td></tr>
 <tr><td><code>IBKR_APP_ADDR</code></td><td>HTTP listen address for <code>ibkr app</code>. Defaults to <code>0.0.0.0:8765</code> so a paired phone on the LAN can reach the app.</td></tr>
 <tr><td><code>IBKR_APP_PUBLIC_URL</code></td><td>Public trusted HTTPS base URL for the <code>ibkr app</code> PWA/relay origin. Defaults to a LAN URL for wildcard listen addresses, falling back to loopback when no LAN address is available.</td></tr>
 <tr><td><code>IBKR_APP_REMOTE</code></td><td>Enable the outbound Cloudflare Worker relay for <code>ibkr app</code>, making pairing URLs reachable through the public relay origin.</td></tr>

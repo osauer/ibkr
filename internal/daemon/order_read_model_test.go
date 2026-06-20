@@ -157,6 +157,9 @@ func TestOrdersOpenCurrentContextRequiresConcreteAccountAndMode(t *testing.T) {
 	if len(res.Orders) != 0 {
 		t.Fatalf("aggregate open orders = %+v, want no concrete-account rows", res.Orders)
 	}
+	if res.Account != "All" || res.Mode != rpc.AccountModeLive || res.NotBrokerStatement == "" || len(res.Limitations) == 0 {
+		t.Fatalf("aggregate disclosure = account %q mode %q source %q limitations %+v", res.Account, res.Mode, res.NotBrokerStatement, res.Limitations)
+	}
 
 	srv.endpoint.Account = "U1234567"
 	res, err = srv.handleOrdersOpen(context.Background(), &rpc.Request{Params: raw})
@@ -166,6 +169,9 @@ func TestOrdersOpenCurrentContextRequiresConcreteAccountAndMode(t *testing.T) {
 	if len(res.Orders) != 1 || res.Orders[0].OrderRef != "live-aapl" {
 		t.Fatalf("concrete account open orders = %+v, want only current live row", res.Orders)
 	}
+	if res.Account != "U1234567" || res.Mode != rpc.AccountModeLive || !res.LastLocalEventAt.Equal(now) || res.NotBrokerStatement == "" || len(res.Limitations) == 0 {
+		t.Fatalf("concrete open disclosure = account %q mode %q last %s source %q limitations %+v", res.Account, res.Mode, res.LastLocalEventAt, res.NotBrokerStatement, res.Limitations)
+	}
 
 	status, err := srv.handleOrderStatus(context.Background(), &rpc.Request{Params: mustJSON(t, rpc.OrderStatusParams{ID: "paper-sap"})})
 	if err != nil {
@@ -173,6 +179,9 @@ func TestOrdersOpenCurrentContextRequiresConcreteAccountAndMode(t *testing.T) {
 	}
 	if status.Found {
 		t.Fatalf("paper order status found in live context: %+v", status)
+	}
+	if status.Account != "U1234567" || status.Mode != rpc.AccountModeLive || !status.LastLocalEventAt.Equal(now) || status.NotBrokerStatement == "" || len(status.Limitations) == 0 {
+		t.Fatalf("not-found status disclosure = account %q mode %q last %s source %q limitations %+v", status.Account, status.Mode, status.LastLocalEventAt, status.NotBrokerStatement, status.Limitations)
 	}
 }
 
@@ -244,12 +253,18 @@ func TestOrdersOpenUsesPinnedConcreteAccountWhenConnectorReportsAll(t *testing.T
 	if len(res.Orders) != 1 || res.Orders[0].OrderRef != "paper-mbg" {
 		t.Fatalf("open orders = %+v, want pinned paper order despite connected All", res.Orders)
 	}
+	if res.Account != "DU7654321" || res.Mode != rpc.AccountModePaper || res.NotBrokerStatement == "" || len(res.Limitations) == 0 {
+		t.Fatalf("open disclosure = account %q mode %q source %q limitations %+v", res.Account, res.Mode, res.NotBrokerStatement, res.Limitations)
+	}
 	status, err := srv.handleOrderStatus(context.Background(), &rpc.Request{Params: mustJSON(t, rpc.OrderStatusParams{ID: "paper-mbg"})})
 	if err != nil {
 		t.Fatalf("paper order status: %v", err)
 	}
 	if !status.Found || status.Order.OrderRef != "paper-mbg" {
 		t.Fatalf("order status = %+v, want pinned paper order", status)
+	}
+	if status.Account != "DU7654321" || status.Mode != rpc.AccountModePaper || !status.LastLocalEventAt.Equal(now.Add(-time.Minute)) || status.NotBrokerStatement == "" || len(status.Limitations) == 0 {
+		t.Fatalf("status disclosure = account %q mode %q last %s source %q limitations %+v", status.Account, status.Mode, status.LastLocalEventAt, status.NotBrokerStatement, status.Limitations)
 	}
 }
 

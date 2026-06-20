@@ -91,6 +91,9 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 		status.OpenOrders = summary.OpenOrders
 		status.LastOrderEvent = summary.LastEvent
 	}
+	if !s.tradingGatewayReady() {
+		add("gateway_unavailable", "order preview and broker writes require a connected IBKR Gateway/TWS session", "Run `ibkr status` and wait for the gateway handshake to complete.")
+	}
 
 	switch tr.Mode {
 	case config.TradingModePaper, config.TradingModeLive:
@@ -161,6 +164,13 @@ func (s *Server) orderBrokerWritesEnabled() bool {
 	return orderWritesAvailable
 }
 
+func (s *Server) tradingGatewayReady() bool {
+	if s != nil && s.gatewayReadyForTrading != nil {
+		return s.gatewayReadyForTrading()
+	}
+	return s != nil && s.gatewayConnector() != nil
+}
+
 type brokerWriteAuthorization struct {
 	Status   rpc.TradingStatus
 	Route    string
@@ -227,6 +237,9 @@ func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteA
 
 // normalizedWriteOrigin maps any request origin onto the journaled audit
 // value: the known human origins pass through, everything else is "agent".
+// Origin remains audit/policy metadata; live broker writes are authorized by
+// the same trading gates, preview tokens, freeze state, and broker checks for
+// every origin.
 func normalizedWriteOrigin(origin string) string {
 	if originIsHuman(origin) {
 		return origin
@@ -245,21 +258,10 @@ func originIsHuman(origin string) bool {
 	return false
 }
 
-// liveOriginBlockers layers per-request origin policy over the routed mode:
-// live routes refuse agent origins outright (no override). Paper carries no
-// origin blockers so agents can exercise the full order path against paper
-// TWS.
-func liveOriginBlockers(status rpc.TradingStatus, origin string) []rpc.TradingBlocker {
-	if status.Mode != config.TradingModeLive {
-		return nil
-	}
-	if !originIsHuman(origin) {
-		return []rpc.TradingBlocker{{
-			Code:    "live_agent_origin_blocked",
-			Message: "live broker writes are blocked for agent-origin requests",
-			Action:  "Agent sessions may place broker orders on paper only. A human must run this write from an interactive terminal.",
-		}}
-	}
+// liveOriginBlockers is retained as the shared hook point for origin-specific
+// policy. Live and paper broker writes currently use the same daemon gates for
+// all origins; normalizedWriteOrigin still journals non-human callers as agent.
+func liveOriginBlockers(_ rpc.TradingStatus, _ string) []rpc.TradingBlocker {
 	return nil
 }
 

@@ -116,6 +116,7 @@ func renderOrdersOpenText(env *Env, res *rpc.OrdersOpenResult) {
 	out := env.Stdout
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "IBKR Open Orders  %s\n", env.statusBadge(statusConcern{Text: strconv.Itoa(len(res.Orders)), Level: statusConcernNone}))
+	renderOrderReadScope(env, res.Account, res.Mode, res.NotBrokerStatement, res.LastLocalEventAt, res.Limitations)
 	if len(res.Orders) == 0 {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "No locally tracked open orders.")
@@ -208,10 +209,13 @@ func renderOrderStatusText(env *Env, res *rpc.OrderStatusResult, id string) {
 	fmt.Fprintln(out)
 	if !res.Found {
 		fmt.Fprintf(out, "IBKR Order Status  %s\n\n", env.statusBadge(statusConcern{Text: "NOT FOUND", Level: statusConcernWarn}))
+		renderOrderReadScope(env, res.Account, res.Mode, res.NotBrokerStatement, res.LastLocalEventAt, res.Limitations)
+		fmt.Fprintln(out)
 		fmt.Fprintf(out, "No locally tracked order matched %s.\n\n", id)
 		return
 	}
 	fmt.Fprintf(out, "IBKR Order Status  %s\n", env.statusBadge(statusConcern{Text: strings.ToUpper(res.Order.LifecycleStatus), Level: orderStatusConcernLevel(res.Order.LifecycleStatus)}))
+	renderOrderReadScope(env, res.Account, res.Mode, res.NotBrokerStatement, res.LastLocalEventAt, res.Limitations)
 	statusRow(env, out, "Order", formatOrderViewTitle(res.Order))
 	if res.Order.ReservedOrderID != 0 {
 		statusRow(env, out, "Broker ID", strconv.Itoa(res.Order.ReservedOrderID))
@@ -261,6 +265,23 @@ func renderOrderStatusText(env *Env, res *rpc.OrderStatusResult, id string) {
 		}
 	}
 	fmt.Fprintln(out)
+}
+
+func renderOrderReadScope(env *Env, account, mode, source string, lastLocalEventAt time.Time, limitations []string) {
+	out := env.Stdout
+	statusRow(env, out, "Scope", strings.TrimSpace(nonEmpty(account, "unknown")+" "+nonEmpty(mode, "unknown")))
+	if !lastLocalEventAt.IsZero() {
+		statusRow(env, out, "Latest local event", formatOrderTime(lastLocalEventAt))
+	}
+	if source != "" {
+		statusRow(env, out, "Source", source)
+	}
+	if len(limitations) > 0 {
+		fmt.Fprintln(out, "Limitations:")
+		for _, limitation := range limitations {
+			fmt.Fprintf(out, "  - %s\n", limitation)
+		}
+	}
 }
 
 func formatOrderViewTitle(order rpc.OrderView) string {

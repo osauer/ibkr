@@ -33,6 +33,7 @@ var skillExcluded = map[string]string{
 var forbiddenAllowPrefixes = []string{
 	"ibkr order place", "ibkr order modify", "ibkr order cancel",
 	"ibkr proposals preview", "ibkr proposals submit", "ibkr proposals ignore",
+	"ibkr opportunities preview", "ibkr opportunities exercise", "ibkr opportunities ignore",
 	"ibkr settings set",
 	"ibkr watch --add", "ibkr watch --remove", "ibkr watch --clear",
 	"ibkr purge",
@@ -92,6 +93,7 @@ func TestSkillAllowlistMirrorsSettingsAndCLI(t *testing.T) {
 	var settings struct {
 		Permissions struct {
 			Allow []string `json:"allow"`
+			Deny  []string `json:"deny"`
 		} `json:"permissions"`
 	}
 	data, err := os.ReadFile(skillSettingsPath)
@@ -135,6 +137,51 @@ func TestSkillAllowlistMirrorsSettingsAndCLI(t *testing.T) {
 		for _, bad := range forbiddenAllowPrefixes {
 			if strings.HasPrefix(inner, bad) {
 				t.Errorf("allowed-tools pattern %q allowlists write path %q; broker/state writes stay outside the skill", p, bad)
+			}
+		}
+	}
+	for _, p := range settings.Permissions.Deny {
+		inner := strings.TrimSuffix(strings.TrimPrefix(p, "Bash("), ")")
+		for _, brokerWrite := range []string{
+			"ibkr order place", "ibkr order modify", "ibkr order cancel",
+			"ibkr proposals submit", "ibkr opportunities exercise",
+		} {
+			if strings.HasPrefix(inner, brokerWrite) {
+				t.Errorf("settings deny pattern %q hard-denies broker write path %q; hook/daemon gates should decide", p, brokerWrite)
+			}
+		}
+	}
+}
+
+func TestAgentPolicyDocsDoNotClaimLiveAgentHardBlock(t *testing.T) {
+	t.Parallel()
+	paths := []string{
+		"../../AGENTS.md",
+		"../../README.md",
+		"../../SECURITY.md",
+		"../../docs/design/agent-origin-gating.md",
+		"../../docs/templates/daemon-cli-trading-contract.md",
+		"../../skills/ibkr/SKILL.md",
+		"../../.agents/skills/ibkr/SKILL.md",
+		"../../.codex/rules/ibkr.rules",
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		lower := strings.ToLower(string(data))
+		for _, stale := range []string{
+			"live agent-origin broker writes are blocked",
+			"live agent-origin writes are hard-blocked",
+			"live routes refuse agent-origin writes",
+			"agent-origin requests are refused",
+			"human must run live",
+			"paper-ready trading state",
+			"live and unknown states remain blocked",
+		} {
+			if strings.Contains(lower, stale) {
+				t.Errorf("%s contains stale live-agent policy phrase %q", path, stale)
 			}
 		}
 	}
