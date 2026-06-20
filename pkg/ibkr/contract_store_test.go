@@ -196,12 +196,12 @@ func TestContractStoreOptionsRoundTripSPXvsSPXW(t *testing.T) {
 	// Two distinct contracts: same date, same strike, same right.
 	// Trading class is the discriminator. ConIDs are fictional but
 	// represent the real-world AM/PM-settled pair on third-Friday.
-	spxAM := ContractDetailsLite{
-		Symbol: "SPX", TradingClass: "SPX", Expiry: "20260619",
+		spxAM := ContractDetailsLite{
+			Symbol: "SPX", TradingClass: "SPX", Expiry: "20991218",
 		Strike: 5400, Right: "C", ConID: 700000001, Exchange: "CBOE",
 	}
-	spxwPM := ContractDetailsLite{
-		Symbol: "SPX", TradingClass: "SPXW", Expiry: "20260619",
+		spxwPM := ContractDetailsLite{
+			Symbol: "SPX", TradingClass: "SPXW", Expiry: "20991218",
 		Strike: 5400, Right: "C", ConID: 700000002, Exchange: "CBOE",
 	}
 
@@ -225,8 +225,8 @@ func TestContractStoreOptionsRoundTripSPXvsSPXW(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("LoadOptions returned %d entries, want 2: %v", len(got), got)
 	}
-	spxKey := optionContractKey("SPX", "SPX", "20260619", 5400, "C")
-	spxwKey := optionContractKey("SPX", "SPXW", "20260619", 5400, "C")
+		spxKey := optionContractKey("SPX", "SPX", "20991218", 5400, "C")
+		spxwKey := optionContractKey("SPX", "SPXW", "20991218", 5400, "C")
 	if got[spxKey].ConID != 700000001 {
 		t.Errorf("SPX-class ConID after round-trip: got %d, want 700000001", got[spxKey].ConID)
 	}
@@ -250,12 +250,12 @@ func TestContractStoreOptionsMigratesV2KeysToEmptyClass(t *testing.T) {
 		"as_of": "2026-05-21T00:00:00Z",
 		"contracts": {},
 		"options": {
-			"SPY|20260620|500.000000|C": {
-				"Symbol": "SPY", "TradingClass": "SPY", "Expiry": "20260620",
+				"SPY|20991218|500.000000|C": {
+					"Symbol": "SPY", "TradingClass": "SPY", "Expiry": "20991218",
 				"Strike": 500, "Right": "C", "ConID": 600000001
 			},
-			"SPY|20260620|500.000000|P": {
-				"Symbol": "SPY", "TradingClass": "SPY", "Expiry": "20260620",
+				"SPY|20991218|500.000000|P": {
+					"Symbol": "SPY", "TradingClass": "SPY", "Expiry": "20991218",
 				"Strike": 500, "Right": "P", "ConID": 600000002
 			}
 		}
@@ -268,11 +268,11 @@ func TestContractStoreOptionsMigratesV2KeysToEmptyClass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOptions (v2 migration): %v", err)
 	}
-	// Keys must be normalised to v3 empty-class shape: "SPY||20260620|500.000000|C".
-	want := map[string]int{
-		"SPY||20260620|500.000000|C": 600000001,
-		"SPY||20260620|500.000000|P": 600000002,
-	}
+		// Keys must be normalised to v3 empty-class shape: "SPY||20991218|500.000000|C".
+		want := map[string]int{
+			"SPY||20991218|500.000000|C": 600000001,
+			"SPY||20991218|500.000000|P": 600000002,
+		}
 	if len(got) != len(want) {
 		t.Fatalf("got %d entries after migration, want %d: %v", len(got), len(want), got)
 	}
