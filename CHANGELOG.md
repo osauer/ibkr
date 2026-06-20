@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.14.2 — 2026-06-20 11:37 CEST
+
+### What's new
+
+- Tightened the agent-facing trading contract for CLI, MCP, hooks, and docs so live and paper broker writes use one connected-gateway gate instead of stale origin-only policy text.
+- Made local order and opportunity read/preview surfaces safer for agentic workflows by separating local-journal evidence, preview-token minting, and submit eligibility.
+
+### Changed
+
+- Updated trading status to report `gateway_unavailable` and keep `can_preview=false` / `can_write=false` while TWS or IB Gateway is disconnected or still handshaking.
+- Aligned CLI and MCP order-preview routing fields, replacement previews, and trailing-stop trigger-method support across help text, schemas, generated docs, and skill guidance.
+- Updated the Claude/Codex hook policy to allow read-only help/piped reads while gating broker-adjacent writes through current trading readiness.
+
+### Fixed
+
+- Fixed stale live-agent policy drift so agent-origin live broker writes are governed by the same daemon authorization path as other origins.
+- Fixed opportunity exercise preview output so blocked previews do not imply a usable submit token.
+- Fixed open-order and order-status outputs to disclose account/mode scope and local-journal limitations instead of looking like a complete broker statement.
+
 ## v1.14.1 — 2026-06-20 06:44 CEST
 
 ### What's new
