@@ -33,6 +33,7 @@ const (
 	MethodSettingsGet         = "settings.get"
 	MethodSettingsUpdate      = "settings.update"
 	MethodOrdersOpen          = "orders.open"
+	MethodOrdersHistory       = "orders.history"
 	MethodOrderStatus         = "order.status"
 	MethodOrderPreview        = "order.preview"
 	MethodBreadthSPX          = "breadth.spx"
@@ -2975,6 +2976,17 @@ const (
 // OrdersOpenParams reads the current broker account/mode open-order view.
 type OrdersOpenParams struct{}
 
+// OrdersHistoryParams reads bounded local order-journal history for the
+// current broker account/mode. Since and Until accept RFC3339 timestamps or
+// YYYY-MM-DD UTC dates; Limit caps returned grouped order rows, while
+// EventLimit caps returned lifecycle events per grouped order row.
+type OrdersHistoryParams struct {
+	Since      string `json:"since,omitempty"`
+	Until      string `json:"until,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	EventLimit int    `json:"event_limit,omitempty"`
+}
+
 // OrderStatusParams identifies one journal-backed order view by order ref,
 // IBKR order ID, or permanent ID.
 type OrderStatusParams struct {
@@ -3500,6 +3512,33 @@ type OrderStatusResult struct {
 	Order  OrderView    `json:"order,omitzero"`
 	Events []OrderEvent `json:"events,omitempty"`
 	AsOf   time.Time    `json:"as_of"`
+}
+
+type OrdersHistoryRow struct {
+	Order            OrderView    `json:"order"`
+	Events           []OrderEvent `json:"events"`
+	EventsCount      int          `json:"events_count"`
+	TotalEventsCount int          `json:"total_events_count"`
+	EventsTruncated  bool         `json:"events_truncated"`
+}
+
+type OrdersHistoryResult struct {
+	Orders             []OrdersHistoryRow `json:"orders"`
+	AsOf               time.Time          `json:"as_of"`
+	Since              time.Time          `json:"since"`
+	Until              time.Time          `json:"until"`
+	Account            string             `json:"account,omitempty"`
+	Mode               string             `json:"mode,omitempty"`
+	Count              int                `json:"count"`
+	TotalCount         int                `json:"total_count"`
+	EventsCount        int                `json:"events_count"`
+	TotalEventsCount   int                `json:"total_events_count"`
+	Limit              int                `json:"limit"`
+	EventLimit         int                `json:"event_limit"`
+	Truncated          bool               `json:"truncated"`
+	EventsTruncated    bool               `json:"events_truncated"`
+	NotBrokerStatement string             `json:"not_broker_statement"`
+	Limitations        []string           `json:"limitations"`
 }
 
 // MembersHealth is the wire shape for the SPX-members surface

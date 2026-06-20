@@ -4,7 +4,7 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**24 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+**25 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
@@ -29,6 +29,19 @@ Read ibkr's platform settings and observed state: runtime user preferences such 
 Read current broker account/mode open-order lifecycle state without placing, modifying, cancelling, or transmitting any broker order. Use after an order preview/place flow to inspect what the daemon believes is still open for the currently connected broker context, or when the user asks for open orders. Paper/test journal rows are intentionally not returned while connected to live, and live rows are intentionally not returned while connected to paper. This tool is read-only and does not place orders; it only reports journal/broker-callback state. It is NOT for historical audit across old accounts or modes, NOT for creating a new preview token (use `ibkr_order_preview`), and NOT for submitting, modifying, or cancelling an order.
 
 *No parameters.*
+
+## `ibkr_orders_history`
+
+Read bounded local order-journal history for the current broker account/mode without placing, modifying, cancelling, or transmitting any broker order. Use for recent trade-review forensics when the user asks what locally journaled order lifecycle/fill callbacks occurred over a date range. This read-only tool does not place orders; it only reports local journal evidence. Results are bounded by grouped-order limit and per-order event_limit so callback-heavy trailing stops do not flood the context; inspect events_truncated/total_events_count before treating event samples as complete. This is a local daemon journal view only, not an IBKR Activity Statement, trade confirmation, execution report, commission ledger, closed-position ledger, or broker-grade historical audit; it may miss manual orders, other-client orders, broker activity while the daemon was offline, and rows outside the selected account/mode. For currently working orders use `ibkr_orders_open`; for one order's full audit use `ibkr_order_status`; for official broker history ask the user for an IBKR Activity Statement/Flex export.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `event_limit` | integer | no | maximum lifecycle events returned per grouped order row; default 20, max 200. When truncated, rows carry events_truncated and total_events_count. |
+| `limit` | integer | no | maximum grouped order rows to return; default 50, max 500 |
+| `since` | string | no | optional inclusive lower boundary as YYYY-MM-DD UTC date or RFC3339 timestamp; default is 7 days before until |
+| `until` | string | no | optional upper boundary as RFC3339 timestamp, or YYYY-MM-DD UTC date to include that whole UTC day; default is now |
 
 ## `ibkr_order_status`
 

@@ -1,9 +1,9 @@
 ---
 name: ibkr
-description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, opportunity, offline opportunity backtest/research diagnostics, settings/freeze, order-preview, and order-status questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read-only and never runs broker writes; live agent-origin broker writes are blocked daemon-side.
+description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, opportunity, offline opportunity backtest/research diagnostics, settings/freeze, order-preview, order-status, and order-history questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read-only and never runs broker writes; live agent-origin broker writes are blocked daemon-side.
 ---
 
-Updated: 2026-06-18 12:07 CEST
+Updated: 2026-06-19 12:16 CEST
 
 ## Contract
 
@@ -12,7 +12,7 @@ daily P&L, watchlist, quotes, calendars, option chains, daily history, scanners,
 technical screens, fixed-fractional sizing, broad-market regime, dealer gamma,
 market breadth, portfolio canary posture, held-name market events, protection
 proposals, option-exercise opportunities, runtime settings/freeze state, order
-preview, or order status.
+preview, order status, or order history.
 
 Prefer MCP tools for read-only snapshots when the `ibkr` MCP server is available.
 Use the CLI with `--json` when the MCP surface is not available or when a project
@@ -30,6 +30,12 @@ Treat `not_advice`, `evidence.status`, `evidence.reasons`, feature diagnostics,
 and reason diagnostics as the answer; never translate a passing/strong
 diagnostic into alpha proof, a live trade recommendation, or an order
 preview/place request.
+
+Use `ibkr orders history --json` only as recent local order-journal evidence for
+the current account/mode. It is not an IBKR Activity Statement, Flex
+query/export, trade confirmation, commission ledger, closed-position ledger, or
+broker-grade historical audit. Prefer `ibkr orders open` for current working
+orders and `ibkr order status ID` for one order's full local audit trail.
 
 The MCP surface remains read-oriented for agents. Paper-account broker writes
 are open to agents through the gated CLI flow; live agent-origin broker writes

@@ -1,6 +1,6 @@
 # ibkr canary
 
-Updated: 2026-06-11 21:20 CEST
+Updated: 2026-06-20 06:44 CEST
 
 `ibkr canary` is a local Interactive Brokers (IBKR) MCP server, terminal CLI, Canary app, and Go implementation of the TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows.
 
@@ -22,13 +22,9 @@ Do not describe the standard downloads as an order-entry or automated-trading sy
 - [IBKR MCP server](https://osauer.dev/ibkr/ibkr-mcp/)
 - [IBKR MCP TWS setup](https://osauer.dev/ibkr/ibkr-mcp-tws/)
 - [Interactive Brokers MCP server page](https://osauer.dev/ibkr/interactive-brokers-mcp-server/)
-- [TWS MCP server](https://osauer.dev/ibkr/tws-mcp-server/)
 - [IB Gateway MCP server](https://osauer.dev/ibkr/ib-gateway-mcp/)
 - [Claude Desktop Install](https://osauer.dev/ibkr/claude-desktop-interactive-brokers/)
-- [IBKR Claude Desktop MCP setup](https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/)
-- [Connect Claude to IBKR](https://osauer.dev/ibkr/connect-claude-to-ibkr/)
 - [Best IBKR MCP server for Claude Code](https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/)
-- [Analyze Interactive Brokers portfolio with AI](https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/)
 - [Portfolio review with Claude and IBKR](https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/)
 - [Read-only MCP server for Interactive Brokers](https://osauer.dev/ibkr/read-only-mcp-server/)
 - [Canary remote app beta](https://osauer.dev/ibkr/canary-remote/)

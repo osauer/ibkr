@@ -55,8 +55,8 @@
         "applicationCategory": "FinanceApplication",
         "applicationSubCategory": "Model Context Protocol server",
         "operatingSystem": "macOS, Linux, Unix",
-        "softwareVersion": "1.14.0",
-        "dateModified": "2026-06-18T13:37:00+02:00",
+        "softwareVersion": "1.14.1",
+        "dateModified": "2026-06-20T06:44:00+02:00",
         "offers": {
           "@type": "Offer",
           "price": "0",
@@ -643,7 +643,7 @@
       <div>
         <p class="eyebrow">Agentic IBKR workflows</p>
         <h1 id="hero-title">ibkr canary for portfolio analysis and trading research</h1>
-        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Turn portfolio, options, quotes, scanners, breadth, gamma, regime, Canary app checks, and data-quality checks into review workflows an assistant can actually use.</p>
+        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop first, with Claude Code, Cursor, Zed, and other local MCP hosts supported from the same binary. Ask real portfolio and market questions without copying tables out of TWS.</p>
         <p class="safety">The bundled MCP surface is read-side only: agents can analyze, monitor, and size plans without receiving order-entry tools.</p>
         <div class="actions" aria-label="Main actions">
           <a class="button primary" href="claude-desktop-interactive-brokers/">Claude Desktop Install</a>
@@ -651,7 +651,7 @@
           <a class="button" href="https://github.com/osauer/ibkr">View on GitHub</a>
           <a class="button" href="reference/mcp-tools.html">Read MCP tools</a>
         </div>
-        <p class="install-note">Claude Desktop: review the Mac prerequisites, install the MCPB from the setup page, restart Claude, and keep IB Gateway or TWS running locally. Claude Code: install the plugin for the skill, hooks, and MCP server config, then install the local <code>ibkr</code> binary.</p>
+        <p class="install-note">For Claude Desktop, use the MCPB install page, restart Claude, and keep IB Gateway or TWS running locally. The shell and Claude Code paths are there when you want one shared binary.</p>
         <p class="disclaimer">ibkr is analysis software, not financial advice — nothing it shows or says is a recommendation to buy or sell any security.</p>
       </div>
       <div class="hero-media">
@@ -681,6 +681,29 @@
         </div>
       </div>
     </div>
+
+    <section class="wrap install" id="install" aria-labelledby="install-title">
+      <div>
+        <div class="section-head">
+          <h2 id="install-title">Install for Claude Desktop first.</h2>
+          <p>Most Mac users should start with the Claude Desktop MCPB. It bundles the local MCP server, keeps the broker session on your machine, and avoids hand-editing MCP config files.</p>
+        </div>
+        <p>Prerequisites: IB Gateway 10.37+ or TWS running locally, plus an IBKR Pro account with TWS API access. IBKR Lite does not include TWS API access.</p>
+        <p><a class="button primary" href="claude-desktop-interactive-brokers/">Claude Desktop Install</a></p>
+        <p>The Claude Desktop path explains what the MCPB bundles, what still needs to be running locally, and the exact Mac install and restart steps.</p>
+      </div>
+      <pre><code># Claude Code plugin
+/plugin marketplace add osauer/ibkr
+/plugin install ibkr@ibkr
+# restart Claude Code or run /reload-plugins after install/update
+
+# Shell, Cursor, Continue, Zed, generic MCP hosts
+curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
+ibkr setup claude-desktop
+
+# then ask:
+# "How does my IBKR account look today?"</code></pre>
+    </section>
 
     <section class="wrap">
       <div class="section-head">
@@ -781,98 +804,6 @@
       </div>
     </section>
 
-    <section class="wrap" aria-labelledby="search-paths-title">
-      <div class="section-head">
-        <h2 id="search-paths-title">Popular setup paths.</h2>
-        <p>Use the page that matches the phrase you searched for; all paths install the same local <code>ibkr mcp</code> workflow surface.</p>
-      </div>
-      <div class="feature-grid">
-        <article class="feature">
-          <small>IBKR MCP TWS</small>
-          <h3><a href="ibkr-mcp-tws/">IBKR MCP TWS setup</a></h3>
-          <p>Exact setup path for using <code>ibkr mcp</code> against a local Trader Workstation API session.</p>
-        </article>
-        <article class="feature">
-          <small>IBKR MCP</small>
-          <h3><a href="ibkr-mcp/">IBKR MCP server</a></h3>
-          <p>Exact setup notes for users searching by the IBKR acronym and MCP server phrase.</p>
-        </article>
-        <article class="feature">
-          <small>Interactive Brokers</small>
-          <h3><a href="interactive-brokers-mcp-server/">Interactive Brokers MCP server</a></h3>
-          <p>The broader guide for account, market-data, install, and safety boundaries.</p>
-        </article>
-        <article class="feature">
-          <small>TWS</small>
-          <h3><a href="tws-mcp-server/">TWS MCP server</a></h3>
-          <p>Use Trader Workstation as the local API session behind the MCP tools.</p>
-        </article>
-        <article class="feature">
-          <small>IB Gateway</small>
-          <h3><a href="ib-gateway-mcp/">IB Gateway MCP server</a></h3>
-          <p>Use the lighter local Gateway process as the source for account and market data.</p>
-        </article>
-        <article class="feature">
-          <small>Claude Desktop</small>
-          <h3><a href="claude-desktop-interactive-brokers/">Claude Desktop Install</a></h3>
-          <p>Mac-focused prerequisites, MCPB download, Claude Desktop install steps, and first-run checks.</p>
-        </article>
-        <article class="feature">
-          <small>IBKR Claude Desktop MCP</small>
-          <h3><a href="ibkr-claude-desktop-mcp/">IBKR Claude Desktop MCP setup</a></h3>
-          <p>Exact setup notes for Claude Desktop users whose search results are mixing in IBKR Desktop.</p>
-        </article>
-        <article class="feature">
-          <small>Claude</small>
-          <h3><a href="connect-claude-to-ibkr/">Connect Claude to IBKR</a></h3>
-          <p>Use Claude Desktop or Claude Code for local IBKR portfolio review and market analysis.</p>
-        </article>
-        <article class="feature">
-          <small>Claude Code</small>
-          <h3><a href="best-ibkr-mcp-server-claude-code/">Best IBKR MCP server for Claude Code</a></h3>
-          <p>How to evaluate Claude Code IBKR MCP servers by local execution, tool coverage, and current execution boundary.</p>
-        </article>
-        <article class="feature">
-          <small>Portfolio AI</small>
-          <h3><a href="analyze-interactive-brokers-portfolio-with-ai/">Analyze an Interactive Brokers portfolio with AI</a></h3>
-          <p>Ask natural-language portfolio questions against live local positions, options, and market context.</p>
-        </article>
-        <article class="feature">
-          <small>Claude portfolio review</small>
-          <h3><a href="portfolio-review-with-claude-ibkr/">Portfolio review with Claude and IBKR</a></h3>
-          <p>Use a desk-style prompt to rank exposures, options risks, quote freshness, and next review steps.</p>
-        </article>
-        <article class="feature">
-          <small>Safety</small>
-          <h3><a href="read-only-mcp-server/">Read-only MCP server</a></h3>
-          <p>Make the no-order-entry boundary explicit for agentic account and market workflows.</p>
-        </article>
-      </div>
-    </section>
-
-    <section class="wrap install" id="install" aria-labelledby="install-title">
-      <div>
-        <div class="section-head">
-          <h2 id="install-title">Install for Claude Desktop, Claude Code, or shell.</h2>
-          <p>Claude Desktop users should start with the guided install page. Claude Code users install the plugin for the skill, hooks, and MCP server config, plus the local binary. Shell and generic MCP users can install the CLI and configure a local stdio server.</p>
-        </div>
-        <p>Prerequisites: IB Gateway 10.37+ or TWS running locally, plus an IBKR Pro account with TWS API access. IBKR Lite does not include TWS API access.</p>
-        <p><a class="button primary" href="claude-desktop-interactive-brokers/">Claude Desktop Install</a></p>
-        <p>The Claude Desktop path explains what the MCPB bundles, what still needs to be running locally, and the exact Mac install and restart steps.</p>
-      </div>
-      <pre><code># Claude Code plugin
-/plugin marketplace add osauer/ibkr
-/plugin install ibkr@ibkr
-# restart Claude Code or run /reload-plugins after install/update
-
-# Shell, Cursor, Continue, Zed, generic MCP hosts
-curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
-ibkr setup claude-desktop
-
-# then ask:
-# "How does my IBKR account look today?"</code></pre>
-    </section>
-
     <section class="wrap" aria-labelledby="faq-title">
       <div class="section-head">
         <h2 id="faq-title">IBKR MCP FAQ.</h2>
@@ -893,6 +824,45 @@ ibkr setup claude-desktop
         <article class="feature">
           <h3>How does Claude Desktop connect?</h3>
           <p>Install the latest MCPB release asset, open it with Claude Desktop, and restart Claude while IB Gateway or TWS is running.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap" aria-labelledby="search-paths-title">
+      <div class="section-head">
+        <h2 id="search-paths-title">Useful setup pages.</h2>
+        <p>Start with Claude Desktop if that is where you plan to ask questions. The other pages are here for TWS, Gateway, safety, and deeper portfolio-review context.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <small>Claude Desktop</small>
+          <h3><a href="claude-desktop-interactive-brokers/">Claude Desktop Install</a></h3>
+          <p>Mac prerequisites, MCPB download, Claude Desktop install steps, and first-run checks.</p>
+        </article>
+        <article class="feature">
+          <small>IBKR MCP</small>
+          <h3><a href="ibkr-mcp/">IBKR MCP server</a></h3>
+          <p>The compact overview of the local MCP server, supported hosts, and read-only boundary.</p>
+        </article>
+        <article class="feature">
+          <small>TWS</small>
+          <h3><a href="ibkr-mcp-tws/">IBKR MCP TWS setup</a></h3>
+          <p>Use Trader Workstation as the local API session behind Claude and other MCP clients.</p>
+        </article>
+        <article class="feature">
+          <small>IB Gateway</small>
+          <h3><a href="ib-gateway-mcp/">IB Gateway MCP server</a></h3>
+          <p>Use the lighter local Gateway process as the account and market-data source.</p>
+        </article>
+        <article class="feature">
+          <small>Safety</small>
+          <h3><a href="read-only-mcp-server/">Read-only MCP server</a></h3>
+          <p>The no-order-entry boundary for agentic account and market workflows.</p>
+        </article>
+        <article class="feature">
+          <small>Portfolio review</small>
+          <h3><a href="portfolio-review-with-claude-ibkr/">Portfolio review with Claude and IBKR</a></h3>
+          <p>A practical review flow for exposures, options risk, quote freshness, and next steps.</p>
         </article>
       </div>
     </section>

@@ -5,7 +5,7 @@
   "homepage": "https://osauer.dev/ibkr/",
   "repository": "https://github.com/osauer/ibkr",
   "license": "MIT",
-  "version": "1.14.0",
+  "version": "1.14.1",
   "transport": {
     "type": "stdio",
     "command": "ibkr",
@@ -48,7 +48,7 @@
     "protection proposal reads",
     "option exercise opportunity reads",
     "trading-readiness and platform-settings reads",
-    "open-order and order-status reads",
+    "open-order, order-history, and order-status reads",
     "preview-only order drafts",
     "stock and ETF quote resources"
   ],

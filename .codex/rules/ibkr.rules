@@ -28,12 +28,12 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["ibkr", "orders", ["open", "status"]],
+    pattern = ["ibkr", "orders", ["open", "history"]],
     decision = "allow",
-    justification = "Open/status order commands are read-only journal surfaces.",
+    justification = "Open/history order commands are read-only journal surfaces.",
     match = [
         "ibkr orders open --json",
-        "ibkr orders status --json",
+        "ibkr orders history --since 2026-06-18 --until 2026-06-19 --json",
     ],
 )
 

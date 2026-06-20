@@ -1,6 +1,6 @@
 # `ibkr` JSON schemas
 
-Updated: 2026-06-18 12:07 CEST
+Updated: 2026-06-19 12:16 CEST
 
 This document is the authoritative description of every `--json` output the
 `ibkr` CLI emits. Field absence semantics matter:
@@ -1949,6 +1949,84 @@ Field meanings:
   requires a broker-acknowledged order ID and not `pending_cancel`.
 - `purge_id`, `leg_id`, `source`, `bypass_preview` — provenance for
   purge/proposal-originated orders.
+
+## orders-history
+
+`ibkr orders history --json` — bounded local order-journal history for
+the current broker account/mode. Optional filters:
+`--since YYYY-MM-DD|RFC3339`, `--until YYYY-MM-DD|RFC3339`, and
+`--limit N` (default 50, max 500). `--event-limit N` caps returned
+lifecycle events per grouped order (default 20, max 200). Without explicit
+dates the daemon returns the last 7 days. Date-only values are interpreted
+as UTC days; date-only `--until` includes that full day.
+
+This is local daemon journal evidence only. It is not an IBKR Activity
+Statement, Flex query/export, trade confirmation, execution report,
+commission ledger, closed-position ledger, or broker-grade historical
+audit. It may miss manual orders, other-client orders, broker activity
+while the daemon was offline, and rows outside the selected account/mode.
+
+```json
+{
+  "orders": [
+    {
+      "order": { "...": "OrderView — same shape as orders open rows" },
+      "events": [
+        {
+          "at": "2026-06-11T15:02:11Z",
+          "type": "status-updated",
+          "status": "Filled",
+          "lifecycle_status": "filled",
+          "filled": 25,
+          "remaining": 0,
+          "avg_fill_price": 207.85
+        }
+      ],
+      "events_count": 1,
+      "total_events_count": 1,
+      "events_truncated": false
+    }
+  ],
+  "as_of": "2026-06-19T10:16:00Z",
+  "since": "2026-06-12T10:16:00Z",
+  "until": "2026-06-19T10:16:00Z",
+  "account": "DU1234567",
+  "mode": "paper",
+  "count": 1,
+  "total_count": 1,
+  "events_count": 1,
+  "total_events_count": 1,
+  "limit": 50,
+  "event_limit": 20,
+  "truncated": false,
+  "events_truncated": false,
+  "not_broker_statement": "local order journal only; not an IBKR Activity Statement, trade confirmation, execution report, or historical broker audit",
+  "limitations": [
+    "Reduced from the daemon's local append-only order journal for the current broker account/mode only."
+  ]
+}
+```
+
+Field meanings:
+
+- `orders[]` is grouped by order, sorted by latest matching in-window
+  order update newest first. Each `order` has the same shape documented under
+  [orders-open](#orders-open); each `events[]` row has the same shape
+  documented under [order-status](#order-status).
+- `since` is inclusive and `until` is exclusive after date expansion.
+- `account` / `mode` are the connected broker scope used for filtering.
+- `count` is returned groups, `total_count` is matching groups before
+  the group limit, `events_count` is returned local events, and
+  `total_events_count` is local events before per-order event sampling for
+  the returned groups.
+- `truncated: true` means more matching grouped orders existed than the
+  selected `limit`.
+- `events_truncated: true` means at least one returned grouped order had
+  more local events than `event_limit`; use each row's
+  `total_events_count` before treating `events[]` as complete.
+- `not_broker_statement` and `limitations[]` are part of the contract;
+  surface them when users ask for official trade history, commissions,
+  closed-position P&L, or audit-grade evidence.
 
 ## order-status
 

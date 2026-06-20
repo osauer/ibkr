@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.14.1 — 2026-06-20 06:44 CEST
+
+### What's new
+
+- Added a bounded local order-history read surface for recent order-review forensics. It groups the daemon's local order journal by current account/mode, supports date and event limits, and keeps the warning explicit: this is not an IBKR Activity Statement, Flex export, commission ledger, or broker-grade audit.
+- Cleaned up the public site around the Claude Desktop path: the guided install moved higher on the homepage, duplicate setup pages now point readers to canonical pages, and the noisy setup-card block was reduced to the handful of pages most likely to help.
+
+### Added
+
+- Added `ibkr orders history` and the read-only MCP `ibkr_orders_history` tool, with grouped-order limits, per-order event sampling, current account/mode filtering, and generated schema/docs updates.
+
+### Changed
+
+- Updated the Claude/Codex skill, hooks, and settings allowlists so order-history reads are permitted while broker-write guardrails stay unchanged.
+- Moved the homepage install section above the product-tour sections and narrowed "Popular setup paths" to a short set of canonical pages.
+
+### Fixed
+
+- Removed stale guardrail examples that mentioned the nonexistent `ibkr orders status` command.
+- Ignored local `reports/` artifacts so private trading-review pages are not accidentally swept into release work.
+
 ## v1.14.0 — 2026-06-18 13:37 CEST
 
 ### What's new
