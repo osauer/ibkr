@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,12 @@ import (
 )
 
 func runOrders(ctx context.Context, env *Env, args []string) int {
+	if slicesContains(args, "history") {
+		return runOrdersHistory(ctx, env, args)
+	}
+	if slicesContains(args, "open") {
+		return runOrdersOpen(ctx, env, args)
+	}
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return runOrdersOpen(ctx, env, args)
 	}
@@ -19,8 +26,10 @@ func runOrders(ctx context.Context, env *Env, args []string) int {
 	switch sub {
 	case "open":
 		return runOrdersOpen(ctx, env, args)
+	case "history":
+		return runOrdersHistory(ctx, env, args)
 	default:
-		return fail(env, "orders: unknown subcommand %q (try `ibkr orders open`)", sub)
+		return fail(env, "orders: unknown subcommand %q (try `ibkr orders open` or `ibkr orders history`)", sub)
 	}
 }
 
@@ -45,6 +54,40 @@ func runOrdersOpen(ctx context.Context, env *Env, args []string) int {
 		return printJSON(env, res)
 	}
 	renderOrdersOpenText(env, &res)
+	return 0
+}
+
+func runOrdersHistory(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "orders")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	since := fs.String("since", "", "inclusive lower boundary: YYYY-MM-DD UTC day or RFC3339 timestamp")
+	until := fs.String("until", "", "exclusive upper boundary: YYYY-MM-DD UTC day (inclusive date) or RFC3339 timestamp")
+	limit := fs.Int("limit", 0, "max grouped orders to return (default 50, max 500)")
+	eventLimit := fs.Int("event-limit", 0, "max lifecycle events per grouped order (default 20, max 200)")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	rest := fs.Args()
+	if len(rest) > 0 && rest[0] == "history" {
+		rest = rest[1:]
+	}
+	if len(rest) != 0 {
+		return fail(env, "orders history: usage is `ibkr orders history [--since YYYY-MM-DD|RFC3339] [--until YYYY-MM-DD|RFC3339] [--limit N] [--event-limit N] [--json]`")
+	}
+	params := rpc.OrdersHistoryParams{
+		Since:      strings.TrimSpace(*since),
+		Until:      strings.TrimSpace(*until),
+		Limit:      *limit,
+		EventLimit: *eventLimit,
+	}
+	var res rpc.OrdersHistoryResult
+	if err := env.Conn.Call(ctx, rpc.MethodOrdersHistory, params, &res); err != nil {
+		return fail(env, "orders history: %v", err)
+	}
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	renderOrdersHistoryText(env, &res)
 	return 0
 }
 
@@ -93,6 +136,68 @@ func renderOrdersOpenText(env *Env, res *rpc.OrdersOpenResult) {
 		}
 		if order.MktCapPrice != 0 {
 			fmt.Fprintf(out, "    capped price: %.4f\n", order.MktCapPrice)
+		}
+	}
+	fmt.Fprintln(out)
+}
+
+func renderOrdersHistoryText(env *Env, res *rpc.OrdersHistoryResult) {
+	out := env.Stdout
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "IBKR Order History  %s\n", env.statusBadge(statusConcern{Text: strconv.Itoa(res.Count), Level: statusConcernNone}))
+	statusRow(env, out, "Scope", strings.TrimSpace(nonEmpty(res.Account, "unknown")+" "+nonEmpty(res.Mode, "unknown")))
+	statusRow(env, out, "Range", fmt.Sprintf("%s to %s", formatOrderTime(res.Since), formatOrderTime(res.Until)))
+	if res.Truncated {
+		statusRow(env, out, "Limit", fmt.Sprintf("%d of %d groups shown", res.Count, res.TotalCount))
+	}
+	if res.EventsTruncated {
+		statusRow(env, out, "Events", fmt.Sprintf("%d of %d events shown; max %d per order", res.EventsCount, res.TotalEventsCount, res.EventLimit))
+	}
+	if res.NotBrokerStatement != "" {
+		statusRow(env, out, "Source", res.NotBrokerStatement)
+	}
+	if len(res.Orders) == 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "No local order-journal events matched this range for the current account/mode.")
+	} else {
+		for _, row := range res.Orders {
+			fmt.Fprintln(out)
+			fmt.Fprintf(out, "  %s\n", formatOrderViewTitle(row.Order))
+			fmt.Fprintf(out, "    %s  %s  updated %s  events %d\n",
+				row.Order.LifecycleStatus,
+				nonEmpty(row.Order.Status, row.Order.LastEvent),
+				formatOrderTime(row.Order.UpdatedAt),
+				row.TotalEventsCount,
+			)
+			if row.EventsTruncated {
+				fmt.Fprintf(out, "    showing %d of %d events\n", row.EventsCount, row.TotalEventsCount)
+			}
+			for _, ev := range row.Events {
+				fmt.Fprintf(out, "    - %s  %s", formatOrderTime(ev.At), ev.Type)
+				if ev.LifecycleStatus != "" {
+					fmt.Fprintf(out, "  %s", ev.LifecycleStatus)
+				}
+				if ev.Filled != 0 || ev.Remaining != 0 {
+					fmt.Fprintf(out, "  filled %.4g remaining %.4g", ev.Filled, ev.Remaining)
+				}
+				if ev.AvgFillPrice != 0 {
+					fmt.Fprintf(out, " avg %.4f", ev.AvgFillPrice)
+				}
+				if ev.LastFillPrice != 0 {
+					fmt.Fprintf(out, " last %.4f", ev.LastFillPrice)
+				}
+				if ev.Message != "" {
+					fmt.Fprintf(out, "  %s", ev.Message)
+				}
+				fmt.Fprintln(out)
+			}
+		}
+	}
+	if len(res.Limitations) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Limitations:")
+		for _, limitation := range res.Limitations {
+			fmt.Fprintf(out, "  - %s\n", limitation)
 		}
 	}
 	fmt.Fprintln(out)
@@ -187,6 +292,10 @@ func formatOrderViewTitle(order rpc.OrderView) string {
 		title += " trigger=" + formatOrderTriggerMethod(order.TriggerMethod)
 	}
 	return title + " " + nonEmpty(order.TIF, "?")
+}
+
+func slicesContains(values []string, target string) bool {
+	return slices.Contains(values, target)
 }
 
 func formatOrderTriggerMethod(method int) string {

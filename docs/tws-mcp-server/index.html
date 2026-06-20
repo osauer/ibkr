@@ -3,87 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TWS MCP server for Interactive Brokers | ibkr</title>
-  <meta name="description" content="ibkr can act as a TWS MCP server by connecting a local MCP host to the Interactive Brokers Trader Workstation socket API. Claude Desktop, Claude Code,...">
-  <link rel="canonical" href="https://osauer.dev/ibkr/tws-mcp-server/">
-
-  <meta property="og:type" content="article">
-  <meta property="og:url" content="https://osauer.dev/ibkr/tws-mcp-server/">
-  <meta property="og:title" content="TWS MCP server for Interactive Brokers | ibkr">
-  <meta property="og:description" content="ibkr can act as a TWS MCP server by connecting a local MCP host to the Interactive Brokers Trader Workstation socket API. Claude Desktop, Claude Code,...">
-  <meta property="og:image" content="https://osauer.dev/ibkr/social/social-preview.png">
-  <meta property="og:image:width" content="1280">
-  <meta property="og:image:height" content="640">
-  <meta name="twitter:card" content="summary_large_image">
-  <script type="application/ld+json">
-{
-    "@context": "https://schema.org",
-    "@type": "TechArticle",
-    "author": {
-      "@type": "Person",
-      "name": "Oliver Sauer",
-      "url": "https://github.com/osauer"
-    },
-    "dateModified": "2026-05-31T21:23:00+02:00",
-    "description": "ibkr can act as a TWS MCP server by connecting a local MCP host to the Interactive Brokers Trader Workstation socket API. Claude Desktop, Claude Code,...",
-    "headline": "TWS MCP server for Interactive Brokers",
-    "isPartOf": {
-      "@type": "SoftwareApplication",
-      "name": "ibkr",
-      "url": "https://osauer.dev/ibkr/"
-    },
-    "url": "https://osauer.dev/ibkr/tws-mcp-server/"
-  }
-  </script>
-  <link rel="stylesheet" href="../shared.css">
+  <meta name="robots" content="noindex">
+  <meta http-equiv="refresh" content="0; url=../ibkr-mcp-tws/">
+  <link rel="canonical" href="https://osauer.dev/ibkr/ibkr-mcp-tws/">
+  <title>IBKR MCP TWS setup | ibkr</title>
 </head>
 <body>
-  <div class="topline"></div>
-  <header class="wrap nav" aria-label="Primary">
-    <a class="brand" href="../index.html">ibkr</a>
-    <nav class="nav-links" aria-label="Site">
-      <a href="../index.html#install">Install</a>
-      <a href="https://github.com/osauer/ibkr">GitHub</a>
-      <a href="../reference/mcp-tools.html">MCP tools</a>
-      <a href="../guides/agentic-use.html">Agent guide</a>
-    </nav>
-  </header>
-  <main class="wrap doc">
-<h1 id="tws-mcp-server-for-interactive-brokers">TWS MCP server for Interactive Brokers</h1>
-<p>Updated: 2026-05-31 21:23 CEST</p>
-<p><code>ibkr</code> can act as a TWS MCP server by connecting a local MCP host to the Interactive Brokers Trader Workstation socket API. Claude Desktop, Claude Code, Cursor, Zed, Continue, and other MCP clients talk to <code>ibkr mcp</code> over stdio; <code>ibkr</code> talks to TWS through the local TWS API port. If your exact search was &#34;ibkr mcp tws&#34;, the <a href="../ibkr-mcp-tws/index.html">IBKR MCP TWS setup</a> page is the shortest path.</p>
-<p>This is useful when you keep TWS open for trading, charting, or manual supervision and want an assistant to read account and market context from the same local session.</p>
-<h2 id="how-the-connection-works">How the connection works</h2>
-<pre><code>MCP host -&gt; ibkr mcp -&gt; local ibkr daemon -&gt; TWS API socket -&gt; Interactive Brokers account data</code></pre>
-<p><code>ibkr</code> auto-discovers the standard local ports, including TWS paper and live ports. You can also pin host, port, client ID, account, and TLS settings in the local config file when auto-discovery is not what you want.</p>
-<h2 id="tws-versus-ib-gateway">TWS versus IB Gateway</h2>
-<p>Use TWS when you already want the desktop platform open. Use IB Gateway when you want a lighter background process for API access. The MCP surface is the same either way: read-only account, positions, quotes, calendars, option chains, scanners, sizing, breadth, gamma, broad-market regime lifecycle, and portfolio stress-check tools.</p>
-<h2 id="install-for-an-mcp-host">Install for an MCP host</h2>
-<pre><code>curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh
-ibkr status
-ibkr setup claude-desktop</code></pre>
-<p>For a generic MCP host:</p>
-<pre><code>{
-  &#34;mcpServers&#34;: {
-    &#34;ibkr&#34;: {
-      &#34;command&#34;: &#34;/ABSOLUTE/PATH/TO/ibkr&#34;,
-      &#34;args&#34;: [&#34;mcp&#34;]
-    }
-  }
-}</code></pre>
-<p>The command must be an absolute path because MCP hosts usually do not expand <code>~</code> or consult your interactive shell&#39;s <code>PATH</code>.</p>
-<h2 id="what-to-ask">What to ask</h2>
-<ul>
-<li>&#34;What&#39;s in my IBKR account?&#34;</li>
-<li>&#34;Show my SPY exposure, including option deltas.&#34;</li>
-<li>&#34;What expiries are listed for NVDA and what is the implied move?&#34;</li>
-<li>&#34;Why does this quote look stale after the market close?&#34;</li>
-<li>&#34;How does the risk regime look today?&#34;</li>
-</ul>
-<p>For exact tool names and parameters, see the <a href="../reference/mcp-tools.html">MCP tools reference</a>.</p>
-<h2 id="read-only-by-design">Read-only by design</h2>
-<p>The TWS connection can expose sensitive brokerage state. <code>ibkr mcp</code> keeps the interface narrow: it has no order-entry, order-modification, or order-cancellation tool.</p>
-  </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap fineprint">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
+  <p>This setup page has moved to <a href="../ibkr-mcp-tws/">IBKR MCP TWS setup</a>.</p>
 </body>
 </html>

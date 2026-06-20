@@ -2164,6 +2164,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleSettingsUpdate(ctx, req) })
 	case rpc.MethodOrdersOpen:
 		s.unary(req, enc, func() (any, error) { return s.handleOrdersOpen(ctx, req) })
+	case rpc.MethodOrdersHistory:
+		s.unary(req, enc, func() (any, error) { return s.handleOrdersHistory(ctx, req) })
 	case rpc.MethodOrderStatus:
 		s.unary(req, enc, func() (any, error) { return s.handleOrderStatus(ctx, req) })
 	case rpc.MethodOrderPreview:
@@ -2296,7 +2298,7 @@ func unaryDeadline(method string) time.Duration {
 		return 100 * time.Second
 	case rpc.MethodAccountSummary, rpc.MethodQuoteSnapshot:
 		return 10 * time.Second
-	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodAutoTradeStatus, rpc.MethodOpportunitiesStatus, rpc.MethodSettingsGet, rpc.MethodSettingsUpdate, rpc.MethodOrdersOpen, rpc.MethodOrderStatus, rpc.MethodPurgeStatus, rpc.MethodTradeProposalsSnapshot, rpc.MethodTradeProposalsIgnore, rpc.MethodOpportunitiesSnapshot, rpc.MethodOpportunitiesIgnore, rpc.MethodScanList:
+	case rpc.MethodStatusHealth, rpc.MethodTradingStatus, rpc.MethodAutoTradeStatus, rpc.MethodOpportunitiesStatus, rpc.MethodSettingsGet, rpc.MethodSettingsUpdate, rpc.MethodOrdersOpen, rpc.MethodOrdersHistory, rpc.MethodOrderStatus, rpc.MethodPurgeStatus, rpc.MethodTradeProposalsSnapshot, rpc.MethodTradeProposalsIgnore, rpc.MethodOpportunitiesSnapshot, rpc.MethodOpportunitiesIgnore, rpc.MethodScanList:
 		return 5 * time.Second
 	case rpc.MethodQuoteSubscribe:
 		return 0

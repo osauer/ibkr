@@ -1,6 +1,6 @@
 # ibkr canary full context
 
-Updated: 2026-06-11 21:20 CEST
+Updated: 2026-06-20 06:44 CEST
 
 `ibkr canary` is a local Interactive Brokers (IBKR) integration for agentic portfolio analysis, trading research, risk checks, and market workflows. It ships as a Go CLI, daemon, clean-room TWS protocol implementation, stdio MCP server, Claude Desktop MCP Bundle, Claude Code plugin, and Canary app.
 
@@ -63,13 +63,9 @@ Claude Code plugin path:
 - IBKR MCP server: https://osauer.dev/ibkr/ibkr-mcp/
 - IBKR MCP TWS setup: https://osauer.dev/ibkr/ibkr-mcp-tws/
 - Interactive Brokers MCP server: https://osauer.dev/ibkr/interactive-brokers-mcp-server/
-- TWS MCP server: https://osauer.dev/ibkr/tws-mcp-server/
 - IB Gateway MCP server: https://osauer.dev/ibkr/ib-gateway-mcp/
 - Claude Desktop Install: https://osauer.dev/ibkr/claude-desktop-interactive-brokers/
-- IBKR Claude Desktop MCP setup: https://osauer.dev/ibkr/ibkr-claude-desktop-mcp/
-- Connect Claude to IBKR: https://osauer.dev/ibkr/connect-claude-to-ibkr/
 - Best IBKR MCP server for Claude Code: https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/
-- Analyze Interactive Brokers portfolio with AI: https://osauer.dev/ibkr/analyze-interactive-brokers-portfolio-with-ai/
 - Portfolio review with Claude and IBKR: https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/
 - Read-only MCP server: https://osauer.dev/ibkr/read-only-mcp-server/
 - Canary remote app beta: https://osauer.dev/ibkr/canary-remote/
@@ -118,6 +114,7 @@ Important tools:
 - `ibkr_proposals`: read daemon-owned protection proposals (trailing stops, theta hygiene, risk reduction) with per-row blockers; read-only.
 - `ibkr_trading_status`: read-only order-entry readiness — disabled, paper-ready, live-ready, or blocked, with pinned-session evidence and concrete blockers.
 - `ibkr_orders_open`: read-only open-order lifecycle state for the connected broker account and mode.
+- `ibkr_orders_history`: bounded local order-journal history for the connected broker account and mode; not an IBKR Activity Statement or broker audit.
 - `ibkr_order_status`: read-only lifecycle and audit events for one locally journaled order.
 - `ibkr_order_preview`: draft a locally gated order and mint a short-lived local preview token; cannot place, modify, cancel, or transmit a broker order.
 - `ibkr_settings`: read platform settings and observed state — feature enablement, trading mode/account/build capability, safety limits; cannot change settings.

@@ -109,10 +109,13 @@ func TestTradingToolAllowlist(t *testing.T) {
 				t.Errorf("tool %s must explicitly say it only reports readiness and does not place orders", tool.Name)
 			}
 			continue
-		case "ibkr_orders_open", "ibkr_order_status":
+		case "ibkr_orders_open", "ibkr_orders_history", "ibkr_order_status":
 			desc := strings.ToLower(tool.Description)
 			if !strings.Contains(desc, "read-only") || !strings.Contains(desc, "does not place") {
 				t.Errorf("tool %s must explicitly say it is read-only and does not place orders", tool.Name)
+			}
+			if tool.Name == "ibkr_orders_history" && !strings.Contains(desc, "not an ibkr activity statement") {
+				t.Errorf("tool %s must warn that local history is not an IBKR Activity Statement", tool.Name)
 			}
 			continue
 		case "ibkr_order_preview":

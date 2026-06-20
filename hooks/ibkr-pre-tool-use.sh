@@ -130,7 +130,7 @@ if has_re '(^|[[:space:]/])ibkr[[:space:]]+(order|orders|trading|trade|trades|pr
   exit 0
 fi
 
-if has_re '(^|[[:space:]/])ibkr[[:space:]]+(order[[:space:]]+(preview|status)|orders[[:space:]]+(open|status)|trading[[:space:]]+status)([[:space:]]|$)'; then
+if has_re '(^|[[:space:]/])ibkr[[:space:]]+(order[[:space:]]+(preview|status)|orders[[:space:]]+(open|history)|trading[[:space:]]+status)([[:space:]]|$)'; then
   exit 0
 fi
 

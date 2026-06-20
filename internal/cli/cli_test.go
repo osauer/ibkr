@@ -112,6 +112,11 @@ func TestHoistFlagsReordersValueFlags(t *testing.T) {
 			want: []string{"--min-dte", "90", "--max-dte", "180", "--target-dte", "120", "SPY"},
 		},
 		{
+			name: "orders history range flags hoisted as pairs",
+			in:   []string{"history", "--since", "2026-06-18", "--until", "2026-06-19", "--limit", "5", "--event-limit", "10"},
+			want: []string{"--since", "2026-06-18", "--until", "2026-06-19", "--limit", "5", "--event-limit", "10", "history"},
+		},
+		{
 			name: "flag before positional preserved",
 			in:   []string{"--json", "AAPL"},
 			want: []string{"--json", "AAPL"},

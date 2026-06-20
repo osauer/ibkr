@@ -253,6 +253,170 @@ func TestOrdersOpenUsesPinnedConcreteAccountWhenConnectorReportsAll(t *testing.T
 	}
 }
 
+func TestOrdersHistoryFiltersRangeLimitAndCurrentScope(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	srv := &Server{
+		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		endpoint: discover.Endpoint{
+			Host:    "127.0.0.1",
+			Port:    7496,
+			Account: "U1234567",
+		},
+		now: func() time.Time { return now },
+	}
+	events := []orderJournalEvent{
+		{
+			At:              time.Date(2026, 6, 17, 15, 0, 0, 0, time.UTC),
+			Type:            orderJournalEventStatusUpdated,
+			OrderRef:        "old-live",
+			ReservedOrderID: 1,
+			Account:         "U1234567",
+			Mode:            rpc.AccountModeLive,
+			Symbol:          "OLD",
+			Status:          "Filled",
+			Filled:          1,
+			SendState:       orderSendStateTerminal,
+		},
+		{
+			At:              time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC),
+			Type:            orderJournalEventStatusUpdated,
+			OrderRef:        "live-first",
+			ReservedOrderID: 2,
+			Account:         "U1234567",
+			Mode:            rpc.AccountModeLive,
+			Symbol:          "AAPL",
+			Action:          rpc.OrderActionBuy,
+			OrderType:       rpc.OrderTypeLMT,
+			TIF:             rpc.OrderTIFDay,
+			Quantity:        3,
+			Status:          "Submitted",
+			Remaining:       3,
+			SendState:       orderSendStateBrokerAcknowledged,
+		},
+		{
+			At:              time.Date(2026, 6, 18, 10, 5, 0, 0, time.UTC),
+			Type:            orderJournalEventStatusUpdated,
+			OrderRef:        "live-first",
+			ReservedOrderID: 2,
+			Account:         "U1234567",
+			Mode:            rpc.AccountModeLive,
+			Symbol:          "AAPL",
+			Status:          "Filled",
+			Filled:          3,
+			Remaining:       0,
+			AvgFillPrice:    195.25,
+			SendState:       orderSendStateTerminal,
+		},
+		{
+			At:              time.Date(2026, 6, 18, 11, 0, 0, 0, time.UTC),
+			Type:            orderJournalEventStatusUpdated,
+			OrderRef:        "paper-same-day",
+			ReservedOrderID: 3,
+			Account:         "DU1234567",
+			Mode:            rpc.AccountModePaper,
+			Symbol:          "MSFT",
+			Status:          "Filled",
+			Filled:          1,
+			SendState:       orderSendStateTerminal,
+		},
+		{
+			At:              time.Date(2026, 6, 18, 12, 55, 0, 0, time.UTC),
+			Type:            orderJournalEventStatusUpdated,
+			OrderRef:        "live-latest",
+			ReservedOrderID: 4,
+			Account:         "DU1234567",
+			Mode:            rpc.AccountModePaper,
+			Symbol:          "AMD",
+			Status:          "Filled",
+			Filled:          1,
+			SendState:       orderSendStateTerminal,
+		},
+		{
+			At:              time.Date(2026, 6, 18, 13, 0, 0, 0, time.UTC),
+			Type:            orderJournalEventStatusUpdated,
+			OrderRef:        "live-latest",
+			ReservedOrderID: 4,
+			Account:         "U1234567",
+			Mode:            rpc.AccountModeLive,
+			Symbol:          "AMD",
+			Status:          "Submitted",
+			Remaining:       1,
+			SendState:       orderSendStateBrokerAcknowledged,
+		},
+		{
+			At:              time.Date(2026, 6, 18, 13, 5, 0, 0, time.UTC),
+			Type:            orderJournalEventStatusUpdated,
+			OrderRef:        "live-latest",
+			ReservedOrderID: 4,
+			Account:         "U1234567",
+			Mode:            rpc.AccountModeLive,
+			Symbol:          "AMD",
+			Status:          "Submitted",
+			Remaining:       1,
+			SendState:       orderSendStateBrokerAcknowledged,
+		},
+		{
+			At:              time.Date(2026, 6, 19, 0, 0, 0, 0, time.UTC),
+			Type:            orderJournalEventStatusUpdated,
+			OrderRef:        "next-day",
+			ReservedOrderID: 5,
+			Account:         "U1234567",
+			Mode:            rpc.AccountModeLive,
+			Symbol:          "NEXT",
+			Status:          "Filled",
+			Filled:          1,
+			SendState:       orderSendStateTerminal,
+		},
+	}
+	if err := srv.orderJournal.AppendAll(events); err != nil {
+		t.Fatalf("append orders: %v", err)
+	}
+
+	res, err := srv.handleOrdersHistory(context.Background(), &rpc.Request{Params: mustJSON(t, rpc.OrdersHistoryParams{
+		Since:      "2026-06-18",
+		Until:      "2026-06-18",
+		Limit:      1,
+		EventLimit: 1,
+	})})
+	if err != nil {
+		t.Fatalf("handleOrdersHistory: %v", err)
+	}
+	if res.Count != 1 || res.TotalCount != 2 || !res.Truncated {
+		t.Fatalf("history counts = count %d total %d truncated %v, want 1/2/true", res.Count, res.TotalCount, res.Truncated)
+	}
+	if res.Account != "U1234567" || res.Mode != rpc.AccountModeLive {
+		t.Fatalf("history scope = %q/%q, want live U1234567", res.Account, res.Mode)
+	}
+	if len(res.Limitations) == 0 || !strings.Contains(strings.ToLower(res.NotBrokerStatement), "not an ibkr activity statement") {
+		t.Fatalf("history limitations missing broker-statement warning: %+v", res)
+	}
+	if len(res.Orders) != 1 || res.Orders[0].Order.OrderRef != "live-latest" {
+		t.Fatalf("history rows = %+v, want latest current-scope row", res.Orders)
+	}
+	row := res.Orders[0]
+	if res.EventsCount != 1 || res.TotalEventsCount != 2 || !res.EventsTruncated {
+		t.Fatalf("history event counts = returned %d total %d truncated %v, want 1/2/true", res.EventsCount, res.TotalEventsCount, res.EventsTruncated)
+	}
+	if row.EventsCount != 1 || row.TotalEventsCount != 2 || !row.EventsTruncated || len(row.Events) != 1 {
+		t.Fatalf("history row event counts = %+v, want one returned event from two current-scope events", row)
+	}
+	if !row.Order.UpdatedAt.Equal(time.Date(2026, 6, 18, 13, 5, 0, 0, time.UTC)) {
+		t.Fatalf("history row updated_at = %s, want latest in-window current-scope event", row.Order.UpdatedAt)
+	}
+	for _, row := range res.Orders {
+		for _, ev := range row.Events {
+			if ev.At.Before(res.Since) || !ev.At.Before(res.Until) {
+				t.Fatalf("event outside returned range: %+v in %s..%s", ev, res.Since, res.Until)
+			}
+			if ev.Mode != rpc.AccountModeLive || ev.Account != "U1234567" {
+				t.Fatalf("event crossed broker scope: %+v", ev)
+			}
+		}
+	}
+}
+
 func TestBuildOrderViewsFilledClearsStaleRemaining(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 6, 8, 9, 2, 0, 0, time.UTC)

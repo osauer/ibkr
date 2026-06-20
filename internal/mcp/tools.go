@@ -91,6 +91,28 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:        "ibkr_orders_history",
+		Title:       "IBKR Order History",
+		Description: "Read bounded local order-journal history for the current broker account/mode without placing, modifying, cancelling, or transmitting any broker order. Use for recent trade-review forensics when the user asks what locally journaled order lifecycle/fill callbacks occurred over a date range. This read-only tool does not place orders; it only reports local journal evidence. Results are bounded by grouped-order limit and per-order event_limit so callback-heavy trailing stops do not flood the context; inspect events_truncated/total_events_count before treating event samples as complete. This is a local daemon journal view only, not an IBKR Activity Statement, trade confirmation, execution report, commission ledger, closed-position ledger, or broker-grade historical audit; it may miss manual orders, other-client orders, broker activity while the daemon was offline, and rows outside the selected account/mode. For currently working orders use `ibkr_orders_open`; for one order's full audit use `ibkr_order_status`; for official broker history ask the user for an IBKR Activity Statement/Flex export.",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"since":       schemaString("optional inclusive lower boundary as YYYY-MM-DD UTC date or RFC3339 timestamp; default is 7 days before until"),
+			"until":       schemaString("optional upper boundary as RFC3339 timestamp, or YYYY-MM-DD UTC date to include that whole UTC day; default is now"),
+			"limit":       json.RawMessage(`{"type":"integer","minimum":1,"maximum":500,"description":"maximum grouped order rows to return; default 50, max 500"}`),
+			"event_limit": json.RawMessage(`{"type":"integer","minimum":1,"maximum":200,"description":"maximum lifecycle events returned per grouped order row; default 20, max 200. When truncated, rows carry events_truncated and total_events_count."}`),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in rpc.OrdersHistoryParams
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.OrdersHistoryResult
+			if err := conn.Call(ctx, rpc.MethodOrdersHistory, in, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
 		Name:        "ibkr_order_status",
 		Title:       "IBKR Order Status",
 		Description: "Read one locally journaled order's lifecycle and audit events by order ref, IBKR order ID, or permanent ID. Use when the user asks what happened to a specific order or needs the daemon's latest broker-callback evidence. This tool is read-only: it does NOT place, modify, cancel, preview, transmit, or confirm an order. For the open-order list use `ibkr_orders_open`; for a new tokenized preview use `ibkr_order_preview`.",

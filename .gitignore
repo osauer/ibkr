@@ -44,4 +44,5 @@ cloudflare/remote-relay/.dev.vars
 *lab*.html
 *scratch*
 /HANDOFF.md
+/reports/
 tmp/

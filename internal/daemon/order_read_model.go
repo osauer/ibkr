@@ -15,6 +15,14 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
+const (
+	orderHistoryDefaultLookback = 7 * 24 * time.Hour
+	orderHistoryDefaultLimit    = 50
+	orderHistoryMaxLimit        = 500
+	orderHistoryDefaultEvents   = 20
+	orderHistoryMaxEvents       = 200
+)
+
 func (s *Server) handleOrdersOpen(ctx context.Context, req *rpc.Request) (*rpc.OrdersOpenResult, error) {
 	var p rpc.OrdersOpenParams
 	if err := decodeParams(req.Params, &p); err != nil {
@@ -36,6 +44,86 @@ func (s *Server) handleOrdersOpen(ctx context.Context, req *rpc.Request) (*rpc.O
 	}
 	sortOrderViews(out)
 	return &rpc.OrdersOpenResult{Orders: out, AsOf: s.orderNow()}, nil
+}
+
+func (s *Server) handleOrdersHistory(_ context.Context, req *rpc.Request) (*rpc.OrdersHistoryResult, error) {
+	var p rpc.OrdersHistoryParams
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	now := s.orderNow()
+	since, until, err := orderHistoryRange(p, now)
+	if err != nil {
+		return nil, err
+	}
+	limit, err := orderHistoryLimit(p.Limit)
+	if err != nil {
+		return nil, err
+	}
+	eventLimit, err := orderHistoryEventLimit(p.EventLimit)
+	if err != nil {
+		return nil, err
+	}
+	scope := s.currentBrokerStateScope()
+	journalEvents, err := s.loadScopedOrderHistoryEvents(since, until, scope)
+	if err != nil {
+		return nil, err
+	}
+	views := buildOrderViews(journalEvents)
+	eventsByKey := buildOrderEventsByKey(journalEvents)
+	inferDayOrderExpiry(views, eventsByKey, now)
+	rows := make([]rpc.OrdersHistoryRow, 0, len(views))
+	for _, view := range views {
+		if !orderViewMatchesBrokerScope(view, scope) {
+			continue
+		}
+		events := eventsByKey[orderViewKey(view)]
+		if len(events) == 0 {
+			continue
+		}
+		totalEvents := len(events)
+		events, eventsTruncated := limitOrderHistoryEvents(events, eventLimit)
+		rows = append(rows, rpc.OrdersHistoryRow{
+			Order:            view,
+			Events:           events,
+			EventsCount:      len(events),
+			TotalEventsCount: totalEvents,
+			EventsTruncated:  eventsTruncated,
+		})
+	}
+	sortOrderHistoryRows(rows)
+	totalCount := len(rows)
+	truncated := false
+	if len(rows) > limit {
+		rows = rows[:limit]
+		truncated = true
+	}
+	eventsCount := 0
+	totalEventsCount := 0
+	eventsTruncated := false
+	for _, row := range rows {
+		eventsCount += row.EventsCount
+		totalEventsCount += row.TotalEventsCount
+		eventsTruncated = eventsTruncated || row.EventsTruncated
+	}
+	return &rpc.OrdersHistoryResult{
+		Orders:             rows,
+		AsOf:               now,
+		Since:              since,
+		Until:              until,
+		Account:            scope.Account,
+		Mode:               scope.Mode,
+		Count:              len(rows),
+		TotalCount:         totalCount,
+		EventsCount:        eventsCount,
+		TotalEventsCount:   totalEventsCount,
+		Limit:              limit,
+		EventLimit:         eventLimit,
+		Truncated:          truncated,
+		EventsTruncated:    eventsTruncated,
+		NotBrokerStatement: orderHistoryNotBrokerStatement(),
+		Limitations:        orderHistoryLimitations(),
+	}, nil
 }
 
 func (s *Server) handleOrderStatus(ctx context.Context, req *rpc.Request) (*rpc.OrderStatusResult, error) {
@@ -68,6 +156,139 @@ func (s *Server) handleOrderStatus(ctx context.Context, req *rpc.Request) (*rpc.
 		}, nil
 	}
 	return &rpc.OrderStatusResult{Found: false, AsOf: s.orderNow()}, nil
+}
+
+func orderHistoryRange(p rpc.OrdersHistoryParams, now time.Time) (time.Time, time.Time, error) {
+	now = now.UTC()
+	until := now
+	if raw := strings.TrimSpace(p.Until); raw != "" {
+		parsed, dateOnly, err := parseOrderHistoryTime(raw)
+		if err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+		until = parsed
+		if dateOnly {
+			until = until.Add(24 * time.Hour)
+		}
+	}
+	since := until.Add(-orderHistoryDefaultLookback)
+	if raw := strings.TrimSpace(p.Since); raw != "" {
+		parsed, _, err := parseOrderHistoryTime(raw)
+		if err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+		since = parsed
+	}
+	if !since.Before(until) {
+		return time.Time{}, time.Time{}, errBadRequest("orders history: since must be before until")
+	}
+	return since.UTC(), until.UTC(), nil
+}
+
+func parseOrderHistoryTime(raw string) (time.Time, bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false, errBadRequest("orders history: empty time boundary")
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC(), false, nil
+	}
+	if t, err := time.ParseInLocation("2006-01-02", raw, time.UTC); err == nil {
+		return t.UTC(), true, nil
+	}
+	return time.Time{}, false, errBadRequest("orders history: time boundaries must be YYYY-MM-DD or RFC3339")
+}
+
+func orderHistoryLimit(limit int) (int, error) {
+	if limit == 0 {
+		return orderHistoryDefaultLimit, nil
+	}
+	if limit < 0 || limit > orderHistoryMaxLimit {
+		return 0, errBadRequest(fmt.Sprintf("orders history: limit must be between 1 and %d", orderHistoryMaxLimit))
+	}
+	return limit, nil
+}
+
+func orderHistoryEventLimit(limit int) (int, error) {
+	if limit == 0 {
+		return orderHistoryDefaultEvents, nil
+	}
+	if limit < 0 || limit > orderHistoryMaxEvents {
+		return 0, errBadRequest(fmt.Sprintf("orders history: event_limit must be between 1 and %d", orderHistoryMaxEvents))
+	}
+	return limit, nil
+}
+
+func (s *Server) loadScopedOrderHistoryEvents(since, until time.Time, scope brokerStateScope) ([]orderJournalEvent, error) {
+	if s == nil || s.orderJournal == nil {
+		return nil, fmt.Errorf("%w: order journal is unavailable", ErrTradingDisabled)
+	}
+	events, err := s.orderJournal.LoadEvents(0)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]orderJournalEvent, 0, len(events))
+	for _, ev := range events {
+		if !orderJournalEventMatchesBrokerScope(ev, scope) || !orderJournalEventInRange(ev, since, until) {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out, nil
+}
+
+func orderJournalEventMatchesBrokerScope(ev orderJournalEvent, scope brokerStateScope) bool {
+	return brokerScopedAccountMatches(ev.Account, scope) &&
+		brokerScopedModeMatches(ev.Mode, scope.Mode)
+}
+
+func orderJournalEventInRange(ev orderJournalEvent, since, until time.Time) bool {
+	at := ev.At.UTC()
+	return !at.IsZero() && !at.Before(since) && at.Before(until)
+}
+
+func limitOrderHistoryEvents(events []rpc.OrderEvent, limit int) ([]rpc.OrderEvent, bool) {
+	if limit <= 0 || len(events) <= limit {
+		return events, false
+	}
+	if limit == 1 {
+		return append([]rpc.OrderEvent(nil), events[0]), true
+	}
+	head := limit / 2
+	tail := limit - head
+	out := make([]rpc.OrderEvent, 0, limit)
+	out = append(out, events[:head]...)
+	out = append(out, events[len(events)-tail:]...)
+	return out, true
+}
+
+func sortOrderHistoryRows(rows []rpc.OrdersHistoryRow) {
+	slices.SortStableFunc(rows, func(a, b rpc.OrdersHistoryRow) int {
+		cmp := b.Order.UpdatedAt.Compare(a.Order.UpdatedAt)
+		if cmp != 0 {
+			return cmp
+		}
+		return latestOrderHistoryEventAt(b).Compare(latestOrderHistoryEventAt(a))
+	})
+}
+
+func latestOrderHistoryEventAt(row rpc.OrdersHistoryRow) time.Time {
+	if len(row.Events) == 0 {
+		return time.Time{}
+	}
+	return row.Events[len(row.Events)-1].At
+}
+
+func orderHistoryNotBrokerStatement() string {
+	return "local order journal only; not an IBKR Activity Statement, trade confirmation, execution report, or historical broker audit"
+}
+
+func orderHistoryLimitations() []string {
+	return []string{
+		"Reduced from the daemon's local append-only order journal for the current broker account/mode only.",
+		"May miss manual orders, other-client orders, broker activity while the daemon was offline, and rows outside the selected account/mode scope.",
+		"Broker callbacks remain authoritative when journaled; absence of a local event is not proof that no broker activity occurred.",
+	}
 }
 
 func (s *Server) loadOrderViews() ([]rpc.OrderView, map[string][]rpc.OrderEvent, error) {

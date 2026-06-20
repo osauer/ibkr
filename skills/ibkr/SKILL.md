@@ -7,16 +7,16 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
   with SPY context and 0DTE / 1-7 / term horizon split, the broad-market
   regime dashboard), checking portfolio-aware canary stress lifecycle, held-name market-event flags,
   reading daemon protection proposals, daemon opportunities, offline opportunity research diagnostics, or runtime settings/freeze state,
-  or explicitly requests an order preview/status read. This skill is read-only and never
+  or explicitly requests an order preview/status/history read. This skill is read-only and never
   runs broker writes; live agent-origin broker writes are blocked daemon-side.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
-  Bash(ibkr canary*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr opportunities status*) Bash(ibkr opportunities list*) Bash(ibkr opportunities refresh*) Bash(ibkr backtest research-opportunity*) Bash(ibkr settings show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr order status*) Bash(ibkr order preview*)
+  Bash(ibkr canary*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr opportunities status*) Bash(ibkr opportunities list*) Bash(ibkr opportunities refresh*) Bash(ibkr backtest research-opportunity*) Bash(ibkr settings show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr orders history*) Bash(ibkr order status*) Bash(ibkr order preview*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-06-18 12:07 CEST
+Updated: 2026-06-19 12:16 CEST
 
 ## When to use
 
@@ -66,6 +66,13 @@ If the user asks about runtime platform preferences or whether trading is
 frozen, run `ibkr settings show --json`; `ibkr settings set` is a write, and the
 `trading.freeze` switch is human-only.
 
+If the user asks for recent order history or trade-review forensics, run
+`ibkr orders history --json`. Treat it as bounded local order-journal evidence
+for the current account/mode only: it is not an IBKR Activity Statement, Flex
+query/export, trade confirmation, commission ledger, closed-position ledger, or
+broker-grade historical audit. Use `ibkr orders open` for currently working
+orders and `ibkr order status ID` for one order's full local audit trail.
+
 If the user explicitly asks for a stock/ETF order draft, use
 `ibkr order preview` and explain `token_minted` separately from
 `submit_eligible`; only an accepted broker WhatIf for the exact draft makes a
@@ -95,6 +102,8 @@ broker-write commands. Do not invent or simulate trade execution.
   regular sessions, or the next known open.
 - Never claim an order was placed unless the CLI returned a successful paper
   order write result. Live agent-origin order writes are blocked daemon-side.
+- Never present `orders history` as official broker history or a commission/P&L
+  ledger; it is local journal evidence only.
 - For opportunity research output, say "diagnostic only" unless the JSON
   explicitly clears the evidence gate; even promising diagnostics are not alpha
   proof without locked walk-forward or live paper evidence.
@@ -135,6 +144,7 @@ broker-write commands. Do not invent or simulate trade execution.
 | `ibkr settings show` | Runtime platform preferences and observed read-only state, incl. `trading.freeze` | [schemas.md#settings-show](schemas.md#settings-show) |
 | `ibkr trading status` | Local order-entry readiness: mode, pinned session evidence, `can_preview`/`can_write`, concrete blockers | [schemas.md#trading-status](schemas.md#trading-status) |
 | `ibkr orders open` | Open-order lifecycle rows for the connected account/mode (read-only journal view) | [schemas.md#orders-open](schemas.md#orders-open) |
+| `ibkr orders history` | Recent local order-journal history for the connected account/mode; not an IBKR Activity Statement/Flex/commission ledger | [schemas.md#orders-history](schemas.md#orders-history) |
 | `ibkr order status ID` | One journaled order's lifecycle and audit events | [schemas.md#order-status](schemas.md#order-status) |
 | `ibkr order preview …` | Tokenized stock/ETF/option order draft; report `token_minted` and `submit_eligible` separately, never transmits | [schemas.md#order-preview](schemas.md#order-preview) |
 | `ibkr version` | Print version, commit, build date, binary path | — |
@@ -189,6 +199,10 @@ broker-data command and is not exposed as an MCP tool.
 - `ibkr proposals status|list|refresh [--json]` — daemon-owned protection proposals, read paths. `status` reports the proposal-engine state, `list` returns the latest proposal snapshot (per-row blockers carry codes plus remediation text), `refresh` asks the daemon to recompute before returning. `preview`, `submit`, and `ignore` are broker-write verbs outside this skill's allowlist.
 - `ibkr backtest research-opportunity --input SCORED_PIT.jsonl [--plan all|ID[,ID...]] [--max-slots N] [--bars BARS.jsonl] [--bars-manifest MANIFEST.json] [--json]` — offline/local opportunity research diagnostics. Use only when the user explicitly asks to inspect scored research files; treat evidence gates, feature diagnostics, and reason diagnostics as diagnostics, not trading instructions.
 - `ibkr settings show [--json]` — runtime platform preferences plus observed read-only state, including the `trading.freeze` switch. `ibkr settings set key=value` is a write; the freeze switch is human-only.
+- `ibkr trading status [--json]` — local order-entry readiness and blockers.
+- `ibkr orders open [--json]` — current local open-order journal view for the connected account/mode.
+- `ibkr orders history [--since YYYY-MM-DD|RFC3339] [--until YYYY-MM-DD|RFC3339] [--limit N] [--event-limit N] [--json]` — recent local order-journal history for the connected account/mode. Defaults to the last 7 days, returns up to 50 grouped orders by default, caps `--limit` at 500, and returns up to 20 lifecycle events per grouped order by default (`--event-limit`, max 200). Date-only `--until` includes the whole UTC day. This is local journal evidence only, not an IBKR Activity Statement/Flex export, trade confirmation, commission ledger, closed-position ledger, or broker-grade historical audit. When `events_truncated` is true, inspect `total_events_count` before treating the event sample as complete.
+- `ibkr order status <order-ref|order-id|perm-id> [--json]` — one journaled order plus its local audit events.
 - `ibkr size --symbol SYM --entry F --stop F [--target F] [--risk-pct 1.0] [--side long|short] [--lot 1] [--fx 1.0] [--json]` — fixed-fractional sizing. Reads NLV from `account.summary` so `risk_pct` is pegged to the live account. `--fx` converts the base-currency risk budget into the trade's quote currency (e.g. `--fx 1.085` for a USD trade against an EUR account); default `1.0` is correct for same-currency trades. `--lot` rounds shares down (use `100` for one option contract's worth of stock). `--target` is optional: when set, the response also carries `r` (reward-to-risk multiple = `|target − entry| / |entry − stop|`; the standard "is this trade worth taking" filter, ≥ 2R typical), `reward_quote`, `reward_base`, and `breakeven_win_rate` (= `1 / (1 + R)`). Output `status` is `ok` | `tight_risk` (budget < per-share risk × lot — widen the stop or raise risk-pct) | `exceeds_buying_power`. The CLI never derives entry/stop/target from quotes — those are the user's trade plan; if the user asks "and what about the current price?" run `ibkr quote SYM --json` separately.
 
 ## Errors

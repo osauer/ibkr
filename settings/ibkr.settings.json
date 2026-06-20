@@ -30,6 +30,7 @@
       "Bash(ibkr settings show*)",
       "Bash(ibkr trading status*)",
       "Bash(ibkr orders open*)",
+      "Bash(ibkr orders history*)",
       "Bash(ibkr order status*)",
       "Bash(ibkr order preview*)",
       "Bash(ibkr status*)",
