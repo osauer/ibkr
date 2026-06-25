@@ -292,16 +292,16 @@ branches) — intended; the tape is the second witness. Stage and severity stay
 separable throughout: a governed panic reads stage `panic`, severity `act`,
 with the governor record explaining the withheld rung.
 
-### Tone follows stage, severity is governed — stated explicitly
+### Tone follows governed severity — stated explicitly
 
-When the governor caps severity, the *stage* and *tone* are not rewritten: two
-deep, fresh, persistent eligible reds with no tape co-sign still produce
-stage `confirmed_stress`, tone `stress` (red headline) — with `severity:
-watch` and a governor record explaining why act was withheld. This is
-deliberate: that evidence is real and earned its color; the incident case
-never reaches it (provisional reds → `early_warning`, tone `watch`). The new
-label "Confirmed stress regime" must be added to `regimePostureTone`'s
-label-fallback switch (`lifecycle.go:239-247`) mapping to stress.
+When the governor caps severity, the *stage* is not rewritten: two deep, fresh,
+persistent eligible reds with no tape co-sign still produce stage
+`confirmed_stress` and label "Confirmed stress regime". The display tone does
+follow the governed severity: `severity: watch` renders tone `watch` (amber),
+with a governor record explaining why act/red was withheld. This preserves
+headroom for act-grade stress and full risk-off conditions while keeping the
+evidence label honest. The incident case remains weaker still (provisional reds
+→ `early_warning`, tone `watch`).
 
 ### Timing honesty
 
@@ -324,17 +324,18 @@ match wins:
 | ranked < 3 | Insufficient signal — too few inputs ready | data_quality |
 | all ranked clusters eligible-red, none unranked | Full risk-off conditions | risk_off |
 | eligible red ≥ 3 | Broad stress regime | stress |
-| stage == confirmed_stress (incl. tape-corroborated single-red branches) | Confirmed stress regime | stress |
+| stage == confirmed_stress and severity == watch | Confirmed stress regime | watch |
+| stage == confirmed_stress and severity >= act | Confirmed stress regime | stress |
 | raw red ≥ 1 (provisional or single eligible without tape) | Stress signal present | watch |
 | yellow ≥ 3 | Elevated stress watch | watch |
 | otherwise | Normal regime | normal |
 
 This fixes the red==2 drift (incident headline), makes "Broad" mean broad
 again, and removes the label/stage mismatch when a tape-corroborated single
-red confirms. The Tone column is the *label-fallback* mapping; the
-stage-aware tone switch takes precedence (`panic` / `confirmed_stress` →
-stress), so a pure-tape panic with few reds still renders red even though its
-label row alone would say watch.
+red confirms. The Tone column is the display contract after severity governors:
+the label can confirm stress while the tone remains watch if policy withheld the
+act rung. A pure-tape panic with few reds still renders red because the panic
+stage reaches act/urgent severity.
 
 ### Deferred: stage dwell
 
@@ -634,9 +635,11 @@ also fork the decisions journal's comparability, undermining Part 4. So:
   tape co-sign day or threshold promotion — "act" arrives later than today.
   That is the deliberate price of the provenance gate, and the journal will
   measure whether it was ever paid in practice.
-- **Tone outruns severity by design:** deep fresh confirmed evidence keeps a
-  red headline even when the governor holds severity at watch. The incident
-  case cannot reach this (its reds were provisional).
+- **Tone follows governed severity by design:** deep fresh confirmed evidence
+  keeps the "Confirmed stress regime" label, but renders amber/watch when the
+  governor holds severity at watch. Red is reserved for act-grade stress, and
+  the incident case cannot reach the confirmed label at all (its reds were
+  provisional).
 - **Degraded-cap scope:** capping on global readiness was rejected (one dead
   feed would mute everything); evidence-keyed capping can in principle miss a
   quality problem outside the confirming set — accepted, since non-confirming

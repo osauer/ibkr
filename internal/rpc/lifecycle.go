@@ -408,11 +408,10 @@ func BuildRegimePosture(r *RegimeSnapshotResult) RegimePosture {
 	}
 }
 
-// regimePostureTone maps the unified headline + lifecycle stage to a display
-// tone. Stage-aware rows take precedence over the label fallback: a
-// confirmed/panic stage renders stress even when the severity governor has
-// capped the demanded response — deep fresh confirmed evidence earned its
-// color; the governor record explains the withheld severity.
+// regimePostureTone maps the unified headline + lifecycle state to the display
+// tone. Stage keeps the condition label honest, while severity owns urgency:
+// governed confirmed stress with severity watch remains an amber watch so red
+// stays available for act-grade stress and true risk-off conditions.
 func regimePostureTone(c RegimeComposite, lifecycle LifecycleState) string {
 	label := RegimeHeadline(c, lifecycle.Stage)
 	if label == "Full risk-off conditions" {
@@ -424,7 +423,15 @@ func regimePostureTone(c RegimeComposite, lifecycle LifecycleState) string {
 	switch lifecycle.Stage {
 	case LifecycleDataQuality:
 		return RegimeToneDataQuality
-	case LifecyclePanic, LifecycleConfirmedStress, LifecycleForcedDefense:
+	case LifecycleConfirmedStress, LifecycleForcedDefense:
+		if severityRank(lifecycle.Severity) <= severityRank("watch") {
+			return RegimeToneWatch
+		}
+		return RegimeToneStress
+	case LifecyclePanic:
+		if severityRank(lifecycle.Severity) <= severityRank("watch") {
+			return RegimeToneWatch
+		}
 		return RegimeToneStress
 	}
 	if regimeLifecycleReadinessDegraded(lifecycle.Readiness) {

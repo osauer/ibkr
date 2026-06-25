@@ -268,6 +268,13 @@ func TestRegimePostureClassifiesPolicyTone(t *testing.T) {
 		}
 	}
 	yellowMeta := RegimeIndicatorMeta{Band: "yellow"}
+	pendingRedMeta := func() RegimeIndicatorMeta {
+		return RegimeIndicatorMeta{
+			Band:        "red",
+			Eligibility: &RegimeEligibility{Eligible: true},
+			Thresholds:  &RegimeThresholds{Label: "test_v1", Heuristic: true, PendingBacktest: true},
+		}
+	}
 
 	tests := []struct {
 		name         string
@@ -308,6 +315,26 @@ func TestRegimePostureClassifiesPolicyTone(t *testing.T) {
 			wantTone:     RegimeToneStress,
 			wantStage:    LifecycleConfirmedStress,
 			wantSeverity: "act",
+		},
+		{
+			name: "confirmed stress capped to watch renders amber watch",
+			build: func() RegimeSnapshotResult {
+				calmTape := 0.3
+				return RegimeSnapshotResult{
+					VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: greenMeta()},
+					HYGSPYDivergence: RegimeHYGSPYDivergence{
+						RegimeIndicatorMeta: greenMeta(),
+						SPYChangePct:        &calmTape,
+					},
+					FundingStress: RegimeFundingStress{RegimeIndicatorMeta: pendingRedMeta()},
+					USDJPY:        RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
+					Breadth:       RegimeBreadth{RegimeIndicatorMeta: pendingRedMeta()},
+				}
+			},
+			wantLabel:    "Confirmed stress regime",
+			wantTone:     RegimeToneWatch,
+			wantStage:    LifecycleConfirmedStress,
+			wantSeverity: "watch",
 		},
 		{
 			name: "all ranked clusters eligible red is risk off",

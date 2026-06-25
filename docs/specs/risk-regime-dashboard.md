@@ -255,8 +255,11 @@ Severity governance, applied after stage selection and disclosed in
    caps at watch (evidence-keyed: an unrelated dead feed does not mute a fresh
    confirmation).
 
-Tone follows stage: deep, fresh, persistent confirmed evidence keeps a red
-headline even when the governor holds the demanded response at watch.
+Display tone follows governed severity, not just stage: `confirmed_stress`
+with `severity: watch` remains an amber/watch headline, preserving red for
+act-grade stress and `risk_off` for full risk-off conditions. The condition
+label still stays "Confirmed stress regime" so the evidence balance is not
+watered down.
 
 ## Composite Logic
 
