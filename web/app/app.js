@@ -2507,6 +2507,8 @@ function protectionRow(proposal) {
   if (stepper) copy.append(stepper);
   const quoteLine = protectionQuoteLine(proposal);
   if (quoteLine) copy.append(quoteLine);
+  const positionLine = protectionPositionLine(proposal);
+  if (positionLine) copy.append(positionLine);
   const metricText = protectionMetricText(proposal);
   const riskTicket = protectionRiskTicket(proposal, metricText);
   if (riskTicket) {
@@ -2996,6 +2998,53 @@ function protectionQuoteFrozen(quote = {}) {
   const quality = String(quote.quote_quality || "").trim().toLowerCase();
   const dataType = String(quote.data_type || "").trim().toLowerCase();
   return (quality !== "" && quality !== "firm") || (dataType !== "" && dataType !== "live");
+}
+
+// protectionPositionLine renders holding-level decision context: the
+// exposure being acted on (position market value and its share of NLV) and
+// today's P&L move, colored green/red by sign with an explicit +/- sign so
+// direction reads without relying on color. Distinct from the metric line,
+// which is the per-bucket decision number. Risk reduction acts on a whole
+// single-name group, so it omits a leg share count and leads with the dollar
+// exposure — the dollar value is the size there. Parts vanish individually
+// when their typed field is missing; never fabricated.
+function protectionPositionLine(proposal = {}) {
+  const currency = proposal.contract?.currency || "USD";
+  const parts = [];
+  if (proposal.bucket !== "risk_reduction") {
+    const qty = Math.abs(Number(proposal.position_quantity || 0));
+    if (qty > 0) {
+      const unit = ["OPT", "OPTION"].includes(proposal.sec_type) ? "ct" : "sh";
+      parts.push(`held ${qty} ${unit}`);
+    }
+  }
+  if (hasNumericValue(proposal.position_market_value) && proposal.position_market_value !== 0) {
+    let value = money(proposal.position_market_value, currency);
+    if (typeof proposal.market_value_pct_nlv === "number") {
+      value += ` (${pct(Math.abs(proposal.market_value_pct_nlv))} NLV)`;
+    }
+    parts.push(value);
+  }
+  const dayMoney = firstNumber(proposal.position_day_change_money);
+  const hasDay = hasNumericValue(dayMoney);
+  if (parts.length === 0 && !hasDay) return null;
+  const line = document.createElement("small");
+  line.className = "protection-row__position";
+  if (parts.length > 0) line.append(document.createTextNode(parts.join(" · ")));
+  if (hasDay) {
+    line.append(document.createTextNode(`${parts.length > 0 ? " · " : ""}today `));
+    const move = document.createElement("span");
+    const dir = dayMoney > 0 ? "up" : dayMoney < 0 ? "down" : "";
+    move.className = "protection-quote" + (dir ? ` protection-quote--${dir}` : "");
+    let text = signedMoneyRead(dayMoney, proposal.position_day_change_currency || currency);
+    if (hasNumericValue(proposal.position_day_change_pct)) {
+      const p = proposal.position_day_change_pct;
+      text += ` (${p > 0 ? "+" : ""}${p.toFixed(1)}%)`;
+    }
+    move.textContent = text;
+    line.append(move);
+  }
+  return line;
 }
 
 function protectionQuoteLine(proposal = {}) {
@@ -6863,6 +6912,17 @@ function bytesToB64url(bytes) {
 function money(value, currency) {
   if (!hasNumericValue(value)) return "--";
   return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(value);
+}
+
+// signedMoneyRead formats a P&L amount with an explicit leading +/- so the
+// sign is legible without relying on color (NO_COLOR, color-blindness),
+// mirroring the CLI proposal renderer.
+function signedMoneyRead(value, currency) {
+  if (!hasNumericValue(value)) return "--";
+  const formatted = money(Math.abs(value), currency);
+  if (value > 0) return "+" + formatted;
+  if (value < 0) return "-" + formatted;
+  return formatted;
 }
 
 function compactMoney(value, currency) {

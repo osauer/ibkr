@@ -2412,6 +2412,15 @@ p {
   font-weight: 650;
 }
 
+/* Holding-level decision context: position exposure and today's P&L move.
+   The today span reuses the .protection-quote--up/--down tokens for the
+   green/red sign color. */
+.protection-row__position {
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
 .protection-row .protection-row__risk-ticket {
   display: flex;
   flex-wrap: wrap;
