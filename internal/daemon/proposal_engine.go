@@ -575,6 +575,7 @@ func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, 
 		for _, row := range pos.Options {
 			p, ok, supp := thetaProposal(policy, status, row, sources, now)
 			if ok {
+				enrichProposalPositionContext(&p, row, acct)
 				applyMarketEventFlagsToProposal(&p, marketEvents)
 				if !e.isIgnored(scope, p.Key) {
 					out = append(out, p)
@@ -587,6 +588,7 @@ func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, 
 	if policy.Buckets.RiskReduction.Enabled {
 		for _, group := range pos.ByUnderlying {
 			if p, ok := riskReductionProposal(policy, status, group, sources, now); ok {
+				enrichRiskReductionContext(&p, group, acct)
 				applyMarketEventFlagsToProposal(&p, marketEvents)
 				if !e.isIgnored(scope, p.Key) {
 					out = append(out, p)
@@ -604,6 +606,7 @@ func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, 
 				trailSizing := e.stockTrailSizing(ctx, policy.Buckets.TrailingStop.StockETF, row, now)
 				if p, ok := trailingStopStockProposal(policy, status, row, sources, now, stockEnabled, e.resolveRowMinTick(row), trailSizing); ok {
 					enrichProtectiveStopProposal(&p, row, acct)
+					enrichProposalPositionContext(&p, row, acct)
 					applyMarketEventFlagsToProposal(&p, marketEvents)
 					for _, b := range e.duplicateProtectiveBlockers(ctx, p, pos) {
 						proposalBlock(&p, b.Code, b.Message)
@@ -619,6 +622,7 @@ func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, 
 			for _, row := range pos.Options {
 				if p, ok := trailingStopOptionProposal(policy, status, row, sources, now, multiLegBySymbol[strings.ToUpper(strings.TrimSpace(row.Symbol))], e.resolveRowMinTick(row)); ok {
 					enrichProtectiveStopProposal(&p, row, acct)
+					enrichProposalPositionContext(&p, row, acct)
 					applyMarketEventFlagsToProposal(&p, marketEvents)
 					if !e.isIgnored(scope, p.Key) {
 						out = append(out, p)

@@ -19,6 +19,53 @@ import (
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
+func TestEnrichProposalPositionContext(t *testing.T) {
+	mv, mvBase, day, dayPct := 38636.0, 33925.0, 2828.0, 7.9
+	row := rpc.PositionView{
+		Symbol: "NOW", SecType: "STOCK", Quantity: 400, Currency: "USD",
+		MarketValue: mv, MarketValueBase: &mvBase, DayChangeMoney: &day, DayChangePct: &dayPct,
+	}
+	acct := &rpc.AccountResult{NetLiquidation: 247000, BaseCurrency: "EUR"}
+	var p rpc.TradeProposal
+	p.Contract.Currency = "USD"
+	enrichProposalPositionContext(&p, row, acct)
+	if p.PositionMarketValue != mv {
+		t.Fatalf("PositionMarketValue=%v, want %v", p.PositionMarketValue, mv)
+	}
+	if p.MarketValuePctNLV == nil || *p.MarketValuePctNLV <= 0 {
+		t.Fatalf("MarketValuePctNLV=%v, want positive", p.MarketValuePctNLV)
+	}
+	if p.PositionDayChangeMoney == nil || *p.PositionDayChangeMoney != day {
+		t.Fatalf("PositionDayChangeMoney=%v, want %v", p.PositionDayChangeMoney, day)
+	}
+	if p.PositionDayChangeCurrency != "USD" {
+		t.Fatalf("PositionDayChangeCurrency=%q, want USD", p.PositionDayChangeCurrency)
+	}
+}
+
+func TestEnrichRiskReductionContextUsesGroup(t *testing.T) {
+	gmv, gmvBase, gday := 84501.67, 74200.0, 14227.98
+	group := rpc.PositionGroup{
+		Underlying: "NOW", GroupMarketValue: gmv,
+		GroupMarketValueBase: &gmvBase, GroupDailyPnLBase: &gday,
+	}
+	acct := &rpc.AccountResult{NetLiquidation: 247000, BaseCurrency: "EUR"}
+	var p rpc.TradeProposal
+	enrichRiskReductionContext(&p, group, acct)
+	if p.PositionMarketValue != gmv {
+		t.Fatalf("PositionMarketValue=%v, want group %v", p.PositionMarketValue, gmv)
+	}
+	if p.PositionDayChangeCurrency != "EUR" {
+		t.Fatalf("PositionDayChangeCurrency=%q, want base EUR", p.PositionDayChangeCurrency)
+	}
+	if p.PositionDayChangeMoney == nil || *p.PositionDayChangeMoney != gday {
+		t.Fatalf("PositionDayChangeMoney=%v, want %v", p.PositionDayChangeMoney, gday)
+	}
+	if p.PositionDayChangePct == nil {
+		t.Fatal("PositionDayChangePct nil, want computed from group base values")
+	}
+}
+
 func thetaTestStatus() rpc.ProtectionPolicyStatus {
 	policy := defaultProtectionPolicy()
 	return protectionPolicyStatus(policy, rpc.ProtectionPolicyStatusDefault, "test", "", time.Now())

@@ -223,6 +223,9 @@ func renderProposalsText(env *Env, snap *rpc.TradeProposalSnapshot) {
 			head += " " + formatOrderTrail(p.Trail)
 		}
 		fmt.Fprintf(out, "  %s  %s  [%s]\n", head, p.Reason, state)
+		if posLine := formatProposalPositionLine(env, &p); posLine != "" {
+			fmt.Fprintf(out, "      Position   %s\n", posLine)
+		}
 		if sizing := formatProposalTrailSizing(p.TrailSizing); sizing != "" {
 			fmt.Fprintf(out, "      Trail sizing: %s\n", sizing)
 		}
@@ -460,6 +463,59 @@ func proposalRiskWarnings(sem *rpc.TradeProposalExecutionSemantics, risk *rpc.Tr
 		warnings = append(warnings, risk.WarningCodes...)
 	}
 	return warnings
+}
+
+// formatProposalPositionLine renders holding-level decision context for a
+// proposal: position size, market value and its share of NLV, and today's P&L
+// move colored by sign. This is the exposure being acted on — distinct from the
+// order size in the proposal head — so a human can judge the trade in context.
+// Empty when the daemon attached no position context.
+func formatProposalPositionLine(env *Env, p *rpc.TradeProposal) string {
+	var parts []string
+	// A share/contract count is exact only for a single-instrument proposal.
+	// Risk reduction acts on a whole single-name group (stock + options), so a
+	// leg's count would misrepresent the size the dollar market value reports —
+	// lead with the dollar exposure there instead.
+	if qty := p.PositionQuantity; qty != 0 && p.Bucket != rpc.TradeProposalBucketRiskReduction {
+		if qty < 0 {
+			qty = -qty
+		}
+		parts = append(parts, fmt.Sprintf("held %g %s", qty, positionUnit(p.SecType)))
+	}
+	if p.PositionMarketValue != 0 {
+		mv := formatProposalMoney(p.PositionMarketValue, p.Contract.Currency)
+		if p.MarketValuePctNLV != nil {
+			mv += fmt.Sprintf(" (%.1f%% NLV)", *p.MarketValuePctNLV)
+		}
+		parts = append(parts, mv)
+	}
+	if p.PositionDayChangeMoney != nil {
+		parts = append(parts, "today "+env.formatProposalDayChange(*p.PositionDayChangeMoney, p.PositionDayChangeCurrency, p.PositionDayChangePct))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func positionUnit(secType string) string {
+	switch strings.ToUpper(strings.TrimSpace(secType)) {
+	case "OPT", "OPTION":
+		return "ct"
+	default:
+		return "sh"
+	}
+}
+
+// formatProposalDayChange renders today's position P&L with an explicit sign and
+// green/red color (colorBySign), so direction is legible without relying on
+// color alone (NO_COLOR, color-blindness). The percent carries its own sign.
+func (e *Env) formatProposalDayChange(money float64, ccy string, pct *float64) string {
+	s := formatProposalMoney(money, ccy)
+	if money > 0 {
+		s = "+" + s
+	}
+	if pct != nil {
+		s += fmt.Sprintf(" (%+.1f%%)", *pct)
+	}
+	return e.colorBySign(money, s, signPnL)
 }
 
 func formatProposalMoney(v float64, currency string) string {

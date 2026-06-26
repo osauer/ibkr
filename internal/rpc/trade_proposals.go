@@ -135,14 +135,23 @@ type TradeProposal struct {
 	RiskExcessNotional float64                          `json:"risk_excess_notional,omitempty"`
 	RiskExcessCurrency string                           `json:"risk_excess_currency,omitempty"`
 	MarketValuePctNLV  *float64                         `json:"market_value_pct_nlv,omitempty"`
-	MarketFlags        []MarketEventFlag                `json:"market_flags,omitempty"`
-	LimitPrice         *float64                         `json:"limit_price,omitempty"`
-	PolicyID           string                           `json:"policy_id,omitempty"`
-	PolicyVersion      int                              `json:"policy_version,omitempty"`
-	PolicyFingerprint  Fingerprint                      `json:"policy_fingerprint,omitzero"`
-	SourceFingerprints TradeProposalSourceFingerprints  `json:"source_fingerprints,omitzero"`
-	Blockers           []TradingBlocker                 `json:"blockers,omitempty"`
-	CreatedAt          time.Time                        `json:"created_at,omitzero"`
+	// Holding-level decision context: the full exposure being acted on, not
+	// the order size. PositionMarketValue is in Contract.Currency;
+	// MarketValuePctNLV is its share of net liquidation. PositionDayChange* is
+	// today's P&L move on the held position (money in PositionDayChangeCurrency,
+	// plus a percent) so a human can see whether the name is up or down today.
+	PositionMarketValue       float64                         `json:"position_market_value,omitempty"`
+	PositionDayChangeMoney    *float64                        `json:"position_day_change_money,omitempty"`
+	PositionDayChangeCurrency string                          `json:"position_day_change_currency,omitempty"`
+	PositionDayChangePct      *float64                        `json:"position_day_change_pct,omitempty"`
+	MarketFlags               []MarketEventFlag               `json:"market_flags,omitempty"`
+	LimitPrice                *float64                        `json:"limit_price,omitempty"`
+	PolicyID                  string                          `json:"policy_id,omitempty"`
+	PolicyVersion             int                             `json:"policy_version,omitempty"`
+	PolicyFingerprint         Fingerprint                     `json:"policy_fingerprint,omitzero"`
+	SourceFingerprints        TradeProposalSourceFingerprints `json:"source_fingerprints,omitzero"`
+	Blockers                  []TradingBlocker                `json:"blockers,omitempty"`
+	CreatedAt                 time.Time                       `json:"created_at,omitzero"`
 }
 
 // TradeProposalTrailSizing is the daemon-owned explanation for a protective

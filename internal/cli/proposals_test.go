@@ -36,6 +36,55 @@ func TestRunProposalsGroupHelp(t *testing.T) {
 	}
 }
 
+func TestRenderProposalsTextShowsPositionContext(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	thetaPct, thetaDay := 1.2, 1719.79
+	groupPct, groupDay, groupDayPct := 34.2, 14227.98, 19.2
+	renderProposalsText(env, &rpc.TradeProposalSnapshot{
+		Revision: "sha256:test", PolicyID: "default", PolicyVersion: 3,
+		Counts: rpc.TradeProposalCounts{Total: 2, Actionable: 2},
+		Proposals: []rpc.TradeProposal{
+			{
+				Key: "theta_hygiene:NOW", Bucket: rpc.TradeProposalBucketThetaHygiene,
+				Action: rpc.OrderActionSell, Quantity: 20, PositionQuantity: 20, Symbol: "NOW",
+				SecType: "OPT", OrderType: rpc.OrderTypeLMT, Reason: "time value bleed",
+				Contract:               rpc.ContractParams{Currency: "USD"},
+				PositionMarketValue:    2919.79,
+				MarketValuePctNLV:      &thetaPct,
+				PositionDayChangeMoney: &thetaDay, PositionDayChangeCurrency: "USD",
+			},
+			{
+				Key: "risk_reduction:NOW", Bucket: rpc.TradeProposalBucketRiskReduction,
+				Action: rpc.OrderActionSell, Quantity: 103, PositionQuantity: 400, Symbol: "NOW",
+				SecType: "STK", OrderType: rpc.OrderTypeLMT, Reason: "34% of NLV",
+				Contract:               rpc.ContractParams{Currency: "USD"},
+				PositionMarketValue:    84501.67,
+				MarketValuePctNLV:      &groupPct,
+				PositionDayChangeMoney: &groupDay, PositionDayChangeCurrency: "EUR",
+				PositionDayChangePct: &groupDayPct,
+			},
+		},
+	})
+	got := stdout.String()
+	for _, want := range []string{
+		"held 20 ct",  // theta shows the exact contract count
+		"(1.2% NLV)",  // exposure context
+		"today +$",    // today's move carries an explicit sign
+		"(34.2% NLV)", // risk-reduction group exposure
+		"today +€",    // group P&L reported in base currency
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("position context missing %q:\n%s", want, got)
+		}
+	}
+	// Risk reduction acts on a group; a single leg's share count would mislead.
+	if strings.Contains(got, "held 400 sh") {
+		t.Fatalf("risk reduction must not print a misleading leg share count:\n%s", got)
+	}
+}
+
 func TestRenderProposalsTextShowsTrailSizingFallback(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer

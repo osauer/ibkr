@@ -11,6 +11,48 @@ import (
 
 const proposalStopGapScenarioPct = 5.0
 
+// enrichProposalPositionContext attaches holding-level decision context to a
+// single-position proposal: the full position market value, its share of NLV,
+// and today's P&L move. This is what a human needs to weigh the action — the
+// exposure being acted on and whether the name is up or down today — separate
+// from the order size in the proposal head.
+func enrichProposalPositionContext(prop *rpc.TradeProposal, row rpc.PositionView, acct *rpc.AccountResult) {
+	if prop == nil {
+		return
+	}
+	prop.PositionMarketValue = row.MarketValue
+	if prop.MarketValuePctNLV == nil && acct != nil && acct.NetLiquidation > 0 && row.MarketValueBase != nil {
+		pct := *row.MarketValueBase / acct.NetLiquidation * 100
+		prop.MarketValuePctNLV = &pct
+	}
+	prop.PositionDayChangeMoney = cloneFloat64Ptr(row.DayChangeMoney)
+	prop.PositionDayChangePct = cloneFloat64Ptr(row.DayChangePct)
+	prop.PositionDayChangeCurrency = nonEmptyString(row.Currency, prop.Contract.Currency)
+}
+
+// enrichRiskReductionContext is the group-level analogue: a risk-reduction
+// proposal acts on a whole single-name group (stock + its options), so the
+// decision context is the group's total market value and today's group P&L,
+// not one leg. MarketValuePctNLV is already set from the group; this fills the
+// market value and today's move (reported in base currency, the only currency
+// the daemon aggregates group P&L in).
+func enrichRiskReductionContext(prop *rpc.TradeProposal, group rpc.PositionGroup, acct *rpc.AccountResult) {
+	if prop == nil {
+		return
+	}
+	prop.PositionMarketValue = group.GroupMarketValue
+	if group.GroupDailyPnLBase != nil {
+		prop.PositionDayChangeMoney = cloneFloat64Ptr(group.GroupDailyPnLBase)
+		if acct != nil {
+			prop.PositionDayChangeCurrency = strings.ToUpper(strings.TrimSpace(acct.BaseCurrency))
+		}
+		if group.GroupMarketValueBase != nil && *group.GroupMarketValueBase != 0 {
+			pct := *group.GroupDailyPnLBase / *group.GroupMarketValueBase * 100
+			prop.PositionDayChangePct = &pct
+		}
+	}
+}
+
 func enrichProtectiveStopProposal(prop *rpc.TradeProposal, row rpc.PositionView, acct *rpc.AccountResult) {
 	if prop == nil || prop.Trail == nil || !isTrailOrderType(prop.OrderType) {
 		return
