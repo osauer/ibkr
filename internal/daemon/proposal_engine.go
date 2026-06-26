@@ -480,7 +480,7 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		}
 		sources.MarketEvents = &fp
 	}
-	proposals := e.generate(ctx, policy, policyStatus, acct, pos, sources, marketEvents, scope, now)
+	proposals, thetaSuppressions := e.generate(ctx, policy, policyStatus, acct, pos, sources, marketEvents, scope, now)
 	slices.SortStableFunc(proposals, func(a, b rpc.TradeProposal) int {
 		if a.Score > b.Score {
 			return -1
@@ -513,7 +513,7 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		Proposals:          proposals,
 		Counts:             proposalCounts(proposals),
 	}
-	return e.installScoped(snap, scope, show), nil
+	return e.installScoped(snap, scope, show, thetaSuppressions), nil
 }
 
 // installScoped re-resolves the broker scope immediately before publishing a
@@ -522,7 +522,7 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 // under the scope resolved at refresh start would persist proposals labeled
 // with one session's identity but built from another's positions. Fail
 // closed with a proposal-free shell instead.
-func (e *proposalEngine) installScoped(snap rpc.TradeProposalSnapshot, scope brokerStateScope, show bool) rpc.TradeProposalSnapshot {
+func (e *proposalEngine) installScoped(snap rpc.TradeProposalSnapshot, scope brokerStateScope, show bool, thetaSuppressions []thetaSuppression) rpc.TradeProposalSnapshot {
 	if current := e.currentScope(); !sameBrokerScope(current, scope) {
 		shell := emptyProposalSnapshot(snap.AsOf)
 		shell.AutoTrade = snap.AutoTrade
@@ -531,19 +531,56 @@ func (e *proposalEngine) installScoped(snap rpc.TradeProposalSnapshot, scope bro
 		e.installSnapshot(shell, show)
 		return shell
 	}
+	// Journal theta suppressions before installing, while e.snapshot still
+	// holds the previous revision, so the revision-change gate matches the one
+	// installSnapshot uses for "generated" events (no 2-minute-cadence spam).
+	e.journalThetaSuppressions(snap, thetaSuppressions)
 	e.installSnapshot(snap, show)
 	return snap
 }
 
-func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, status rpc.ProtectionPolicyStatus, acct *rpc.AccountResult, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, scope brokerStateScope, now time.Time) []rpc.TradeProposal {
+// journalThetaSuppressions records near-expiry options that were deliberately
+// not turned into close proposals, gated on a revision change so the unbounded
+// trade-proposals.jsonl does not accrue a duplicate line every refresh cycle.
+func (e *proposalEngine) journalThetaSuppressions(snap rpc.TradeProposalSnapshot, suppressions []thetaSuppression) {
+	if len(suppressions) == 0 {
+		return
+	}
+	e.mu.Lock()
+	prevRevision := e.snapshot.Revision
+	e.mu.Unlock()
+	if snap.Revision == prevRevision {
+		return
+	}
+	for _, s := range suppressions {
+		e.appendEvent(proposalEvent{
+			At:                 snap.AsOf,
+			Type:               "theta-suppressed",
+			Key:                s.Key,
+			Bucket:             rpc.TradeProposalBucketThetaHygiene,
+			PolicyID:           snap.PolicyID,
+			PolicyVersion:      snap.PolicyVersion,
+			PolicyFingerprint:  snap.PolicyFingerprint,
+			Reason:             s.Reason,
+			Message:            s.Message,
+			SourceFingerprints: snap.SourceFingerprints,
+		})
+	}
+}
+
+func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, status rpc.ProtectionPolicyStatus, acct *rpc.AccountResult, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, scope brokerStateScope, now time.Time) ([]rpc.TradeProposal, []thetaSuppression) {
 	var out []rpc.TradeProposal
+	var suppressions []thetaSuppression
 	if policy.Buckets.ThetaHygiene.Enabled {
 		for _, row := range pos.Options {
-			if p, ok := thetaProposal(policy, status, row, sources, now); ok {
+			p, ok, supp := thetaProposal(policy, status, row, sources, now)
+			if ok {
 				applyMarketEventFlagsToProposal(&p, marketEvents)
 				if !e.isIgnored(scope, p.Key) {
 					out = append(out, p)
 				}
+			} else if supp != nil {
+				suppressions = append(suppressions, *supp)
 			}
 		}
 	}
@@ -590,7 +627,7 @@ func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, 
 			}
 		}
 	}
-	return out
+	return out, suppressions
 }
 
 func (e *proposalEngine) marketEventsSnapshot(ctx context.Context, pos *rpc.PositionsResult) *rpc.MarketEventsResult {
@@ -789,32 +826,132 @@ func (e *proposalEngine) regimeFingerprint(ctx context.Context) (rpc.Fingerprint
 	return fp, fp.Key != ""
 }
 
-func thetaProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, row rpc.PositionView, sources rpc.TradeProposalSourceFingerprints, now time.Time) (rpc.TradeProposal, bool) {
+// thetaSuppression records a near-expiry option that cleared the DTE and dust
+// floors but was deliberately NOT turned into a close proposal — almost always
+// because it is intrinsic-dominated. It is journaled (not served) so the
+// extrinsic floor can be calibrated against real holdings.
+type thetaSuppression struct {
+	Key     string
+	Reason  string
+	Message string
+}
+
+// thetaProposal evaluates one held option for theta hygiene. It returns at most
+// one of: a proposal (ok=true; possibly State=Blocked with a remediation
+// blocker) or a suppression record to journal. Theta only erodes EXTRINSIC
+// (time) value, so the materiality test is the extrinsic share of the premium —
+// not absolute dollar theta, which merely scales with position size and price.
+func thetaProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, row rpc.PositionView, sources rpc.TradeProposalSourceFingerprints, now time.Time) (rpc.TradeProposal, bool, *thetaSuppression) {
 	if !strings.EqualFold(row.SecType, "OPTION") && !strings.EqualFold(row.SecType, "OPT") || row.Quantity == 0 || row.Theta == nil {
-		return rpc.TradeProposal{}, false
+		return rpc.TradeProposal{}, false, nil
 	}
 	dte, ok := optionDTE(row.Expiry, now)
 	if !ok || dte > policy.Buckets.ThetaHygiene.MaxDTE {
-		return rpc.TradeProposal{}, false
+		return rpc.TradeProposal{}, false, nil
 	}
-	thetaPerDay := math.Abs(*row.Theta * row.Quantity * float64(max(row.Multiplier, 1)))
+	mult := float64(max(row.Multiplier, 1))
+	qtyAbs := math.Abs(row.Quantity)
+	thetaPerDay := math.Abs(*row.Theta * row.Quantity * mult)
+	// Dust floor: cheaply skip trivially small positions before the extrinsic
+	// math. This is NOT the materiality gate (see protectionThetaPolicy).
 	if thetaPerDay < policy.Buckets.ThetaHygiene.MinAbsThetaPerDay {
-		return rpc.TradeProposal{}, false
+		return rpc.TradeProposal{}, false, nil
 	}
-	qty := int(math.Ceil(math.Abs(row.Quantity)))
+
+	qty := int(math.Ceil(qtyAbs))
 	action := rpc.OrderActionSell
 	if row.Quantity < 0 {
 		action = rpc.OrderActionBuy
 	}
-	p := baseProposal(policy, status, sources, now, rpc.TradeProposalBucketThetaHygiene, row, action, qty, rpc.OrderPositionEffectClose, fmt.Sprintf("option expires in %d DTE with %.2f/day theta exposure", dte, thetaPerDay))
-	p.ThetaPerDay = thetaPerDay
-	p.Score = thetaPerDay + float64(max(policy.Buckets.ThetaHygiene.MaxDTE-dte, 0))
-	p.Details = []string{fmt.Sprintf("dte=%d", dte)}
-	if row.SpreadPct != nil && *row.SpreadPct > policy.Buckets.ThetaHygiene.MaxSpreadPctOfMid {
-		p.State = rpc.TradeProposalStateBlocked
-		p.Blockers = []rpc.TradingBlocker{{Code: "wide_spread", Message: fmt.Sprintf("option spread %.1f%% exceeds policy max %.1f%% of mid", *row.SpreadPct, policy.Buckets.ThetaHygiene.MaxSpreadPctOfMid)}}
+
+	// Extrinsic decomposition from fields already on the row. If the
+	// underlying spot or a usable mark is missing or the row is stale, we
+	// cannot separate intrinsic from time value and therefore cannot assert
+	// the close is non-destructive. Surface a blocked row with remediation
+	// rather than silently dropping what was previously a visible proposal.
+	mark := row.Mark
+	if mark <= 0 {
+		mark = row.ValuationMark
 	}
-	return p, true
+	if row.Underlying == nil || mark <= 0 || row.Stale {
+		p := baseProposal(policy, status, sources, now, rpc.TradeProposalBucketThetaHygiene, row, action, qty, rpc.OrderPositionEffectClose, fmt.Sprintf("option expires in %d DTE; time-value at risk is unknown without a fresh quote", dte))
+		p.ThetaPerDay = thetaPerDay
+		p.Score = thetaPerDay
+		p.Details = []string{fmt.Sprintf("dte=%d", dte)}
+		p.State = rpc.TradeProposalStateBlocked
+		p.Blockers = []rpc.TradingBlocker{{Code: "extrinsic_uncomputable", Message: "underlying spot or option mark is unavailable or stale; refresh during 09:30-16:00 ET so the Greeks and underlying tick are present before assessing theta hygiene"}}
+		return p, true, nil
+	}
+
+	intrinsicPerShare := optionIntrinsicPerShare(row.Right, *row.Underlying, row.Strike)
+	extrinsicPerShare := mark - intrinsicPerShare
+	extrinsicPctOfMark := extrinsicPerShare / mark * 100
+	if extrinsicPerShare <= 0 || extrinsicPctOfMark < policy.Buckets.ThetaHygiene.MinExtrinsicPctOfMark {
+		// Intrinsic-dominated (or a stale mark sitting below intrinsic).
+		// Closing forfeits intrinsic value and delta exposure to "save" a
+		// decay that is mostly not at risk; theta hygiene does not apply. This
+		// is also the correct outcome for a SHORT option whose extrinsic has
+		// already decayed away — there is no time value left to harvest by
+		// buying it back. Suppress and journal for floor calibration.
+		key := proposalKey(rpc.TradeProposalBucketThetaHygiene, proposalContractFromPosition(row, positionWireSecType(row.SecType)), action)
+		msg := fmt.Sprintf("%s suppressed reason=intrinsic_dominated extrinsic_pct=%.1f dte=%d theta_per_day=%.0f qty=%.0f", strings.ToUpper(strings.TrimSpace(row.Symbol)), extrinsicPctOfMark, dte, thetaPerDay, row.Quantity)
+		return rpc.TradeProposal{}, false, &thetaSuppression{Key: key, Reason: "intrinsic_dominated", Message: msg}
+	}
+
+	// Genuine time-value bleed. Rank by the forfeitable extrinsic dollars over
+	// the remaining life — bounded by projected decay so a thin-theta leg
+	// cannot out-rank a fast-decaying near-expiry one. Absolute dollar theta is
+	// kept only as the rendered headline (counts/CLI/SPA), never as the rank.
+	extrinsicTotal := extrinsicPerShare * qtyAbs * mult
+	extrinsicAtRisk := math.Min(extrinsicTotal, thetaPerDay*float64(max(dte, 1)))
+	thetaPctOfExtrinsic := math.Abs(*row.Theta) / extrinsicPerShare * 100
+
+	p := baseProposal(policy, status, sources, now, rpc.TradeProposalBucketThetaHygiene, row, action, qty, rpc.OrderPositionEffectClose, fmt.Sprintf("%.0f%% of premium is time value decaying into %d DTE; ~$%.0f extrinsic at risk (intrinsic value and delta are unaffected)", extrinsicPctOfMark, dte, extrinsicAtRisk))
+	p.ThetaPerDay = thetaPerDay
+	p.Score = extrinsicAtRisk
+	p.Details = []string{
+		fmt.Sprintf("dte=%d", dte),
+		fmt.Sprintf("extrinsic_pct=%.0f", extrinsicPctOfMark),
+		fmt.Sprintf("extrinsic_at_risk=%.0f", extrinsicAtRisk),
+		fmt.Sprintf("theta_pct_extrinsic=%.0f", thetaPctOfExtrinsic),
+	}
+	// Transaction-cost guard. row.SpreadPct is never populated for option legs
+	// (only the stock-quote enrichment path sets it), so compute the spread
+	// from the option's own bid/ask: a close that crosses a spread wider than
+	// policy can cost more than the extrinsic it would save.
+	if spreadPct, ok := optionSpreadPct(row); ok && spreadPct > policy.Buckets.ThetaHygiene.MaxSpreadPctOfMid {
+		p.State = rpc.TradeProposalStateBlocked
+		p.Blockers = []rpc.TradingBlocker{{Code: "wide_spread", Message: fmt.Sprintf("option spread %.1f%% exceeds policy max %.1f%% of mid; the round-trip exit cost likely exceeds the extrinsic this would save", spreadPct, policy.Buckets.ThetaHygiene.MaxSpreadPctOfMid)}}
+	}
+	return p, true, nil
+}
+
+// optionIntrinsicPerShare is the per-share in-the-money amount; 0 for an
+// out-of-the-money option or an unrecognized right.
+func optionIntrinsicPerShare(right string, underlying, strike float64) float64 {
+	switch strings.ToUpper(strings.TrimSpace(right)) {
+	case "C", "CALL":
+		return math.Max(0, underlying-strike)
+	case "P", "PUT":
+		return math.Max(0, strike-underlying)
+	default:
+		return 0
+	}
+}
+
+// optionSpreadPct is the bid/ask spread as a percentage of mid, computed from
+// the option leg's own quote. Returns ok=false when the quote is missing or
+// crossed/locked.
+func optionSpreadPct(row rpc.PositionView) (float64, bool) {
+	if row.OptionBid == nil || row.OptionAsk == nil {
+		return 0, false
+	}
+	bid, ask := *row.OptionBid, *row.OptionAsk
+	mid := (bid + ask) / 2
+	if mid <= 0 || ask < bid {
+		return 0, false
+	}
+	return (ask - bid) / mid * 100, true
 }
 
 func riskReductionProposal(policy protectionPolicy, status rpc.ProtectionPolicyStatus, group rpc.PositionGroup, sources rpc.TradeProposalSourceFingerprints, now time.Time) (rpc.TradeProposal, bool) {

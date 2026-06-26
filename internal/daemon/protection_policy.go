@@ -43,10 +43,22 @@ type protectionPolicyBuckets struct {
 }
 
 type protectionThetaPolicy struct {
-	Enabled           bool    `toml:"enabled" json:"enabled"`
-	MaxDTE            int     `toml:"max_dte" json:"max_dte"`
+	Enabled bool `toml:"enabled" json:"enabled"`
+	MaxDTE  int  `toml:"max_dte" json:"max_dte"`
+	// MinAbsThetaPerDay is a dust floor only: it cheaply skips trivially
+	// small positions before the extrinsic decomposition. It is NOT the
+	// materiality gate — absolute dollar theta scales with position size and
+	// price, so on its own it flags every large near-dated option regardless
+	// of whether time decay is a meaningful fraction of the position.
 	MinAbsThetaPerDay float64 `toml:"min_abs_theta_per_day" json:"min_abs_theta_per_day"`
-	MaxSpreadPctOfMid float64 `toml:"max_spread_pct_of_mid" json:"max_spread_pct_of_mid"`
+	// MinExtrinsicPctOfMark is the materiality gate. Theta only erodes
+	// extrinsic (time) value; intrinsic value is directional and theta-immune
+	// while the option stays in the money. Below this floor the option is
+	// intrinsic-dominated, so closing it to "save" theta would forfeit
+	// intrinsic value and delta exposure for a decay that mostly is not at
+	// risk — the bucket suppresses instead of recommending a close.
+	MinExtrinsicPctOfMark float64 `toml:"min_extrinsic_pct_of_mark" json:"min_extrinsic_pct_of_mark"`
+	MaxSpreadPctOfMid     float64 `toml:"max_spread_pct_of_mid" json:"max_spread_pct_of_mid"`
 }
 
 type protectionRiskPolicy struct {
@@ -262,10 +274,11 @@ func defaultProtectionPolicy() protectionPolicy {
 		},
 		Buckets: protectionPolicyBuckets{
 			ThetaHygiene: protectionThetaPolicy{
-				Enabled:           true,
-				MaxDTE:            21,
-				MinAbsThetaPerDay: 5.0,
-				MaxSpreadPctOfMid: 25.0,
+				Enabled:               true,
+				MaxDTE:                21,
+				MinAbsThetaPerDay:     5.0,
+				MinExtrinsicPctOfMark: 40.0,
+				MaxSpreadPctOfMid:     25.0,
 			},
 			RiskReduction: protectionRiskPolicy{
 				Enabled:                true,
@@ -314,6 +327,15 @@ func applyProtectionPolicyDefaults(p *protectionPolicy, md *toml.MetaData) {
 		p.Profile = p.PolicyID
 	}
 	defaults := defaultProtectionPolicy()
+	// Backfill the extrinsic materiality gate so a pre-existing policy file
+	// written before this knob existed (it carries max_dte / min_abs_theta but
+	// not min_extrinsic_pct_of_mark) keeps validating instead of decoding the
+	// field to 0.0 and failing the positive-value check. Done before the
+	// trailing_stop branch below because that branch can return early for files
+	// with no [buckets.trailing_stop] table.
+	if p.Buckets.ThetaHygiene.Enabled && p.Buckets.ThetaHygiene.MinExtrinsicPctOfMark == 0 {
+		p.Buckets.ThetaHygiene.MinExtrinsicPctOfMark = defaults.Buckets.ThetaHygiene.MinExtrinsicPctOfMark
+	}
 	if md != nil && !md.IsDefined("buckets", "trailing_stop") {
 		p.Buckets.TrailingStop = defaults.Buckets.TrailingStop
 		return
@@ -354,6 +376,9 @@ func validateProtectionPolicy(p protectionPolicy) error {
 		}
 		if p.Buckets.ThetaHygiene.MinAbsThetaPerDay <= 0 {
 			return fmt.Errorf("theta_hygiene.min_abs_theta_per_day must be positive")
+		}
+		if p.Buckets.ThetaHygiene.MinExtrinsicPctOfMark <= 0 {
+			return fmt.Errorf("theta_hygiene.min_extrinsic_pct_of_mark must be positive")
 		}
 		if p.Buckets.ThetaHygiene.MaxSpreadPctOfMid <= 0 {
 			return fmt.Errorf("theta_hygiene.max_spread_pct_of_mid must be positive")

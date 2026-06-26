@@ -19,32 +19,164 @@ import (
 	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
 )
 
-func TestThetaProposalNeverOpensRisk(t *testing.T) {
-	theta := -0.08
-	spread := 12.0
-	row := rpc.PositionView{
-		Symbol:     "AAPL",
-		SecType:    "OPTION",
-		Quantity:   2,
-		Multiplier: 100,
-		Mark:       1.25,
-		Expiry:     "20260619",
-		Right:      "C",
-		Strike:     200,
-		Theta:      &theta,
-		SpreadPct:  &spread,
-	}
+func thetaTestStatus() rpc.ProtectionPolicyStatus {
 	policy := defaultProtectionPolicy()
-	status := protectionPolicyStatus(policy, rpc.ProtectionPolicyStatusDefault, "test", "", time.Now())
-	prop, ok := thetaProposal(policy, status, row, rpc.TradeProposalSourceFingerprints{}, time.Date(2026, 6, 6, 10, 0, 0, 0, time.UTC))
-	if !ok {
-		t.Fatal("theta proposal missing")
+	return protectionPolicyStatus(policy, rpc.ProtectionPolicyStatusDefault, "test", "", time.Now())
+}
+
+var thetaTestNow = time.Date(2026, 6, 6, 10, 0, 0, 0, time.UTC)
+
+// A genuinely time-value-dominated near-expiry long is the legitimate theta
+// hygiene target: it fires a close-only proposal.
+func TestThetaProposalFiresOnTimeValueBleed(t *testing.T) {
+	theta := -0.08
+	underlying := 200.0
+	row := rpc.PositionView{
+		Symbol: "AAPL", SecType: "OPTION", Quantity: 2, Multiplier: 100,
+		Mark: 1.25, Expiry: "20260619", Right: "C", Strike: 200,
+		Theta: &theta, Underlying: &underlying, // ATM: mark is all extrinsic
+	}
+	prop, ok, supp := thetaProposal(defaultProtectionPolicy(), thetaTestStatus(), row, rpc.TradeProposalSourceFingerprints{}, thetaTestNow)
+	if !ok || supp != nil {
+		t.Fatalf("ATM bleeder should fire a proposal: ok=%v supp=%v", ok, supp)
+	}
+	if prop.State != rpc.TradeProposalStateGenerated {
+		t.Fatalf("state=%q, want generated", prop.State)
 	}
 	if prop.Action != rpc.OrderActionSell || prop.PositionEffect != rpc.OrderPositionEffectClose {
-		t.Fatalf("proposal action/effect = %s/%s, want SELL/close", prop.Action, prop.PositionEffect)
+		t.Fatalf("action/effect = %s/%s, want SELL/close", prop.Action, prop.PositionEffect)
 	}
 	if prop.Quantity != 2 || prop.MaxQuantity != 2 {
-		t.Fatalf("proposal qty=%d max=%d, want 2/2", prop.Quantity, prop.MaxQuantity)
+		t.Fatalf("qty=%d max=%d, want 2/2", prop.Quantity, prop.MaxQuantity)
+	}
+}
+
+// The reported live bug: a deep-ish ITM long (BB Jul-17 $10 call, ~79% of the
+// premium intrinsic) must be suppressed, not recommended for a close.
+func TestThetaProposalSuppressesIntrinsicDominated(t *testing.T) {
+	theta := -0.0207
+	underlying := 11.286
+	row := rpc.PositionView{
+		Symbol: "BB", SecType: "OPTION", Quantity: 300, Multiplier: 100,
+		Mark: 1.62, Expiry: "20260626", Right: "C", Strike: 10,
+		Theta: &theta, Underlying: &underlying,
+	}
+	prop, ok, supp := thetaProposal(defaultProtectionPolicy(), thetaTestStatus(), row, rpc.TradeProposalSourceFingerprints{}, thetaTestNow)
+	if ok {
+		t.Fatalf("intrinsic-dominated ITM long must not produce a proposal, got %+v", prop)
+	}
+	if supp == nil || supp.Reason != "intrinsic_dominated" {
+		t.Fatalf("want intrinsic_dominated suppression, got %v", supp)
+	}
+}
+
+// When intrinsic cannot be separated from time value (no underlying spot, no
+// mark, or a stale row), surface a blocked row with remediation rather than
+// silently dropping a previously-visible proposal.
+func TestThetaProposalBlocksWhenExtrinsicUncomputable(t *testing.T) {
+	theta := -0.08
+	row := rpc.PositionView{
+		Symbol: "AAPL", SecType: "OPTION", Quantity: 2, Multiplier: 100,
+		Mark: 1.25, Expiry: "20260619", Right: "C", Strike: 200,
+		Theta: &theta, // Underlying nil -> uncomputable
+	}
+	prop, ok, supp := thetaProposal(defaultProtectionPolicy(), thetaTestStatus(), row, rpc.TradeProposalSourceFingerprints{}, thetaTestNow)
+	if !ok || supp != nil {
+		t.Fatalf("uncomputable extrinsic should emit a blocked proposal: ok=%v supp=%v", ok, supp)
+	}
+	if prop.State != rpc.TradeProposalStateBlocked {
+		t.Fatalf("state=%q, want blocked", prop.State)
+	}
+	if len(prop.Blockers) == 0 || prop.Blockers[0].Code != "extrinsic_uncomputable" {
+		t.Fatalf("want extrinsic_uncomputable blocker, got %+v", prop.Blockers)
+	}
+}
+
+// A stale mark sitting below intrinsic must not divide-by-zero into a +Inf
+// ratio and the most-confident possible close.
+func TestThetaProposalStaleMarkBelowIntrinsicSuppresses(t *testing.T) {
+	theta := -0.05
+	underlying := 11.29
+	row := rpc.PositionView{
+		Symbol: "BB", SecType: "OPTION", Quantity: 300, Multiplier: 100,
+		Mark: 1.20, Expiry: "20260626", Right: "C", Strike: 10, // mark < intrinsic 1.29
+		Theta: &theta, Underlying: &underlying,
+	}
+	prop, ok, supp := thetaProposal(defaultProtectionPolicy(), thetaTestStatus(), row, rpc.TradeProposalSourceFingerprints{}, thetaTestNow)
+	if ok {
+		t.Fatalf("mark<intrinsic must not produce a close proposal, got %+v", prop)
+	}
+	if supp == nil {
+		t.Fatal("want a suppression record")
+	}
+}
+
+// Rank must surface high-dollar time value at risk, not the fastest-bleeding
+// cheap far-OTM lottery ticket.
+func TestThetaProposalRanksExtrinsicDollarsOverLotto(t *testing.T) {
+	atmTheta, atmUnder := -0.30, 100.0
+	atm := rpc.PositionView{
+		Symbol: "ATM", SecType: "OPTION", Quantity: 50, Multiplier: 100,
+		Mark: 3.00, Expiry: "20260616", Right: "C", Strike: 100,
+		Theta: &atmTheta, Underlying: &atmUnder,
+	}
+	lottoTheta, lottoUnder := -0.01, 100.0
+	lotto := rpc.PositionView{
+		Symbol: "LOTTO", SecType: "OPTION", Quantity: 5, Multiplier: 100,
+		Mark: 0.05, Expiry: "20260616", Right: "C", Strike: 130, // far OTM
+		Theta: &lottoTheta, Underlying: &lottoUnder,
+	}
+	policy, status := defaultProtectionPolicy(), thetaTestStatus()
+	atmProp, atmOK, _ := thetaProposal(policy, status, atm, rpc.TradeProposalSourceFingerprints{}, thetaTestNow)
+	lottoProp, lottoOK, _ := thetaProposal(policy, status, lotto, rpc.TradeProposalSourceFingerprints{}, thetaTestNow)
+	if !atmOK || !lottoOK {
+		t.Fatalf("both should fire: atm=%v lotto=%v", atmOK, lottoOK)
+	}
+	if atmProp.Score <= lottoProp.Score {
+		t.Fatalf("ATM score %.2f must outrank lotto score %.2f", atmProp.Score, lottoProp.Score)
+	}
+}
+
+// Theta is favorable for shorts; a deep-ITM short with negligible extrinsic
+// must never be turned into a theta-framed buy-to-close.
+func TestThetaProposalShortDeepITMNoThetaClose(t *testing.T) {
+	theta := -0.05
+	underlying := 120.0
+	row := rpc.PositionView{
+		Symbol: "XYZ", SecType: "OPTION", Quantity: -3, Multiplier: 100,
+		Mark: 20.10, Expiry: "20260619", Right: "C", Strike: 100, // ITM 20, extrinsic 0.10
+		Theta: &theta, Underlying: &underlying,
+	}
+	prop, ok, supp := thetaProposal(defaultProtectionPolicy(), thetaTestStatus(), row, rpc.TradeProposalSourceFingerprints{}, thetaTestNow)
+	if ok {
+		t.Fatalf("deep-ITM short must not produce a theta close, got %+v", prop)
+	}
+	if supp == nil {
+		t.Fatal("want a suppression record for the deep-ITM short")
+	}
+}
+
+// The wide-spread transaction-cost guard must work off the option's own
+// bid/ask: row.SpreadPct is never populated for option legs, so the old guard
+// reading it was a no-op.
+func TestThetaProposalWideSpreadBlocksFromOptionQuote(t *testing.T) {
+	theta := -0.08
+	underlying, bid, ask := 50.0, 1.50, 2.50 // mid 2.00, spread 50% of mid
+	row := rpc.PositionView{
+		Symbol: "WIDE", SecType: "OPTION", Quantity: 4, Multiplier: 100,
+		Mark: 2.00, Expiry: "20260619", Right: "C", Strike: 50,
+		Theta: &theta, Underlying: &underlying, OptionBid: &bid, OptionAsk: &ask,
+		// SpreadPct intentionally nil — proves the guard no longer relies on it.
+	}
+	prop, ok, supp := thetaProposal(defaultProtectionPolicy(), thetaTestStatus(), row, rpc.TradeProposalSourceFingerprints{}, thetaTestNow)
+	if !ok || supp != nil {
+		t.Fatalf("wide-spread case still emits a (blocked) proposal: ok=%v supp=%v", ok, supp)
+	}
+	if prop.State != rpc.TradeProposalStateBlocked {
+		t.Fatalf("state=%q, want blocked", prop.State)
+	}
+	if len(prop.Blockers) == 0 || prop.Blockers[0].Code != "wide_spread" {
+		t.Fatalf("want wide_spread blocker, got %+v", prop.Blockers)
 	}
 }
 
@@ -1854,7 +1986,7 @@ func TestProposalInstallScopedFailsClosedOnScopeChange(t *testing.T) {
 	e.scope = func() brokerStateScope { return brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeLive} }
 	snap := scopedTestSnapshot("DU7654321", rpc.AccountModePaper, now)
 
-	got := e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false)
+	got := e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false, nil)
 	if len(got.Proposals) != 0 || !hasBlocker(got.Blockers, "proposal_scope_mismatch") {
 		t.Fatalf("installScoped result = %+v, want proposal_scope_mismatch shell", got)
 	}
@@ -1873,7 +2005,7 @@ func TestProposalInstallScopedFailsClosedOnScopeChange(t *testing.T) {
 	// Stable scope installs the generated snapshot unchanged — and that
 	// one IS persisted for warm-start adoption.
 	e.scope = func() brokerStateScope { return brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper} }
-	got = e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false)
+	got = e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false, nil)
 	if len(got.Proposals) != 1 || len(got.Blockers) != 0 {
 		t.Fatalf("stable scope install = %+v, want generated snapshot", got)
 	}
@@ -2345,7 +2477,7 @@ func TestGenerateDoesNotCapProtectiveProposals(t *testing.T) {
 		Currency:   "USD",
 	}}}
 	scope := brokerStateScope{Account: "DU1234567", Mode: rpc.AccountModePaper}
-	props := engine.generate(context.Background(), policy, status, nil, pos, rpc.TradeProposalSourceFingerprints{}, nil, scope, now)
+	props, _ := engine.generate(context.Background(), policy, status, nil, pos, rpc.TradeProposalSourceFingerprints{}, nil, scope, now)
 	if len(props) != 1 {
 		t.Fatalf("generated %d proposals, want 1: %+v", len(props), props)
 	}
