@@ -23,7 +23,7 @@ func TestRunProposalsGroupHelp(t *testing.T) {
 			for _, want := range []string{
 				"ibkr proposals",
 				"Daemon-owned close/reduce-only protection proposals",
-				"status|refresh|list|preview|submit|ignore",
+				"status|refresh|list|preview|submit|reduce|ignore",
 			} {
 				if !strings.Contains(got, want) {
 					t.Fatalf("proposals help missing %q:\n%s", want, got)
@@ -33,6 +33,25 @@ func TestRunProposalsGroupHelp(t *testing.T) {
 				t.Fatalf("stderr=%q, want empty", stderr.String())
 			}
 		})
+	}
+}
+
+func TestRunProposalsReducePortfolioRejectsHolding(t *testing.T) {
+	t.Parallel()
+	// --portfolio sweeps the whole book; passing a SYMBOL must fail before any
+	// RPC call (so a nil Conn is fine here).
+	for _, args := range [][]string{
+		{"reduce", "--portfolio", "--percent", "50", "AMD"},
+		{"reduce", "--portfolio", "--percent", "50", "--con-id", "4391"},
+	} {
+		var stdout, stderr bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &stderr}
+		if code := Run(context.Background(), env, "proposals", args); code == 0 {
+			t.Fatalf("Run(proposals %v) = 0, want nonzero", args)
+		}
+		if !strings.Contains(stderr.String(), "sweeps the whole book") {
+			t.Fatalf("stderr=%q, want 'sweeps the whole book'", stderr.String())
+		}
 	}
 }
 

@@ -63,6 +63,82 @@ func (h *handler) handleProposalsSubmit(w nethttp.ResponseWriter, r *nethttp.Req
 	writeJSON(w, res)
 }
 
+func (h *handler) handleProposalsReducePreview(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var req rpc.TradeProposalReduceParams
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := h.deps.Daemon.TradeProposalsReducePreview(r.Context(), req)
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (h *handler) handleProposalsReduceSubmit(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var req struct {
+		rpc.TradeProposalReduceParams
+		BrokerWriteConfirmation
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := h.requireBrokerWriteConfirmation(r.Context(), req.BrokerWriteConfirmation); err != nil {
+		writeBrokerWriteConfirmationError(w, err)
+		return
+	}
+	// Origin is server-assigned, never client-claimed: every authenticated
+	// app caller is a paired device regardless of what the body says.
+	req.TradeProposalReduceParams.Origin = rpc.OrderOriginPairedDevice
+	res, err := h.deps.Daemon.TradeProposalsReduceSubmit(r.Context(), req.TradeProposalReduceParams)
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (h *handler) handleProposalsReducePortfolioPreview(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var req rpc.TradeProposalReducePortfolioParams
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := h.deps.Daemon.TradeProposalsReducePortfolioPreview(r.Context(), req)
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (h *handler) handleProposalsReducePortfolioSubmit(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var req struct {
+		rpc.TradeProposalReducePortfolioParams
+		BrokerWriteConfirmation
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := h.requireBrokerWriteConfirmation(r.Context(), req.BrokerWriteConfirmation); err != nil {
+		writeBrokerWriteConfirmationError(w, err)
+		return
+	}
+	// Origin is server-assigned, never client-claimed: every authenticated app
+	// caller is a paired device regardless of what the body says.
+	req.TradeProposalReducePortfolioParams.Origin = rpc.OrderOriginPairedDevice
+	res, err := h.deps.Daemon.TradeProposalsReducePortfolioSubmit(r.Context(), req.TradeProposalReducePortfolioParams)
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, res)
+}
+
 func writeBrokerWriteConfirmationError(w nethttp.ResponseWriter, err error) {
 	var rpcErr *rpc.Error
 	if errors.As(err, &rpcErr) {

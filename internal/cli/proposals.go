@@ -35,6 +35,8 @@ func runProposals(ctx context.Context, env *Env, args []string) int {
 		return runProposalsPreview(ctx, env, args)
 	case "submit":
 		return runProposalsSubmit(ctx, env, args)
+	case "reduce":
+		return runProposalsReduce(ctx, env, args)
 	case "ignore":
 		return runProposalsIgnore(ctx, env, args)
 	default:
@@ -45,7 +47,7 @@ func runProposals(ctx context.Context, env *Env, args []string) int {
 func proposalsSubcommandIndex(args []string) int {
 	for i, arg := range args {
 		switch arg {
-		case "status", "refresh", "list", "preview", "submit", "ignore":
+		case "status", "refresh", "list", "preview", "submit", "reduce", "ignore":
 			return i
 		}
 	}
@@ -149,6 +151,172 @@ func runProposalsSubmit(ctx context.Context, env *Env, args []string) int {
 	}
 	renderProposalSubmitText(env, &res)
 	return 0
+}
+
+// runProposalsReduce is a discretionary partial close of a held position by a
+// chosen percentage. It previews by default and only places with --submit, so a
+// bare invocation is always safe to run. The holding is identified by --con-id
+// (preferred; required for option legs) or a unique stock SYMBOL.
+func runProposalsReduce(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "proposals reduce")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	percent := fs.Int("percent", 0, "percentage to reduce: 25, 50, 75, or 100")
+	conID := fs.Int("con-id", 0, "contract ID of the holding (preferred; required for option legs)")
+	includeHedges := fs.Bool("include-hedges", false, "allow trimming a protective short (hedge) such as long index puts")
+	portfolio := fs.Bool("portfolio", false, "trim the whole portfolio proportionally (risk-off sweep) instead of one holding")
+	protectHedges := fs.Bool("protect-hedges", true, "portfolio mode: keep protective hedges out of the sweep (use --protect-hedges=false to include them)")
+	submit := fs.Bool("submit", false, "place the order; without this flag the command only previews")
+	timeout := fs.Duration("timeout", 5*time.Second, "quote/WhatIf timeout")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	if *percent <= 0 || *percent > 100 {
+		return fail(env, "proposals reduce: --percent must be between 1 and 100 (the app offers 25/50/75/100)")
+	}
+	if *portfolio {
+		if fs.NArg() > 0 || *conID > 0 {
+			return fail(env, "proposals reduce --portfolio sweeps the whole book; do not pass SYMBOL or --con-id")
+		}
+		pparams := rpc.TradeProposalReducePortfolioParams{Percent: *percent, ProtectHedges: *protectHedges, TimeoutMs: int(timeout.Milliseconds())}
+		method := rpc.MethodTradeProposalsReducePortfolioPreview
+		if *submit {
+			method = rpc.MethodTradeProposalsReducePortfolioSubmit
+			pparams.Origin = env.Origin
+		}
+		var pres rpc.TradeProposalReducePortfolioResult
+		if err := env.Conn.Call(ctx, method, pparams, &pres); err != nil {
+			return fail(env, "proposals reduce: %v", err)
+		}
+		if *jsonOut {
+			return printJSON(env, pres)
+		}
+		renderProposalReducePortfolioText(env, &pres, *submit)
+		return 0
+	}
+	symbol := ""
+	switch fs.NArg() {
+	case 0:
+	case 1:
+		symbol = strings.TrimSpace(fs.Arg(0))
+	default:
+		return fail(env, "proposals reduce: usage is `ibkr proposals reduce [SYMBOL] --percent N [--con-id ID] [--include-hedges] [--submit]`")
+	}
+	if *conID <= 0 && symbol == "" {
+		return fail(env, "proposals reduce: provide a SYMBOL or --con-id (or --portfolio for the whole book)")
+	}
+	params := rpc.TradeProposalReduceParams{
+		ConID:         *conID,
+		Symbol:        symbol,
+		Percent:       *percent,
+		IncludeHedges: *includeHedges,
+		TimeoutMs:     int(timeout.Milliseconds()),
+	}
+	method := rpc.MethodTradeProposalsReducePreview
+	if *submit {
+		method = rpc.MethodTradeProposalsReduceSubmit
+		params.Origin = env.Origin
+	}
+	var res rpc.TradeProposalReduceResult
+	if err := env.Conn.Call(ctx, method, params, &res); err != nil {
+		return fail(env, "proposals reduce: %v", err)
+	}
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	renderProposalReduceText(env, &res, *submit)
+	return 0
+}
+
+func renderProposalReduceText(env *Env, res *rpc.TradeProposalReduceResult, submitted bool) {
+	out := env.Stdout
+	fmt.Fprintln(out)
+	title := "Reduce Preview"
+	if submitted {
+		title = "Reduce Submit"
+	}
+	fmt.Fprintf(out, "%s  accepted=%v submit_eligible=%v\n", title, res.Accepted, res.SubmitEligible)
+	holding := res.Symbol
+	if res.ConID > 0 {
+		holding = fmt.Sprintf("%s (conID %d)", res.Symbol, res.ConID)
+	}
+	statusRow(env, out, "Holding", strings.TrimSpace(holding))
+	if res.ReduceQuantity > 0 {
+		posQty := res.PositionQuantity
+		if posQty < 0 {
+			posQty = -posQty
+		}
+		statusRow(env, out, "Reduce", fmt.Sprintf("%s %d of %g %s (%d%%)", res.Action, res.ReduceQuantity, posQty, positionUnit(res.SecType), res.Percent))
+	}
+	if res.HedgeLike {
+		statusRow(env, out, "Hedge", "holding is a protective short")
+	}
+	statusRow(env, out, "Token ID", res.PreviewTokenID)
+	renderProposalOrderPreview(env, out, res.Preview)
+	if submitted && res.Place != nil {
+		statusRow(env, out, "Order ref", res.OrderRef)
+		statusRow(env, out, "Broker ID", strconv.Itoa(res.Place.ReservedOrderID))
+		statusRow(env, out, "Lifecycle", nonEmpty(res.Place.LifecycleStatus, res.Place.SendState))
+		if res.Place.Status != "" {
+			statusRow(env, out, "Status", res.Place.Status)
+		}
+	}
+	if res.Message != "" {
+		statusRow(env, out, "Message", res.Message)
+	}
+	printTradingBlockers(out, "  ", res.Blockers)
+	fmt.Fprintln(out)
+}
+
+func renderProposalReducePortfolioText(env *Env, res *rpc.TradeProposalReducePortfolioResult, submitted bool) {
+	out := env.Stdout
+	fmt.Fprintln(out)
+	title := "Portfolio Reduce Preview"
+	if submitted {
+		title = "Portfolio Reduce Submit"
+	}
+	fmt.Fprintf(out, "%s  accepted=%v\n", title, res.Accepted)
+	statusRow(env, out, "Percent", fmt.Sprintf("%d%%", res.Percent))
+	statusRow(env, out, "Protect hedges", fmt.Sprint(res.ProtectHedges))
+	verb := "eligible"
+	if submitted {
+		verb = "placed"
+	}
+	statusRow(env, out, "Legs", fmt.Sprintf("%d %s · %d blocked · %d hedge-excluded of %d", res.EligibleCount, verb, res.BlockedCount, res.HedgeExcludedCount, res.LegCount))
+	if res.TotalNotional != 0 || res.FXIncomplete {
+		total := formatProposalMoney(res.TotalNotional, res.BaseCurrency)
+		if res.FXIncomplete {
+			total += " [fx incomplete]"
+		}
+		statusRow(env, out, "Total notional", total)
+	}
+	if res.Replayed {
+		statusRow(env, out, "Replayed", "true (idempotent retry; nothing placed)")
+	}
+	printTradingBlockers(out, "  ", res.Blockers)
+	for _, leg := range res.Legs {
+		state := "eligible"
+		switch {
+		case len(leg.Blockers) > 0 && leg.Blockers[0].Code == "hedge_excluded":
+			state = "hedge-excluded"
+		case submitted && leg.Placed:
+			state = "placed"
+		case submitted || !leg.SubmitEligible:
+			state = "blocked"
+		}
+		head := strings.TrimSpace(fmt.Sprintf("%s %d %s", leg.Action, leg.ReduceQuantity, leg.Symbol))
+		if leg.Action == "" {
+			head = leg.Symbol
+		}
+		fmt.Fprintf(out, "  %s  [%s]\n", head, state)
+		if leg.Notional != 0 {
+			statusRow(env, out, "  notional", formatProposalMoney(leg.Notional, leg.NotionalCurrency))
+		}
+		if leg.OrderRef != "" {
+			statusRow(env, out, "  order ref", leg.OrderRef)
+		}
+		printTradingBlockers(out, "      ", leg.Blockers)
+	}
+	fmt.Fprintln(out)
 }
 
 func runProposalsIgnore(ctx context.Context, env *Env, args []string) int {

@@ -460,6 +460,22 @@ func (c *fakeClient) TradeProposalsSubmit(context.Context, rpc.TradeProposalSubm
 	return nil, nil
 }
 
+func (c *fakeClient) TradeProposalsReducePreview(context.Context, rpc.TradeProposalReduceParams) (*rpc.TradeProposalReduceResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) TradeProposalsReduceSubmit(context.Context, rpc.TradeProposalReduceParams) (*rpc.TradeProposalReduceResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) TradeProposalsReducePortfolioPreview(context.Context, rpc.TradeProposalReducePortfolioParams) (*rpc.TradeProposalReducePortfolioResult, error) {
+	return nil, nil
+}
+
+func (c *fakeClient) TradeProposalsReducePortfolioSubmit(context.Context, rpc.TradeProposalReducePortfolioParams) (*rpc.TradeProposalReducePortfolioResult, error) {
+	return nil, nil
+}
+
 func (c *fakeClient) TradeProposalsIgnore(context.Context, rpc.TradeProposalIgnoreParams) (*rpc.TradeProposalIgnoreResult, error) {
 	return nil, nil
 }

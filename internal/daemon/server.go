@@ -81,6 +81,14 @@ type Server struct {
 	// cancel is never queued behind a long purge.
 	brokerWriteMu sync.Mutex
 
+	// reduceBasketMu guards reduceBasketDedupe, the short-TTL replay cache for
+	// portfolio-reduce submits. A submit carrying a RequestRef already seen
+	// within reduceBasketDedupeTTL replays the prior result and places nothing,
+	// so a double-tap or client retry can never fan the basket out twice.
+	// Entries are swept on access; the map is lazily allocated.
+	reduceBasketMu     sync.Mutex
+	reduceBasketDedupe map[string]reduceBasketDedupeEntry
+
 	// paperSmokeMu admits one paper-smoke round-trip at a time; a second
 	// concurrent run could overwrite fresh evidence with its own outcome
 	// while two smoke orders ride. brokerWriteMu cannot serve here — the
@@ -2147,6 +2155,14 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsSubmit(ctx, req) })
 	case rpc.MethodTradeProposalsIgnore:
 		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsIgnore(req), nil })
+	case rpc.MethodTradeProposalsReducePreview:
+		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsReducePreview(ctx, req) })
+	case rpc.MethodTradeProposalsReduceSubmit:
+		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsReduceSubmit(ctx, req) })
+	case rpc.MethodTradeProposalsReducePortfolioPreview:
+		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsReducePortfolioPreview(ctx, req) })
+	case rpc.MethodTradeProposalsReducePortfolioSubmit:
+		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsReducePortfolioSubmit(ctx, req) })
 	case rpc.MethodOpportunitiesStatus:
 		s.unary(req, enc, func() (any, error) { return s.handleOpportunitiesStatus(), nil })
 	case rpc.MethodOpportunitiesSnapshot:
@@ -2290,8 +2306,13 @@ func unaryDeadline(method string) time.Duration {
 		// a fast quote path on a v203 TWS session; leave enough room for
 		// it while still beating the CLI's default 60 s unary ceiling.
 		return 55 * time.Second
-	case rpc.MethodPurgeExecute, rpc.MethodPurgeRestorePreview, rpc.MethodPurgeRestoreExecute, rpc.MethodTradeProposalsRefresh, rpc.MethodTradeProposalsPreview, rpc.MethodTradeProposalsSubmit, rpc.MethodOpportunitiesRefresh, rpc.MethodOpportunitiesPreviewExercise, rpc.MethodOpportunitiesSubmitExercise:
+	case rpc.MethodPurgeExecute, rpc.MethodPurgeRestorePreview, rpc.MethodPurgeRestoreExecute, rpc.MethodTradeProposalsRefresh, rpc.MethodTradeProposalsPreview, rpc.MethodTradeProposalsSubmit, rpc.MethodTradeProposalsReducePreview, rpc.MethodTradeProposalsReduceSubmit, rpc.MethodOpportunitiesRefresh, rpc.MethodOpportunitiesPreviewExercise, rpc.MethodOpportunitiesSubmitExercise:
 		return 55 * time.Second
+	case rpc.MethodTradeProposalsReducePortfolioPreview, rpc.MethodTradeProposalsReducePortfolioSubmit:
+		// A sweep previews/places each eligible leg sequentially; the budget
+		// scales past the single-order 55s bucket. Per-leg deadlines (legContext)
+		// keep one stuck leg from consuming the whole window.
+		return 120 * time.Second
 	case rpc.MethodTradingPaperSmoke:
 		// Quote + WhatIf preview, place, ≤60 s ack wait, 15 s detached
 		// cancel budget. The CLI's paper-smoke budget is 120 s in lockstep

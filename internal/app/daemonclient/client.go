@@ -35,6 +35,10 @@ type Client interface {
 	TradeProposalsRefresh(context.Context, rpc.TradeProposalRefreshParams) (*rpc.TradeProposalSnapshot, error)
 	TradeProposalsPreview(context.Context, rpc.TradeProposalPreviewParams) (*rpc.TradeProposalPreviewResult, error)
 	TradeProposalsSubmit(context.Context, rpc.TradeProposalSubmitParams) (*rpc.TradeProposalSubmitResult, error)
+	TradeProposalsReducePreview(context.Context, rpc.TradeProposalReduceParams) (*rpc.TradeProposalReduceResult, error)
+	TradeProposalsReduceSubmit(context.Context, rpc.TradeProposalReduceParams) (*rpc.TradeProposalReduceResult, error)
+	TradeProposalsReducePortfolioPreview(context.Context, rpc.TradeProposalReducePortfolioParams) (*rpc.TradeProposalReducePortfolioResult, error)
+	TradeProposalsReducePortfolioSubmit(context.Context, rpc.TradeProposalReducePortfolioParams) (*rpc.TradeProposalReducePortfolioResult, error)
 	TradeProposalsIgnore(context.Context, rpc.TradeProposalIgnoreParams) (*rpc.TradeProposalIgnoreResult, error)
 	Settings(context.Context) (*rpc.PlatformSettings, error)
 	UpdateSettings(context.Context, json.RawMessage) (*rpc.PlatformSettings, error)
@@ -251,6 +255,38 @@ func (c Real) TradeProposalsPreview(ctx context.Context, params rpc.TradeProposa
 func (c Real) TradeProposalsSubmit(ctx context.Context, params rpc.TradeProposalSubmitParams) (*rpc.TradeProposalSubmitResult, error) {
 	var out rpc.TradeProposalSubmitResult
 	if err := c.call(ctx, rpc.MethodTradeProposalsSubmit, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) TradeProposalsReducePreview(ctx context.Context, params rpc.TradeProposalReduceParams) (*rpc.TradeProposalReduceResult, error) {
+	var out rpc.TradeProposalReduceResult
+	if err := c.call(ctx, rpc.MethodTradeProposalsReducePreview, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) TradeProposalsReduceSubmit(ctx context.Context, params rpc.TradeProposalReduceParams) (*rpc.TradeProposalReduceResult, error) {
+	var out rpc.TradeProposalReduceResult
+	if err := c.call(ctx, rpc.MethodTradeProposalsReduceSubmit, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) TradeProposalsReducePortfolioPreview(ctx context.Context, params rpc.TradeProposalReducePortfolioParams) (*rpc.TradeProposalReducePortfolioResult, error) {
+	var out rpc.TradeProposalReducePortfolioResult
+	if err := c.call(ctx, rpc.MethodTradeProposalsReducePortfolioPreview, params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) TradeProposalsReducePortfolioSubmit(ctx context.Context, params rpc.TradeProposalReducePortfolioParams) (*rpc.TradeProposalReducePortfolioResult, error) {
+	var out rpc.TradeProposalReducePortfolioResult
+	if err := c.call(ctx, rpc.MethodTradeProposalsReducePortfolioSubmit, params, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

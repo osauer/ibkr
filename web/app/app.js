@@ -36,6 +36,7 @@ const state = {
   protectionSnapshotNotice: "",
   protectionQuoteTicks: {},
   protectionQtyOverrides: {},
+  protectionDerisk: { percent: 25, protectHedges: true, busy: "", result: null, submitted: null, requestRef: "" },
   opportunityPreviewBusy: "",
   opportunityPreviews: {},
   opportunitySubmitBusy: "",
@@ -1971,6 +1972,9 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   const reasonText = [reason, hiddenReason, refreshReason].filter(Boolean).join(" · ");
   reasonEl.textContent = reasonText;
   reasonEl.hidden = !reasonText;
+  // The de-risk control lives in the always-visible header, so it renders
+  // before the fold early-return below.
+  renderProtectionDerisk();
   if (!state.protectionOpen) return;
   const visibleRows = protectionVisibleRows(rows, marketEvents);
   $("protectionRows").replaceChildren(...(visibleRows.length > 0
@@ -1978,6 +1982,245 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
     : [protectionEmptyRow("No protection proposals requiring action.")]));
   if (protectionNeedsSnapshotSync(proposals, autoTrade)) {
     queueProtectionSnapshotSync();
+  }
+}
+
+// reduceEligibleHoldings lists the positions the discretionary trim can act on:
+// stocks/ETFs (long or short) and long options, matching the daemon's
+// reduceEligible scope. When protectHedges is on, protective shorts (long
+// index puts and the like) are filtered out so the user cannot accidentally
+// trim a hedge — the daemon enforces the same exclusion server-side.
+function reduceEligibleHoldings(protectHedges = true) {
+  const positions = state.snapshot?.positions || {};
+  const stocks = Array.isArray(positions.stocks) ? positions.stocks : [];
+  const options = Array.isArray(positions.options) ? positions.options : [];
+  const out = [];
+  for (const row of [...stocks, ...options]) {
+    if (!row || !row.con_id) continue;
+    const qty = Number(row.quantity || 0);
+    if (qty === 0) continue;
+    // Skip defunct rows the enricher flagged stale (delisted/zero-value): they
+    // are position truth but not tradable. Stale is the deliberate signal — a
+    // live row can carry a zero/absent mark off-hours and is still tradable.
+    if (row.stale) continue;
+    const isOption = reduceIsOption(row);
+    if (isOption && qty <= 0) continue; // long options only
+    if (protectHedges && reduceHoldingIsHedge(row)) continue;
+    out.push(row);
+  }
+  return out;
+}
+
+function reduceIsOption(row = {}) {
+  const secType = String(row.sec_type || "").toUpperCase();
+  return secType === "OPT" || secType === "OPTION";
+}
+
+// reduceHoldingIsHedge mirrors the daemon's isProtectiveShort: short delta
+// (long put, short call, short stock). Delta sign wins when present; otherwise
+// the option right / position sign decides, and a nil-delta option still counts
+// as a hedge so the filter fails safe toward protecting the position.
+function reduceHoldingIsHedge(row = {}) {
+  const qty = Number(row.quantity || 0);
+  if (qty === 0) return false;
+  if (reduceIsOption(row)) {
+    if (typeof row.delta === "number") return row.delta < 0;
+    const right = String(row.right || "").toUpperCase();
+    return (right === "P" && qty > 0) || (right === "C" && qty < 0);
+  }
+  if (typeof row.delta === "number") return row.delta < 0;
+  return qty < 0;
+}
+
+// renderProtectionDerisk draws the always-visible header "Trim risk" control:
+// a percentage + protect-hedges + a Preview button, plus the basket once
+// previewed. It lives outside the foldable detail panel so it is reachable
+// whether the panel is open or not. The daemon computes the basket legs; this
+// is display only.
+function renderProtectionDerisk() {
+  const section = $("protectionDerisk");
+  if (!section) return;
+  const d = state.protectionDerisk;
+  // Offer the sweep only when something is eligible to trim, so the header
+  // stays calm for an all-hedge or empty book.
+  const eligible = reduceEligibleHoldings(d.protectHedges);
+  section.hidden = eligible.length === 0;
+  if (eligible.length === 0) return;
+  $("protectionDeriskPercent").value = String(d.percent);
+  $("protectionDeriskProtectHedges").checked = d.protectHedges;
+  const previewBtn = $("protectionDeriskPreview");
+  previewBtn.disabled = d.busy !== "";
+  previewBtn.textContent = d.busy === "preview" ? "Previewing…" : "Trim risk";
+  renderProtectionDeriskBasket();
+  $("protectionDeriskState").textContent = protectionDeriskStateText();
+}
+
+function protectionDeriskStateText() {
+  const d = state.protectionDerisk;
+  if (d.busy === "preview") return "Previewing each leg; no orders placed";
+  if (d.busy === "submit") return "Submitting the basket; fresh broker WhatIf per leg";
+  const res = d.submitted || d.result;
+  if (!res) return "Choose a percentage, then Trim risk to preview the basket.";
+  if ((res.blockers || []).length > 0) return `${res.blockers[0].code}: ${res.blockers[0].message}`;
+  const verb = d.submitted ? "placed" : "eligible";
+  let line = `${res.eligible_count || 0} ${verb} · ${res.blocked_count || 0} blocked · ${res.hedge_excluded_count || 0} hedge-kept`;
+  if (res.total_notional) {
+    line += ` · ≈ ${money(res.total_notional, res.base_currency || "")}`;
+    if (res.fx_incomplete) line += " (partial FX)";
+  }
+  if (!d.submitted && (res.eligible_count || 0) > 0) {
+    line += ` — Submit sends to ${protectionWriteConfirmationLabel()}`;
+  }
+  return line;
+}
+
+function renderProtectionDeriskBasket() {
+  const box = $("protectionDeriskBasket");
+  const d = state.protectionDerisk;
+  const res = d.submitted || d.result;
+  const legs = (res && res.legs) || [];
+  const basketBlockers = (res && res.blockers) || [];
+  if (!res || (legs.length === 0 && basketBlockers.length === 0)) {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+  box.hidden = false;
+  const children = [];
+  for (const b of basketBlockers) children.push(deriskBasketLine(`${b.code}: ${b.message}`, "blocked"));
+  for (const leg of legs) children.push(deriskLegRow(leg, Boolean(d.submitted)));
+  // Two-gesture flow: the header Preview never writes. The Submit button only
+  // appears after a preview that surfaced eligible legs, and is minted with a
+  // literal id so the contract test can pin it.
+  if (!d.submitted && (res.eligible_count || 0) > 0) {
+    const submit = document.createElement("button");
+    submit.type = "button";
+    submit.id = "protectionDeriskSubmit";
+    submit.className = "protection-submit protection-derisk__submit";
+    submit.textContent = `Submit ${res.eligible_count} order${res.eligible_count === 1 ? "" : "s"}`;
+    submit.disabled = d.busy !== "";
+    submit.addEventListener("click", submitProtectionDerisk);
+    children.push(submit);
+  }
+  box.replaceChildren(...children);
+}
+
+function deriskBasketLine(text, kind = "") {
+  const line = document.createElement("p");
+  line.className = "protection-derisk__note" + (kind ? ` protection-derisk__note--${kind}` : "");
+  line.textContent = text;
+  return line;
+}
+
+function deriskLegRow(leg = {}, submitted = false) {
+  const row = document.createElement("div");
+  row.className = "protection-derisk__leg";
+  const hedge = (leg.blockers || []).some((b) => b.code === "hedge_excluded");
+  let badge = "eligible";
+  if (hedge) badge = "hedge";
+  else if (submitted) badge = leg.placed ? "placed" : "blocked";
+  else if (!leg.submit_eligible) badge = "blocked";
+  const action = leg.action === "BUY" ? "Buy to cover" : "Sell";
+  const unit = leg.sec_type === "OPT" ? "ct" : "sh";
+  const label = document.createElement("span");
+  label.className = "protection-derisk__leg-label";
+  label.textContent = hedge
+    ? `${leg.symbol} · hedge kept`
+    : `${action} ${leg.reduce_quantity || 0} ${unit} ${leg.symbol}`;
+  const tag = document.createElement("span");
+  tag.className = `protection-derisk__badge protection-derisk__badge--${badge}`;
+  tag.textContent = badge;
+  row.append(label, tag);
+  if (!hedge && hasNumericValue(leg.notional) && leg.notional !== 0) {
+    const n = document.createElement("span");
+    n.className = "protection-derisk__leg-notional";
+    n.textContent = money(leg.notional, leg.notional_currency || "");
+    row.append(n);
+  }
+  const blocker = (leg.blockers || []).find((b) => b.code !== "hedge_excluded");
+  if (blocker) {
+    const why = document.createElement("span");
+    why.className = "protection-derisk__leg-why";
+    why.textContent = blocker.message;
+    row.append(why);
+  }
+  if (leg.order_ref) {
+    const ref = document.createElement("span");
+    ref.className = "protection-derisk__leg-ref";
+    ref.textContent = `ref ${leg.order_ref}`;
+    row.append(ref);
+  }
+  return row;
+}
+
+// deriskRequestRef is a per-preview idempotency key so a double-tapped Submit
+// (or a client retry) replays the daemon's basket result instead of placing it
+// twice. Not cryptographic — uniqueness within a session is all that is needed,
+// and crypto.randomUUID is unavailable on non-secure LAN origins.
+function deriskRequestRef() {
+  return `derisk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function previewProtectionDerisk() {
+  const d = state.protectionDerisk;
+  d.busy = "preview";
+  d.result = null;
+  d.submitted = null;
+  d.requestRef = deriskRequestRef();
+  renderProtectionDerisk();
+  try {
+    const res = await fetch("/api/proposals/reduce-portfolio/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ percent: d.percent, protect_hedges: d.protectHedges, timeout_ms: 5000 }),
+    });
+    const body = await readJSONOrText(res);
+    if (!res.ok) throw new Error(body.error || body.message || String(body));
+    d.result = body;
+  } catch (err) {
+    d.result = { blockers: [{ code: "preview_failed", message: err.message }] };
+  } finally {
+    if (d.busy === "preview") d.busy = "";
+    renderProtectionDerisk();
+  }
+}
+
+async function submitProtectionDerisk() {
+  const d = state.protectionDerisk;
+  if (!d.result || (d.result.eligible_count || 0) === 0) return;
+  const confirmation = protectionWriteConfirmation();
+  if (!confirmation) {
+    d.submitted = { blockers: [{ code: "confirmation_cancelled", message: "broker submit confirmation was cancelled" }] };
+    renderProtectionDerisk();
+    return;
+  }
+  d.busy = "submit";
+  renderProtectionDerisk();
+  try {
+    const res = await fetch("/api/proposals/reduce-portfolio/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        percent: d.percent,
+        protect_hedges: d.protectHedges,
+        timeout_ms: 5000,
+        request_ref: d.requestRef || deriskRequestRef(),
+        confirm_account: confirmation.account,
+        confirm_mode: confirmation.mode,
+      }),
+    });
+    const body = await readJSONOrText(res);
+    if (!res.ok) throw new Error(body.error || body.message || String(body));
+    d.submitted = body;
+    d.result = null;
+    await refreshOpenOrders();
+  } catch (err) {
+    d.submitted = { blockers: [{ code: "submit_failed", message: err.message }] };
+  } finally {
+    if (d.busy === "submit") d.busy = "";
+    renderProtectionDerisk();
   }
 }
 
@@ -2580,7 +2823,7 @@ function protectionRow(proposal) {
     const finalSubmit = document.createElement("button");
     finalSubmit.type = "button";
     finalSubmit.className = "protection-submit";
-    finalSubmit.textContent = submitBusy ? "Submitting" : "Submit stop";
+    finalSubmit.textContent = submitBusy ? "Submitting" : protectionFinalSubmitLabel(proposal);
     finalSubmit.disabled = blocked || previewBusy || submitBusy || !finalSubmitGate.ready;
     finalSubmit.title = protectionSubmitButtonTitle({ blocked, previewBusy, submitBusy, gate: finalSubmitGate });
     finalSubmit.addEventListener("click", () => submitProtectionProposal(proposal));
@@ -2608,11 +2851,16 @@ function protectionProposalTitle(proposal = {}) {
 
 function protectionSubmitLabel(proposal = {}) {
   if (proposal.bucket === "trailing_stop") return "Preview stop";
-  return protectionActionLabel(proposal);
+  return "Preview";
 }
 
 function protectionUsesPreviewFlow(proposal = {}) {
-  return proposal.bucket === "trailing_stop";
+  return true;
+}
+
+function protectionFinalSubmitLabel(proposal = {}) {
+  if (proposal.bucket === "trailing_stop") return "Submit stop";
+  return "Submit order";
 }
 
 function protectionButtonTitle(proposal = {}, gate = {}) {
@@ -3014,12 +3262,11 @@ function protectionPositionLine(proposal = {}) {
   if (proposal.bucket !== "risk_reduction") {
     const qty = Math.abs(Number(proposal.position_quantity || 0));
     if (qty > 0) {
-      const unit = ["OPT", "OPTION"].includes(proposal.sec_type) ? "ct" : "sh";
-      parts.push(`held ${qty} ${unit}`);
+      parts.push(`Held: ${qty} ${protectionPositionUnitLabel(proposal)}`);
     }
   }
   if (hasNumericValue(proposal.position_market_value) && proposal.position_market_value !== 0) {
-    let value = money(proposal.position_market_value, currency);
+    let value = `Position value: ${money(proposal.position_market_value, currency)}`;
     if (typeof proposal.market_value_pct_nlv === "number") {
       value += ` (${pct(Math.abs(proposal.market_value_pct_nlv))} NLV)`;
     }
@@ -3032,7 +3279,7 @@ function protectionPositionLine(proposal = {}) {
   line.className = "protection-row__position";
   if (parts.length > 0) line.append(document.createTextNode(parts.join(" · ")));
   if (hasDay) {
-    line.append(document.createTextNode(`${parts.length > 0 ? " · " : ""}today `));
+    line.append(document.createTextNode(`${parts.length > 0 ? " · " : ""}Today: `));
     const move = document.createElement("span");
     const dir = dayMoney > 0 ? "up" : dayMoney < 0 ? "down" : "";
     move.className = "protection-quote" + (dir ? ` protection-quote--${dir}` : "");
@@ -3045,6 +3292,15 @@ function protectionPositionLine(proposal = {}) {
     line.append(move);
   }
   return line;
+}
+
+function protectionPositionUnitLabel(proposal = {}) {
+  const secType = String(proposal.sec_type || proposal.contract?.sec_type || "").toUpperCase();
+  if (secType === "OPT" || secType === "OPTION") {
+    const multiplier = Number(proposal.contract?.multiplier || 0);
+    return multiplier > 0 ? `contracts (x${multiplier})` : "contracts";
+  }
+  return "shares";
 }
 
 function protectionQuoteLine(proposal = {}) {
@@ -3389,7 +3645,8 @@ function protectionPreviewStateKey(proposal = {}) {
 function protectionPreviewText(result = null, proposal = {}) {
   if (!result) return "";
   if (result.local && result.pending) {
-    return `Stop draft ready; broker WhatIf running · ${protectionStopDraftSummary(proposal)}`;
+    const draft = proposal.bucket === "trailing_stop" ? protectionStopDraftSummary(proposal) : protectionProposalTitle(proposal);
+    return `Order draft ready; broker WhatIf running · ${draft}`;
   }
   if (result.pending) return "Previewing broker WhatIf; no order is placed";
   const blocker = (result.blockers || [])[0];
@@ -3449,13 +3706,13 @@ function protectionWhatIfDetails(whatIf = {}) {
 }
 
 function protectionSubmitStateText({ result = null, gate = {}, busy = false, previewResult = null } = {}) {
-  if (busy) return "Submitting stop; fresh broker WhatIf running";
+  if (busy) return "Submitting order; fresh broker WhatIf running";
   if (result) return protectionSubmitResultText(result);
   if (!previewResult) return "";
   if (previewResult.pending) return "";
   if (!gate.ready) return `Submit blocked · ${gate.reason}`;
   if (!protectionPreviewSubmitEligible(previewResult)) return `Submit unavailable · ${protectionPreviewSubmitBlockedReason(previewResult)}`;
-  return `Ready; Submit stop sends the broker write to ${protectionWriteConfirmationLabel()}`;
+  return `Ready; Submit order sends the broker write to ${protectionWriteConfirmationLabel()}`;
 }
 
 function protectionSubmitStateClass({ result = null, gate = {}, busy = false } = {}) {
@@ -3473,7 +3730,7 @@ function protectionSubmitStateClass({ result = null, gate = {}, busy = false } =
 }
 
 function protectionSubmitResultText(result = {}) {
-  if (result.local && result.pending) return "Submitting stop; fresh broker WhatIf running";
+  if (result.local && result.pending) return "Submitting order; fresh broker WhatIf running";
   const blocker = (result.blockers || [])[0];
   if (blocker) return `Submit blocked · ${blocker.code}: ${blocker.message}`;
   const orderRef = result.order_ref || result.place?.order_ref || "";
@@ -3936,7 +4193,7 @@ function opportunityPostExerciseRiskMetrics(opportunity = {}) {
   if (!risk) return [];
   const metrics = [];
   const underlying = normalizeSymbol(risk.underlying || opportunity.underlying_contract?.symbol || opportunity.symbol || "");
-  metrics.push(["exposure", `${underlying || "underlying"} ${numberRead(risk.before_quantity)}→${numberRead(risk.after_quantity)} sh`]);
+  metrics.push(["exposure", `${underlying || "underlying"} ${numberRead(risk.before_quantity)}→${numberRead(risk.after_quantity)} shares`]);
   const riskChange = opportunityPostExerciseRiskChangeLabel(risk);
   if (riskChange) metrics.push(["risk", riskChange]);
   if (risk.protection_review_needed) {
@@ -6805,6 +7062,19 @@ $("purgeRestoreToggle").addEventListener("change", (event) => {
 $("stockProtectionToggle").addEventListener("change", (event) => {
   setStockProtectionEnabled(event.currentTarget.checked);
 });
+$("protectionDeriskPercent").addEventListener("change", (event) => {
+  state.protectionDerisk.percent = Number(event.currentTarget.value) || 25;
+  state.protectionDerisk.result = null;
+  state.protectionDerisk.submitted = null;
+  renderProtectionDerisk();
+});
+$("protectionDeriskProtectHedges").addEventListener("change", (event) => {
+  state.protectionDerisk.protectHedges = event.currentTarget.checked;
+  state.protectionDerisk.result = null;
+  state.protectionDerisk.submitted = null;
+  renderProtectionDerisk();
+});
+$("protectionDeriskPreview").addEventListener("click", previewProtectionDerisk);
 
 async function enablePush() {
   if (!canUseWebPush()) {

@@ -207,6 +207,23 @@ func unaryInvocationBudget(cmd string, rest []string) time.Duration {
 	if cmd == "trading" && len(rest) > 0 && rest[0] == "paper-smoke" {
 		return 120 * time.Second
 	}
+	// `proposals reduce --portfolio` previews/places each eligible leg
+	// sequentially; the daemon-side bucket is 120 s, so the CLI ceiling must
+	// exceed it for a classified basket error to reach the user.
+	if cmd == "proposals" {
+		reduce, portfolio := false, false
+		for _, a := range rest {
+			switch a {
+			case "reduce":
+				reduce = true
+			case "--portfolio", "-portfolio":
+				portfolio = true
+			}
+		}
+		if reduce && portfolio {
+			return 150 * time.Second
+		}
+	}
 	return parseDurationOr(cliUnaryTimeout, 60*time.Second)
 }
 

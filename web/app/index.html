@@ -229,6 +229,24 @@
           </div>
           <div class="protection-exposure-note" id="protectionExposure" hidden></div>
           <div class="market-flag-rail" id="protectionFlagRail" hidden></div>
+          <section class="protection-derisk" id="protectionDerisk" hidden>
+            <div class="protection-derisk__controls">
+              <span class="protection-derisk__label">Trim risk</span>
+              <select id="protectionDeriskPercent" aria-label="Trim percentage">
+                <option value="25">25%</option>
+                <option value="50">50%</option>
+                <option value="75">75%</option>
+                <option value="100">100%</option>
+              </select>
+              <label class="protection-derisk__hedge">
+                <input id="protectionDeriskProtectHedges" type="checkbox" checked>
+                Protect hedges
+              </label>
+              <button class="text-button" id="protectionDeriskPreview" type="button">Trim risk</button>
+            </div>
+            <div class="protection-derisk__basket" id="protectionDeriskBasket" hidden></div>
+            <p class="protection-derisk__state" id="protectionDeriskState"></p>
+          </section>
           <div class="detail-panel protection-detail" id="protectionDetailPanel" hidden>
             <div class="source-inline" id="protectionReason" hidden></div>
             <div class="protection-rows" id="protectionRows"></div>

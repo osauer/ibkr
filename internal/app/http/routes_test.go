@@ -854,6 +854,22 @@ func (routeFakeClient) TradeProposalsSubmit(context.Context, rpc.TradeProposalSu
 	return &rpc.TradeProposalSubmitResult{Accepted: false, Blockers: []rpc.TradingBlocker{{Code: "test", Message: "blocked"}}}, nil
 }
 
+func (routeFakeClient) TradeProposalsReducePreview(context.Context, rpc.TradeProposalReduceParams) (*rpc.TradeProposalReduceResult, error) {
+	return &rpc.TradeProposalReduceResult{Accepted: true, PreviewTokenID: "tok-reduce"}, nil
+}
+
+func (routeFakeClient) TradeProposalsReduceSubmit(context.Context, rpc.TradeProposalReduceParams) (*rpc.TradeProposalReduceResult, error) {
+	return &rpc.TradeProposalReduceResult{Accepted: false, Blockers: []rpc.TradingBlocker{{Code: "test", Message: "blocked"}}}, nil
+}
+
+func (routeFakeClient) TradeProposalsReducePortfolioPreview(context.Context, rpc.TradeProposalReducePortfolioParams) (*rpc.TradeProposalReducePortfolioResult, error) {
+	return &rpc.TradeProposalReducePortfolioResult{Accepted: true, LegCount: 1}, nil
+}
+
+func (routeFakeClient) TradeProposalsReducePortfolioSubmit(context.Context, rpc.TradeProposalReducePortfolioParams) (*rpc.TradeProposalReducePortfolioResult, error) {
+	return &rpc.TradeProposalReducePortfolioResult{Accepted: false, Blockers: []rpc.TradingBlocker{{Code: "test", Message: "blocked"}}}, nil
+}
+
 func (routeFakeClient) TradeProposalsIgnore(context.Context, rpc.TradeProposalIgnoreParams) (*rpc.TradeProposalIgnoreResult, error) {
 	return &rpc.TradeProposalIgnoreResult{Accepted: true, Key: "proposal"}, nil
 }

@@ -2665,6 +2665,125 @@ p {
   background: var(--surface-soft);
 }
 
+.protection-derisk {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.protection-derisk__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.protection-derisk__label {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.protection-derisk__hedge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.protection-derisk__controls select {
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink);
+}
+
+.protection-derisk__controls button:disabled,
+.protection-derisk__submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.protection-derisk__basket {
+  display: grid;
+  gap: 6px;
+}
+
+.protection-derisk__leg {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 0;
+  border-top: 1px solid var(--line);
+}
+
+.protection-derisk__leg-label {
+  font-weight: 600;
+}
+
+.protection-derisk__leg-notional {
+  color: var(--ink-2);
+}
+
+.protection-derisk__leg-why {
+  color: var(--ink-2);
+  flex: 1 1 100%;
+}
+
+.protection-derisk__leg-ref {
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.protection-derisk__badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+}
+
+.protection-derisk__badge--eligible,
+.protection-derisk__badge--placed {
+  color: #047857;
+  border-color: #047857;
+}
+
+.protection-derisk__badge--blocked {
+  color: #b91c1c;
+  border-color: #b91c1c;
+}
+
+.protection-derisk__badge--hedge {
+  color: var(--ink-2);
+}
+
+.protection-derisk__submit {
+  justify-self: start;
+}
+
+.protection-derisk__note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.protection-derisk__note--blocked {
+  color: #b91c1c;
+}
+
+.protection-derisk__state {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
 .opportunities-panel {
   display: grid;
   gap: 8px;

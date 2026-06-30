@@ -9,6 +9,19 @@ const (
 	MethodTradeProposalsPreview  = "trade_proposals.preview"
 	MethodTradeProposalsSubmit   = "trade_proposals.submit"
 	MethodTradeProposalsIgnore   = "trade_proposals.ignore"
+	// Reduce is a discretionary, user-initiated partial close of an existing
+	// holding by a chosen percentage. Unlike the daemon-generated proposals
+	// above (keyed by key+revision), it acts directly on a live position, so
+	// it carries no proposal key. It reuses the gated order preview/place
+	// path and is always close/reduce-only.
+	MethodTradeProposalsReducePreview = "trade_proposals.reduce_preview"
+	MethodTradeProposalsReduceSubmit  = "trade_proposals.reduce_submit"
+	// Portfolio reduce is the one-tap risk-off sweep: a proportional trim of the
+	// whole book by a chosen percentage. It enumerates every eligible position
+	// and drives each leg through the same gated order path as the single-position
+	// reduce, best-effort. Protective hedges are excluded unless opted in.
+	MethodTradeProposalsReducePortfolioPreview = "trade_proposals.reduce_portfolio_preview"
+	MethodTradeProposalsReducePortfolioSubmit  = "trade_proposals.reduce_portfolio_submit"
 
 	ProtectionPolicyFingerprintVersion = "protection-policy-fp-v1"
 
@@ -320,4 +333,119 @@ type TradeProposalIgnoreResult struct {
 	Revision string    `json:"revision,omitempty"`
 	Message  string    `json:"message,omitempty"`
 	AsOf     time.Time `json:"as_of"`
+}
+
+// TradeProposalReduceParams is a discretionary partial reduce of an existing
+// holding by a chosen percentage (the SPA offers 25/50/75/100). The holding is
+// identified by ConID; Symbol is a convenience for a unique stock when ConID is
+// unknown. SELL reduces a long; BUY-to-cover reduces a short. The percentage is
+// resolved to an integer quantity server-side and is always clamped to the held
+// size, so the order is close/reduce-only and can never flip or open exposure.
+//
+// IncludeHedges defaults false: a holding that carries short (bearish) delta —
+// a long put, short call, or short stock used as a protective hedge — is
+// excluded from the reduce workflow so the user cannot accidentally trim a
+// hedge. Set IncludeHedges true to act on such a holding deliberately.
+type TradeProposalReduceParams struct {
+	ConID         int    `json:"con_id,omitempty"`
+	Symbol        string `json:"symbol,omitempty"`
+	Percent       int    `json:"percent"`
+	IncludeHedges bool   `json:"include_hedges,omitempty"`
+	TimeoutMs     int    `json:"timeout_ms,omitempty"`
+	// Origin identifies who is asking (OrderOrigin*) for audit and the
+	// live-origin write gate; submit only.
+	Origin string `json:"origin,omitempty"`
+}
+
+// TradeProposalReduceResult is returned by both reduce_preview and
+// reduce_submit. Preview carries the sanitized order preview (the raw token
+// never leaves the daemon; PreviewTokenID is for audit only) and SubmitEligible.
+// Submit additionally fills Place/OrderRef/Message. HedgeLike reports whether
+// the resolved holding is a protective short; when true and the action was not
+// opted into hedges, Blockers carries hedge_excluded and no token is minted.
+type TradeProposalReduceResult struct {
+	Accepted              bool                       `json:"accepted"`
+	ConID                 int                        `json:"con_id,omitempty"`
+	Symbol                string                     `json:"symbol,omitempty"`
+	SecType               string                     `json:"sec_type,omitempty"`
+	Action                string                     `json:"action,omitempty"`
+	Percent               int                        `json:"percent"`
+	PositionQuantity      float64                    `json:"position_quantity"`
+	ReduceQuantity        int                        `json:"reduce_quantity"`
+	HedgeLike             bool                       `json:"hedge_like,omitempty"`
+	PreviewTokenID        string                     `json:"preview_token_id,omitempty"`
+	PreviewTokenExpiresAt time.Time                  `json:"preview_token_expires_at,omitzero"`
+	SubmitEligible        bool                       `json:"submit_eligible"`
+	Preview               *TradeProposalOrderPreview `json:"preview,omitempty"`
+	Place                 *OrderPlaceResult          `json:"place,omitempty"`
+	OrderRef              string                     `json:"order_ref,omitempty"`
+	Blockers              []TradingBlocker           `json:"blockers,omitempty"`
+	Message               string                     `json:"message,omitempty"`
+	AsOf                  time.Time                  `json:"as_of"`
+}
+
+// TradeProposalReducePortfolioParams is the one-tap portfolio risk-off sweep:
+// trim every eligible position by Percent (SELL % of each long, BUY-to-cover %
+// of each short). ProtectHedges (default true at the CLI/SPA trust boundary;
+// the daemon trusts the wire value) excludes protective shorts — long puts,
+// short calls, short stock — so de-risking longs does not shed protection.
+// RequestRef is a client-generated idempotency key: a repeat submit with the
+// same ref places nothing and replays the prior result.
+type TradeProposalReducePortfolioParams struct {
+	Percent       int    `json:"percent"`
+	ProtectHedges bool   `json:"protect_hedges,omitempty"`
+	TimeoutMs     int    `json:"timeout_ms,omitempty"`
+	Origin        string `json:"origin,omitempty"`
+	RequestRef    string `json:"request_ref,omitempty"`
+}
+
+// TradeProposalReduceLeg is one position's slice of a portfolio sweep. On
+// preview it carries the sized order + per-leg eligibility; on submit it adds
+// Place/OrderRef/Placed. Excluded hedges appear with HedgeLike + a
+// hedge_excluded blocker (disclosed, never silently dropped). Notional is in the
+// contract currency; NotionalBase is nil when no FX rate was available.
+type TradeProposalReduceLeg struct {
+	ConID            int                        `json:"con_id,omitempty"`
+	Symbol           string                     `json:"symbol,omitempty"`
+	SecType          string                     `json:"sec_type,omitempty"`
+	Action           string                     `json:"action,omitempty"`
+	PositionQuantity float64                    `json:"position_quantity"`
+	ReduceQuantity   int                        `json:"reduce_quantity"`
+	HedgeLike        bool                       `json:"hedge_like,omitempty"`
+	Notional         float64                    `json:"notional,omitempty"`
+	NotionalCurrency string                     `json:"notional_currency,omitempty"`
+	NotionalBase     *float64                   `json:"notional_base,omitempty"`
+	PreviewTokenID   string                     `json:"preview_token_id,omitempty"`
+	SubmitEligible   bool                       `json:"submit_eligible"`
+	Preview          *TradeProposalOrderPreview `json:"preview,omitempty"`
+	Place            *OrderPlaceResult          `json:"place,omitempty"`
+	Placed           bool                       `json:"placed,omitempty"`
+	OrderRef         string                     `json:"order_ref,omitempty"`
+	Blockers         []TradingBlocker           `json:"blockers,omitempty"`
+	Message          string                     `json:"message,omitempty"`
+}
+
+// TradeProposalReducePortfolioResult is the basket preview/submit envelope.
+// Accepted means (preview) every eligible leg is submit-eligible, or (submit)
+// at least one leg placed and none were blocked. TotalNotional is the base-
+// currency sum over eligible legs; FXIncomplete flags any eligible leg whose
+// notional could not be converted (never fabricated). Replayed marks a dedupe
+// hit. Basket-level Blockers (write-gate, positions_unavailable, too_many_legs)
+// mean zero legs were touched.
+type TradeProposalReducePortfolioResult struct {
+	Accepted           bool                     `json:"accepted"`
+	Percent            int                      `json:"percent"`
+	ProtectHedges      bool                     `json:"protect_hedges"`
+	Legs               []TradeProposalReduceLeg `json:"legs"`
+	LegCount           int                      `json:"leg_count"`
+	EligibleCount      int                      `json:"eligible_count"`
+	BlockedCount       int                      `json:"blocked_count"`
+	HedgeExcludedCount int                      `json:"hedge_excluded_count"`
+	TotalNotional      float64                  `json:"total_notional,omitempty"`
+	BaseCurrency       string                   `json:"base_currency,omitempty"`
+	FXIncomplete       bool                     `json:"fx_incomplete,omitempty"`
+	Replayed           bool                     `json:"replayed,omitempty"`
+	Blockers           []TradingBlocker         `json:"blockers,omitempty"`
+	Message            string                   `json:"message,omitempty"`
+	AsOf               time.Time                `json:"as_of"`
 }

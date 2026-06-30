@@ -347,7 +347,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function protectionPreviewTimeoutMs(proposal = {})",
 		"function previewProtectionProposal(proposal)",
 		"protection-row__blocker",
-		"Stop draft ready; broker WhatIf running",
+		"Order draft ready; broker WhatIf running",
 		`fetch("/api/proposals/preview"`,
 		`fetch("/api/proposals/submit"`,
 		"timeout_ms: protectionPreviewTimeoutMs(proposal)",
