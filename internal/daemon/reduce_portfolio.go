@@ -188,7 +188,7 @@ func reduceSweepCandidates(pos *rpc.PositionsResult, percent int) (cands []reduc
 		}
 		heldAbs, _ := closeReduceQuantity(c.row.Quantity)
 		qty = min(qty, heldAbs)
-		cands = append(cands, reduceSweepCandidate{row: c.row, dollarDelta: c.dollarDelta, qty: qty, allocatedDollars: allocated})
+		cands = append(cands, reduceSweepCandidate{row: c.row, dollarDelta: c.dollarDelta, qty: qty, allocatedDollars: float64(qty) * perUnit})
 	}
 	return cands, netDelta, netComplete, targetDollarDelta, nil
 }

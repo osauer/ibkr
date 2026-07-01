@@ -247,6 +247,44 @@ func TestReduceSweepShortfallCapsAndDiscloses(t *testing.T) {
 	}
 }
 
+// TestReduceSweepAllocatedDollarsReflectsFlooredQty asserts the disclosed
+// RiskContributionCut (allocatedDollars) tracks what the floored integer
+// order quantity actually removes (qty*perUnit), not the pre-floor pro-rata
+// target — the achieved-risk figure must never overstate what the order
+// placed. Here the pro-rata share is $12,800 at $1,000/contract, which
+// floors the order to 12 contracts ($12,000); the old code disclosed the
+// pre-floor $12,800 even though only $12,000 of risk is actually removed.
+func TestReduceSweepAllocatedDollarsReflectsFlooredQty(t *testing.T) {
+	delta := 1.0
+	underlying := 100.0
+	pos := reduceTestPortfolio(
+		nil,
+		[]rpc.PositionView{
+			{Symbol: "DEEP", SecType: "OPTION", ConID: 1, Currency: "USD", Quantity: 20, Right: "C", Delta: &delta, Underlying: &underlying, Multiplier: 10},
+		},
+	)
+	cands, netDelta, _, target, blockers := reduceSweepCandidates(pos, 64)
+	if len(blockers) > 0 {
+		t.Fatalf("unexpected blockers: %+v", blockers)
+	}
+	if !approxEqual(netDelta, 20000, 0.01) {
+		t.Fatalf("netDelta=%v, want 20000 (20 contracts * 1.0 delta * 100 spot * 10 multiplier)", netDelta)
+	}
+	if !approxEqual(target, 12800, 0.01) {
+		t.Fatalf("target=%v, want 12800 (64%% of 20000)", target)
+	}
+	c, ok := reduceFindCandidate(cands, 1)
+	if !ok {
+		t.Fatalf("DEEP should be a candidate")
+	}
+	if c.qty != 12 {
+		t.Fatalf("qty=%d, want 12 (floor(12800/1000))", c.qty)
+	}
+	if !approxEqual(c.allocatedDollars, 12000, 0.01) {
+		t.Fatalf("allocatedDollars=%v, want 12000 (qty*perUnit = 12*1000), not the pre-floor 12800 target share", c.allocatedDollars)
+	}
+}
+
 // TestReduceSweepDeltaUnavailableDisclosed asserts a reduceEligible row with
 // no computable delta surfaces as a disclosed, zero-quantity candidate rather
 // than being silently dropped (or, worse, silently mis-sized).
