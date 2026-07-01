@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"strconv"
@@ -162,7 +163,9 @@ func runProposalsSubmit(ctx context.Context, env *Env, args []string) int {
 // percentage: percent is the share of NET portfolio delta to remove, not a
 // flat per-position cut. Hedges (positions whose delta is opposite-signed to
 // net exposure) are never selected — there is no opt-out, because trimming
-// one would increase net risk rather than reduce it.
+// one would increase net risk rather than reduce it. --include-hedges only
+// applies to the single-holding path, so it is a hard error alongside
+// --portfolio rather than a silent no-op.
 func runProposalsReduce(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "proposals reduce")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
@@ -179,6 +182,15 @@ func runProposalsReduce(ctx context.Context, env *Env, args []string) int {
 		return fail(env, "proposals reduce: --percent must be between 1 and 100 (the app offers 25/50/75/100)")
 	}
 	if *portfolio {
+		includeHedgesSet := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "include-hedges" {
+				includeHedgesSet = true
+			}
+		})
+		if includeHedgesSet {
+			return fail(env, "proposals reduce --portfolio excludes hedges structurally (opposite-sign-to-net positions are never selected); --include-hedges has no effect here, drop it")
+		}
 		if fs.NArg() > 0 || *conID > 0 {
 			return fail(env, "proposals reduce --portfolio sweeps the whole book; do not pass SYMBOL or --con-id")
 		}

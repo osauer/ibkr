@@ -71,6 +71,26 @@ func TestRunProposalsReducePortfolioRejectsProtectHedgesFlag(t *testing.T) {
 	}
 }
 
+func TestRunProposalsReducePortfolioRejectsIncludeHedgesFlag(t *testing.T) {
+	t.Parallel()
+	// --include-hedges only applies to the single-holding path; passing it
+	// alongside --portfolio must be a hard error, not a silent no-op (the
+	// portfolio sweep excludes hedges structurally regardless of the flag).
+	for _, args := range [][]string{
+		{"reduce", "--portfolio", "--percent", "50", "--include-hedges"},
+		{"reduce", "--portfolio", "--percent", "50", "--include-hedges=false"},
+	} {
+		var stdout, stderr bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &stderr}
+		if code := Run(context.Background(), env, "proposals", args); code == 0 {
+			t.Fatalf("Run(proposals %v) = 0, want nonzero", args)
+		}
+		if !strings.Contains(stderr.String(), "include-hedges") {
+			t.Fatalf("stderr=%q, want it to mention --include-hedges", stderr.String())
+		}
+	}
+}
+
 func TestRenderProposalsTextShowsPositionContext(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer
