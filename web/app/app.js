@@ -36,7 +36,7 @@ const state = {
   protectionSnapshotNotice: "",
   protectionQuoteTicks: {},
   protectionQtyOverrides: {},
-  protectionDerisk: { percent: 25, protectHedges: true, busy: "", result: null, submitted: null, requestRef: "" },
+  protectionDerisk: { percent: 25, busy: "", result: null, submitted: null, requestRef: "" },
   opportunityPreviewBusy: "",
   opportunityPreviews: {},
   opportunitySubmitBusy: "",
@@ -356,7 +356,6 @@ function renderAll() {
   $("canarySummary").textContent = canarySummaryText(canary, snap);
   renderCanaryStatus(canary);
   renderCanaryTimestamp(canary);
-  renderCanaryActions(canary);
   renderSelectedAlert();
   renderProtectionPanel(snap.proposals || {}, snap.auto_trade || {}, snap.market_events || {});
   renderOpportunitiesPanel(snap.opportunities || {});
@@ -374,7 +373,7 @@ function renderAll() {
 }
 
 function normalizedTab(tab) {
-  if (tab === "alerts" || tab === "settings") return tab;
+  if (tab === "alerts" || tab === "orders" || tab === "settings") return tab;
   return "monitor";
 }
 
@@ -663,14 +662,18 @@ function ensureRegimeCanaryExpansion(canary = {}) {
   state.regimeCanaryExpansionInitialized = true;
 }
 
+// Regime and canary detail can now open independently (or together) — both
+// live inside one shared deck below the split, so opening one no longer
+// changes the other's position on the page. See docs/design note in the
+// merged-panel spec: the mutual-exclusion this used to enforce existed to
+// stop two independently-tall sibling panels from fighting for vertical
+// rhythm, and that premise no longer holds once they share one deck.
 function setRegimeCanaryExpansion(which, open) {
   state.detailPreferenceSet = true;
   if (which === "regime") {
     state.regimeDetailOpen = open;
-    if (open) state.canaryDetailOpen = false;
   } else {
     state.canaryDetailOpen = open;
-    if (open) state.regimeDetailOpen = false;
   }
   renderRegimePanel(state.snapshot || {});
   renderCanaryDetail(state.snapshot?.canary || {});
@@ -1833,25 +1836,6 @@ function renderCanaryDetail(canary, snap = state.snapshot || {}) {
   $("canaryDrivers").replaceChildren(...(rows.length > 0 ? rows.map(canaryDriverRow) : [canaryEmptyDriverRow()]));
 }
 
-function renderCanaryActions(canary) {
-  const review = $("quickReviewBlockersButton");
-  if (!review) return;
-  const label = review.querySelector("span");
-  const sublabel = review.querySelector("small");
-  if (canaryInputCheckBlocksAction(canary)) {
-    if (label) label.textContent = "Review blockers";
-    if (sublabel) sublabel.textContent = "Open data gate";
-    return;
-  }
-  if (canaryNeedsInputCheck(canary)) {
-    if (label) label.textContent = "Check data";
-    if (sublabel) sublabel.textContent = "Open source health";
-    return;
-  }
-  if (label) label.textContent = "Review evidence";
-  if (sublabel) sublabel.textContent = "Open drivers";
-}
-
 function canaryDriverRows(canary) {
   const rows = Array.isArray(canary.rows) ? canary.rows : [];
   const detailRows = rows.filter((row) => cleanDetail(row.title).toLowerCase() !== "portfolio canary");
@@ -1985,12 +1969,14 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   }
 }
 
-// reduceEligibleHoldings lists the positions the discretionary trim can act on:
-// stocks/ETFs (long or short) and long options, matching the daemon's
-// reduceEligible scope. When protectHedges is on, protective shorts (long
-// index puts and the like) are filtered out so the user cannot accidentally
-// trim a hedge — the daemon enforces the same exclusion server-side.
-function reduceEligibleHoldings(protectHedges = true) {
+// reduceEligibleHoldings lists the positions the discretionary trim could
+// touch: stocks/ETFs (long or short) and long options, matching the daemon's
+// reduceEligible scope. This is a cheap "is the sweep worth offering"
+// precondition only — it does not replicate the daemon's net-delta
+// direction/sign-matching logic, which is the real source of truth for which
+// legs actually trim. A Preview can still legitimately return zero candidates
+// (e.g. net delta is immaterial) even when this list is non-empty.
+function reduceEligibleHoldings() {
   const positions = state.snapshot?.positions || {};
   const stocks = Array.isArray(positions.stocks) ? positions.stocks : [];
   const options = Array.isArray(positions.options) ? positions.options : [];
@@ -2005,7 +1991,6 @@ function reduceEligibleHoldings(protectHedges = true) {
     if (row.stale) continue;
     const isOption = reduceIsOption(row);
     if (isOption && qty <= 0) continue; // long options only
-    if (protectHedges && reduceHoldingIsHedge(row)) continue;
     out.push(row);
   }
   return out;
@@ -2016,24 +2001,8 @@ function reduceIsOption(row = {}) {
   return secType === "OPT" || secType === "OPTION";
 }
 
-// reduceHoldingIsHedge mirrors the daemon's isProtectiveShort: short delta
-// (long put, short call, short stock). Delta sign wins when present; otherwise
-// the option right / position sign decides, and a nil-delta option still counts
-// as a hedge so the filter fails safe toward protecting the position.
-function reduceHoldingIsHedge(row = {}) {
-  const qty = Number(row.quantity || 0);
-  if (qty === 0) return false;
-  if (reduceIsOption(row)) {
-    if (typeof row.delta === "number") return row.delta < 0;
-    const right = String(row.right || "").toUpperCase();
-    return (right === "P" && qty > 0) || (right === "C" && qty < 0);
-  }
-  if (typeof row.delta === "number") return row.delta < 0;
-  return qty < 0;
-}
-
-// renderProtectionDerisk draws the always-visible header "Trim risk" control:
-// a percentage + protect-hedges + a Preview button, plus the basket once
+// renderProtectionDerisk draws the always-visible header "Trim delta-adjusted
+// risk" control: a percentage + a Preview button, plus the basket once
 // previewed. It lives outside the foldable detail panel so it is reachable
 // whether the panel is open or not. The daemon computes the basket legs; this
 // is display only.
@@ -2041,16 +2010,16 @@ function renderProtectionDerisk() {
   const section = $("protectionDerisk");
   if (!section) return;
   const d = state.protectionDerisk;
-  // Offer the sweep only when something is eligible to trim, so the header
-  // stays calm for an all-hedge or empty book.
-  const eligible = reduceEligibleHoldings(d.protectHedges);
+  // Offer the sweep only when something is scope-eligible to trim, so the
+  // header stays calm for an empty book. The daemon's net-delta direction
+  // logic — which decides which of these actually trim — runs at Preview.
+  const eligible = reduceEligibleHoldings();
   section.hidden = eligible.length === 0;
   if (eligible.length === 0) return;
   $("protectionDeriskPercent").value = String(d.percent);
-  $("protectionDeriskProtectHedges").checked = d.protectHedges;
   const previewBtn = $("protectionDeriskPreview");
   previewBtn.disabled = d.busy !== "";
-  previewBtn.textContent = d.busy === "preview" ? "Previewing…" : "Trim risk";
+  previewBtn.textContent = d.busy === "preview" ? "Previewing…" : "Preview";
   renderProtectionDeriskBasket();
   $("protectionDeriskState").textContent = protectionDeriskStateText();
 }
@@ -2060,10 +2029,17 @@ function protectionDeriskStateText() {
   if (d.busy === "preview") return "Previewing each leg; no orders placed";
   if (d.busy === "submit") return "Submitting the basket; fresh broker WhatIf per leg";
   const res = d.submitted || d.result;
-  if (!res) return "Choose a percentage, then Trim risk to preview the basket.";
+  if (!res) return "Choose a percentage, then Preview to see the basket.";
   if ((res.blockers || []).length > 0) return `${res.blockers[0].code}: ${res.blockers[0].message}`;
   const verb = d.submitted ? "placed" : "eligible";
-  let line = `${res.eligible_count || 0} ${verb} · ${res.blocked_count || 0} blocked · ${res.hedge_excluded_count || 0} hedge-kept`;
+  let line = `${res.eligible_count || 0} ${verb} · ${res.blocked_count || 0} blocked`;
+  if (res.target_dollar_delta) {
+    const ccy = res.base_currency || "";
+    const achievedPct = res.achieved_pct_of_target != null ? Math.round(res.achieved_pct_of_target) : null;
+    line += ` · removing ${money(res.achieved_dollar_delta || 0, ccy)} of ${money(res.target_dollar_delta, ccy)} targeted net delta`;
+    if (achievedPct != null) line += ` (${achievedPct}%)`;
+  }
+  if (res.net_delta_incomplete) line += " · net delta is a partial-book estimate (some Greeks unavailable)";
   if (res.total_notional) {
     line += ` · ≈ ${money(res.total_notional, res.base_currency || "")}`;
     if (res.fx_incomplete) line += " (partial FX)";
@@ -2088,7 +2064,17 @@ function renderProtectionDeriskBasket() {
   box.hidden = false;
   const children = [];
   for (const b of basketBlockers) children.push(deriskBasketLine(`${b.code}: ${b.message}`, "blocked"));
-  for (const leg of legs) children.push(deriskLegRow(leg, Boolean(d.submitted)));
+  // Only render a leg that will be/was trimmed (reduce_quantity > 0, no
+  // blocker) or that carries a disclosed problem (a blocker — e.g.
+  // delta_unavailable, wide_spread, preview_failed). The daemon already omits
+  // candidates that round to zero, so this is mostly defense-in-depth against
+  // a leg that should never reach the basket in the first place.
+  for (const leg of legs) {
+    const hasBlocker = (leg.blockers || []).length > 0;
+    const willTrim = Number(leg.reduce_quantity || 0) > 0 && !hasBlocker;
+    if (!willTrim && !hasBlocker) continue;
+    children.push(deriskLegRow(leg, Boolean(d.submitted)));
+  }
   // Two-gesture flow: the header Preview never writes. The Submit button only
   // appears after a preview that surfaced eligible legs, and is minted with a
   // literal id so the contract test can pin it.
@@ -2115,29 +2101,32 @@ function deriskBasketLine(text, kind = "") {
 function deriskLegRow(leg = {}, submitted = false) {
   const row = document.createElement("div");
   row.className = "protection-derisk__leg";
-  const hedge = (leg.blockers || []).some((b) => b.code === "hedge_excluded");
+  const hasBlockers = (leg.blockers || []).length > 0;
   let badge = "eligible";
-  if (hedge) badge = "hedge";
-  else if (submitted) badge = leg.placed ? "placed" : "blocked";
-  else if (!leg.submit_eligible) badge = "blocked";
+  if (submitted) badge = leg.placed ? "placed" : "blocked";
+  else if (!leg.submit_eligible || hasBlockers) badge = "blocked";
   const action = leg.action === "BUY" ? "Buy to cover" : "Sell";
   const unit = leg.sec_type === "OPT" ? "ct" : "sh";
   const label = document.createElement("span");
   label.className = "protection-derisk__leg-label";
-  label.textContent = hedge
-    ? `${leg.symbol} · hedge kept`
-    : `${action} ${leg.reduce_quantity || 0} ${unit} ${leg.symbol}`;
+  label.textContent = `${action} ${leg.reduce_quantity || 0} ${unit} ${leg.symbol}`;
   const tag = document.createElement("span");
   tag.className = `protection-derisk__badge protection-derisk__badge--${badge}`;
   tag.textContent = badge;
   row.append(label, tag);
-  if (!hedge && hasNumericValue(leg.notional) && leg.notional !== 0) {
+  if (hasNumericValue(leg.notional) && leg.notional !== 0) {
     const n = document.createElement("span");
     n.className = "protection-derisk__leg-notional";
     n.textContent = money(leg.notional, leg.notional_currency || "");
     row.append(n);
   }
-  const blocker = (leg.blockers || []).find((b) => b.code !== "hedge_excluded");
+  if (hasNumericValue(leg.risk_contribution_cut) && leg.risk_contribution_cut !== 0) {
+    const risk = document.createElement("span");
+    risk.className = "protection-derisk__leg-risk";
+    risk.textContent = `cuts ~${money(leg.risk_contribution_cut, leg.notional_currency || "")} of risk`;
+    row.append(risk);
+  }
+  const blocker = (leg.blockers || [])[0];
   if (blocker) {
     const why = document.createElement("span");
     why.className = "protection-derisk__leg-why";
@@ -2173,7 +2162,7 @@ async function previewProtectionDerisk() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ percent: d.percent, protect_hedges: d.protectHedges, timeout_ms: 5000 }),
+      body: JSON.stringify({ percent: d.percent, timeout_ms: 5000 }),
     });
     const body = await readJSONOrText(res);
     if (!res.ok) throw new Error(body.error || body.message || String(body));
@@ -2204,7 +2193,6 @@ async function submitProtectionDerisk() {
       credentials: "include",
       body: JSON.stringify({
         percent: d.percent,
-        protect_hedges: d.protectHedges,
         timeout_ms: 5000,
         request_ref: d.requestRef || deriskRequestRef(),
         confirm_account: confirmation.account,
@@ -4437,8 +4425,6 @@ function canaryExplanationCards(canary, snap = state.snapshot || {}) {
   return [
     marketExplanation(canary),
     portfolioExplanation(canary, snap),
-    inputExplanation(canary, snap),
-    readinessExplanation(canary),
   ];
 }
 
@@ -4549,12 +4535,15 @@ function marketExplanation(canary) {
     tone: legacyRegimeTone(canary.market?.regime_verdict),
   };
   const verdict = cleanDetail(posture.label || canary.market?.regime_verdict);
-  const readiness = String(posture.readiness || "").toLowerCase();
+  // Trust the server's posture.tone outright — same pattern renderMarketWeather
+  // uses for the Regime panel's own weather chip. This card used to escalate
+  // to "warn" locally whenever it saw a data gap, which is exactly the kind
+  // of client-side reinterpretation that let closed-session gamma staleness
+  // read amber here even when the canonical posture read normal.
+  const tone = regimePostureDetailTone(posture);
   const hasGaps = marketHasDataGaps(canary.market || {}) ||
-    ["blocked", "degraded", "failed", "partial", "warming"].includes(readiness) ||
+    ["blocked", "degraded", "failed", "partial", "warming"].includes(String(posture.readiness || "").toLowerCase()) ||
     String(posture.tone || "").toLowerCase() === "data_quality";
-  const postureTone = regimePostureDetailTone(posture);
-  const tone = hasGaps && (postureTone === "ok" || postureTone === "neutral") ? "warn" : postureTone;
   const body = tone === "warn" || hasGaps
     ? "Market stress is not confirmed, but the regime read has watch or data-quality warnings."
     : "The broad-market regime is not giving a fully confirmed canary trigger.";
@@ -4633,79 +4622,8 @@ function protectionCoverageCanaryLine(canary = {}, snap = state.snapshot || {}) 
   return ` ${parts.join("; ")}.`;
 }
 
-function inputExplanation(canary, snap = state.snapshot || {}) {
-  const health = String(canary.input_health || "").toLowerCase();
-  if (health === "ok") {
-    return {
-      label: "Inputs",
-      title: "Data looks usable",
-      body: "The snapshot has enough current account, portfolio, and market data for this canary read.",
-      tone: "ok",
-    };
-  }
-  const issues = canaryInputIssueSummary(canary, snap);
-  return {
-    label: "Inputs",
-    title: issues ? `Check ${issues}` : "Check data quality",
-    body: issues
-      ? `Stale or degraded inputs: ${issues}. Refresh or verify before treating the canary as a market signal.`
-      : "Some inputs are stale, missing, or degraded. Use the detail rows before acting.",
-    tone: "warn",
-  };
-}
-
-function readinessExplanation(canary) {
-  const readiness = String(canary.planner_readiness || canary.planner_mode_hint || "").toLowerCase();
-  if (canaryInputCheckBlocksAction(canary)) {
-    return {
-      label: "Readiness",
-      title: "Data check blocked",
-      body: "Risk-plan readiness is blocked until the missing or stale inputs are refreshed.",
-      tone: "warn",
-    };
-  }
-  if (readiness.includes("ready")) {
-    return {
-      label: "Readiness",
-      title: "Risk plan can proceed",
-      body: "The canary has enough evidence to support the next risk-management step.",
-      tone: "ok",
-    };
-  }
-  if (readiness.includes("confirm")) {
-    return {
-      label: "Readiness",
-      title: "Confirm before acting",
-      body: "The app is asking for one more data-quality or intent check before a major move.",
-      tone: "warn",
-    };
-  }
-  if (readiness === "prestage") {
-    return {
-      label: "Readiness",
-      title: "Prestage only",
-      body: "Stage or review a reduction plan; this is not an automatic trading instruction.",
-      tone: "warn",
-    };
-  }
-  if (readiness === "watch") {
-    return {
-      label: "Readiness",
-      title: "Watch only",
-      body: "Keep the snapshot under review; no risk-plan action is ready from this canary alone.",
-      tone: "neutral",
-    };
-  }
-  return {
-    label: "Readiness",
-    title: cleanDetail(readiness || canary.action),
-    body: "Use this as a prompt for review, not an automatic trading instruction.",
-    tone: "warn",
-  };
-}
-
 function renderCanaryTimestamp(canary) {
-  renderFreshnessTimestamp("canaryAsOf", canary.as_of, { staleMinutes: 5 });
+  renderFreshnessTimestamp("canaryAsOf", canary.as_of, { staleMinutes: 5, compact: true });
 }
 
 function renderMarketContext(snap) {
@@ -4809,10 +4727,20 @@ function renderRegimePanel(snap) {
   const regimeStatus = marketRegimeStatusLine(snap, canary, market, indicators);
   $("marketRegime").textContent = marketRegimeLabel(posture);
   $("marketRegimeSummary").textContent = regimeStatus.summary;
-  $("marketRegimeMix").textContent = regimeStatus.detail;
-  $("marketRegimeMix").title = regimeStatus.title;
+  // marketRegimeMix now lives in the expanded detail deck and shows only the
+  // governed-severity note (a real policy downgrade disclosure) — not a
+  // repeat of the freshness badge or the itemized data-gap list, both of
+  // which already have their own home (regimeAsOf and regimeQualityRemarks).
+  const governedNote = regimeGovernedNote(snap, market);
+  const mixNote = $("marketRegimeMix");
+  mixNote.hidden = !governedNote;
+  if (governedNote) {
+    mixNote.textContent = governedNote;
+    mixNote.title = governedNote;
+  }
   renderFreshnessTimestamp("regimeAsOf", latestRegimeTimestamp(canary, indicators), {
     staleMinutes: regimeStaleBudgetMinutes(snap),
+    compact: true,
   });
   renderMarketWeather(posture);
   renderRegimeDetail(indicators, snap, canary);
@@ -5003,19 +4931,6 @@ function marketRegimeStatusLine(snap, canary, market, indicators) {
   return { summary, detail, title: `${detail}; regime updated ${latest}` };
 }
 
-function marketRegimeMix(market, indicators) {
-  if (indicators.length === 0) return "Waiting for market evidence";
-  const counts = indicators.reduce((out, indicator) => {
-    const status = indicatorStatusClass(indicator.status);
-    out[status] = (out[status] || 0) + 1;
-    return out;
-  }, {});
-  const risk = (counts.red || 0) + Number(market.red_clusters || 0);
-  const neutral = (counts.amber || 0) + (counts.context || 0) + (counts.na || 0);
-  const normal = counts.green || 0;
-  return `${risk} Risk · ${neutral} Neutral · ${normal} Normal`;
-}
-
 function latestRegimeRead(canary, indicators) {
   const latest = latestRegimeTimestamp(canary, indicators);
   if (latest) return shortTimeWithZone(latest.toISOString());
@@ -5057,11 +4972,8 @@ function latestRegimeTimestampFallback(canary, indicators) {
 function renderMarketWeather(posture = {}) {
   const tone = regimeWeatherClass(posture.tone);
   const card = $("regimeSummaryCard");
-  const panel = $("regimePanel");
   card.classList.remove("weather-green", "weather-amber", "weather-red", "weather-na");
-  panel.classList.remove("weather-green", "weather-amber", "weather-red", "weather-na");
   card.classList.add("weather-" + tone);
-  panel.classList.add("weather-" + tone);
 }
 
 function regimeWeatherClass(tone) {
@@ -6293,11 +6205,12 @@ function renderSelectedAlert() {
 }
 
 function renderOpenOrders() {
-  const panel = $("ordersPanel");
   const list = $("ordersOpenList");
   const orders = state.ordersOpen?.orders || [];
-  if (panel) panel.hidden = orders.length === 0;
   renderFreshnessTimestamp("ordersAsOf", state.ordersOpen?.as_of, { staleMinutes: 15, fallback: "--" });
+  const count = $("ordersOpenCount");
+  count.textContent = orders.length === 1 ? "1 open" : `${orders.length} open`;
+  count.classList.toggle("is-zero", orders.length === 0);
   if (orders.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-row";
@@ -7013,17 +6926,6 @@ $("opportunitiesRefreshButton").addEventListener("click", (event) => {
   event.stopPropagation();
   refreshOpportunities();
 });
-$("quickReviewBlockersButton").addEventListener("click", () => {
-  setRegimeCanaryExpansion("canary", true);
-  $("canaryDetailPanel").scrollIntoView({ block: "nearest" });
-});
-  $("quickHeldActionsButton").addEventListener("click", () => {
-  setUnderlyingExpansion(true);
-  $("underlyingPanel").scrollIntoView({ block: "nearest" });
-});
-$("quickAlertsButton").addEventListener("click", () => {
-  setActiveTab("alerts");
-});
 $("clearSelectedAlertButton").addEventListener("click", () => {
   state.selectedAlertID = null;
   renderAlerts();
@@ -7032,7 +6934,7 @@ $("clearSelectedAlertButton").addEventListener("click", () => {
   $("regimeDetailToggle").addEventListener("click", () => {
   setRegimeCanaryExpansion("regime", !state.regimeDetailOpen);
 });
-$("regimePanel").addEventListener("click", (event) => {
+$("regimeSummaryCard").addEventListener("click", (event) => {
   handleExpandablePanelTap(event, "regime");
 });
 $("canaryHero").addEventListener("click", (event) => {
@@ -7064,12 +6966,6 @@ $("stockProtectionToggle").addEventListener("change", (event) => {
 });
 $("protectionDeriskPercent").addEventListener("change", (event) => {
   state.protectionDerisk.percent = Number(event.currentTarget.value) || 25;
-  state.protectionDerisk.result = null;
-  state.protectionDerisk.submitted = null;
-  renderProtectionDerisk();
-});
-$("protectionDeriskProtectHedges").addEventListener("change", (event) => {
-  state.protectionDerisk.protectHedges = event.currentTarget.checked;
   state.protectionDerisk.result = null;
   state.protectionDerisk.submitted = null;
   renderProtectionDerisk();
@@ -7370,7 +7266,9 @@ function renderFreshnessTimestamp(target, value, options = {}) {
   const ageMinutes = Math.max(0, Math.floor(ageMS / 60000));
   const staleMinutes = typeof options.staleMinutes === "number" ? options.staleMinutes : 15;
   const stale = ageMinutes >= staleMinutes;
-  el.textContent = `${stale ? "stale" : "updated"} ${shortTime(at.toISOString())} · ${ageLabel(ageMinutes)}`;
+  el.textContent = options.compact
+    ? `${shortTime(at.toISOString())} · ${ageLabel(ageMinutes)}`
+    : `${stale ? "stale" : "updated"} ${shortTime(at.toISOString())} · ${ageLabel(ageMinutes)}`;
   el.classList.toggle("stale", stale);
 }
 

@@ -106,6 +106,84 @@ func TestRegimeIncident20260612Regression(t *testing.T) {
 	}
 }
 
+// TestRegimeOffHoursGammaStaleAloneStaysNormal pins the 2026-07-01 pre-open
+// case: every ranked cluster (vol, credit, funding, fx, breadth) is green and
+// gamma — the one context_only/unranked cluster (rankableLifecycleGammaBand
+// returns "" whenever Rankability != rankable) — is status=stale from the
+// EXPECTED off-hours prior-NY-trading-date cache described in gammaNotes
+// ("...a prior-date cache serves status=stale, stays visible, and warns
+// only", internal/daemon/regime.go) and TestGammaStatusQualityTreatsContext
+// OnlyAsContextNotDegraded (status_quality_test.go). With zero yellow/red in
+// the ranked evidence, this must read tone=normal / readiness=ready, not the
+// amber "verify inputs" data_quality read: the only "weak" thing is gamma's
+// intentionally-unranked, by-design-warns-only cache going stale, which must
+// never by itself drag down a clean ranked tally.
+func TestRegimeOffHoursGammaStaleAloneStaysNormal(t *testing.T) {
+	t.Parallel()
+	r := mkAllGreenRegime()
+	r.AsOf = time.Now()
+	// Off-hours prior-trading-date compute: fetchRegimeGamma would map this
+	// to RegimeStatusStale (see gammaNotes) while Rankability degrades to
+	// context_only ("market is closed; cached gamma is context only").
+	r.GammaZero.Status = rpc.RegimeStatusStale
+	r.GammaZero.Envelope.Result.Quality = &rpc.GammaSignalQuality{
+		Rankability:       rpc.GammaRankabilityContextOnly,
+		RankabilityReason: "freshness: market is closed; cached gamma is context only",
+	}
+	c := regimeTestFinalize(t, r)
+
+	if c.ClusterUnrankedCount != 1 {
+		t.Fatalf("unranked clusters = %d, want 1 (gamma context-only)", c.ClusterUnrankedCount)
+	}
+	if c.ClusterRankedCount != 5 || c.ClusterYellowCount != 0 || c.ClusterRedCount != 0 {
+		t.Fatalf("ranked=%d yellow=%d red=%d, want 5/0/0", c.ClusterRankedCount, c.ClusterYellowCount, c.ClusterRedCount)
+	}
+	if r.Lifecycle.Readiness != "ready" {
+		t.Fatalf("readiness = %q, want ready — off-hours gamma-only staleness must not degrade readiness", r.Lifecycle.Readiness)
+	}
+	if r.Posture.Tone != rpc.RegimeToneNormal {
+		t.Fatalf("posture.tone = %q, want %q — off-hours gamma-only staleness must not flip amber", r.Posture.Tone, rpc.RegimeToneNormal)
+	}
+	if r.Lifecycle.Stage != rpc.LifecycleQuiet {
+		t.Fatalf("lifecycle.stage = %q, want %q", r.Lifecycle.Stage, rpc.LifecycleQuiet)
+	}
+	// The staleness is still honestly disclosed on the data-quality surface
+	// (--explain/status readers see it) even though it doesn't gate tone.
+	foundGammaStale := false
+	for _, item := range r.DataQuality {
+		if slices.Contains(item.StaleClusters, "gamma") {
+			foundGammaStale = true
+		}
+	}
+	if !foundGammaStale {
+		t.Fatalf("data_quality = %+v, want gamma disclosed as stale (awareness, not a readiness gate)", r.DataQuality)
+	}
+}
+
+// TestRegimeRankedClusterStaleDegradesReadiness is the regression guard for
+// TestRegimeOffHoursGammaStaleAloneStaysNormal: a RANKED cluster's source
+// (funding, here) going stale must still force degraded readiness / a
+// non-normal tone. This proves the off-hours-gamma fix is scoped to
+// context-only/unranked sources and does not overshoot into masking real
+// ranked-cluster data problems.
+func TestRegimeRankedClusterStaleDegradesReadiness(t *testing.T) {
+	t.Parallel()
+	r := mkAllGreenRegime()
+	r.AsOf = time.Now()
+	r.FundingStress.Status = rpc.RegimeStatusStale
+	c := regimeTestFinalize(t, r)
+
+	if c.ClusterRankedCount != 6 || c.ClusterYellowCount != 0 || c.ClusterRedCount != 0 {
+		t.Fatalf("ranked=%d yellow=%d red=%d, want 6/0/0 (funding stays green — only its source status is stale)", c.ClusterRankedCount, c.ClusterYellowCount, c.ClusterRedCount)
+	}
+	if r.Lifecycle.Readiness != "degraded" {
+		t.Fatalf("readiness = %q, want degraded — a ranked cluster's source going stale is a real data-quality problem", r.Lifecycle.Readiness)
+	}
+	if r.Posture.Tone != rpc.RegimeToneDataQuality {
+		t.Fatalf("posture.tone = %q, want %q — ranked-cluster staleness must still flip amber", r.Posture.Tone, rpc.RegimeToneDataQuality)
+	}
+}
+
 // TestStreakStoreCountsTradingDays pins the weekend fix: a Saturday or
 // Sunday poll keys to Friday's trading session and cannot inflate the
 // counter; Monday increments it.

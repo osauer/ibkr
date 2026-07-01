@@ -378,13 +378,14 @@ async function exerciseMarketLayout(page) {
     return /\b(closing|opening) in\b/i.test(text);
   }, { timeout: 10000 });
   const layout = await page.evaluate(() => {
-    const regimePanel = document.getElementById("regimePanel");
+    const regimeHalf = document.getElementById("regimeSummaryCard");
     const canaryPanel = document.getElementById("canaryHero");
+    const signalPanel = document.getElementById("signalPanel");
     const underlyingPanel = document.getElementById("underlyingPanel");
     const marketStrip = document.querySelector(".market-strip");
     const accountPanel = document.getElementById("accountPanel");
-    const regimeBeforeCanary = !!(regimePanel && canaryPanel && (regimePanel.compareDocumentPosition(canaryPanel) & Node.DOCUMENT_POSITION_FOLLOWING));
-    const canaryBeforeUnderlying = !!(canaryPanel && underlyingPanel && (canaryPanel.compareDocumentPosition(underlyingPanel) & Node.DOCUMENT_POSITION_FOLLOWING));
+    const regimeBeforeCanary = !!(regimeHalf && canaryPanel && (regimeHalf.compareDocumentPosition(canaryPanel) & Node.DOCUMENT_POSITION_FOLLOWING));
+    const canaryBeforeUnderlying = !!(signalPanel && underlyingPanel && (signalPanel.compareDocumentPosition(underlyingPanel) & Node.DOCUMENT_POSITION_FOLLOWING));
     const accountAfterMarketStrip = !!(marketStrip && accountPanel && (marketStrip.compareDocumentPosition(accountPanel) & Node.DOCUMENT_POSITION_FOLLOWING));
     const phase = document.getElementById("sessionPhase")?.textContent?.trim() || "";
     const strip = document.querySelector(".market-strip");
@@ -473,13 +474,20 @@ async function assertNoViewportOverflow(page) {
     const info = await page.evaluate(() => {
       const clientWidth = document.documentElement.clientWidth;
       const pageScrollWidth = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth);
-      const regime = document.getElementById("regimePanel")?.getBoundingClientRect();
-      const canary = document.getElementById("canaryHero")?.getBoundingClientRect();
+      const signalPanel = document.getElementById("signalPanel")?.getBoundingClientRect();
+      const regime = document.querySelector("#signalSplit .signal-half--regime")?.getBoundingClientRect();
+      const canary = document.querySelector("#signalSplit .signal-half--canary")?.getBoundingClientRect();
+      const dashboard = document.getElementById("dashboard")?.getBoundingClientRect();
       const signalLayout = regime && canary ? {
+        // <900px: the split stacks — regime above canary, both full-bleed.
+        stackedVertically: regime.top < canary.top - 4 && Math.abs(regime.left - canary.left) <= 4,
+        // >=900px: the split sits side by side, sharing a row, roughly
+        // splitting signalPanel's width; signalPanel itself spans the full
+        // two-column dashboard width rather than pairing with a sibling.
         sameRow: Math.abs(regime.top - canary.top) <= 4,
-        regimeFirst: regime.top < canary.top - 4 || (Math.abs(regime.top - canary.top) <= 4 && regime.left < canary.left),
+        regimeFirst: regime.left < canary.left,
         similarWidths: Math.abs(regime.width - canary.width) <= 24,
-        similarHeights: Math.abs(regime.height - canary.height) <= 18,
+        signalPanelFullWidth: !!(signalPanel && dashboard) && Math.abs(signalPanel.width - dashboard.width) <= 4,
         regime: { left: Math.round(regime.left), top: Math.round(regime.top), width: Math.round(regime.width), height: Math.round(regime.height) },
         canary: { left: Math.round(canary.left), top: Math.round(canary.top), width: Math.round(canary.width), height: Math.round(canary.height) },
       } : null;
@@ -504,8 +512,11 @@ async function assertNoViewportOverflow(page) {
     if (info.pageScrollWidth > info.clientWidth + 1) {
       throw new Error(`page overflows at ${size.width}px: ${JSON.stringify(info)}`);
     }
-    if (size.width >= 900 && (!info.signalLayout?.sameRow || !info.signalLayout?.regimeFirst || !info.signalLayout?.similarWidths || !info.signalLayout?.similarHeights)) {
-      throw new Error(`Regime and Canary should align side-by-side with equal weight at ${size.width}px: ${JSON.stringify(info.signalLayout)}`);
+    if (size.width >= 900 && (!info.signalLayout?.sameRow || !info.signalLayout?.regimeFirst || !info.signalLayout?.similarWidths || !info.signalLayout?.signalPanelFullWidth)) {
+      throw new Error(`Regime and Portfolio halves should align side-by-side inside a full-width combined panel at ${size.width}px: ${JSON.stringify(info.signalLayout)}`);
+    }
+    if (size.width < 900 && !info.signalLayout?.stackedVertically) {
+      throw new Error(`Regime and Portfolio halves should stack vertically below 900px: ${JSON.stringify(info.signalLayout)}`);
     }
   }
   return results;
@@ -521,6 +532,9 @@ async function exerciseCanaryControlsRemoved(page) {
     mitigationButton: document.querySelectorAll("#canaryMitigationButton").length,
     orderReviewPanel: document.querySelectorAll("#orderReviewPanel").length,
     riskPlanQuickAction: document.querySelectorAll("#quickRiskPlanButton").length,
+    reviewBlockersButton: document.querySelectorAll("#quickReviewBlockersButton").length,
+    heldActionsButton: document.querySelectorAll("#quickHeldActionsButton").length,
+    alertsQuickButton: document.querySelectorAll("#quickAlertsButton").length,
   }));
   const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
   if (total > 0) {
@@ -675,7 +689,7 @@ async function exerciseCanaryDetail(page) {
   await page.locator("#canaryDetailToggle").click();
   await page.waitForFunction(() => {
     const panel = document.getElementById("canaryDetailPanel");
-    return panel && !panel.hidden && document.getElementById("canaryDetailGrid")?.children.length >= 4;
+    return panel && !panel.hidden && document.getElementById("canaryDetailGrid")?.children.length >= 2;
   }, { timeout: 5000 });
   const counts = await page.evaluate(() => ({
     cards: document.getElementById("canaryDetailGrid")?.children.length || 0,
@@ -755,6 +769,9 @@ async function exerciseMarketContext(page) {
   if (canaryInitiallyOpen || regimeInitiallyOpen) {
     throw new Error(`Regime and Canary details should both be collapsed by default: ${JSON.stringify({ canaryInitiallyOpen, regimeInitiallyOpen })}`);
   }
+  // Regime and canary detail now expand independently (no mutual exclusion):
+  // opening regime must not touch canary, and opening canary afterward must
+  // leave regime open too — both can be visible together in the shared deck.
   await page.locator("#regimeDetailToggle").click();
   await page.waitForFunction(() => {
     const panel = document.getElementById("regimeDetailPanel");
@@ -769,7 +786,22 @@ async function exerciseMarketContext(page) {
   await page.waitForFunction(() => {
     const regime = document.getElementById("regimeDetailPanel");
     const canary = document.getElementById("canaryDetailPanel");
-    return regime?.hidden && canary && !canary.hidden;
+    return regime && !regime.hidden && canary && !canary.hidden;
+  }, { timeout: 5000 });
+  const bothOpen = await page.evaluate(() => {
+    const regime = document.getElementById("regimeDetailPanel");
+    const canary = document.getElementById("canaryDetailPanel");
+    return !regime?.hidden && !canary?.hidden;
+  });
+  if (!bothOpen) {
+    throw new Error("Regime and Canary detail should be independently expandable — opening canary should not close regime");
+  }
+  await page.locator("#regimeDetailToggle").click();
+  await page.locator("#canaryDetailToggle").click();
+  await page.waitForFunction(() => {
+    const regime = document.getElementById("regimeDetailPanel");
+    const canary = document.getElementById("canaryDetailPanel");
+    return regime?.hidden && canary?.hidden;
   }, { timeout: 5000 });
   return {
     regime: before.regime,
@@ -777,6 +809,7 @@ async function exerciseMarketContext(page) {
     quote_cells: before.quotes.length,
     canary_initially_open: canaryInitiallyOpen,
     regime_initially_open: regimeInitiallyOpen,
+    both_independently_open: bothOpen,
     indicators,
   };
 }
@@ -1055,35 +1088,41 @@ async function exerciseAlertHistory(page) {
   };
 }
 
+// Orders now lives on its own bottom-nav tab (Monitor, Alerts, Orders,
+// Settings) rather than an inline <details> panel — visibility is
+// tab-driven, not a per-panel open/closed toggle, and the panel itself is
+// always present once the tab is active (emptiness is signaled by the
+// ordersOpenCount badge and an .empty-row message, not by hiding the panel).
 async function exerciseOpenOrders(page) {
-  const initiallyOpen = await page.locator("#ordersPanel").evaluate((el) => !!el.open);
-  if (!initiallyOpen) {
-    await page.locator("#ordersPanel summary").click();
-    await page.waitForFunction(() => document.getElementById("ordersPanel")?.open, { timeout: 5000 });
-  }
+  await page.locator("#tabOrders").click();
+  await page.waitForFunction(() => document.getElementById("ordersTab")?.hidden === false, { timeout: 5000 });
   const info = await page.evaluate(() => {
     const buttons = [...document.querySelectorAll("#ordersOpenList button")].map((button) => ({
       text: button.textContent?.trim() || "",
       disabled: button.disabled,
       title: button.title || "",
     }));
-    const panel = document.getElementById("ordersPanel");
     return {
-      hidden: panel?.hidden || false,
+      panelPresent: !!document.getElementById("ordersPanel"),
+      countText: document.getElementById("ordersOpenCount")?.textContent?.trim() || "",
       rows: document.querySelectorAll("#ordersOpenList .open-order-row").length,
       empty: document.getElementById("ordersOpenList")?.textContent?.includes("No open orders available for this view.") || false,
       buttons,
       oldLabels: buttons.map((button) => button.text).filter((label) => ["Modify", "Cancel", "Execute"].includes(label)),
     };
   });
+  if (!info.panelPresent) {
+    throw new Error("Orders panel should always be present once the Orders tab is active");
+  }
   if (info.oldLabels.length > 0) {
     throw new Error(`open-order controls still use old labels: ${info.oldLabels.join(", ")}`);
   }
   if (info.rows === 0 && !info.empty) {
     throw new Error("open-order empty state is missing");
   }
-  if (info.rows === 0 && !info.hidden) {
-    throw new Error("empty open-order panel should stay hidden until rows exist");
+  const expectedCount = info.rows === 1 ? "1 open" : `${info.rows} open`;
+  if (info.countText !== expectedCount) {
+    throw new Error(`orders open-count badge should read ${JSON.stringify(expectedCount)}, got ${JSON.stringify(info.countText)}`);
   }
   if (info.rows > 0) {
     for (const label of ["Preview change", "Apply change", "Cancel order"]) {
@@ -1097,14 +1136,12 @@ async function exerciseOpenOrders(page) {
       }
     }
   }
-  if (!initiallyOpen) {
-    await page.locator("#ordersPanel summary").click();
-  }
+  await page.locator("#tabMonitor").click();
+  await page.waitForFunction(() => document.getElementById("dashboard")?.hidden === false, { timeout: 5000 });
   return {
-    initially_open: initiallyOpen,
-    hidden_when_empty: info.hidden && info.rows === 0,
     rows: info.rows,
     empty: info.empty,
+    count_text: info.countText,
     buttons: info.buttons.map((button) => ({ text: button.text, disabled: button.disabled, has_reason: !!button.title })),
   };
 }

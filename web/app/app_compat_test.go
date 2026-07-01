@@ -233,14 +233,26 @@ func TestAppJSCanaryDetailUsesSourceBackedEvidenceRows(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"function renderCanaryActions(canary)",
 		"function sourceHealthMentions(source, needle)",
 		"Provisional market warning",
-		"Prestage only",
 		"market-event sources",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js missing canary clarity contract %q", want)
+		}
+	}
+	// renderCanaryActions (the "Review blockers"/"Held actions"/"Alerts"
+	// quick-action row) and the standalone Readiness explanation card
+	// ("Prestage only" etc.) were deliberately removed as noise: the first
+	// was self-referential or duplicated top-level navigation already one
+	// tap away, the second had no unique signal a risk-conscious trader
+	// couldn't already get from the Market/Portfolio cards.
+	for _, forbidden := range []string{
+		"function renderCanaryActions(canary)",
+		"Prestage only",
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("app.js should not reintroduce removed canary clutter %q", forbidden)
 		}
 	}
 	if strings.Contains(css, ".canary-hero p {") {
@@ -272,7 +284,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 	for _, want := range []string{
 		`const symbols = ["SPY", "VIX", "QQQ", "IWM", "HYG", "TLT"];`,
 		"function handleExpandablePanelTap(event, which)",
-		`$("regimePanel").addEventListener("click"`,
+		`$("regimeSummaryCard").addEventListener("click"`,
 		`$("canaryHero").addEventListener("click"`,
 		`"trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary"`,
 		"function setupLiveRefreshLoop()",

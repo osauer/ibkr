@@ -448,6 +448,7 @@ p {
 }
 
 .tab-panel--alerts,
+.tab-panel--orders,
 .tab-panel--settings {
   display: grid;
   gap: 8px;
@@ -861,10 +862,6 @@ p {
   margin-left: auto;
 }
 
-.signal-panel .panel-chevron {
-  margin-left: 0;
-}
-
 .signal-panel :where(.detail-panel, .regime-detail-panel, .alert-focus) {
   cursor: auto;
 }
@@ -873,8 +870,89 @@ p {
   cursor: pointer;
 }
 
-.canary-hero {
-  order: -2;
+/* The combined Regime+Canary card is one panel with two independently-toned
+   halves — the outer article stays a neutral frame (each half carries its
+   own accent-bar color below) and isn't itself one click target. */
+.signal-panel--combined {
+  order: -3;
+  border-top-width: 1px;
+  cursor: default;
+  touch-action: auto;
+}
+
+.panel-time-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.panel-time-group .panel-time {
+  margin-left: 0;
+}
+
+.panel-time-sep {
+  color: var(--muted-2);
+  font-size: 10px;
+}
+
+.signal-split {
+  display: grid;
+  gap: 12px;
+}
+
+.signal-detail-deck {
+  display: grid;
+  gap: 10px;
+}
+
+.signal-half {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 3px solid var(--line);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.signal-half :where(button, a, input, select, textarea, label) {
+  cursor: pointer;
+}
+
+.signal-half__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.signal-half__label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 680;
+  line-height: 1.2;
+}
+
+.signal-half__toggle {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  margin-left: auto;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 720;
+  line-height: 1;
+}
+
+.signal-half__toggle[aria-expanded="true"] {
+  background: var(--surface);
+  color: var(--ink-2);
 }
 
 .canary-hero__grid {
@@ -897,13 +975,6 @@ p {
   font-size: 10px;
   font-weight: 720;
   line-height: 1;
-}
-
-.canary-summary-label {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 680;
-  line-height: 1.2;
 }
 
 .canary-summary-actions {
@@ -954,55 +1025,6 @@ p {
   border-color: rgba(0, 138, 34, 0.22);
   background: var(--green-soft);
   color: var(--market-green);
-}
-
-.canary-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
-  padding-top: 2px;
-}
-
-.canary-action {
-  display: grid;
-  align-content: center;
-  min-width: 0;
-  min-height: 52px;
-  padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface-soft);
-  color: var(--ink-2);
-  text-align: left;
-}
-
-.canary-action--primary {
-  border-color: rgba(18, 104, 219, 0.28);
-  background: var(--blue-soft);
-  color: var(--blue);
-}
-
-.canary-action span {
-  display: block;
-  overflow: hidden;
-  font-size: 12px;
-  font-weight: 760;
-  line-height: 1.08;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.canary-action small {
-  display: block;
-  overflow: hidden;
-  margin-top: 5px;
-  color: currentColor;
-  font-size: 10px;
-  font-weight: 520;
-  line-height: 1.1;
-  opacity: 0.78;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .alert-focus,
@@ -1369,6 +1391,14 @@ p {
   border-top: 1px solid var(--line-soft);
 }
 
+.regime-governed-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.35;
+}
+
 .indicator-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1419,19 +1449,15 @@ p {
   font-size: 12px;
 }
 
-.regime-panel {
-  order: -3;
-}
-
-.regime-panel.weather-green {
+.signal-half--regime.weather-green {
   border-top-color: var(--market-green);
 }
 
-.regime-panel.weather-amber {
+.signal-half--regime.weather-amber {
   border-top-color: var(--amber);
 }
 
-.regime-panel.weather-red {
+.signal-half--regime.weather-red {
   border-top-color: var(--market-red);
 }
 
@@ -1449,15 +1475,6 @@ p {
   gap: 5px;
   min-width: 0;
   min-height: 50px;
-}
-
-.regime-summary span {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 680;
-  line-height: 1.2;
-  letter-spacing: 0;
-  text-transform: none;
 }
 
 .regime-summary b,
@@ -1484,7 +1501,6 @@ p {
 }
 
 .regime-summary small,
-.regime-summary em,
 .canary-hero__copy p {
   max-width: 560px;
   color: var(--muted);
@@ -1494,15 +1510,10 @@ p {
   line-height: 1.3;
 }
 
-.regime-summary em,
 .canary-hero__copy p {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.canary-hero__copy p {
   -webkit-line-clamp: 1;
 }
 
@@ -2685,14 +2696,6 @@ p {
   color: var(--ink);
 }
 
-.protection-derisk__hedge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--ink-2);
-}
-
 .protection-derisk__controls select {
   min-height: 32px;
   padding: 4px 8px;
@@ -2741,6 +2744,11 @@ p {
   font-variant-numeric: tabular-nums;
 }
 
+.protection-derisk__leg-risk {
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
 .protection-derisk__badge {
   font-size: 11px;
   padding: 1px 6px;
@@ -2758,10 +2766,6 @@ p {
 .protection-derisk__badge--blocked {
   color: #b91c1c;
   border-color: #b91c1c;
-}
-
-.protection-derisk__badge--hedge {
-  color: var(--ink-2);
 }
 
 .protection-derisk__submit {
@@ -3292,33 +3296,30 @@ p {
   gap: 7px;
 }
 
-.alerts-panel,
-.orders-panel {
-  padding: 0;
-}
-
 .alerts-panel {
+  padding: 0;
   min-height: 222px;
 }
 
-.alerts-panel summary,
-.orders-panel summary {
+.alerts-panel summary {
   margin: 0;
   padding: 15px;
   cursor: pointer;
   list-style: none;
 }
 
-.alerts-panel summary::-webkit-details-marker,
-.orders-panel summary::-webkit-details-marker {
+.alerts-panel summary::-webkit-details-marker {
   display: none;
 }
 
-.alerts-panel summary.panel-head,
-.orders-panel summary.panel-head {
+.alerts-panel summary.panel-head {
   display: flex;
   align-items: center;
   gap: 13px;
+}
+
+.orders-panel {
+  min-height: 222px;
 }
 
 .segments {
@@ -3375,13 +3376,26 @@ p {
   color: var(--muted-2);
 }
 
-.alerts-body,
-.orders-body {
+/* Orders' panel-head has three items (title, count, freshness); only the
+   trailing freshness badge should claim the auto-margin right-push, so the
+   count sits close to the title instead of the two badges colliding. */
+.orders-panel .alert-active-count {
+  margin-left: 0;
+}
+
+.alerts-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   max-width: 100%;
   padding: 0 15px 15px;
+}
+
+.orders-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .orders-list {
@@ -3794,16 +3808,28 @@ p {
     align-items: start;
   }
 
-  .regime-panel,
-  .canary-hero {
-    grid-column: auto;
-  }
-
   .underlying-panel,
   .portfolio-panel,
   .alerts-panel,
-  .orders-panel {
+  .orders-panel,
+  .signal-panel--combined {
     grid-column: 1 / -1;
+  }
+
+  .signal-split {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .signal-half--canary {
+    padding-left: 18px;
+    border-left: 1px solid var(--line-soft);
+  }
+
+  .signal-detail-deck:has(.signal-detail-col:not([hidden]) ~ .signal-detail-col:not([hidden])) {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
   }
 }
 
@@ -3820,11 +3846,6 @@ p {
 
   .settings-grid {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .canary-action span,
-  .canary-action small {
-    white-space: normal;
   }
 
   .account-risk-strip {
@@ -3997,13 +4018,6 @@ p {
     letter-spacing: 0.05em;
   }
 
-  .canary-action {
-    min-height: 54px;
-    padding-right: 9px;
-    padding-left: 9px;
-    text-align: left;
-  }
-
   .market-strip {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
@@ -4113,7 +4127,7 @@ p {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .orders-panel summary.panel-head {
+  .orders-panel .panel-head {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
   }

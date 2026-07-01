@@ -39,16 +39,19 @@ var browserScriptFiles = []string{
 // index.html or app.js (else the smoke's absence assert breaks at runtime).
 // Values name the asserting function in scripts/app-browser-smoke.mjs.
 var removedSPAIDs = map[string]string{
-	"canaryWarningsToggle":    "exerciseCanaryControlsRemoved",
-	"canaryChecksToggle":      "exerciseCanaryControlsRemoved",
-	"canaryInlineDetailPanel": "exerciseCanaryControlsRemoved",
-	"canaryMitigationButton":  "exerciseCanaryControlsRemoved",
-	"orderReviewPanel":        "exerciseCanaryControlsRemoved",
-	"quickRiskPlanButton":     "exerciseCanaryControlsRemoved",
-	"accountMenu":             "exerciseAccountPanel (account dropdown removed)",
-	"accountMenuToggle":       "exerciseAccountPanel (account dropdown removed)",
-	"marketPanel":             "exerciseMarketContext (old Market Context panel removed)",
-	"toolsPanel":              "assertDebugToolsRemoved",
+	"canaryWarningsToggle":      "exerciseCanaryControlsRemoved",
+	"canaryChecksToggle":        "exerciseCanaryControlsRemoved",
+	"canaryInlineDetailPanel":   "exerciseCanaryControlsRemoved",
+	"canaryMitigationButton":    "exerciseCanaryControlsRemoved",
+	"orderReviewPanel":          "exerciseCanaryControlsRemoved",
+	"quickRiskPlanButton":       "exerciseCanaryControlsRemoved",
+	"quickReviewBlockersButton": "exerciseCanaryControlsRemoved",
+	"quickHeldActionsButton":    "exerciseCanaryControlsRemoved",
+	"quickAlertsButton":         "exerciseCanaryControlsRemoved",
+	"accountMenu":               "exerciseAccountPanel (account dropdown removed)",
+	"accountMenuToggle":         "exerciseAccountPanel (account dropdown removed)",
+	"marketPanel":               "exerciseMarketContext (old Market Context panel removed)",
+	"toolsPanel":                "assertDebugToolsRemoved",
 }
 
 func TestBrowserScriptIDsMatchSPA(t *testing.T) {

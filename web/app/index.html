@@ -123,46 +123,43 @@
 
       <section class="tab-panels" id="tabPanels" hidden>
       <section class="dashboard tab-panel" id="dashboard" data-tab-panel="monitor" role="tabpanel" aria-labelledby="tabMonitor">
-        <article class="panel signal-panel regime-panel weather-na" id="regimePanel">
+        <article class="panel signal-panel signal-panel--combined" id="signalPanel">
           <div class="panel-head">
-            <span>Market Regime</span>
-            <span class="panel-time" id="regimeAsOf">--</span>
-            <button class="panel-chevron" id="regimeDetailToggle" type="button" aria-expanded="false" aria-controls="regimeDetailPanel">
-              Detail
-            </button>
+            <span>Market &amp; Portfolio</span>
+            <span class="panel-time-group">
+              <span class="panel-time" id="regimeAsOf" title="Market regime freshness">--</span>
+              <span class="panel-time-sep" aria-hidden="true">·</span>
+              <span class="panel-time" id="canaryAsOf" title="Portfolio canary freshness">--</span>
+            </span>
           </div>
-          <div class="regime-summary weather-na" id="regimeSummaryCard">
-            <span>Market regime</span>
-            <b id="marketRegime">--</b>
-            <small id="marketRegimeSummary">Regime read</small>
-            <em id="marketRegimeMix">Waiting for market evidence</em>
-          </div>
-          <div class="regime-detail-panel" id="regimeDetailPanel" hidden>
-            <div class="regime-indicators" id="regimeIndicators"></div>
-            <div class="source-inline" id="regimeQualityRemarks" role="status" hidden>
-              <span>Data quality</span>
-              <b id="regimeQualityText">--</b>
+          <div class="signal-split" id="signalSplit">
+            <div class="signal-half signal-half--regime regime-summary weather-na" id="regimeSummaryCard" role="group" aria-label="Market regime">
+              <div class="signal-half__head">
+                <span class="signal-half__label">Market</span>
+                <button class="signal-half__toggle" id="regimeDetailToggle" type="button" aria-expanded="false" aria-controls="regimeDetailPanel">
+                  Detail
+                </button>
+              </div>
+              <b id="marketRegime">--</b>
+              <small id="marketRegimeSummary">Regime read</small>
             </div>
-          </div>
-        </article>
-
-        <article class="panel signal-panel canary-hero" id="canaryHero">
-          <div class="panel-head">
-            <span>Portfolio Canary</span>
-            <span class="panel-time" id="canaryAsOf">--</span>
-            <button class="panel-chevron" id="canaryDetailToggle" type="button" aria-expanded="false" aria-controls="canaryDetailPanel">
-              Show detail
-            </button>
-          </div>
-          <div class="canary-hero__grid">
-            <div class="canary-hero__copy">
-              <span class="canary-summary-label">Canary posture</span>
-              <strong id="canaryAction">--</strong>
-              <p id="canarySummary">Waiting for canary snapshot.</p>
+            <div class="signal-half signal-half--canary canary-hero" id="canaryHero" role="group" aria-label="Portfolio canary">
+              <div class="signal-half__head">
+                <span class="signal-half__label">Portfolio</span>
+                <button class="signal-half__toggle" id="canaryDetailToggle" type="button" aria-expanded="false" aria-controls="canaryDetailPanel">
+                  Show detail
+                </button>
+              </div>
+              <div class="canary-hero__grid">
+                <div class="canary-hero__copy">
+                  <strong id="canaryAction">--</strong>
+                  <p id="canarySummary">Waiting for canary snapshot.</p>
+                </div>
+              </div>
+              <div class="canary-summary-actions">
+                <span class="severity-pill" id="canarySeverity">--</span>
+              </div>
             </div>
-          </div>
-          <div class="canary-summary-actions">
-            <span class="severity-pill" id="canarySeverity">--</span>
           </div>
           <div class="alert-focus" id="selectedAlertPanel" hidden>
             <div>
@@ -173,30 +170,26 @@
             </div>
             <button class="text-button text-button--dark" id="clearSelectedAlertButton" type="button">Clear</button>
           </div>
-          <div class="detail-panel detail-panel--dark" id="canaryDetailPanel" hidden>
-            <div class="canary-actions" aria-label="Canary quick actions">
-              <button class="canary-action canary-action--primary" id="quickReviewBlockersButton" type="button">
-                <span>Review blockers</span>
-                <small>Open evidence</small>
-              </button>
-              <button class="canary-action" id="quickHeldActionsButton" type="button">
-                <span>Held actions</span>
-                <small>Open underlyings</small>
-              </button>
-              <button class="canary-action" id="quickAlertsButton" type="button">
-                <span>Alerts</span>
-                <small>Watch + act</small>
-              </button>
-            </div>
-            <div class="detail-grid" id="canaryDetailGrid"></div>
-            <div class="held-stress" id="heldStressPanel" hidden>
-              <div class="held-stress__head">
-                <span>Held stress</span>
-                <b id="heldStressSummary">--</b>
+          <div class="signal-detail-deck" id="signalDetailDeck">
+            <div class="signal-detail-col signal-detail-col--regime regime-detail-panel" id="regimeDetailPanel" hidden>
+              <div class="regime-indicators" id="regimeIndicators"></div>
+              <div class="source-inline" id="regimeQualityRemarks" role="status" hidden>
+                <span>Data quality</span>
+                <b id="regimeQualityText">--</b>
               </div>
-              <div class="held-stress__list" id="heldStressList"></div>
+              <p class="regime-governed-note" id="marketRegimeMix" hidden>Waiting for market evidence</p>
             </div>
-            <div class="detail-list" id="canaryDrivers"></div>
+            <div class="signal-detail-col signal-detail-col--canary detail-panel detail-panel--dark" id="canaryDetailPanel" hidden>
+              <div class="detail-grid" id="canaryDetailGrid"></div>
+              <div class="held-stress" id="heldStressPanel" hidden>
+                <div class="held-stress__head">
+                  <span>Held stress</span>
+                  <b id="heldStressSummary">--</b>
+                </div>
+                <div class="held-stress__list" id="heldStressList"></div>
+              </div>
+              <div class="detail-list" id="canaryDrivers"></div>
+            </div>
           </div>
         </article>
 
@@ -231,18 +224,14 @@
           <div class="market-flag-rail" id="protectionFlagRail" hidden></div>
           <section class="protection-derisk" id="protectionDerisk" hidden>
             <div class="protection-derisk__controls">
-              <span class="protection-derisk__label">Trim risk</span>
+              <span class="protection-derisk__label" title="Hedges are never touched — trimming one would increase net risk, not reduce it.">Trim delta-adjusted risk</span>
               <select id="protectionDeriskPercent" aria-label="Trim percentage">
                 <option value="25">25%</option>
                 <option value="50">50%</option>
                 <option value="75">75%</option>
                 <option value="100">100%</option>
               </select>
-              <label class="protection-derisk__hedge">
-                <input id="protectionDeriskProtectHedges" type="checkbox" checked>
-                Protect hedges
-              </label>
-              <button class="text-button" id="protectionDeriskPreview" type="button">Trim risk</button>
+              <button class="text-button" id="protectionDeriskPreview" type="button">Preview</button>
             </div>
             <div class="protection-derisk__basket" id="protectionDeriskBasket" hidden></div>
             <p class="protection-derisk__state" id="protectionDeriskState"></p>
@@ -367,22 +356,6 @@
           </div>
         </article>
 
-        <details class="panel orders-panel" id="ordersPanel" hidden open>
-          <summary class="panel-head">
-            <span class="panel-title-with-icon">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 7h14"></path>
-                <path d="M5 12h14"></path>
-                <path d="M5 17h8"></path>
-              </svg>
-              Open Orders
-            </span>
-            <span class="panel-time" id="ordersAsOf">--</span>
-          </summary>
-          <div class="orders-body">
-            <div class="orders-list" id="ordersOpenList"></div>
-          </div>
-        </details>
       </section>
 
       <section class="tab-panel tab-panel--alerts" id="alertsTab" data-tab-panel="alerts" role="tabpanel" aria-labelledby="tabAlerts" hidden>
@@ -441,6 +414,26 @@
             </div>
           </div>
         </details>
+      </section>
+
+      <section class="tab-panel tab-panel--orders" id="ordersTab" data-tab-panel="orders" role="tabpanel" aria-labelledby="tabOrders" hidden>
+        <article class="panel orders-panel" id="ordersPanel">
+          <div class="panel-head">
+            <span class="panel-title-with-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 7h14"></path>
+                <path d="M5 12h14"></path>
+                <path d="M5 17h8"></path>
+              </svg>
+              Open Orders
+            </span>
+            <span class="alert-active-count" id="ordersOpenCount">0 open</span>
+            <span class="panel-time" id="ordersAsOf">--</span>
+          </div>
+          <div class="orders-body">
+            <div class="orders-list" id="ordersOpenList"></div>
+          </div>
+        </article>
       </section>
 
       <section class="tab-panel tab-panel--settings" id="settingsTab" data-tab-panel="settings" role="tabpanel" aria-labelledby="tabSettings" hidden>
@@ -551,6 +544,14 @@
             <path d="M10 20a2.3 2.3 0 0 0 4 0"></path>
           </svg>
           <span>Alerts</span>
+        </button>
+        <button class="bottom-tab" id="tabOrders" type="button" data-tab="orders" aria-selected="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 7h14"></path>
+            <path d="M5 12h14"></path>
+            <path d="M5 17h8"></path>
+          </svg>
+          <span>Orders</span>
         </button>
         <button class="bottom-tab" id="tabSettings" type="button" data-tab="settings" aria-selected="false">
           <svg viewBox="0 0 24 24" aria-hidden="true">

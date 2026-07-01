@@ -176,7 +176,7 @@ func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 	if state.Stage == LifecycleConfirmedStress || state.Stage == LifecyclePanic {
 		state.ConfirmedBy = confirmedNames
 	}
-	if state.Readiness == "ready" && (regimeLifecycleHasDegradedInputs(*r) || regimeLifecycleHasWeakSourceRows(*r)) {
+	if state.Readiness == "ready" && (regimeLifecycleHasDegradedInputs(*r, cb) || regimeLifecycleHasWeakSourceRows(*r, cb)) {
 		state.Readiness = "degraded"
 		state.Confidence = capLifecycleConfidence(state.Confidence)
 	}
@@ -651,32 +651,94 @@ func regimeLifecycleConfidence(t regimeClusterTally) string {
 	}
 }
 
-func regimeLifecycleHasDegradedInputs(r RegimeSnapshotResult) bool {
+// regimeLifecycleHasDegradedInputs reports whether the served data-quality
+// disclosures flag a readiness-relevant problem. Partial/degraded clusters
+// (computing, unavailable, error, missing required fields, or gamma's own
+// compute-quality degradation) always count, on any cluster — those are
+// active data problems, not routine cadence. Stale clusters are exempted
+// only when named cluster is UNRANKED (cb scopes this the same way
+// regimeLifecycleHasWeakSourceRows does): gamma's documented off-hours
+// prior-NY-trading-date stale cache (gammaNotes in internal/daemon/regime.go;
+// docs/design/regime-calibration.md Part 3) is real, disclosed evidence (it
+// still rides on r.DataQuality for the --explain/status reader) but must not
+// by itself flip lifecycle readiness once the cluster is also context-only.
+// An item naming no clusters at all is never a stale-only item (see
+// regimeStatusQuality/gammaStatusQuality) and always degrades.
+func regimeLifecycleHasDegradedInputs(r RegimeSnapshotResult, cb RegimeClusterBands) bool {
 	for _, item := range r.DataQuality {
-		switch strings.ToLower(strings.TrimSpace(item.Status)) {
-		case RegimeStatusStale, "degraded", "partial":
+		if len(item.PartialClusters) > 0 || len(item.DegradedClusters) > 0 {
 			return true
+		}
+		switch strings.ToLower(strings.TrimSpace(item.Status)) {
+		case "degraded", "partial":
+			return true
+		case RegimeStatusStale:
+			if len(item.StaleClusters) == 0 {
+				return true
+			}
+			for _, name := range item.StaleClusters {
+				if regimeClusterNameIsRanked(cb, name) {
+					return true
+				}
+			}
 		}
 	}
 	return false
 }
 
-func regimeLifecycleHasWeakSourceRows(r RegimeSnapshotResult) bool {
-	statuses := []string{
-		r.VIXTermStructure.Status,
-		r.VolOfVol.Status,
-		r.HYGSPYDivergence.Status,
-		r.CreditSpreads.Status,
-		r.FundingStress.Status,
-		r.USDJPY.Status,
-		r.GammaZero.Status,
-		r.Breadth.Status,
+// regimeClusterNameIsRanked reports whether the named cluster (lowercase
+// wire name, e.g. "gamma", or the "FX" title-case used by
+// staleRegimeClusters/partialRegimeClusters) currently carries a ranked
+// (green/yellow/red) confirmed band rather than being unranked/context-only.
+func regimeClusterNameIsRanked(cb RegimeClusterBands, name string) bool {
+	for i, clusterName := range RegimeClusterNames {
+		if strings.EqualFold(clusterName, name) && i < len(cb.Confirmed) {
+			return cb.Confirmed[i] != ""
+		}
 	}
-	for _, status := range statuses {
-		switch strings.ToLower(strings.TrimSpace(status)) {
-		case "", RegimeStatusOK:
-		default:
-			return true
+	// Unknown name (e.g. a non-cluster-scoped surface) — treat as ranked so
+	// it still degrades readiness rather than being silently dropped.
+	return true
+}
+
+// regimeLifecycleHasWeakSourceRows reports whether any source row carries a
+// non-ok status that should degrade readiness. computing/unavailable/error
+// always count, on any cluster — those are active data problems. stale is
+// exempted only when the row's cluster is UNRANKED (cb.Confirmed == ""):
+// gamma going status=stale off-hours from an expected prior-NY-trading-date
+// cache is the documented case (docs/design/regime-calibration.md Part 3;
+// internal/daemon/regime.go's gammaNotes: "a prior-date cache serves
+// status=stale, stays visible, and warns only") where the cluster is also
+// marked context_only/unranked (rankableLifecycleGammaBand), so it never
+// entered the ranked tally in the first place. A RANKED cluster's source
+// (vol/credit/funding/fx/breadth, or gamma once it is rankable) going stale
+// is still a real data-quality problem and keeps degrading, same as before.
+func regimeLifecycleHasWeakSourceRows(r RegimeSnapshotResult, cb RegimeClusterBands) bool {
+	rows := []struct {
+		cluster  int
+		statuses []string
+	}{
+		{RegimeClusterEquityVol, []string{r.VIXTermStructure.Status, r.VolOfVol.Status}},
+		{RegimeClusterCredit, []string{r.HYGSPYDivergence.Status, r.CreditSpreads.Status}},
+		{RegimeClusterFunding, []string{r.FundingStress.Status}},
+		{RegimeClusterFX, []string{r.USDJPY.Status}},
+		{RegimeClusterGamma, []string{r.GammaZero.Status}},
+		{RegimeClusterBreadth, []string{r.Breadth.Status}},
+	}
+	for _, row := range rows {
+		ranked := row.cluster < len(cb.Confirmed) && cb.Confirmed[row.cluster] != ""
+		for _, status := range row.statuses {
+			switch strings.ToLower(strings.TrimSpace(status)) {
+			case "", RegimeStatusOK:
+			case RegimeStatusStale:
+				if ranked {
+					return true
+				}
+				// Unranked cluster's cache went stale (expected off-hours
+				// behavior) — context-only evidence, not a readiness input.
+			default:
+				return true
+			}
 		}
 	}
 	return false
