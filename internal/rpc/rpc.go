@@ -2372,14 +2372,20 @@ type UnderlyingExposure struct {
 // zero as "show em-dash" for non-money fields like Cushion to avoid
 // fabricating signal.
 //
-// DailyPnL / DailyPnLUnrealized / DailyPnLRealized are populated from
-// the gateway's reqPnL stream (TWS msg 94): start-of-trading-day to now.
-// Distinct from the session-running UnrealizedPnL / RealizedPnL above.
+// DailyPnL / PnLUnrealizedTotal / PnLRealizedTotal are populated from
+// the gateway's reqPnL stream (TWS msg 94). DailyPnL is start-of-
+// trading-day to now — the figure TWS shows in the portfolio header.
+// PnLUnrealizedTotal / PnLRealizedTotal come from the same msg 94 frame
+// (fields 3 & 4) but are the account's TOTAL unrealized / realized P&L
+// (inception to now), NOT a decomposition of DailyPnL — they do not sum
+// to it. They measure the same quantity as the session-running
+// UnrealizedPnL / RealizedPnL above but arrive on a different feed
+// (reqPnL vs account-updates), so the two can legitimately differ.
 // All three are *float64 — nil means "no data yet" (pre-handshake,
 // before the first stream frame), "no entitlement" (the gateway doesn't
 // emit PnL for unentitled accounts), or "DBL_MAX sentinel" (gateway
-// hasn't computed the slice). Never zero-substituted. DailyPnLUnrealized
-// / DailyPnLRealized stay nil on older server versions that emit only
+// hasn't computed the slice). Never zero-substituted. PnLUnrealizedTotal
+// / PnLRealizedTotal stay nil on older server versions that emit only
 // the bare dailyPnL field.
 type AccountResult struct {
 	AccountID            string             `json:"account_id"`
@@ -2401,8 +2407,8 @@ type AccountResult struct {
 	LookAheadAvailable   float64            `json:"look_ahead_available_funds"`
 	LookAheadExcess      float64            `json:"look_ahead_excess_liquidity"`
 	DailyPnL             *float64           `json:"daily_pnl,omitempty"`
-	DailyPnLUnrealized   *float64           `json:"daily_pnl_unrealized,omitempty"`
-	DailyPnLRealized     *float64           `json:"daily_pnl_realized,omitempty"`
+	PnLUnrealizedTotal   *float64           `json:"pnl_unrealized_total,omitempty"`
+	PnLRealizedTotal     *float64           `json:"pnl_realized_total,omitempty"`
 	CurrencyExposure     []CurrencyExposure `json:"currency_exposure,omitempty"`
 	// DataType is reserved for account-feed state; the account-summary
 	// path is gateway-direct with no live/delayed dimension and the field

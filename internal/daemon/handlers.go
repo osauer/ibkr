@@ -23,6 +23,13 @@ import (
 
 // handleAccountSummary issues a one-shot reqAccountSummary and converts the
 // result into the wire shape exposed to the CLI.
+// dailyPnLStaleGrace is how old the account daily-P&L frame may be before
+// handleAccountSummary asks the connector to self-heal the reqPnL stream (see
+// Connector.MaybeResubscribeStaleDailyPnL). Matches the connector's own
+// staleness window; the daemon pre-checks it to skip the calendar lookup on the
+// common fresh path.
+const dailyPnLStaleGrace = 90 * time.Second
+
 func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, error) {
 	c := s.gatewayConnector()
 	if c == nil {
@@ -110,8 +117,28 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 	}
 	if ok {
 		res.DailyPnL = snap.DailyPnL
-		res.DailyPnLUnrealized = snap.UnrealizedDailyPnL
-		res.DailyPnLRealized = snap.RealizedDailyPnL
+		res.PnLUnrealizedTotal = snap.UnrealizedTotalPnL
+		res.PnLRealizedTotal = snap.RealizedTotalPnL
+		// Self-heal a silently-stalled reqPnL stream. The gateway can stop
+		// feeding the daily-P&L subscription (observed after a pre-market
+		// subscribe that never resumed post-open) while account-updates keep
+		// flowing — NLV stays live but daily P&L freezes. SubscribeAccountPnL is
+		// idempotent and cannot revive it, so the connector force-rebuilds, gated
+		// on market hours (off-hours the stream idles legitimately) and throttled.
+		// When it fires, wait briefly for the fresh frame before returning.
+		if !snap.AsOf.IsZero() && time.Since(snap.AsOf) >= dailyPnLStaleGrace {
+			marketOpen := false
+			if ses, sErr := marketcal.New().SessionAt(marketcal.MarketUSEquity, time.Now()); sErr == nil {
+				marketOpen = ses.IsOpen
+			}
+			if c.MaybeResubscribeStaleDailyPnL(marketOpen) {
+				if fresh, freshOK := waitForAccountDailyPnL(ctx, c, time.Now().Add(750*time.Millisecond)); freshOK {
+					res.DailyPnL = fresh.DailyPnL
+					res.PnLUnrealizedTotal = fresh.UnrealizedTotalPnL
+					res.PnLRealizedTotal = fresh.RealizedTotalPnL
+				}
+			}
+		}
 	}
 	return res, nil
 }

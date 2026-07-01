@@ -117,6 +117,24 @@ type Server struct {
 	// `ibkr status` waits for handshake).
 	lastDiscoveryWarn string
 
+	// lastEndpointResolvedSig / lastGatewayUnreachable / lastNoEndpointUsable
+	// dedupe the connect-retry log lines the same way lastDiscoveryWarn dedupes
+	// discovery. While the gateway is down the daemon rebuilds the connector
+	// every cycle (pinned port → discovery returns the same endpoint with
+	// derr==nil each time), and without this each cycle re-emits the same
+	// "endpoint resolved" INFO and "gateway not connected" / "no endpoint
+	// usable" WARN lines — ~50k lines over a 13.5h off-hours window. Each holds
+	// the last *surfaced* signature: a matching repeat drops to Debug, a
+	// changed signature logs afresh. The two unreachable verdicts are cleared
+	// on a successful handshake (resetConnectVerdicts) so the next outage logs
+	// its transition again; they are deliberately NOT cleared at the
+	// per-candidate / triggerReconnect lastConnectError resets, which fire
+	// mid-outage and would defeat the dedupe. lastEndpointResolvedSig is
+	// value-keyed on the endpoint and needs no reset.
+	lastEndpointResolvedSig string
+	lastGatewayUnreachable  string
+	lastNoEndpointUsable    string
+
 	// connectInFlight is true while a connect attempt (initial or reconnect)
 	// is running its handshake. triggerReconnect refuses to fire while this
 	// is set so a stream of `ibkr status` calls during a wedged-gateway
@@ -1336,8 +1354,18 @@ func (s *Server) connectWithFailover(ctx context.Context, primary discover.Endpo
 	)
 	s.mu.Lock()
 	s.lastConnectError = hint
+	// Dedupe like the per-candidate verdict above: exhaustion recurs every
+	// reconnect cycle while the gateway is down, so log once per changed
+	// verdict and demote repeats to Debug.
+	verdictChanged := s.lastNoEndpointUsable != hint
+	s.lastNoEndpointUsable = hint
 	s.mu.Unlock()
-	s.logger.Warnf("Daemon up but no endpoint usable: %s", hint)
+	const format = "Daemon up but no endpoint usable: %s"
+	if verdictChanged {
+		s.logger.Warnf(format, hint)
+	} else {
+		s.logger.Debugf(format, hint)
+	}
 }
 
 // tryOneHandshake runs a single candidate's connect under the watchdog
@@ -1406,8 +1434,20 @@ func (s *Server) tryOneHandshake(ctx context.Context, a connectAttempter, ep dis
 		}
 		s.mu.Lock()
 		s.lastConnectError = hint
+		// Dedupe: the daemon rebuilds and re-fails against a down gateway every
+		// reconnect cycle. Log the transition once at WARN and demote identical
+		// repeats to Debug. Compare-and-set under the same lock as
+		// lastConnectError so two racing status-driven reconnects can't both
+		// decide "changed" (see resetConnectVerdicts for the recovery reset).
+		verdictChanged := s.lastGatewayUnreachable != hint
+		s.lastGatewayUnreachable = hint
 		s.mu.Unlock()
-		s.logger.Warnf("Daemon up but gateway not connected: %s", hint)
+		const format = "Daemon up but gateway not connected: %s"
+		if verdictChanged {
+			s.logger.Warnf(format, hint)
+		} else {
+			s.logger.Debugf(format, hint)
+		}
 		return false
 	}
 	return true
@@ -1431,6 +1471,22 @@ func (s *Server) gatewayUnavailableError() error {
 	return fmt.Errorf("%w: %s", ibkrlib.ErrIBKRUnavailable, lastErr)
 }
 
+// resetConnectVerdicts clears the connect-retry verdict dedupe on a successful
+// handshake so the next unreachable episode logs its transition afresh. It
+// returns true iff the daemon was in a logged-unreachable episode, so the
+// caller can emit the one-line recovery bookend. lastEndpointResolvedSig is
+// intentionally left intact — it is value-keyed on the endpoint, not the
+// episode, and re-logs only when the endpoint actually changes. Caller must not
+// hold s.mu.
+func (s *Server) resetConnectVerdicts() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	was := s.lastGatewayUnreachable != "" || s.lastNoEndpointUsable != ""
+	s.lastGatewayUnreachable = ""
+	s.lastNoEndpointUsable = ""
+	return was
+}
+
 // postConnectSetup runs the best-effort initialization that follows a
 // successful handshake (market-data type + account-updates stream).
 // Failures here are non-fatal: snapshot data still flows; only the
@@ -1439,6 +1495,14 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	s.mu.Lock()
 	s.lastConnectError = ""
 	s.mu.Unlock()
+	// A successful handshake ends any unreachable episode: clear the verdict
+	// dedupe so a later outage logs its transition afresh, and log a one-line
+	// recovery bookend iff we were mid-episode (so a plain first connect stays
+	// quiet).
+	if s.resetConnectVerdicts() {
+		s.logger.Infof("Gateway reachable again at %s:%d after retrying while it was down",
+			ep.Host, ep.Port)
+	}
 	s.logger.Infof("Connected to IB Gateway %s:%d (clientID=%d, tls=%v)",
 		ep.Host, ep.Port, ep.ClientID, a.UsingTLS())
 
@@ -1878,6 +1942,7 @@ func (s *Server) reconnectFlow(ctx context.Context) {
 	}
 
 	ep, derr := discover.Resolve(ctx, partialFromConfig(s.cfg.Gateway))
+	endpointSig := fmt.Sprintf("%s:%d tls=%v", ep.Host, ep.Port, ep.TLS)
 	s.mu.Lock()
 	s.endpoint = ep
 	if derr != nil {
@@ -1891,6 +1956,15 @@ func (s *Server) reconnectFlow(ctx context.Context) {
 		s.lastDiscoveryWarn = ""
 	}
 	curWarn := s.lastDiscoveryWarn
+	// Dedupe the "endpoint resolved" INFO: with a pinned port this resolves to
+	// the same endpoint every reconnect cycle, so log once per changed endpoint
+	// and demote identical repeats to Debug. Captured under the lock as a local
+	// so the log decision can't race a concurrent reconnect.
+	endpointChanged := false
+	if derr == nil {
+		endpointChanged = s.lastEndpointResolvedSig != endpointSig
+		s.lastEndpointResolvedSig = endpointSig
+	}
 	s.mu.Unlock()
 	if derr != nil {
 		// Same verdict as the previous attempt → already logged; stay quiet.
@@ -1902,8 +1976,12 @@ func (s *Server) reconnectFlow(ctx context.Context) {
 		}
 		return
 	}
-	s.logger.Infof("Reconnect: endpoint resolved: %s:%d (port=%s, tls=%v %s, alternates=%v)",
-		ep.Host, ep.Port, ep.PortOrigin, ep.TLS, ep.TLSOrigin, ep.Alternates)
+	const endpointFormat = "Reconnect: endpoint resolved: %s:%d (port=%s, tls=%v %s, alternates=%v)"
+	if endpointChanged {
+		s.logger.Infof(endpointFormat, ep.Host, ep.Port, ep.PortOrigin, ep.TLS, ep.TLSOrigin, ep.Alternates)
+	} else {
+		s.logger.Debugf(endpointFormat, ep.Host, ep.Port, ep.PortOrigin, ep.TLS, ep.TLSOrigin, ep.Alternates)
+	}
 
 	s.connectWithFailover(ctx, ep)
 }

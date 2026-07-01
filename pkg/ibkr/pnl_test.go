@@ -11,9 +11,12 @@ import (
 )
 
 // TestParseAccountPnL_FullPayload covers the modern wire shape where the
-// gateway emits dailyPnL + unrealizedPnL + realizedPnL.
+// gateway emits dailyPnL + unrealizedPnL + realizedPnL. Fields 3 & 4
+// (unrealized/realized) are the account's inception-to-now TOTALS, not a
+// decomposition of dailyPnL — the fixture deliberately picks values that
+// do NOT sum to dailyPnL so nothing bakes in that false invariant.
 func TestParseAccountPnL_FullPayload(t *testing.T) {
-	fields := []string{"94", "42", "1247.30", "962.10", "285.20"}
+	fields := []string{"94", "42", "621.30", "-44485.00", "1830.00"}
 	reqID, snap, ok := parseAccountPnLFields(fields)
 	if !ok {
 		t.Fatalf("parseAccountPnLFields ok=false")
@@ -21,14 +24,14 @@ func TestParseAccountPnL_FullPayload(t *testing.T) {
 	if reqID != 42 {
 		t.Errorf("reqID = %d, want 42", reqID)
 	}
-	if snap.DailyPnL == nil || *snap.DailyPnL != 1247.30 {
-		t.Errorf("DailyPnL = %v, want 1247.30", snap.DailyPnL)
+	if snap.DailyPnL == nil || *snap.DailyPnL != 621.30 {
+		t.Errorf("DailyPnL = %v, want 621.30", snap.DailyPnL)
 	}
-	if snap.UnrealizedDailyPnL == nil || *snap.UnrealizedDailyPnL != 962.10 {
-		t.Errorf("UnrealizedDailyPnL = %v, want 962.10", snap.UnrealizedDailyPnL)
+	if snap.UnrealizedTotalPnL == nil || *snap.UnrealizedTotalPnL != -44485.00 {
+		t.Errorf("UnrealizedTotalPnL = %v, want -44485.00", snap.UnrealizedTotalPnL)
 	}
-	if snap.RealizedDailyPnL == nil || *snap.RealizedDailyPnL != 285.20 {
-		t.Errorf("RealizedDailyPnL = %v, want 285.20", snap.RealizedDailyPnL)
+	if snap.RealizedTotalPnL == nil || *snap.RealizedTotalPnL != 1830.00 {
+		t.Errorf("RealizedTotalPnL = %v, want 1830.00", snap.RealizedTotalPnL)
 	}
 	if snap.AsOf.IsZero() {
 		t.Errorf("AsOf should be set")
@@ -49,11 +52,11 @@ func TestParseAccountPnL_ShortPayload(t *testing.T) {
 	if snap.DailyPnL == nil || *snap.DailyPnL != 100.00 {
 		t.Errorf("DailyPnL = %v, want 100.00", snap.DailyPnL)
 	}
-	if snap.UnrealizedDailyPnL != nil {
-		t.Errorf("UnrealizedDailyPnL = %v, want nil", snap.UnrealizedDailyPnL)
+	if snap.UnrealizedTotalPnL != nil {
+		t.Errorf("UnrealizedTotalPnL = %v, want nil", snap.UnrealizedTotalPnL)
 	}
-	if snap.RealizedDailyPnL != nil {
-		t.Errorf("RealizedDailyPnL = %v, want nil", snap.RealizedDailyPnL)
+	if snap.RealizedTotalPnL != nil {
+		t.Errorf("RealizedTotalPnL = %v, want nil", snap.RealizedTotalPnL)
 	}
 }
 
@@ -70,11 +73,11 @@ func TestParseAccountPnL_DBLMAXSentinel(t *testing.T) {
 	if snap.DailyPnL != nil {
 		t.Errorf("DailyPnL = %v, want nil (DBL_MAX sentinel)", snap.DailyPnL)
 	}
-	if snap.UnrealizedDailyPnL == nil || *snap.UnrealizedDailyPnL != 5.00 {
-		t.Errorf("UnrealizedDailyPnL = %v, want 5.00", snap.UnrealizedDailyPnL)
+	if snap.UnrealizedTotalPnL == nil || *snap.UnrealizedTotalPnL != 5.00 {
+		t.Errorf("UnrealizedTotalPnL = %v, want 5.00", snap.UnrealizedTotalPnL)
 	}
-	if snap.RealizedDailyPnL != nil {
-		t.Errorf("RealizedDailyPnL = %v, want nil (DBL_MAX sentinel)", snap.RealizedDailyPnL)
+	if snap.RealizedTotalPnL != nil {
+		t.Errorf("RealizedTotalPnL = %v, want nil (DBL_MAX sentinel)", snap.RealizedTotalPnL)
 	}
 }
 
@@ -94,7 +97,10 @@ func TestParseAccountPnL_Malformed(t *testing.T) {
 }
 
 func TestParsePositionPnL_FullPayload(t *testing.T) {
-	fields := []string{"95", "11", "100", "25.50", "20.00", "5.50", "9999.00"}
+	// Fields 4 & 5 (unrealized/realized) are the position's inception-to-now
+	// TOTALS, not a decomposition of dailyPnL — values chosen so they do not
+	// sum to dailyPnL.
+	fields := []string{"95", "11", "100", "25.50", "-1440.00", "310.00", "9999.00"}
 	reqID, snap, ok := parsePositionPnLFields(fields)
 	if !ok {
 		t.Fatalf("ok=false")
@@ -105,11 +111,11 @@ func TestParsePositionPnL_FullPayload(t *testing.T) {
 	if snap.DailyPnL == nil || *snap.DailyPnL != 25.50 {
 		t.Errorf("DailyPnL = %v, want 25.50", snap.DailyPnL)
 	}
-	if snap.UnrealizedDailyPnL == nil || *snap.UnrealizedDailyPnL != 20.00 {
-		t.Errorf("UnrealizedDailyPnL = %v", snap.UnrealizedDailyPnL)
+	if snap.UnrealizedTotalPnL == nil || *snap.UnrealizedTotalPnL != -1440.00 {
+		t.Errorf("UnrealizedTotalPnL = %v", snap.UnrealizedTotalPnL)
 	}
-	if snap.RealizedDailyPnL == nil || *snap.RealizedDailyPnL != 5.50 {
-		t.Errorf("RealizedDailyPnL = %v", snap.RealizedDailyPnL)
+	if snap.RealizedTotalPnL == nil || *snap.RealizedTotalPnL != 310.00 {
+		t.Errorf("RealizedTotalPnL = %v", snap.RealizedTotalPnL)
 	}
 }
 
@@ -285,13 +291,14 @@ func TestHandlePnL_UpdatesCache(t *testing.T) {
 	c.pnl.accountReqID = 42
 	c.pnl.accountAcct = "U1"
 
-	c.handlePnL([]string{"94", "42", "1000.00", "800.00", "200.00"})
+	// Totals (fields 3 & 4) deliberately do not sum to dailyPnL.
+	c.handlePnL([]string{"94", "42", "310.00", "-12750.00", "980.00"})
 
 	snap, ok := c.AccountDailyPnL()
 	if !ok {
 		t.Fatalf("ok=false after handler")
 	}
-	if snap.DailyPnL == nil || *snap.DailyPnL != 1000.00 {
+	if snap.DailyPnL == nil || *snap.DailyPnL != 310.00 {
 		t.Errorf("DailyPnL = %v", snap.DailyPnL)
 	}
 }
@@ -304,7 +311,7 @@ func TestHandlePnL_StaleReqIDIgnored(t *testing.T) {
 	c.pnl.accountAcct = "U1"
 
 	// Stale frame from old reqID 99 must be dropped without populating cache.
-	c.handlePnL([]string{"94", "99", "1000.00", "800.00", "200.00"})
+	c.handlePnL([]string{"94", "99", "310.00", "-12750.00", "980.00"})
 
 	if !c.pnl.account.AsOf.IsZero() {
 		t.Errorf("stale frame leaked into cache: AsOf=%v", c.pnl.account.AsOf)
@@ -317,7 +324,8 @@ func TestHandlePnLSingle_UpdatesPositionCache(t *testing.T) {
 	c.pnl.positionReqIDs[265598] = 17
 	c.pnl.positionByReqID[17] = 265598
 
-	c.handlePnLSingle([]string{"95", "17", "100", "12.50", "10.00", "2.50", "9999.00"})
+	// Totals (fields 4 & 5) deliberately do not sum to dailyPnL.
+	c.handlePnLSingle([]string{"95", "17", "100", "12.50", "-880.00", "140.00", "9999.00"})
 
 	snap, ok := c.PositionDailyPnL(265598)
 	if !ok {

@@ -105,18 +105,23 @@ func renderAccountTextTo(env *Env, out io.Writer, a *rpc.AccountResult) int {
 		fmt.Fprintf(out, "    Excess liquidity        %s\n", env.formatMoneyNegCcyRight(a.LookAheadExcess, base, valW))
 	}
 
-	// Daily P&L decomposition (unrealized / realized) sits at the bottom
-	// because the headline figure is already on the hero row. Optional —
-	// older gateways don't supply the breakdown.
-	if a.DailyPnLUnrealized != nil || a.DailyPnLRealized != nil {
-		fmt.Fprintln(out, env.dim("  Daily P&L breakdown"))
-		if a.DailyPnLUnrealized != nil {
-			fmt.Fprintf(out, "    of which unrealized   %s\n",
-				env.formatPnLCcyPtrRight(a.DailyPnLUnrealized, base, valW))
+	// reqPnL-stream totals sit at the bottom because the headline figure is
+	// already on the hero row. These are the account's TOTAL unrealized /
+	// realized P&L from the same msg 94 frame as the Daily P&L headline
+	// (inception-to-now), NOT a breakdown of the daily figure — they do not
+	// sum to it. They measure the same quantity as the Session P&L block
+	// above but come off the reqPnL feed rather than account-updates, so the
+	// two can legitimately differ. Optional — older gateways emit only the
+	// bare daily figure.
+	if a.PnLUnrealizedTotal != nil || a.PnLRealizedTotal != nil {
+		fmt.Fprintln(out, env.dim("  Total P&L (reqPnL stream)"))
+		if a.PnLUnrealizedTotal != nil {
+			fmt.Fprintf(out, "    Unrealized              %s\n",
+				env.formatPnLCcyPtrRight(a.PnLUnrealizedTotal, base, valW))
 		}
-		if a.DailyPnLRealized != nil {
-			fmt.Fprintf(out, "    of which realized     %s\n",
-				env.formatPnLCcyPtrRight(a.DailyPnLRealized, base, valW))
+		if a.PnLRealizedTotal != nil {
+			fmt.Fprintf(out, "    Realized                %s\n",
+				env.formatPnLCcyPtrRight(a.PnLRealizedTotal, base, valW))
 		}
 	}
 

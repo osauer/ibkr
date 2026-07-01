@@ -94,8 +94,8 @@ func fixtureAccount() *rpc.AccountResult {
 		LookAheadAvailable:   124055.21,
 		LookAheadExcess:      124055.21,
 		DailyPnL:             f64(1247.30),
-		DailyPnLUnrealized:   f64(962.10),
-		DailyPnLRealized:     f64(285.20),
+		PnLUnrealizedTotal:   f64(-44485.00),
+		PnLRealizedTotal:     f64(1830.00),
 		CurrencyExposure: []rpc.CurrencyExposure{
 			{Currency: "USD", NetLiquidationCcy: 92418.07, ExchangeRate: 1.0823, NetLiquidationBase: 85398.92},
 			{Currency: "GBP", NetLiquidationCcy: 12061.40, ExchangeRate: 1.1718, NetLiquidationBase: 14034.83},
@@ -405,8 +405,8 @@ func fixtureCanary() *rpc.CanaryResult {
 	acct.LookAheadAvailable = acct.NetLiquidation
 	acct.LookAheadExcess = acct.NetLiquidation
 	acct.DailyPnL = f64(0)
-	acct.DailyPnLUnrealized = f64(0)
-	acct.DailyPnLRealized = f64(0)
+	acct.PnLUnrealizedTotal = f64(0)
+	acct.PnLRealizedTotal = f64(0)
 
 	pos := &rpc.PositionsResult{
 		AsOf:      regime.AsOf,

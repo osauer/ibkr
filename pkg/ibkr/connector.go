@@ -65,6 +65,18 @@ type Connector struct {
 	orderLifecycleMu sync.RWMutex
 	orderLifecycle   []func(OrderLifecycleEvent)
 
+	// orderStatusLogSig dedupes the high-frequency order-status log line.
+	// IBKR re-sends orderStatus frames for unchanged working orders many
+	// times per second (a resting PreSubmitted GTC trail can churn for
+	// hours), and logging each at INFO grew ibkr-daemon.log into the
+	// gigabytes. We remember the last-logged (status|filled|remaining)
+	// signature per broker order id and demote verbatim repeats to Debug so
+	// INFO carries only genuine transitions. Purely a logging concern —
+	// order state tracking above is unaffected. Guarded by its own mutex so
+	// the log path never widens the orderMu critical section.
+	orderStatusLogMu  sync.Mutex
+	orderStatusLogSig map[string]string
+
 	// Lightweight contract details cache to improve routing during OOH sessions
 	contractMu         sync.RWMutex
 	contractCache      map[string]ContractDetailsLite
@@ -92,6 +104,13 @@ type Connector struct {
 	acctUpdatesMu     sync.Mutex
 	acctUpdatesLastAt time.Time
 	acctUpdatesNow    func() time.Time
+
+	// pnlResubMu guards the daily-P&L resubscribe throttle (see
+	// MaybeResubscribeStaleDailyPnL). pnlResubNow is a test seam, nil
+	// meaning time.Now (same pattern as acctUpdatesNow).
+	pnlResubMu     sync.Mutex
+	pnlResubLastAt time.Time
+	pnlResubNow    func() time.Time
 
 	// Option IV tracking (by underlying symbol or per-contract key)
 	optMu           sync.RWMutex
@@ -484,6 +503,7 @@ func NewConnector(config *ConnectorConfig) *Connector {
 		reqIDMap:          make(map[int]string),
 		openOrders:        make(map[string]*Order),
 		brokerOrderIndex:  make(map[string]string),
+		orderStatusLogSig: make(map[string]string),
 		contractCache:     make(map[string]ContractDetailsLite),
 		optIV:             make(map[string]float64),
 		optReqIDs:         make(map[int]string),
@@ -535,7 +555,9 @@ func (c *Connector) useInactiveSymbolStore(ctx context.Context, store inactiveSy
 	c.inactiveMu.Unlock()
 
 	if loaded > 0 {
-		c.logInfo("Loaded %d inactive symbols from store", loaded)
+		// Debug, not Info: re-emitted on every reconnect-cycle rebuild while
+		// the gateway is down (see the demotion note in Start).
+		c.logDebug("Loaded %d inactive symbols from store", loaded)
 	}
 	return nil
 }
@@ -1099,13 +1121,21 @@ func (c *Connector) Start(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 
-	c.logInfo("Starting IBKR connector (client_id: %d)", c.config.PreferredClientID)
+	// Connector start/stop narration and the degraded-connect lines log at
+	// Debug: the daemon rebuilds the connector on every reconnect cycle while
+	// the gateway is down, so at INFO/WARN this floods ibkr-daemon.log
+	// (~4k×/night off-hours). A *successful* start still logs "started
+	// successfully" at INFO below. The degraded-connect WARN is demoted too:
+	// it fires 1:1 with the daemon's gateway-unreachable verdict (which is
+	// deduped to one WARN per outage), and programmatic callers read the
+	// failure via LastError() rather than this log line.
+	c.logDebug("Starting IBKR connector (client_id: %d)", c.config.PreferredClientID)
 
 	c.attachConnectionHooks(c.conn)
 
 	if err := c.conn.Connect(ctx); err != nil {
-		c.logWarn("Failed to connect to IBKR: %v", err)
-		c.logWarn("Running in degraded mode without IBKR connection")
+		c.logDebug("Failed to connect to IBKR: %v", err)
+		c.logDebug("Running in degraded mode without IBKR connection")
 		c.mu.Lock()
 		c.running = true
 		c.lastError = err
@@ -2126,7 +2156,9 @@ func (c *Connector) Stop() error {
 	c.running = false
 	c.mu.Unlock()
 
-	c.logInfo("Stopping IBKR connector")
+	// Debug, not Info: the daemon calls Stop on every reconnect-cycle teardown
+	// while the gateway is down (see the demotion note in Start).
+	c.logDebug("Stopping IBKR connector")
 
 	// Cancel any live PnL subscriptions before the connection drops.
 	// Best-effort: the gateway drops subscriptions on socket close anyway,
@@ -2140,7 +2172,7 @@ func (c *Connector) Stop() error {
 		}
 	}
 
-	c.logInfo("IBKR connector stopped")
+	c.logDebug("IBKR connector stopped")
 
 	return nil
 }
@@ -5230,8 +5262,7 @@ func (c *Connector) handleOrderStatus(fields []string) {
 	avgPx, _ := strconv.ParseFloat(avgFillPrice, 64)
 	lastPx, _ := strconv.ParseFloat(lastFillPrice, 64)
 
-	c.logInfo("Order status - ID: %s, Status: %s, Filled: %.4f, Remaining: %.4f, AvgPrice: %.4f",
-		orderID, status, filledQty, remainingQty, avgPx)
+	c.logOrderStatus(orderID, status, filledQty, remainingQty, avgPx)
 
 	c.orderMu.Lock()
 	internalID, ok := c.brokerOrderIndex[orderID]
@@ -5268,12 +5299,67 @@ func (c *Connector) handleOrderStatus(fields []string) {
 	}
 
 	// Remove from open orders once terminal
-	if isTerminalOrderStatus(order.Status) {
+	terminal := isTerminalOrderStatus(order.Status)
+	if terminal {
 		delete(c.openOrders, internalID)
 		delete(c.brokerOrderIndex, orderID)
 	}
 
 	c.orderMu.Unlock()
+
+	// Drop the log-dedupe signature outside orderMu so a later frame or a
+	// reused broker id logs fresh at INFO instead of being swallowed as a
+	// repeat.
+	if terminal {
+		c.forgetOrderStatusLog(orderID)
+	}
+}
+
+// logOrderStatus emits the order-status line, demoting verbatim repeats to
+// Debug. IBKR re-sends orderStatus frames for unchanged working orders many
+// times per second, so only a change in status/filled/remaining reaches INFO;
+// the steady-state churn stays at Debug, which the default level drops. This
+// governs the log line alone — state tracking in handleOrderStatus is
+// unaffected.
+func (c *Connector) logOrderStatus(orderID, status string, filled, remaining, avgPx float64) {
+	const format = "Order status - ID: %s, Status: %s, Filled: %.4f, Remaining: %.4f, AvgPrice: %.4f"
+	if c.orderStatusChanged(orderID, orderStatusLogSignature(status, filled, remaining)) {
+		c.logInfo(format, orderID, status, filled, remaining, avgPx)
+		return
+	}
+	c.logDebug(format, orderID, status, filled, remaining, avgPx)
+}
+
+// orderStatusLogSignature is the dedupe key for the order-status log line:
+// only a change in one of these fields is worth an INFO line. avgFillPrice is
+// omitted deliberately — it moves only alongside filled/remaining.
+func orderStatusLogSignature(status string, filled, remaining float64) string {
+	return fmt.Sprintf("%s|%.4f|%.4f", status, filled, remaining)
+}
+
+// orderStatusChanged reports whether this order-status frame differs from the
+// last one logged for orderID, recording the new signature when it does. True
+// means the frame earns an INFO line; false means a verbatim repeat that
+// belongs at Debug.
+func (c *Connector) orderStatusChanged(orderID, sig string) bool {
+	c.orderStatusLogMu.Lock()
+	defer c.orderStatusLogMu.Unlock()
+	if c.orderStatusLogSig == nil {
+		c.orderStatusLogSig = make(map[string]string)
+	} else if c.orderStatusLogSig[orderID] == sig {
+		return false
+	}
+	c.orderStatusLogSig[orderID] = sig
+	return true
+}
+
+// forgetOrderStatusLog drops the dedupe signature for a terminal or removed
+// order so its slot does not linger in the map and a later reused broker id
+// logs fresh.
+func (c *Connector) forgetOrderStatusLog(orderID string) {
+	c.orderStatusLogMu.Lock()
+	delete(c.orderStatusLogSig, orderID)
+	c.orderStatusLogMu.Unlock()
 }
 
 func (c *Connector) notifyOrderLifecycle(fields []string) {

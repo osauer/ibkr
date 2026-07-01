@@ -14,30 +14,37 @@ import (
 // Fields:
 //   - DailyPnL: start-of-trading-day to now total P&L (this is the
 //     value TWS shows in the portfolio header).
-//   - UnrealizedDailyPnL, RealizedDailyPnL: the day's swing decomposed.
-//     Distinct from the session-running unrealized/realized totals on
-//     reqAccountUpdates / reqAccountSummary — the latter are inception
-//     to today, not start-of-day to today.
+//   - UnrealizedTotalPnL, RealizedTotalPnL: the account's TOTAL
+//     unrealized / realized P&L, carried on the same reqPnL frame
+//     (msg 94 fields 3 & 4). Per IBKR's
+//     pnl(reqId, dailyPnL, unrealizedPnL, realizedPnL) contract these
+//     are inception-to-now totals, NOT a decomposition of DailyPnL —
+//     they do not sum to it. They measure the same quantity as the
+//     session-running unrealized/realized totals on reqAccountUpdates /
+//     reqAccountSummary, but arrive on a different feed, so the two
+//     total-unrealized measurements can legitimately differ.
 //
 // Pointers (not bare floats) so a value of zero is distinguishable from
 // "no frame yet" / "DBL_MAX sentinel". Older gateway versions only emit
-// the dailyPnL field; the two unrealized/realized pointers stay nil in
-// that case.
+// the dailyPnL field; the two total unrealized/realized pointers stay
+// nil in that case.
 type AccountDailyPnL struct {
 	DailyPnL           *float64
-	UnrealizedDailyPnL *float64
-	RealizedDailyPnL   *float64
+	UnrealizedTotalPnL *float64
+	RealizedTotalPnL   *float64
 	AsOf               time.Time
 }
 
 // PositionDailyPnL captures the most recent per-conId Daily P&L frame
 // IBKR has emitted on the reqPnLSingle subscription. Same pointer
 // semantics as AccountDailyPnL — nil means "no value yet / sentinel /
-// no entitlement".
+// no entitlement". As on the account frame, UnrealizedTotalPnL /
+// RealizedTotalPnL are the position's inception-to-now totals (msg 95
+// fields 4 & 5), not a decomposition of the daily figure.
 type PositionDailyPnL struct {
 	DailyPnL           *float64
-	UnrealizedDailyPnL *float64
-	RealizedDailyPnL   *float64
+	UnrealizedTotalPnL *float64
+	RealizedTotalPnL   *float64
 	AsOf               time.Time
 }
 
@@ -164,9 +171,12 @@ func (c *Connection) CancelPnLSingle(reqID int) error {
 //
 //	[reqId] [dailyPnL] [unrealizedPnL] [realizedPnL]
 //
-// Older gateways (server < 150) emit only the first two fields after
-// reqId; we accept the short form and leave the remaining pointers nil.
-// Returns reqID and a populated snapshot; ok=false on a malformed frame.
+// unrealizedPnL / realizedPnL (fields 3 & 4) are the account's TOTAL
+// unrealized / realized P&L (inception to now), not a decomposition of
+// dailyPnL — see AccountDailyPnL. Older gateways (server < 150) emit only
+// the first two fields after reqId; we accept the short form and leave the
+// remaining pointers nil. Returns reqID and a populated snapshot; ok=false
+// on a malformed frame.
 func parseAccountPnLFields(fields []string) (reqID int, snap AccountDailyPnL, ok bool) {
 	// fields[0] = msgID; fields[1] = reqId; fields[2+] = payload.
 	if len(fields) < 3 {
@@ -178,10 +188,10 @@ func parseAccountPnLFields(fields []string) (reqID int, snap AccountDailyPnL, ok
 	}
 	snap.DailyPnL = parsePnLFloat(fields[2])
 	if len(fields) > 3 {
-		snap.UnrealizedDailyPnL = parsePnLFloat(fields[3])
+		snap.UnrealizedTotalPnL = parsePnLFloat(fields[3])
 	}
 	if len(fields) > 4 {
-		snap.RealizedDailyPnL = parsePnLFloat(fields[4])
+		snap.RealizedTotalPnL = parsePnLFloat(fields[4])
 	}
 	snap.AsOf = time.Now().UTC()
 	return rid, snap, true
@@ -194,8 +204,10 @@ func parseAccountPnLFields(fields []string) (reqID int, snap AccountDailyPnL, ok
 //
 // pos and value are not surfaced — pos is just a sanity check on
 // position size (we already have it from reqAccountUpdates), and value
-// is a stale snapshot of MarketValue. Older gateways may omit the
-// unrealizedPnL / realizedPnL fields; same nil-as-unknown semantics.
+// is a stale snapshot of MarketValue. unrealizedPnL / realizedPnL
+// (fields 4 & 5) are the position's TOTAL unrealized / realized P&L, not
+// a decomposition of dailyPnL. Older gateways may omit those two fields;
+// same nil-as-unknown semantics.
 func parsePositionPnLFields(fields []string) (reqID int, snap PositionDailyPnL, ok bool) {
 	// fields[0] = msgID; fields[1] = reqId; fields[2] = pos;
 	// fields[3] = dailyPnL; fields[4] = unrealizedPnL; fields[5] = realizedPnL;
@@ -209,10 +221,10 @@ func parsePositionPnLFields(fields []string) (reqID int, snap PositionDailyPnL, 
 	}
 	snap.DailyPnL = parsePnLFloat(fields[3])
 	if len(fields) > 4 {
-		snap.UnrealizedDailyPnL = parsePnLFloat(fields[4])
+		snap.UnrealizedTotalPnL = parsePnLFloat(fields[4])
 	}
 	if len(fields) > 5 {
-		snap.RealizedDailyPnL = parsePnLFloat(fields[5])
+		snap.RealizedTotalPnL = parsePnLFloat(fields[5])
 	}
 	snap.AsOf = time.Now().UTC()
 	return rid, snap, true
@@ -455,6 +467,117 @@ func (c *Connector) cancelAllPnL() {
 	for _, r := range posReqs {
 		if err := conn.CancelPnLSingle(r); err != nil {
 			connectorLogger.Debugf("CancelPnLSingle(reqID=%d) on shutdown: %v", r, err)
+		}
+	}
+}
+
+// dailyPnLStaleResubscribe bounds how long the account daily-P&L frame may go
+// without an update, during market hours, before MaybeResubscribeStaleDailyPnL
+// treats the reqPnL stream as silently dead and force-rebuilds it. It also
+// doubles as the throttle window between rebuild attempts. reqPnL pushes on
+// change and, during regular hours on an active book, ticks every few seconds,
+// so a frame this old is a genuine anomaly rather than a quiet market.
+const dailyPnLStaleResubscribe = 90 * time.Second
+
+func (c *Connector) pnlResubClock() time.Time {
+	if c.pnlResubNow != nil {
+		return c.pnlResubNow()
+	}
+	return time.Now()
+}
+
+// MaybeResubscribeStaleDailyPnL force-rebuilds the reqPnL / reqPnLSingle
+// subscriptions when the account daily-P&L frame has gone stale during market
+// hours. reqPnL is subscribed once at connect and pushes on change; if the
+// gateway silently stops feeding it — observed after a pre-market subscribe
+// that never resumed post-open — the value freezes while account-updates keep
+// flowing, so NLV stays correct but daily P&L does not. SubscribeAccountPnL is
+// idempotent and cannot revive a dead-but-"subscribed" stream, so this cancels
+// and re-requests. marketOpen gates off-hours idling (the caller owns the
+// calendar). Returns true when a rebuild was issued; throttled to one attempt
+// per dailyPnLStaleResubscribe window.
+func (c *Connector) MaybeResubscribeStaleDailyPnL(marketOpen bool) bool {
+	if !marketOpen || !c.isConnected() {
+		return false
+	}
+	c.pnl.mu.RLock()
+	reqID := c.pnl.accountReqID
+	asOf := c.pnl.account.AsOf
+	c.pnl.mu.RUnlock()
+	if reqID == 0 || asOf.IsZero() {
+		// Never subscribed, or no frame yet — the startup/lazy-kick path in
+		// SubscribeAccountPnL owns that case; nothing to revive here.
+		return false
+	}
+	now := c.pnlResubClock()
+	if now.Sub(asOf) < dailyPnLStaleResubscribe {
+		return false
+	}
+	c.pnlResubMu.Lock()
+	if !c.pnlResubLastAt.IsZero() && now.Sub(c.pnlResubLastAt) < dailyPnLStaleResubscribe {
+		c.pnlResubMu.Unlock()
+		return false
+	}
+	c.pnlResubLastAt = now
+	c.pnlResubMu.Unlock()
+
+	connectorLogger.Warnf("account daily P&L frame stale for %s during market hours; rebuilding reqPnL subscriptions", now.Sub(asOf).Round(time.Second))
+	c.forceResubscribeDailyPnL()
+	return true
+}
+
+// forceResubscribeDailyPnL tears down and re-issues the account and per-position
+// daily-P&L subscriptions, preserving the same account/conId set. Unlike the
+// idempotent SubscribeAccountPnL / SubscribePositionDailyPnL, it revives a
+// stream the gateway has stopped feeding: the cache identity is cleared first so
+// the idempotency guards re-arm, then the old wire subscriptions are cancelled
+// and fresh ones requested. Inbound frames from the cancelled reqIDs are ignored
+// by handlePnL (reqID mismatch), so no stale frame races the rebuild.
+func (c *Connector) forceResubscribeDailyPnL() {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return
+	}
+
+	c.pnl.mu.Lock()
+	acct := c.pnl.accountAcct
+	acctReq := c.pnl.accountReqID
+	posConIDs := make([]int, 0, len(c.pnl.positionReqIDs))
+	posReqs := make([]int, 0, len(c.pnl.positionReqIDs))
+	for conID, r := range c.pnl.positionReqIDs {
+		posConIDs = append(posConIDs, conID)
+		posReqs = append(posReqs, r)
+	}
+	c.pnl.accountReqID = 0
+	c.pnl.accountAcct = ""
+	c.pnl.account = AccountDailyPnL{}
+	c.pnl.positionReqIDs = make(map[int]int)
+	c.pnl.positionByReqID = make(map[int]int)
+	c.pnl.positionSnapshot = make(map[int]PositionDailyPnL)
+	c.pnl.mu.Unlock()
+
+	if acctReq != 0 {
+		if err := conn.CancelPnL(acctReq); err != nil {
+			connectorLogger.Debugf("CancelPnL(reqID=%d) during resubscribe: %v", acctReq, err)
+		}
+	}
+	for _, r := range posReqs {
+		if err := conn.CancelPnLSingle(r); err != nil {
+			connectorLogger.Debugf("CancelPnLSingle(reqID=%d) during resubscribe: %v", r, err)
+		}
+	}
+
+	if acct == "" {
+		return
+	}
+	if err := c.SubscribeAccountPnL(acct); err != nil {
+		connectorLogger.Debugf("SubscribeAccountPnL(%s) during resubscribe: %v", acct, err)
+	}
+	for _, conID := range posConIDs {
+		if err := c.SubscribePositionDailyPnL(acct, conID); err != nil {
+			connectorLogger.Debugf("SubscribePositionDailyPnL(%s,%d) during resubscribe: %v", acct, conID, err)
 		}
 	}
 }

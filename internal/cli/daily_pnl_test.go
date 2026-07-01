@@ -8,22 +8,24 @@ import (
 	"github.com/osauer/ibkr/internal/rpc"
 )
 
-// TestRenderAccount_DailyPnLBlock pins the Daily P&L row + breakdown:
-// the headline figure sits on the hero row beneath Net liquidation; the
-// unrealized/realized decomposition (when supplied) renders as a
-// "Daily P&L breakdown" sub-block below the rest of the snapshot.
+// TestRenderAccount_DailyPnLBlock pins the Daily P&L row + reqPnL-stream
+// totals: the headline figure sits on the hero row beneath Net liquidation;
+// the account's TOTAL unrealized/realized P&L (when supplied) renders as a
+// "Total P&L (reqPnL stream)" sub-block below the rest of the snapshot.
+// The totals are NOT a breakdown of the daily figure — the fixture picks
+// values that do not sum to dailyPnL.
 func TestRenderAccount_DailyPnLBlock(t *testing.T) {
 	t.Parallel()
-	daily := 1247.30
-	unreal := 962.10
-	real_ := 285.20
+	daily := 621.30
+	unreal := -44485.00
+	real_ := 1830.00
 	a := &rpc.AccountResult{
 		AccountID:          "U1234567",
 		BaseCurrency:       "USD",
 		NetLiquidation:     100000,
 		DailyPnL:           &daily,
-		DailyPnLUnrealized: &unreal,
-		DailyPnLRealized:   &real_,
+		PnLUnrealizedTotal: &unreal,
+		PnLRealizedTotal:   &real_,
 	}
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
@@ -31,7 +33,9 @@ func TestRenderAccount_DailyPnLBlock(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"Daily P&L", "1,247.30", "Daily P&L breakdown", "of which unrealized", "962.10", "of which realized", "285.20"} {
+	// "621.30" is the hero daily value; "44,485.00" / "1,830.00" appear only
+	// in the reqPnL-totals block, so they pin that block distinctly.
+	for _, want := range []string{"Daily P&L", "621.30", "Total P&L (reqPnL stream)", "44,485.00", "1,830.00"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n%s", want, out)
 		}
@@ -62,14 +66,14 @@ func TestRenderAccount_DailyPnLPlaceholderWhenNil(t *testing.T) {
 	if !strings.Contains(out, "subscribing") {
 		t.Errorf("nil Daily P&L should carry a subscribing hint:\n%s", out)
 	}
-	if strings.Contains(out, "Daily P&L breakdown") {
-		t.Errorf("breakdown block should stay hidden when no decomposition is supplied:\n%s", out)
+	if strings.Contains(out, "Total P&L (reqPnL stream)") {
+		t.Errorf("reqPnL-totals block should stay hidden when no totals are supplied:\n%s", out)
 	}
 }
 
 // TestRenderAccount_DailyPnLOnlyBareDaily — older gateway versions
 // emit just the bare dailyPnL field. The headline row renders; the
-// breakdown sub-block stays hidden.
+// reqPnL-totals sub-block stays hidden.
 func TestRenderAccount_DailyPnLOnlyBareDaily(t *testing.T) {
 	t.Parallel()
 	daily := 50.00
@@ -86,11 +90,8 @@ func TestRenderAccount_DailyPnLOnlyBareDaily(t *testing.T) {
 	if !strings.Contains(out, "Daily P&L") {
 		t.Errorf("Daily P&L line should render:\n%s", out)
 	}
-	if strings.Contains(out, "Daily P&L breakdown") {
-		t.Errorf("breakdown block should be hidden on short-form payloads:\n%s", out)
-	}
-	if strings.Contains(out, "of which unrealized") {
-		t.Errorf("unrealized sub-line should be omitted on short-form payloads:\n%s", out)
+	if strings.Contains(out, "Total P&L (reqPnL stream)") {
+		t.Errorf("reqPnL-totals block should be hidden on short-form payloads:\n%s", out)
 	}
 }
 

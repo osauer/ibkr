@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.15.0 — 2026-07-01 19:17 CEST
+
+### What's new
+
+- Corrected a long-standing mislabel in account P&L: the `daily_pnl_unrealized` / `daily_pnl_realized` fields are renamed to `pnl_unrealized_total` / `pnl_realized_total`. They carry the account's inception-to-now TOTAL unrealized/realized P&L from IBKR's reqPnL stream — not a breakdown of the daily figure, so they never summed to `daily_pnl`. The `ibkr account` CLI now shows them under a "Total P&L (reqPnL stream)" block instead of the misleading "Daily P&L breakdown / of which unrealized/realized".
+- `ibkr status` now reports the quote / scanner / history / chain subsystems as `ready` when the market-data farms are actually connected. They were stuck showing `degraded` ("no market-data farm connection notice observed") for the whole session even while quotes, chains, and gamma worked — a false alarm, now fixed.
+
+### Changed
+
+- Renamed account-financials fields `daily_pnl_unrealized`→`pnl_unrealized_total` and `daily_pnl_realized`→`pnl_realized_total` across `ibkr account --json` and the `ibkr_account` MCP tool, and relabeled the corresponding CLI block. These are the reqPnL-stream account totals (inception to now) and stay distinct from the account-updates `unrealized_pnl` / `realized_pnl` — the two total-unrealized measurements come off different gateway feeds and can legitimately differ.
+
+### Fixed
+
+- Fixed a false-degraded market-data-farm status. The gateway sends its farm-status burst (`2104`/`2106`/`2158` "connection is OK") immediately after the API handshake, and the connection read loop consumed that burst before the connector wired its system-notice handler — so the notices were logged but dropped, and because the gateway only re-sends farm status on change, the connector's farm view stayed empty for the rest of the session. `ibkr status` then reported quote / scanner / history / chain as `degraded` even though the farms were connected and data flowed normally. System notices arriving before the handler is wired are now buffered and replayed when it is set (mirroring the existing order-message pending buffer), so a farm that has announced "OK" is reported ready and still flips back to `degraded` on a `2103`/`2105` disconnect.
+- Stopped the daemon log from ballooning (observed at 1.5 GB). IBKR re-sends `orderStatus` frames for unchanged working orders many times per second, and each was logged at INFO; a single resting PreSubmitted order could write thousands of identical lines per minute. Only genuine status/filled/remaining transitions log at INFO now — verbatim repeats drop to Debug. Order state tracking is unchanged. The daemon log additionally rotates at boot when it exceeds 64 MiB, keeping one previous generation (`ibkr-daemon.log.1`), so the file no longer grows without bound across restarts.
+- Quieted the off-hours gateway-reconnect log flood. While TWS / IB Gateway is closed the daemon retries the connection on its normal cadence, and each attempt logged its full multi-line connect sequence (`Starting connection process`, `Client N: Connecting to …`, `Failed to connect … connection refused`, `Daemon up but gateway not connected`, plus the connector start/stop narration) at INFO/WARN — roughly 50k lines over a 13.5h overnight window, a larger contributor to log growth than the order-status flood above. The daemon now logs the transition into "gateway unreachable" once at WARN, demotes the identical per-cycle repeats (and the low-level connect narration) to Debug, and logs a one-line "Gateway reachable again" when the handshake recovers. Reconnect timing, backoff, and retry counts are untouched — this is a logging-volume change only.
+
 ## v1.14.2 — 2026-06-20 11:37 CEST
 
 ### What's new

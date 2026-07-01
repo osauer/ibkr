@@ -208,6 +208,31 @@ func TestSubsystemHealthUsesHealthyFarmNotices(t *testing.T) {
 	}
 }
 
+func TestSubsystemHealthDegradesOnDisconnectedFarms(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.July, 1, 15, 0, 0, 0, time.UTC)
+	// A recorded farm that has flipped back to disconnected (2103 market /
+	// 2105 historical) must degrade the dependent subsystems, not linger
+	// "ready" off a stale OK notice.
+	subs := (&Server{}).subsystemHealth(true, []ibkrlib.DataFarmStatus{
+		{Name: "usfarm", Type: "market", Status: "disconnected", Code: 2103, Message: "Market data farm connection is broken:usfarm", AsOf: now},
+		{Name: "ushmds", Type: "historical", Status: "disconnected", Code: 2105, Message: "HMDS data farm connection is broken:ushmds", AsOf: now},
+	})
+	for _, name := range []string{"quote", "scanner", "chain"} {
+		sub := mustFindSubsystem(t, subs, name)
+		if sub.Status != "degraded" || !strings.Contains(sub.Message, "market-data farm usfarm disconnected") {
+			t.Fatalf("%s subsystem = %+v, want degraded market-data farm disconnected", name, sub)
+		}
+		if sub.LastError != "IBKR 2103 disconnected" || !sub.LastErrorAt.Equal(now) {
+			t.Fatalf("%s error = %q at %s, want IBKR 2103 at %s", name, sub.LastError, sub.LastErrorAt, now)
+		}
+	}
+	history := mustFindSubsystem(t, subs, "history")
+	if history.Status != "degraded" || !strings.Contains(history.Message, "historical-data farm ushmds disconnected") {
+		t.Fatalf("history subsystem = %+v, want degraded historical-data farm disconnected", history)
+	}
+}
+
 func TestSubsystemHealthDegradesChainOnSecurityDefinitionFarmIssue(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.June, 1, 8, 20, 0, 0, time.UTC)

@@ -322,6 +322,17 @@ type Connection struct {
 
 	systemNoticeMu      sync.RWMutex
 	systemNoticeHandler func(note *systemNotification, alias reqAliasEntry)
+	// pendingSystemNotices holds notices that arrived before the connector
+	// wired its handler. The gateway sends the farm-status burst
+	// (2104/2106/2158) immediately after startAPI, and the read loop starts
+	// consuming it before Connect() fires onConnect -> registerHandlers ->
+	// SetSystemNoticeHandler. Without this buffer those notices are logged
+	// but dropped, and because the gateway only re-sends farm status on
+	// change, DataFarmStatuses() stays empty for the whole session — the
+	// false-degraded quote/scanner/history/chain status. Drained and
+	// replayed when a non-nil handler is set. Bounded like the
+	// order-message pending buffer so a permanently-nil handler cannot leak.
+	pendingSystemNotices []pendingSystemNotice
 
 	// Competing live session detection (error 10197)
 	competingMu          sync.RWMutex
@@ -403,10 +414,34 @@ func (c *Connection) lookupReqAlias(reqID int) (reqAliasEntry, bool) {
 	return alias, ok
 }
 
+// pendingSystemNotice is a system notice captured while no handler was wired,
+// held for replay once SetSystemNoticeHandler installs one. note is a freshly
+// parsed pointer per message (parseSystemNotificationPayload never reuses one),
+// so buffering it by pointer is safe.
+type pendingSystemNotice struct {
+	note  *systemNotification
+	alias reqAliasEntry
+}
+
+// pendingSystemNoticeLimit bounds the startup-race buffer, mirroring
+// pendingHandlerMessageLimit for order messages. The real burst is ~6 farm
+// notices; the cap only matters if a handler is never wired at all.
+const pendingSystemNoticeLimit = 256
+
 func (c *Connection) SetSystemNoticeHandler(handler func(note *systemNotification, alias reqAliasEntry)) {
 	c.systemNoticeMu.Lock()
 	c.systemNoticeHandler = handler
+	var replay []pendingSystemNotice
+	if handler != nil && len(c.pendingSystemNotices) > 0 {
+		replay = c.pendingSystemNotices
+		c.pendingSystemNotices = nil
+	}
 	c.systemNoticeMu.Unlock()
+	// Replay outside the lock: the handler runs connector recovery
+	// (processSystemNotice) that must not re-enter systemNoticeMu.
+	for _, p := range replay {
+		handler(p.note, p.alias)
+	}
 }
 
 func (c *Connection) dispatchSystemNotice(note *systemNotification, alias reqAliasEntry) {
@@ -415,7 +450,23 @@ func (c *Connection) dispatchSystemNotice(note *systemNotification, alias reqAli
 	c.systemNoticeMu.RUnlock()
 	if handler != nil {
 		handler(note, alias)
+		return
 	}
+	// No handler yet — buffer for replay. Re-check under the write lock in
+	// case SetSystemNoticeHandler won the race between the RUnlock above and
+	// here; if so, dispatch directly rather than stranding the notice in a
+	// buffer that has already been drained.
+	c.systemNoticeMu.Lock()
+	if c.systemNoticeHandler != nil {
+		handler = c.systemNoticeHandler
+		c.systemNoticeMu.Unlock()
+		handler(note, alias)
+		return
+	}
+	if len(c.pendingSystemNotices) < pendingSystemNoticeLimit {
+		c.pendingSystemNotices = append(c.pendingSystemNotices, pendingSystemNotice{note: note, alias: alias})
+	}
+	c.systemNoticeMu.Unlock()
 }
 
 func (c *Connection) resetReadStartCh() {
@@ -658,12 +709,21 @@ func (c *Connection) Connect(ctx context.Context) error {
 	// neighboring IDs are reserved for other ibkr lanes.
 	maxRetries := max(min(c.config.MaxClientIDRetries, 5), 1)
 
-	connectLogger.Infof("Starting connection process with Client ID %d, MaxRetries=%d",
+	// The connect-attempt narration here and below (this line, the per-attempt
+	// "Attempting connection" / "Connecting to" lines, and the
+	// degraded-teardown "Connection closed") logs at Debug on purpose: the
+	// daemon rebuilds this Connection on every reconnect cycle while the
+	// gateway is down, so at INFO the sequence floods ibkr-daemon.log
+	// (~4k×/night off-hours). The daemon owns the INFO-level connect summary
+	// and the deduped gateway-unreachable verdict; a *successful* handshake
+	// still narrates at INFO ("Connection established" / "API started
+	// successfully"), so a real connect stays legible.
+	connectLogger.Debugf("Starting connection process with Client ID %d, MaxRetries=%d",
 		clientID, maxRetries)
 
 	for attempt := range maxRetries {
 		c.config.ClientID = clientID
-		connectLogger.Infof("Attempting connection with Client ID %d (attempt %d/%d)",
+		connectLogger.Debugf("Attempting connection with Client ID %d (attempt %d/%d)",
 			clientID, attempt+1, maxRetries)
 
 		err := c.connectWithClientID(ctx)
@@ -738,7 +798,7 @@ func (c *Connection) connectWithClientID(ctx context.Context) error {
 
 func (c *Connection) connectAttempt(ctx context.Context, useTLS bool) error {
 	addr := fmt.Sprintf("%s:%d", c.config.Host, c.config.Port)
-	connectLogger.Infof("Client %d: Connecting to %s (tls=%v)...", c.config.ClientID, addr, useTLS)
+	connectLogger.Debugf("Client %d: Connecting to %s (tls=%v)...", c.config.ClientID, addr, useTLS)
 
 	netConn, err := c.dialEndpoint(ctx, useTLS)
 	if err != nil {
@@ -885,7 +945,16 @@ func (c *Connection) Disconnect() error {
 		connectLogger.Warnf("Disconnect: goroutines still running after 2s; closing socket to unblock (Client ID: %d)", c.config.ClientID)
 	}
 
-	connectLogger.Infof("Connection closed (Client ID: %d)", c.config.ClientID)
+	// A real disconnect (we were Connected) is a genuine state change worth
+	// INFO. Tearing down a never-connected attempt — the off-hours rebuild
+	// loop closing a connection-refused socket every cycle — is pure churn and
+	// stays at Debug. The wasConnected guard also owns the onDisconnect
+	// callback below, so demoting the log never touches the disconnect path.
+	if wasConnected {
+		connectLogger.Infof("Connection closed (Client ID: %d)", c.config.ClientID)
+	} else {
+		connectLogger.Debugf("Connection closed (Client ID: %d)", c.config.ClientID)
+	}
 
 	if wasConnected && c.onDisconnect != nil {
 		c.onDisconnect(nil)

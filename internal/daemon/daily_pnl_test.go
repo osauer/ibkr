@@ -130,13 +130,15 @@ func TestAccountDailyPnL_CacheRoundTrip(t *testing.T) {
 	t.Parallel()
 	c := ibkrlib.NewConnector(&ibkrlib.ConnectorConfig{})
 
-	daily := 1247.30
-	unreal := 962.10
-	real_ := 285.20
+	// unrealized/realized are inception-to-now TOTALS, not a decomposition
+	// of dailyPnL — values chosen so they do not sum to dailyPnL.
+	daily := 621.30
+	unreal := -44485.00
+	real_ := 1830.00
 	c.SeedAccountDailyPnLForTest("U1", ibkrlib.AccountDailyPnL{
 		DailyPnL:           &daily,
-		UnrealizedDailyPnL: &unreal,
-		RealizedDailyPnL:   &real_,
+		UnrealizedTotalPnL: &unreal,
+		RealizedTotalPnL:   &real_,
 		AsOf:               timeNowForTest(),
 	})
 
@@ -144,14 +146,14 @@ func TestAccountDailyPnL_CacheRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("AccountDailyPnL ok=false after seed")
 	}
-	if snap.DailyPnL == nil || *snap.DailyPnL != 1247.30 {
-		t.Errorf("DailyPnL = %v, want 1247.30", snap.DailyPnL)
+	if snap.DailyPnL == nil || *snap.DailyPnL != 621.30 {
+		t.Errorf("DailyPnL = %v, want 621.30", snap.DailyPnL)
 	}
-	if snap.UnrealizedDailyPnL == nil || *snap.UnrealizedDailyPnL != 962.10 {
-		t.Errorf("Unrealized = %v, want 962.10", snap.UnrealizedDailyPnL)
+	if snap.UnrealizedTotalPnL == nil || *snap.UnrealizedTotalPnL != -44485.00 {
+		t.Errorf("Unrealized = %v, want -44485.00", snap.UnrealizedTotalPnL)
 	}
-	if snap.RealizedDailyPnL == nil || *snap.RealizedDailyPnL != 285.20 {
-		t.Errorf("Realized = %v, want 285.20", snap.RealizedDailyPnL)
+	if snap.RealizedTotalPnL == nil || *snap.RealizedTotalPnL != 1830.00 {
+		t.Errorf("Realized = %v, want 1830.00", snap.RealizedTotalPnL)
 	}
 }
 
@@ -184,7 +186,7 @@ func TestWaitForAccountDailyPnLIgnoresUnsetDailyPnL(t *testing.T) {
 	t.Parallel()
 	unrealized := 12.50
 	reader := fakeAccountDailyPnLReader{snap: ibkrlib.AccountDailyPnL{
-		UnrealizedDailyPnL: &unrealized,
+		UnrealizedTotalPnL: &unrealized,
 		AsOf:               timeNowForTest(),
 	}, ok: true}
 
