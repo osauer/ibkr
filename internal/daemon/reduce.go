@@ -14,14 +14,17 @@ import (
 // is distinguishable from a daemon-generated protection proposal in audit.
 const reduceOrderSource = "manual_reduce"
 
-// isProtectiveShort reports whether a holding carries short (bearish) delta and
-// is therefore treated as a protective hedge that the reduce workflow excludes
-// by default: long puts, short calls, or short stock. When the broker delta is
-// known we trust its sign; otherwise we fall back to the option right and
-// position sign, which is deterministic and always present (Greeks can be nil
+// isProtectiveShort reports whether a holding carries short (bearish) delta
+// and is therefore treated as a protective hedge: long puts, short calls, or
+// short stock. Used only by the single-position reduce path (IncludeHedges
+// opts a specific holding in deliberately); the portfolio sweep instead
+// excludes opposite-sign-to-net positions structurally via dollar-delta
+// sign-matching, with no separate hedge flag. When the broker delta is known
+// we trust its sign; otherwise we fall back to the option right and position
+// sign, which is deterministic and always present (Greeks can be nil
 // off-hours). A nil delta on an option still classifies as a hedge so the
 // exclusion fails safe toward protecting the position rather than silently
-// exposing it to a trim. The user can opt in per request with include_hedges.
+// exposing it to a trim.
 func isProtectiveShort(row rpc.PositionView) bool {
 	if row.Quantity == 0 {
 		return false
@@ -145,11 +148,10 @@ func (s *Server) prepareReduce(ctx context.Context, p rpc.TradeProposalReducePar
 }
 
 // prepareReduceForRow applies the hedge exclusion, sizes the order, and builds
-// the gated preview params for an already-resolved position row. It is the pure
-// per-leg primitive shared by the single-position trim and the portfolio sweep:
-// it never reads positions or writes to the broker. Terminal blockers
-// (not_reducible, hedge_excluded, percent_too_small, ...) come back with the row
-// echoed so callers can disclose what was acted on.
+// the gated preview params for an already-resolved position row. It is the
+// single-position trim's primitive: it never reads positions or writes to the
+// broker. Terminal blockers (not_reducible, hedge_excluded, percent_too_small,
+// ...) come back with the row echoed so callers can disclose what was acted on.
 func prepareReduceForRow(row rpc.PositionView, p rpc.TradeProposalReduceParams) (preparedReduce, []rpc.TradingBlocker) {
 	hedge := isProtectiveShort(row)
 	if !reduceEligible(row) {
@@ -162,6 +164,16 @@ func prepareReduceForRow(row rpc.PositionView, p rpc.TradeProposalReduceParams) 
 	if len(blockers) > 0 {
 		return preparedReduce{row: row, hedge: hedge}, blockers
 	}
+	prep := buildPreparedReduce(row, qty, p.TimeoutMs)
+	prep.hedge = hedge
+	return prep, nil
+}
+
+// buildPreparedReduce assembles the gated order-preview params for a row whose
+// quantity has already been resolved — by reduceQuantityForPercent (single
+// position) or by the portfolio sweep's dollar-delta pro-rata allocator. It is
+// the shared tail both sizing paths converge on.
+func buildPreparedReduce(row rpc.PositionView, qty int, timeoutMs int) preparedReduce {
 	secType := positionWireSecType(row.SecType)
 	action := rpc.OrderActionSell
 	if row.Quantity < 0 {
@@ -174,10 +186,26 @@ func prepareReduceForRow(row rpc.PositionView, p rpc.TradeProposalReduceParams) 
 		OrderType: rpc.OrderTypeLMT,
 		Strategy:  rpc.OrderStrategyPatientLimit,
 		TIF:       rpc.OrderTIFDay,
-		TimeoutMs: p.TimeoutMs,
+		TimeoutMs: timeoutMs,
 		Source:    reduceOrderSource,
 	}
-	return preparedReduce{row: row, params: params, secType: secType, action: action, qty: qty, hedge: hedge}, nil
+	return preparedReduce{row: row, params: params, secType: secType, action: action, qty: qty}
+}
+
+// preparedReduceWithQty is the portfolio sweep's entry point: qty is already
+// sized by the caller's dollar-delta pro-rata allocation, so this only
+// re-checks eligibility and a positive quantity (defense-in-depth — the
+// caller should never offer an out-of-scope row or a zero qty) before
+// building the same gated order shape prepareReduceForRow produces from a
+// percent.
+func preparedReduceWithQty(row rpc.PositionView, qty int, timeoutMs int) (preparedReduce, []rpc.TradingBlocker) {
+	if !reduceEligible(row) {
+		return preparedReduce{row: row}, []rpc.TradingBlocker{{Code: "not_reducible", Message: fmt.Sprintf("%s %s is not eligible for a portfolio trim", row.Symbol, positionWireSecType(row.SecType)), Action: "The sweep covers stocks/ETFs and long options."}}
+	}
+	if qty < 1 {
+		return preparedReduce{row: row}, []rpc.TradingBlocker{{Code: "qty_zero", Message: "this holding's allocated risk share rounded to less than one unit", Action: "Nothing to trim at this percentage; choose a larger percentage."}}
+	}
+	return buildPreparedReduce(row, qty, timeoutMs), nil
 }
 
 // reduceClock returns the daemon clock, honoring the test override.

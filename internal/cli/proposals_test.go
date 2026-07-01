@@ -55,6 +55,22 @@ func TestRunProposalsReducePortfolioRejectsHolding(t *testing.T) {
 	}
 }
 
+func TestRunProposalsReducePortfolioRejectsProtectHedgesFlag(t *testing.T) {
+	t.Parallel()
+	// --protect-hedges was removed: the new sweep excludes hedges
+	// structurally (opposite-sign-to-net positions are never selected), so
+	// there is no opt-out flag to parse. Lock in that it's actually gone.
+	var stdout, stderr bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &stderr}
+	args := []string{"reduce", "--portfolio", "--percent", "50", "--protect-hedges=false"}
+	if code := Run(context.Background(), env, "proposals", args); code == 0 {
+		t.Fatalf("Run(proposals %v) = 0, want nonzero (flag should be unrecognized)", args)
+	}
+	if !strings.Contains(stderr.String(), "protect-hedges") {
+		t.Fatalf("stderr=%q, want it to mention the unrecognized protect-hedges flag", stderr.String())
+	}
+}
+
 func TestRenderProposalsTextShowsPositionContext(t *testing.T) {
 	t.Parallel()
 	var stdout bytes.Buffer

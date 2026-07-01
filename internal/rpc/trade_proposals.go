@@ -385,67 +385,88 @@ type TradeProposalReduceResult struct {
 }
 
 // TradeProposalReducePortfolioParams is the one-tap portfolio risk-off sweep:
-// trim every eligible position by Percent (SELL % of each long, BUY-to-cover %
-// of each short). ProtectHedges (default true at the CLI/SPA trust boundary;
-// the daemon trusts the wire value) excludes protective shorts — long puts,
-// short calls, short stock — so de-risking longs does not shed protection.
-// RequestRef is a client-generated idempotency key: a repeat submit with the
-// same ref places nothing and replays the prior result.
+// trim positions by Percent, where Percent is the share of NET portfolio
+// delta-adjusted risk to remove (not a flat per-position quantity cut). The
+// daemon computes net portfolio dollar-delta, derives a target dollar amount
+// from Percent, then sizes each contributing position proportionally to its
+// own share of that risk. Positions whose delta is opposite-signed to net
+// exposure (protective hedges — long puts, short calls, short stock) are
+// never selected: trimming them would increase net risk, not reduce it, so
+// the sign-matched ranking structurally excludes them. There is no opt-out
+// flag because none is needed. RequestRef is a client-generated idempotency
+// key: a repeat submit with the same ref places nothing and replays the
+// prior result.
 type TradeProposalReducePortfolioParams struct {
-	Percent       int    `json:"percent"`
-	ProtectHedges bool   `json:"protect_hedges,omitempty"`
-	TimeoutMs     int    `json:"timeout_ms,omitempty"`
-	Origin        string `json:"origin,omitempty"`
-	RequestRef    string `json:"request_ref,omitempty"`
+	Percent    int    `json:"percent"`
+	TimeoutMs  int    `json:"timeout_ms,omitempty"`
+	Origin     string `json:"origin,omitempty"`
+	RequestRef string `json:"request_ref,omitempty"`
 }
 
 // TradeProposalReduceLeg is one position's slice of a portfolio sweep. On
 // preview it carries the sized order + per-leg eligibility; on submit it adds
-// Place/OrderRef/Placed. Excluded hedges appear with HedgeLike + a
-// hedge_excluded blocker (disclosed, never silently dropped). Notional is in the
-// contract currency; NotionalBase is nil when no FX rate was available.
+// Place/OrderRef/Placed. DollarDelta is this leg's signed delta-adjusted
+// exposure before the trim; RiskContributionCut is the (always positive)
+// dollar-delta this leg's ReduceQuantity removes. PositionUnrealizedPnL(Base)
+// is basis context only — annotation, never an input to sizing or selection.
+// Notional is in the contract currency; NotionalBase is nil when no FX rate
+// was available.
 type TradeProposalReduceLeg struct {
-	ConID            int                        `json:"con_id,omitempty"`
-	Symbol           string                     `json:"symbol,omitempty"`
-	SecType          string                     `json:"sec_type,omitempty"`
-	Action           string                     `json:"action,omitempty"`
-	PositionQuantity float64                    `json:"position_quantity"`
-	ReduceQuantity   int                        `json:"reduce_quantity"`
-	HedgeLike        bool                       `json:"hedge_like,omitempty"`
-	Notional         float64                    `json:"notional,omitempty"`
-	NotionalCurrency string                     `json:"notional_currency,omitempty"`
-	NotionalBase     *float64                   `json:"notional_base,omitempty"`
-	PreviewTokenID   string                     `json:"preview_token_id,omitempty"`
-	SubmitEligible   bool                       `json:"submit_eligible"`
-	Preview          *TradeProposalOrderPreview `json:"preview,omitempty"`
-	Place            *OrderPlaceResult          `json:"place,omitempty"`
-	Placed           bool                       `json:"placed,omitempty"`
-	OrderRef         string                     `json:"order_ref,omitempty"`
-	Blockers         []TradingBlocker           `json:"blockers,omitempty"`
-	Message          string                     `json:"message,omitempty"`
+	ConID                     int                        `json:"con_id,omitempty"`
+	Symbol                    string                     `json:"symbol,omitempty"`
+	SecType                   string                     `json:"sec_type,omitempty"`
+	Action                    string                     `json:"action,omitempty"`
+	PositionQuantity          float64                    `json:"position_quantity"`
+	ReduceQuantity            int                        `json:"reduce_quantity"`
+	DollarDelta               float64                    `json:"dollar_delta,omitempty"`
+	RiskContributionCut       float64                    `json:"risk_contribution_cut,omitempty"`
+	Notional                  float64                    `json:"notional,omitempty"`
+	NotionalCurrency          string                     `json:"notional_currency,omitempty"`
+	NotionalBase              *float64                   `json:"notional_base,omitempty"`
+	PositionUnrealizedPnL     float64                    `json:"position_unrealized_pnl_ccy,omitempty"`
+	PositionUnrealizedPnLBase *float64                   `json:"position_unrealized_pnl_base,omitempty"`
+	PreviewTokenID            string                     `json:"preview_token_id,omitempty"`
+	SubmitEligible            bool                       `json:"submit_eligible"`
+	Preview                   *TradeProposalOrderPreview `json:"preview,omitempty"`
+	Place                     *OrderPlaceResult          `json:"place,omitempty"`
+	Placed                    bool                       `json:"placed,omitempty"`
+	OrderRef                  string                     `json:"order_ref,omitempty"`
+	Blockers                  []TradingBlocker           `json:"blockers,omitempty"`
+	Message                   string                     `json:"message,omitempty"`
 }
 
 // TradeProposalReducePortfolioResult is the basket preview/submit envelope.
 // Accepted means (preview) every eligible leg is submit-eligible, or (submit)
-// at least one leg placed and none were blocked. TotalNotional is the base-
-// currency sum over eligible legs; FXIncomplete flags any eligible leg whose
-// notional could not be converted (never fabricated). Replayed marks a dedupe
-// hit. Basket-level Blockers (write-gate, positions_unavailable, too_many_legs)
-// mean zero legs were touched.
+// at least one leg placed and none were blocked. NetDollarDeltaBefore is the
+// signed net portfolio dollar-delta the target was derived from;
+// NetDeltaIncomplete is true when one or more non-stale positions had no
+// computable delta and were excluded from that sum. TargetDollarDelta is
+// abs(NetDollarDeltaBefore)*Percent/100; AchievedDollarDelta is the sum of
+// RiskContributionCut over legs that are eligible (preview) or placed
+// (submit) — it can be less than TargetDollarDelta when the eligible
+// same-sign book can't fully supply the target (disclosed via
+// AchievedPctOfTarget, not an error). TotalNotional is the base-currency sum
+// over eligible legs; FXIncomplete flags any eligible leg whose notional
+// could not be converted (never fabricated). Replayed marks a dedupe hit.
+// Basket-level Blockers (write-gate, positions_unavailable, too_many_legs,
+// net_delta_immaterial) mean zero legs were touched.
 type TradeProposalReducePortfolioResult struct {
-	Accepted           bool                     `json:"accepted"`
-	Percent            int                      `json:"percent"`
-	ProtectHedges      bool                     `json:"protect_hedges"`
-	Legs               []TradeProposalReduceLeg `json:"legs"`
-	LegCount           int                      `json:"leg_count"`
-	EligibleCount      int                      `json:"eligible_count"`
-	BlockedCount       int                      `json:"blocked_count"`
-	HedgeExcludedCount int                      `json:"hedge_excluded_count"`
-	TotalNotional      float64                  `json:"total_notional,omitempty"`
-	BaseCurrency       string                   `json:"base_currency,omitempty"`
-	FXIncomplete       bool                     `json:"fx_incomplete,omitempty"`
-	Replayed           bool                     `json:"replayed,omitempty"`
-	Blockers           []TradingBlocker         `json:"blockers,omitempty"`
-	Message            string                   `json:"message,omitempty"`
-	AsOf               time.Time                `json:"as_of"`
+	Accepted             bool                     `json:"accepted"`
+	Percent              int                      `json:"percent"`
+	NetDollarDeltaBefore float64                  `json:"net_dollar_delta_before,omitempty"`
+	NetDeltaIncomplete   bool                     `json:"net_delta_incomplete,omitempty"`
+	TargetDollarDelta    float64                  `json:"target_dollar_delta,omitempty"`
+	AchievedDollarDelta  float64                  `json:"achieved_dollar_delta,omitempty"`
+	AchievedPctOfTarget  *float64                 `json:"achieved_pct_of_target,omitempty"`
+	Legs                 []TradeProposalReduceLeg `json:"legs"`
+	LegCount             int                      `json:"leg_count"`
+	EligibleCount        int                      `json:"eligible_count"`
+	BlockedCount         int                      `json:"blocked_count"`
+	TotalNotional        float64                  `json:"total_notional,omitempty"`
+	BaseCurrency         string                   `json:"base_currency,omitempty"`
+	FXIncomplete         bool                     `json:"fx_incomplete,omitempty"`
+	Replayed             bool                     `json:"replayed,omitempty"`
+	Blockers             []TradingBlocker         `json:"blockers,omitempty"`
+	Message              string                   `json:"message,omitempty"`
+	AsOf                 time.Time                `json:"as_of"`
 }

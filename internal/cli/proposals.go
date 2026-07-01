@@ -157,14 +157,19 @@ func runProposalsSubmit(ctx context.Context, env *Env, args []string) int {
 // chosen percentage. It previews by default and only places with --submit, so a
 // bare invocation is always safe to run. The holding is identified by --con-id
 // (preferred; required for option legs) or a unique stock SYMBOL.
+//
+// --portfolio trims net delta-adjusted portfolio risk by the chosen
+// percentage: percent is the share of NET portfolio delta to remove, not a
+// flat per-position cut. Hedges (positions whose delta is opposite-signed to
+// net exposure) are never selected — there is no opt-out, because trimming
+// one would increase net risk rather than reduce it.
 func runProposalsReduce(ctx context.Context, env *Env, args []string) int {
 	fs := flagSet(env, "proposals reduce")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
-	percent := fs.Int("percent", 0, "percentage to reduce: 25, 50, 75, or 100")
+	percent := fs.Int("percent", 0, "percentage to reduce: 25, 50, 75, or 100 (in --portfolio mode: share of net portfolio delta to remove, not a flat per-position cut)")
 	conID := fs.Int("con-id", 0, "contract ID of the holding (preferred; required for option legs)")
 	includeHedges := fs.Bool("include-hedges", false, "allow trimming a protective short (hedge) such as long index puts")
-	portfolio := fs.Bool("portfolio", false, "trim the whole portfolio proportionally (risk-off sweep) instead of one holding")
-	protectHedges := fs.Bool("protect-hedges", true, "portfolio mode: keep protective hedges out of the sweep (use --protect-hedges=false to include them)")
+	portfolio := fs.Bool("portfolio", false, "trim net portfolio delta-adjusted risk (risk-off sweep) instead of one holding")
 	submit := fs.Bool("submit", false, "place the order; without this flag the command only previews")
 	timeout := fs.Duration("timeout", 5*time.Second, "quote/WhatIf timeout")
 	if err := fs.Parse(args); err != nil {
@@ -177,7 +182,7 @@ func runProposalsReduce(ctx context.Context, env *Env, args []string) int {
 		if fs.NArg() > 0 || *conID > 0 {
 			return fail(env, "proposals reduce --portfolio sweeps the whole book; do not pass SYMBOL or --con-id")
 		}
-		pparams := rpc.TradeProposalReducePortfolioParams{Percent: *percent, ProtectHedges: *protectHedges, TimeoutMs: int(timeout.Milliseconds())}
+		pparams := rpc.TradeProposalReducePortfolioParams{Percent: *percent, TimeoutMs: int(timeout.Milliseconds())}
 		method := rpc.MethodTradeProposalsReducePortfolioPreview
 		if *submit {
 			method = rpc.MethodTradeProposalsReducePortfolioSubmit
@@ -275,13 +280,24 @@ func renderProposalReducePortfolioText(env *Env, res *rpc.TradeProposalReducePor
 		title = "Portfolio Reduce Submit"
 	}
 	fmt.Fprintf(out, "%s  accepted=%v\n", title, res.Accepted)
-	statusRow(env, out, "Percent", fmt.Sprintf("%d%%", res.Percent))
-	statusRow(env, out, "Protect hedges", fmt.Sprint(res.ProtectHedges))
+	statusRow(env, out, "Percent", fmt.Sprintf("%d%% of net delta", res.Percent))
 	verb := "eligible"
 	if submitted {
 		verb = "placed"
 	}
-	statusRow(env, out, "Legs", fmt.Sprintf("%d %s · %d blocked · %d hedge-excluded of %d", res.EligibleCount, verb, res.BlockedCount, res.HedgeExcludedCount, res.LegCount))
+	statusRow(env, out, "Legs", fmt.Sprintf("%d %s · %d blocked of %d", res.EligibleCount, verb, res.BlockedCount, res.LegCount))
+	if res.TargetDollarDelta != 0 {
+		statusRow(env, out, "Net delta (before)", formatProposalMoney(res.NetDollarDeltaBefore, res.BaseCurrency))
+		statusRow(env, out, "Target removed", formatProposalMoney(res.TargetDollarDelta, res.BaseCurrency))
+		achieved := formatProposalMoney(res.AchievedDollarDelta, res.BaseCurrency)
+		if res.AchievedPctOfTarget != nil {
+			achieved += fmt.Sprintf(" (%.0f%% of target)", *res.AchievedPctOfTarget)
+		}
+		statusRow(env, out, "Achieved", achieved)
+	}
+	if res.NetDeltaIncomplete {
+		statusRow(env, out, "Note", "net delta is a partial-book estimate; some positions had no computable delta")
+	}
 	if res.TotalNotional != 0 || res.FXIncomplete {
 		total := formatProposalMoney(res.TotalNotional, res.BaseCurrency)
 		if res.FXIncomplete {
@@ -296,8 +312,6 @@ func renderProposalReducePortfolioText(env *Env, res *rpc.TradeProposalReducePor
 	for _, leg := range res.Legs {
 		state := "eligible"
 		switch {
-		case len(leg.Blockers) > 0 && leg.Blockers[0].Code == "hedge_excluded":
-			state = "hedge-excluded"
 		case submitted && leg.Placed:
 			state = "placed"
 		case submitted || !leg.SubmitEligible:
