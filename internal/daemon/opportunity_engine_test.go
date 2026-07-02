@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -356,5 +357,138 @@ func opportunityTestStock(now time.Time, quantity float64, bid, ask *float64) rp
 		Bid:        bid,
 		Ask:        ask,
 		PriceAt:    now,
+	}
+}
+
+func opportunityTestGoodSnapshot(now time.Time) rpc.OpportunitySnapshot {
+	return rpc.OpportunitySnapshot{
+		Kind:          rpc.OpportunitySnapshotKind,
+		SchemaVersion: rpc.OpportunitySnapshotSchemaVersion,
+		AsOf:          now,
+		Revision:      "sha256:last-good",
+		AccountID:     "U1234567",
+		AccountMode:   "live",
+		PolicyID:      "opportunity-option-exercise-mvp",
+		PolicyVersion: 1,
+		Opportunities: []rpc.Opportunity{{Key: "option_exercise:test", Revision: "sha256:last-good"}},
+	}
+}
+
+// The scheduled Run loop must record each refresh outcome exactly once
+// (Refresh notes internally): a second noteRefreshOutcome per cycle
+// double-counted the streak, so "blocked 4 consecutive times" meant two
+// boot-race attempts and the warn threshold halved.
+func TestOpportunityNoteRefreshOutcomeStreak(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	clock := base
+	e := &opportunityEngine{now: func() time.Time { return clock }}
+	blocked := rpc.OpportunitySnapshot{AsOf: base, Blockers: []rpc.TradingBlocker{{Code: "account_unavailable", Message: "gateway down"}}}
+	for i := range 3 {
+		clock = base.Add(time.Duration(i) * 30 * time.Second)
+		e.noteRefreshOutcome(blocked, nil)
+		if h := e.RefreshHealth(); h.Streak != i+1 {
+			t.Fatalf("streak=%d after %d failed refreshes, want %d", h.Streak, i+1, i+1)
+		}
+	}
+	h := e.RefreshHealth()
+	if !h.Since.Equal(base) {
+		t.Fatalf("since=%s, want first failure time %s", h.Since, base)
+	}
+	if len(h.Codes) != 1 || h.Codes[0] != "account_unavailable" {
+		t.Fatalf("codes=%v, want [account_unavailable]", h.Codes)
+	}
+	e.noteRefreshOutcome(rpc.OpportunitySnapshot{AsOf: clock}, nil)
+	if h := e.RefreshHealth(); h.Streak != 0 || !h.Since.IsZero() || len(h.Codes) != 0 {
+		t.Fatalf("clean refresh did not reset streak: %+v", h)
+	}
+	e.noteRefreshOutcome(rpc.OpportunitySnapshot{}, errors.New("rpc timeout"))
+	if h := e.RefreshHealth(); h.Streak != 1 || len(h.Codes) != 1 || h.Codes[0] != "rpc timeout" {
+		t.Fatalf("bare error not counted with its message as code: %+v", h)
+	}
+	disabled := rpc.OpportunitySnapshot{Blockers: []rpc.TradingBlocker{{Code: "opportunities_disabled", Message: "disabled by config"}}}
+	e.noteRefreshOutcome(disabled, nil)
+	if h := e.RefreshHealth(); h.Streak != 0 {
+		t.Fatalf("operator-owned disabled blocker counted as refresh failure: streak=%d", h.Streak)
+	}
+}
+
+func TestOpportunityRefreshTransientCodes(t *testing.T) {
+	t.Parallel()
+	transient := []string{"opportunity_scope_unavailable", "opportunity_scope_mismatch", "account_unavailable", "positions_unavailable", "positions_pending"}
+	for _, code := range transient {
+		snap := rpc.OpportunitySnapshot{Blockers: []rpc.TradingBlocker{{Code: code}}}
+		if !opportunityRefreshTransient(snap) {
+			t.Errorf("code %q not classified transient", code)
+		}
+	}
+	for _, code := range []string{"opportunities_disabled", "policy_drift", ""} {
+		snap := rpc.OpportunitySnapshot{Blockers: []rpc.TradingBlocker{{Code: code}}}
+		if opportunityRefreshTransient(snap) {
+			t.Errorf("code %q classified transient, want operator-owned", code)
+		}
+	}
+}
+
+func TestOpportunityPreserveSnapshotOnRefreshFailure(t *testing.T) {
+	t.Parallel()
+	now := opportunityTestRTH()
+	policy := defaultOpportunityPolicy()
+	policyStatus := opportunityPolicyStatus(policy, rpc.OpportunityPolicyStatusDefault, "test", "", now)
+	scope := brokerStateScope{Account: "U1234567", Mode: "live"}
+	blockers := []rpc.TradingBlocker{{Code: "account_unavailable", Message: "gateway down"}}
+
+	e := &opportunityEngine{snapshot: opportunityTestGoodSnapshot(now)}
+	snap, ok := e.preserveSnapshotOnRefreshFailure(scope, rpc.OpportunityStatus{}, policyStatus, blockers, false)
+	if !ok {
+		t.Fatal("same-scope same-policy snapshot not preserved")
+	}
+	if snap.Revision != "sha256:last-good" || len(snap.Opportunities) != 1 {
+		t.Fatalf("preserved snapshot lost content: revision=%q items=%d", snap.Revision, len(snap.Opportunities))
+	}
+	if len(snap.Blockers) != 1 || snap.Blockers[0].Code != "account_unavailable" {
+		t.Fatalf("transient blocker not disclosed on preserved snapshot: %+v", snap.Blockers)
+	}
+	if served := e.Snapshot(false); served.Revision != "sha256:last-good" || len(served.Blockers) != 1 {
+		t.Fatalf("served snapshot not the preserved copy: revision=%q blockers=%d", served.Revision, len(served.Blockers))
+	}
+
+	e = &opportunityEngine{snapshot: opportunityTestGoodSnapshot(now)}
+	if _, ok := e.preserveSnapshotOnRefreshFailure(brokerStateScope{Account: "U7654321", Mode: "live"}, rpc.OpportunityStatus{}, policyStatus, blockers, false); ok {
+		t.Fatal("preserved a snapshot across an account switch")
+	}
+	e = &opportunityEngine{snapshot: opportunityTestGoodSnapshot(now)}
+	if _, ok := e.preserveSnapshotOnRefreshFailure(brokerStateScope{Account: "U1234567", Mode: "paper"}, rpc.OpportunityStatus{}, policyStatus, blockers, false); ok {
+		t.Fatal("preserved a snapshot across a live/paper mode switch")
+	}
+
+	stale := opportunityTestGoodSnapshot(now)
+	stale.PolicyVersion = 2
+	e = &opportunityEngine{snapshot: stale}
+	if _, ok := e.preserveSnapshotOnRefreshFailure(scope, rpc.OpportunityStatus{}, policyStatus, blockers, false); ok {
+		t.Fatal("preserved a snapshot generated under a different policy version")
+	}
+
+	empty := opportunityTestGoodSnapshot(now)
+	empty.Opportunities = nil
+	e = &opportunityEngine{snapshot: empty}
+	if _, ok := e.preserveSnapshotOnRefreshFailure(scope, rpc.OpportunityStatus{}, policyStatus, blockers, false); ok {
+		t.Fatal("preserved an opportunity-free snapshot; shell regeneration is cheaper and equivalent")
+	}
+	e = &opportunityEngine{}
+	if _, ok := e.preserveSnapshotOnRefreshFailure(scope, rpc.OpportunityStatus{}, policyStatus, blockers, false); ok {
+		t.Fatal("preserved a zero-value snapshot")
+	}
+}
+
+// The degraded status row reports the as_of of the snapshot actually being
+// served (adopted-from-disk or preserved), not last-success bookkeeping
+// that formatted as 0001-01-01T00:00:00Z on every boot race.
+func TestOpportunityRefreshHealthServedAsOf(t *testing.T) {
+	t.Parallel()
+	now := opportunityTestRTH()
+	e := &opportunityEngine{snapshot: opportunityTestGoodSnapshot(now)}
+	if h := e.RefreshHealth(); !h.ServedAsOf.Equal(now) {
+		t.Fatalf("served as_of=%s, want adopted snapshot time %s", h.ServedAsOf, now)
 	}
 }
