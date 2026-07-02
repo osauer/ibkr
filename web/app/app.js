@@ -515,7 +515,9 @@ function tradingLimitSummary(limits = {}) {
   const notional = limits.max_notional?.value;
   const optionQty = limits.max_option_contracts?.value;
   const parts = [];
-  if (typeof notional === "number") parts.push(money(notional, "USD"));
+  // [trading].max_notional is defined in the account currency (see
+  // config.Trading), so label it with the account base, never a fixed USD.
+  if (typeof notional === "number") parts.push(money(notional, state.snapshot?.account?.base_currency || ""));
   if (typeof optionQty === "number") parts.push(`${optionQty} opt`);
   return parts.join(" / ") || "--";
 }
@@ -777,7 +779,7 @@ function renderAccountPanel(account = {}, positions = {}, canary = {}) {
   button.title = label;
 
   const portfolio = positions.portfolio || {};
-  const baseCurrency = portfolio.base_currency || account.base_currency || "USD";
+  const baseCurrency = portfolio.base_currency || account.base_currency || "";
   renderSensitiveText("accountRiskDelta", riskMoney(
     portfolio.dollar_delta_base ?? portfolio.dollar_delta_ccy,
     portfolio.dollar_delta_base_currency || portfolio.dollar_delta_ccy_currency || baseCurrency,
@@ -816,7 +818,7 @@ function accountDailyPnlPct(account = {}) {
   return (account.daily_pnl / denominator) * 100;
 }
 
-function renderAccountLargestExposure(portfolio = {}, canary = {}, baseCurrency = "USD") {
+function renderAccountLargestExposure(portfolio = {}, canary = {}, baseCurrency = "") {
   const panel = $("accountLargestExposurePanel");
   const button = $("accountLargestExposureToggle");
   const list = $("accountLargestExposureList");
@@ -875,7 +877,7 @@ function renderUnderlyings(positions = {}, account = {}, marketEvents = {}) {
   const list = $("underlyingBookList");
   if (!list) return;
 
-  const baseCurrency = normalizeCurrency(account.base_currency || positions.portfolio?.base_currency || "USD") || "USD";
+  const baseCurrency = normalizeCurrency(account.base_currency || positions.portfolio?.base_currency || "");
   const rows = underlyingBookRows(positions, baseCurrency, marketEvents);
   const heldCount = rows.filter((row) => !row.virtual).length;
   const virtualCount = rows.length - heldCount;
@@ -1770,13 +1772,7 @@ function mergeCurrency(left, right) {
 }
 
 function displayMoney(value, currency) {
-  if (!hasNumericValue(value)) return "--";
-  const ccy = normalizeCurrency(currency);
-  if (/^[A-Z]{3}$/.test(ccy) && ccy !== "MIX") {
-    return money(value, ccy);
-  }
-  const amount = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
-  return ccy ? `${amount} ${ccy}` : amount;
+  return money(value, currency);
 }
 
 function signedDisplayMoney(value, currency) {
@@ -1925,19 +1921,14 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   renderProtectionTimestamp(proposals);
   const theta = protectionThetaSummary(proposals, rows);
   const thetaEl = $("protectionTheta");
-  thetaEl.textContent = hasNumericValue(theta.value) ? money(theta.value, "") : "--";
+  thetaEl.textContent = hasNumericValue(theta.value) ? money(theta.value, theta.currency) : theta.mixed ? "Mixed" : "--";
   thetaEl.title = theta.title;
   setMetricTone(thetaEl, hasNumericValue(theta.value) && theta.value > 0 ? "risk" : "neutral");
-  const riskExcessCurrency = protectionRiskExcessCurrency(counts);
   const riskExcessEl = $("protectionRiskExcess");
-  const riskExcess = typeof counts.risk_reduction_excess_notional === "number" && riskExcessCurrency
-    ? counts.risk_reduction_excess_notional
-    : null;
-  riskExcessEl.textContent = hasNumericValue(riskExcess)
-    ? compactWholeMoney(counts.risk_reduction_excess_notional, riskExcessCurrency)
-    : "--";
-  riskExcessEl.title = hasNumericValue(riskExcess) && riskExcess > 0 ? "Risk-reduction proposal exposure above policy target." : "No risk-reduction proposal exposure above target.";
-  setMetricTone(riskExcessEl, hasNumericValue(riskExcess) && riskExcess > 0 ? "risk" : "neutral");
+  const riskExcess = protectionRiskExcessSummary(counts);
+  riskExcessEl.textContent = riskExcess.text;
+  riskExcessEl.title = riskExcess.title;
+  setMetricTone(riskExcessEl, riskExcess.risk ? "risk" : "neutral");
   const noStop = protectionNoStopExposureSummary(rows, marketEvents, currentProtectionCoverage());
   const noStopEl = $("protectionNoStopExposure");
   noStopEl.textContent = noStop.text;
@@ -2073,7 +2064,7 @@ function renderProtectionDeriskBasket() {
     const hasBlocker = (leg.blockers || []).length > 0;
     const willTrim = Number(leg.reduce_quantity || 0) > 0 && !hasBlocker;
     if (!willTrim && !hasBlocker) continue;
-    children.push(deriskLegRow(leg, Boolean(d.submitted)));
+    children.push(deriskLegRow(leg, Boolean(d.submitted), res.base_currency || ""));
   }
   // Two-gesture flow: the header Preview never writes. The Submit button only
   // appears after a preview that surfaced eligible legs, and is minted with a
@@ -2098,7 +2089,7 @@ function deriskBasketLine(text, kind = "") {
   return line;
 }
 
-function deriskLegRow(leg = {}, submitted = false) {
+function deriskLegRow(leg = {}, submitted = false, baseCurrency = "") {
   const row = document.createElement("div");
   row.className = "protection-derisk__leg";
   const hasBlockers = (leg.blockers || []).length > 0;
@@ -2123,7 +2114,9 @@ function deriskLegRow(leg = {}, submitted = false) {
   if (hasNumericValue(leg.risk_contribution_cut) && leg.risk_contribution_cut !== 0) {
     const risk = document.createElement("span");
     risk.className = "protection-derisk__leg-risk";
-    risk.textContent = `cuts ~${money(leg.risk_contribution_cut, leg.notional_currency || "")} of risk`;
+    // risk_contribution_cut is delta-adjusted risk in the sweep's base
+    // currency (TradeProposalReduceLeg), not the leg's contract currency.
+    risk.textContent = `cuts ~${money(leg.risk_contribution_cut, baseCurrency)} of risk`;
     row.append(risk);
   }
   const blocker = (leg.blockers || [])[0];
@@ -2284,13 +2277,16 @@ function protectionCoverageHasData(coverage = null) {
   return Object.values(coverage.counts || {}).some((value) => Number(value || 0) > 0);
 }
 
+// protectionCoverageBaseCurrency resolves the currency labeling coverage
+// base-notional amounts. Empty means genuinely unknown — callers render the
+// bare number rather than coercing to USD.
 function protectionCoverageBaseCurrency(coverage = {}, fallback = "") {
   return normalizeCurrency(
     coverage.unprotected_notional_base_currency ||
     fallback ||
     state.snapshot?.positions?.portfolio?.base_currency ||
     state.snapshot?.account?.base_currency ||
-    "USD",
+    "",
   );
 }
 
@@ -2327,9 +2323,10 @@ function protectionCoverageNoStopSummary(coverage = {}) {
     const label = issueCount > 0
       ? `${issueCount} ${issueCount === 1 ? "stock/ETF row has" : "stock/ETF rows have"} uncovered quantity`
       : "No uncovered stock/ETF quantity in the coverage ledger";
+    const currencyNote = baseCurrency ? "" : "Base currency is unavailable in this snapshot; the amount is shown without a currency label.";
     return {
       text,
-      title: [label, stale].filter(Boolean).join(" "),
+      title: [label, currencyNote, stale].filter(Boolean).join(" "),
       risk: coverage.unprotected_notional_base > 0 || issueCount > 0 || counts.stale > 0,
     };
   }
@@ -2566,25 +2563,58 @@ function protectionEmptyRow(message) {
   return empty;
 }
 
+// Theta/day prefers the daemon's base-currency aggregate so the panel's
+// money metrics share one currency. Every branch that returns a numeric
+// value also names its currency — back when money(value, "") coerced to
+// USD, "$729.87" sat next to "€12K" in one panel; money() now renders
+// unknown currencies bare, but naming the currency per branch stays the
+// contract.
 function protectionThetaSummary(proposals = {}, rows = []) {
   const counts = proposals.counts || {};
-  if (hasNumericValue(counts.theta_per_day)) {
+  const baseCurrency = normalizeCurrency(counts.base_currency || "");
+  if (hasNumericValue(counts.theta_per_day_base) && baseCurrency) {
+    return {
+      value: counts.theta_per_day_base,
+      currency: baseCurrency,
+      title: "Theta/day represented by theta-hygiene proposals that crossed policy thresholds, converted to the account base currency; zero means no theta-hygiene action is pending.",
+    };
+  }
+  const servedCurrency = normalizeCurrency(counts.theta_per_day_currency || "");
+  if (hasNumericValue(counts.theta_per_day) && servedCurrency) {
     return {
       value: counts.theta_per_day,
+      currency: servedCurrency,
       title: "Theta/day represented by theta-hygiene proposals that crossed policy thresholds; zero means no theta-hygiene action is pending.",
     };
   }
   const thetaRows = rows.filter((row) => row.bucket === "theta_hygiene" && hasNumericValue(row.theta_per_day));
-  if (thetaRows.length > 0) {
+  const rowCurrencies = [...new Set(thetaRows.map((row) => normalizeCurrency(row.contract?.currency)).filter(Boolean))];
+  if (thetaRows.length > 0 && rowCurrencies.length === 1) {
     return {
       value: thetaRows.reduce((sum, row) => sum + Math.abs(row.theta_per_day), 0),
+      currency: rowCurrencies[0],
       title: "Theta/day summed from visible theta-hygiene proposal rows.",
+    };
+  }
+  if (thetaRows.length > 0) {
+    return {
+      value: null,
+      mixed: true,
+      title: "Theta-hygiene proposals span multiple currencies and no base-currency conversion is available in this snapshot.",
     };
   }
   if ((proposals.blockers || []).length === 0 && counts.theta_hygiene === 0) {
     return {
       value: 0,
+      currency: baseCurrency || protectionCoverageBaseCurrency(currentProtectionCoverage() || {}),
       title: "No theta-hygiene action is above policy threshold.",
+    };
+  }
+  if (hasNumericValue(counts.theta_per_day) && counts.theta_per_day !== 0) {
+    return {
+      value: null,
+      mixed: true,
+      title: "Theta-hygiene exposure exists but is not summable to a single currency in this snapshot.",
     };
   }
   return {
@@ -2953,7 +2983,8 @@ function protectionMetricText(proposal = {}) {
   if (proposal.bucket === "theta_hygiene") {
     const parts = [];
     if (hasNumericValue(proposal.theta_per_day) && proposal.theta_per_day > 0) {
-      parts.push(`theta ${money(proposal.theta_per_day, "")}/day`);
+      const thetaCurrency = normalizeCurrency(proposal.contract?.currency || "");
+      parts.push(`theta ${thetaCurrency ? money(proposal.theta_per_day, thetaCurrency) : numberRead(proposal.theta_per_day)}/day`);
     }
     const dte = protectionProposalDTE(proposal);
     if (dte !== null) parts.push(`${dte} DTE`);
@@ -3013,13 +3044,21 @@ function protectionExecutionTriggerLabel(semantics = {}) {
   return [side, trigger].filter(Boolean).join(" / ");
 }
 
+// protectionLossCurrency labels an estimated-loss amount: base-converted
+// losses carry the risk block's base currency (account base as fallback),
+// contract-currency losses carry the row currency. Never coerce a
+// base-converted amount to the contract currency, or anything to USD —
+// unknown stays "" and renders as a bare number.
+function protectionLossCurrency(usedBase, risk = {}) {
+  if (usedBase) return risk.base_currency || state.snapshot?.account?.base_currency || "";
+  return risk.currency || "";
+}
+
 function protectionStopRiskLossLabel(risk = {}) {
   if (!risk) return "";
   const value = firstNumber(risk.estimated_loss_base, risk.estimated_loss_ccy);
   if (!hasNumericValue(value)) return "";
-  const currency = risk.estimated_loss_base !== undefined
-    ? risk.base_currency || risk.currency || state.snapshot?.account?.base_currency || "USD"
-    : risk.currency || state.snapshot?.account?.base_currency || "USD";
+  const currency = protectionLossCurrency(risk.estimated_loss_base !== undefined, risk);
   const pctNLV = hasNumericValue(risk.estimated_loss_pct_nlv) ? ` (${pct(risk.estimated_loss_pct_nlv)} NLV)` : "";
   return `${compactWholeMoney(Math.abs(value), currency)}${pctNLV}`;
 }
@@ -3029,9 +3068,7 @@ function protectionStopRiskGapLabel(risk = {}) {
   if (!gap) return "";
   const value = firstNumber(gap.estimated_loss_base, gap.estimated_loss_ccy);
   if (!hasNumericValue(value)) return "";
-  const currency = gap.estimated_loss_base !== undefined
-    ? risk.base_currency || risk.currency || state.snapshot?.account?.base_currency || "USD"
-    : risk.currency || state.snapshot?.account?.base_currency || "USD";
+  const currency = protectionLossCurrency(gap.estimated_loss_base !== undefined, risk);
   const pctNLV = hasNumericValue(gap.estimated_loss_pct_nlv) ? ` (${pct(gap.estimated_loss_pct_nlv)} NLV)` : "";
   return `${compactWholeMoney(Math.abs(value), currency)}${pctNLV}`;
 }
@@ -3132,9 +3169,9 @@ function protectionStopLadderStepDetail(step = {}, risk = {}) {
   if (hasNumericValue(step.stop_price)) parts.push(numberRead(step.stop_price));
   const loss = firstNumber(step.estimated_loss_base, step.estimated_loss_ccy);
   if (hasNumericValue(loss)) {
-    const currency = step.estimated_loss_base !== undefined
-      ? risk.base_currency || step.base_currency || risk.currency || state.snapshot?.account?.base_currency || "USD"
-      : step.currency || risk.currency || state.snapshot?.account?.base_currency || "USD";
+    // Ladder steps carry no per-step currency field; the parent risk block
+    // labels base and contract-currency losses.
+    const currency = protectionLossCurrency(step.estimated_loss_base !== undefined, risk);
     parts.push(compactWholeMoney(Math.abs(loss), currency));
   }
   return parts.join(" / ") || "--";
@@ -3147,9 +3184,9 @@ function protectionStopLadderStepTitle(step = {}, risk = {}) {
 }
 
 function protectionStopLadderLabel(ladder = [], risk = {}) {
-  const currency = risk.base_currency || risk.currency || state.snapshot?.account?.base_currency || "USD";
   return (ladder || []).slice(0, 5).map((step) => {
     const loss = firstNumber(step.estimated_loss_base, step.estimated_loss_ccy);
+    const currency = protectionLossCurrency(step.estimated_loss_base !== undefined, risk);
     const amount = hasNumericValue(loss) ? compactWholeMoney(Math.abs(loss), currency) : "";
     const stop = hasNumericValue(step.stop_price) ? `stop ${numberRead(step.stop_price)}` : "";
     return [step.label, stop, amount].filter(Boolean).join(" ");
@@ -3245,7 +3282,7 @@ function protectionQuoteFrozen(quote = {}) {
 // exposure — the dollar value is the size there. Parts vanish individually
 // when their typed field is missing; never fabricated.
 function protectionPositionLine(proposal = {}) {
-  const currency = proposal.contract?.currency || "USD";
+  const currency = proposal.contract?.currency || "";
   const parts = [];
   if (proposal.bucket !== "risk_reduction") {
     const qty = Math.abs(Number(proposal.position_quantity || 0));
@@ -3271,7 +3308,9 @@ function protectionPositionLine(proposal = {}) {
     const move = document.createElement("span");
     const dir = dayMoney > 0 ? "up" : dayMoney < 0 ? "down" : "";
     move.className = "protection-quote" + (dir ? ` protection-quote--${dir}` : "");
-    let text = signedMoneyRead(dayMoney, proposal.position_day_change_currency || currency);
+    // position_day_change_money may be a base-currency group aggregate, so
+    // never fall back to the contract currency for its label.
+    let text = signedMoneyRead(dayMoney, proposal.position_day_change_currency || "");
     if (hasNumericValue(proposal.position_day_change_pct)) {
       const p = proposal.position_day_change_pct;
       text += ` (${p > 0 ? "+" : ""}${p.toFixed(1)}%)`;
@@ -3681,7 +3720,7 @@ function protectionPreviewSubmitBlockedReason(result = {}) {
 
 function protectionWhatIfDetails(whatIf = {}) {
   const margin = whatIf.margin || {};
-  const currency = margin.currency || margin.commission_currency || "USD";
+  const currency = margin.currency || margin.commission_currency || "";
   const parts = [];
   if (hasNumericValue(margin.commission)) {
     parts.push(`commission ${compactMoney(margin.commission, margin.commission_currency || currency)}`);
@@ -3771,13 +3810,48 @@ function protectionBlockerText(proposal = {}) {
   return blockers.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
 }
 
+// Risk-over-target prefers the daemon's base-currency aggregate so the
+// panel's money metrics share one currency; the per-contract-currency
+// aggregate is the compat fallback for older snapshots. An absent or MIX
+// currency is unrenderable — never coerce to USD.
+function protectionRiskExcessSummary(counts = {}) {
+  const baseCurrency = normalizeCurrency(counts.base_currency || "");
+  if (hasNumericValue(counts.risk_reduction_excess_notional_base) && baseCurrency) {
+    const value = counts.risk_reduction_excess_notional_base;
+    return {
+      text: compactWholeMoney(value, baseCurrency),
+      title: value > 0
+        ? "Risk-reduction proposal exposure above policy target, in the account base currency."
+        : "No risk-reduction proposal exposure above target.",
+      risk: value > 0,
+    };
+  }
+  const riskExcessCurrency = protectionRiskExcessCurrency(counts);
+  if (typeof counts.risk_reduction_excess_notional === "number" && riskExcessCurrency) {
+    const value = counts.risk_reduction_excess_notional;
+    return {
+      text: compactWholeMoney(counts.risk_reduction_excess_notional, riskExcessCurrency),
+      title: value > 0 ? "Risk-reduction proposal exposure above policy target." : "No risk-reduction proposal exposure above target.",
+      risk: value > 0,
+    };
+  }
+  if (Number(counts.risk_reduction || 0) > 0) {
+    return {
+      text: "Review",
+      title: "Risk-reduction proposals exist but their excess is not summable to one currency (mixed currencies or FX conversion unavailable).",
+      risk: true,
+    };
+  }
+  return { text: "--", title: "No risk-reduction proposal exposure above target.", risk: false };
+}
+
 function protectionRiskExcessCurrency(counts = {}) {
   const currency = String(counts.risk_reduction_excess_currency || "").trim().toUpperCase();
   // "MIX" marked a raw sum across currencies in pre-2026-06-12 persisted
-  // snapshots — not a number in any currency, so render "--" instead of
-  // the old (wrong) USD coercion. New daemons omit the aggregate instead.
+  // snapshots — not a number in any currency. An absent currency on a
+  // present notional is equally unrenderable; never coerce either to USD.
   if (currency === "MIX") return "";
-  return currency || "USD";
+  return currency;
 }
 
 function formatStrike(value) {
@@ -3968,9 +4042,12 @@ function renderOpportunitiesPanel(opportunities = {}) {
   const total = counts.total ?? rows.length ?? 0;
   $("opportunitiesCount").textContent = String(total);
   const gainCurrency = counts.expected_gain_currency || rows.find((row) => row.expected_gain_currency)?.expected_gain_currency || "";
-  $("opportunitiesExpectedGain").textContent = total > 0 && hasNumericValue(counts.expected_gain)
-    ? money(counts.expected_gain, gainCurrency)
-    : "--";
+  const gainEl = $("opportunitiesExpectedGain");
+  const hasGain = total > 0 && hasNumericValue(counts.expected_gain);
+  gainEl.textContent = hasGain ? money(counts.expected_gain, gainCurrency) : "--";
+  gainEl.title = hasGain && !gainCurrency
+    ? "Opportunity gains span mixed or unknown currencies; the sum is shown without a currency label."
+    : "";
   const refresh = $("opportunitiesRefreshButton");
   refresh.disabled = state.opportunitySnapshotBusy;
   refresh.title = state.opportunitySnapshotBusy ? "Refreshing opportunities" : "Refresh opportunity snapshot";
@@ -4624,6 +4701,20 @@ function protectionCoverageCanaryLine(canary = {}, snap = state.snapshot || {}) 
 
 function renderCanaryTimestamp(canary) {
   renderFreshnessTimestamp("canaryAsOf", canary.as_of, { staleMinutes: 5, compact: true });
+  reconcileSignalPanelTimes();
+}
+
+// The Market & Portfolio head shows two freshness spans (regime + canary).
+// When both render the same text, showing the pair reads as a stutter
+// ("now · now"), so collapse to the regime span alone.
+function reconcileSignalPanelTimes() {
+  const regime = $("regimeAsOf");
+  const canary = $("canaryAsOf");
+  if (!regime || !canary) return;
+  const duplicate = regime.textContent === canary.textContent;
+  canary.hidden = duplicate;
+  const sep = canary.parentElement?.querySelector(".panel-time-sep");
+  if (sep) sep.hidden = duplicate;
 }
 
 function renderMarketContext(snap) {
@@ -4742,6 +4833,7 @@ function renderRegimePanel(snap) {
     staleMinutes: regimeStaleBudgetMinutes(snap),
     compact: true,
   });
+  reconcileSignalPanelTimes();
   renderMarketWeather(posture);
   renderRegimeDetail(indicators, snap, canary);
 }
@@ -5353,7 +5445,7 @@ function heldStressFlagLabel(value) {
 
 function renderPortfolioRisk(positions, account) {
   const portfolio = positions.portfolio || {};
-  const baseCurrency = portfolio.base_currency || account.base_currency || "USD";
+  const baseCurrency = portfolio.base_currency || account.base_currency || "";
   renderPortfolioDeltaPosture(portfolio, account);
   renderSensitiveText("portfolioDailyTheta", riskMoney(
     portfolio.daily_theta_base ?? portfolio.daily_theta_ccy,
@@ -5509,9 +5601,6 @@ function renderExposureVisual(exposures) {
     segment.className = "exposure-visual__segment" + (exposure.other ? " exposure-visual__segment--other" : "");
     segment.style.width = `${(exposure.pct / trackBase) * 100}%`;
     segment.title = `${exposure.label} ${pct(exposure.pct)}`;
-    if (exposure.pct >= 5) {
-      segment.textContent = wholePct(exposure.pct);
-    }
     track.append(segment);
   }
   if (remainder > 0) {
@@ -5567,7 +5656,7 @@ function setPortfolioExpansion(open) {
   renderPortfolioDetail(
     state.snapshot?.positions?.portfolio || {},
     state.snapshot?.positions || {},
-    state.snapshot?.account?.base_currency || "USD",
+    state.snapshot?.positions?.portfolio?.base_currency || state.snapshot?.account?.base_currency || "",
   );
 }
 
@@ -6168,16 +6257,25 @@ function alertRowElement(alert) {
   const body = document.createElement("p");
   body.textContent = alert.body;
   text.append(title, body);
-  const at = document.createElement("span");
-  at.className = "alert-row__source";
-  at.textContent = alertSourceLabel(alert);
-  at.title = alertSourceTitle(alert);
-  row.append(text, at);
+  const sourceLabel = alertSourceLabel(alert);
+  if (sourceLabel) {
+    const at = document.createElement("span");
+    at.className = "alert-row__source";
+    at.textContent = sourceLabel;
+    at.title = alertSourceTitle(alert);
+    row.append(text, at);
+  } else {
+    row.classList.add("alert-row--nosource");
+    row.title = alertSourceTitle(alert);
+    row.append(text);
+  }
   return row;
 }
 
 function alertSourceLabel(alert) {
-  if (alert.preview) return "current signal";
+  // Preview alerts only appear under the "Current signal" section header, so
+  // a per-row "current signal" chip would restate it.
+  if (alert.preview) return "";
   if (alertIsStale(alert)) return `stale: ${staleAlertReason(alert)}`;
   return alert.created_at ? `stored ${shortTime(alert.created_at)}` : "stored history";
 }
@@ -6236,6 +6334,10 @@ function openOrderRowElement(order) {
   title.textContent = `${order.action || "--"} ${order.quantity || "--"} ${order.symbol || order.order_ref || "--"}`;
   const meta = document.createElement("span");
   meta.textContent = [
+    orderLifecycleLabel(order.lifecycle_status),
+    orderSendStateLabel(order.send_state),
+  ].filter(Boolean).join(" · ") || "journal view";
+  meta.title = [
     order.lifecycle_status,
     order.send_state,
     order.order_ref,
@@ -6267,19 +6369,19 @@ function openOrderRowElement(order) {
   const priceInputs = orderIsTrail(order)
     ? [
         order.trail?.trailing_amount > 0
-          ? orderEditNumberInput(order, edit, modifyGate, "trailing_amount", "Trailing amount", "Trail amt")
-          : orderEditNumberInput(order, edit, modifyGate, "trailing_percent", "Trailing percent", "Trail %"),
-        orderEditNumberInput(order, edit, modifyGate, "initial_stop", "Initial stop price", "Stop"),
+          ? orderEditField("Trail amt", orderEditNumberInput(order, edit, modifyGate, "trailing_amount", "Trailing amount", "Trail amt"))
+          : orderEditField("Trail %", orderEditNumberInput(order, edit, modifyGate, "trailing_percent", "Trailing percent", "Trail %")),
+        orderEditField("Stop", orderEditNumberInput(order, edit, modifyGate, "initial_stop", "Initial stop price", "Stop")),
         ...(String(order.order_type || "").toUpperCase() === "TRAIL LIMIT"
-          ? [orderEditNumberInput(order, edit, modifyGate, "limit_offset", "Limit offset", "Offset")]
+          ? [orderEditField("Offset", orderEditNumberInput(order, edit, modifyGate, "limit_offset", "Limit offset", "Offset"))]
           : []),
       ]
-    : [orderEditNumberInput(order, edit, modifyGate, "limit_price", "Limit price", "Limit")];
+    : [orderEditField("Limit", orderEditNumberInput(order, edit, modifyGate, "limit_price", "Limit price", "Limit"))];
 
   const fixed = document.createElement("span");
   fixed.className = "open-order-row__fixed";
   fixed.textContent = `${order.order_type || "LMT"} / ${order.tif || "DAY"} / ${order.action || "--"}`;
-  editBox.append(qty, ...priceInputs, fixed);
+  editBox.append(orderEditField("Qty", qty), ...priceInputs, fixed);
 
   const controls = document.createElement("div");
   controls.className = "open-order-row__controls";
@@ -6297,6 +6399,15 @@ function openOrderRowElement(order) {
 
   row.append(main, editBox, controls, status);
   return row;
+}
+
+function orderEditField(labelText, input) {
+  const field = document.createElement("label");
+  field.className = "open-order-row__field";
+  const caption = document.createElement("span");
+  caption.textContent = labelText;
+  field.append(caption, input);
+  return field;
 }
 
 function orderEditNumberInput(order, edit, modifyGate, field, label, placeholder) {
@@ -6554,6 +6665,41 @@ function modifyApplyDisabledReason(gate, preview) {
   if (!preview.submit_eligible) return "Modify preview is not submit eligible";
   if (!previewToken(preview)) return "Modify preview did not mint a preview token";
   return "Apply previewed change after confirmation";
+}
+
+const ORDER_LIFECYCLE_LABELS = {
+  previewed: "Previewed",
+  pending_submit: "Pending submit",
+  pre_submitted: "Pre-submitted",
+  submitted: "Working",
+  partially_filled: "Partially filled",
+  filled: "Filled",
+  pending_cancel: "Pending cancel",
+  cancelled: "Cancelled",
+  rejected: "Rejected",
+  inactive: "Inactive",
+  unknown_reconcile_required: "Needs reconcile",
+  expired_inferred: "Expired (inferred)",
+};
+
+const ORDER_SEND_STATE_LABELS = {
+  reserved: "Reserved",
+  send_attempted: "Send attempted",
+  broker_acknowledged: "At broker",
+  uncertain_send: "Uncertain send",
+  terminal: "Terminal",
+};
+
+function orderLifecycleLabel(value) {
+  const key = String(value || "").toLowerCase();
+  if (!key) return "";
+  return ORDER_LIFECYCLE_LABELS[key] || labelize(key);
+}
+
+function orderSendStateLabel(value) {
+  const key = String(value || "").toLowerCase();
+  if (!key) return "";
+  return ORDER_SEND_STATE_LABELS[key] || labelize(key);
 }
 
 function openOrderStatusLine(order, edit, modifyGate, cancelGate) {
@@ -7075,9 +7221,17 @@ function bytesToB64url(bytes) {
   return btoa(raw).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
+// money never invents a currency: an unknown/mixed currency renders the
+// bare amount (optionally suffixed with a non-ISO label such as MIX) so a
+// EUR-base account can never see a $ label on an unlabeled number.
 function money(value, currency) {
   if (!hasNumericValue(value)) return "--";
-  return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(value);
+  const ccy = normalizeCurrency(currency);
+  if (/^[A-Z]{3}$/.test(ccy) && ccy !== "MIX") {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: ccy }).format(value);
+  }
+  const amount = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
+  return ccy ? `${amount} ${ccy}` : amount;
 }
 
 // signedMoneyRead formats a P&L amount with an explicit leading +/- so the
@@ -7093,22 +7247,24 @@ function signedMoneyRead(value, currency) {
 
 function compactMoney(value, currency) {
   if (!hasNumericValue(value)) return "--";
+  const ccy = normalizeCurrency(currency);
+  const prefix = ccy ? `${ccy} ` : "";
   const abs = Math.abs(value);
   if (abs >= 1000000) {
-    return `${currency || "USD"} ${(value / 1000000).toFixed(abs >= 10000000 ? 1 : 2)}m`;
+    return `${prefix}${(value / 1000000).toFixed(abs >= 10000000 ? 1 : 2)}m`;
   }
   if (abs >= 100000) {
-    return `${currency || "USD"} ${(value / 1000).toFixed(0)}k`;
+    return `${prefix}${(value / 1000).toFixed(0)}k`;
   }
   if (abs >= 10000) {
-    return `${currency || "USD"} ${(value / 1000).toFixed(1)}k`;
+    return `${prefix}${(value / 1000).toFixed(1)}k`;
   }
-  return money(value, currency);
+  return money(value, ccy);
 }
 
 function compactWholeMoney(value, currency) {
   if (!hasNumericValue(value)) return "--";
-  const ccy = normalizeCurrency(currency) || "USD";
+  const ccy = normalizeCurrency(currency);
   const compact = Math.abs(value) >= 1000;
   const amountOptions = { minimumFractionDigits: 0, maximumFractionDigits: 0 };
   if (compact) amountOptions.notation = "compact";
@@ -7127,12 +7283,6 @@ function setMetricTone(el, tone = "neutral") {
   if (!el) return;
   el.classList.remove("metric-risk", "metric-neutral");
   el.classList.add(tone === "risk" ? "metric-risk" : "metric-neutral");
-}
-
-function renderSignedMoney(id, value, currency) {
-  const el = $(id);
-  el.className = signedClass(value);
-  el.textContent = hasNumericValue(value) ? money(value, currency) : "--";
 }
 
 function renderSensitiveSignedMoney(id, value, currency) {
@@ -7215,7 +7365,8 @@ function riskMoney(value, currency) {
     maximumFractionDigits: 0,
     minimumFractionDigits: 0,
   }).format(value);
-  return `${amount} ${currency || "USD"}`;
+  const ccy = normalizeCurrency(currency);
+  return ccy ? `${amount} ${ccy}` : amount;
 }
 
 function pct(value) {
@@ -7256,9 +7407,16 @@ function ageLabel(minutes) {
 function renderFreshnessTimestamp(target, value, options = {}) {
   const el = typeof target === "string" ? $(target) : target;
   if (!el) return;
+  // Markup may pin a static explanatory title (e.g. "Market regime
+  // freshness"); keep it as a prefix instead of clobbering it.
+  if (el.dataset.freshnessLabel === undefined) {
+    el.dataset.freshnessLabel = el.title || "";
+  }
+  const label = el.dataset.freshnessLabel;
   const at = value instanceof Date ? value : parseDate(value);
   if (!at) {
     el.textContent = options.fallback || "no timestamp";
+    el.title = label;
     el.classList.add("stale");
     return;
   }
@@ -7266,9 +7424,16 @@ function renderFreshnessTimestamp(target, value, options = {}) {
   const ageMinutes = Math.max(0, Math.floor(ageMS / 60000));
   const staleMinutes = typeof options.staleMinutes === "number" ? options.staleMinutes : 15;
   const stale = ageMinutes >= staleMinutes;
-  el.textContent = options.compact
-    ? `${shortTime(at.toISOString())} · ${ageLabel(ageMinutes)}`
-    : `${stale ? "stale" : "updated"} ${shortTime(at.toISOString())} · ${ageLabel(ageMinutes)}`;
+  const absolute = shortTime(at.toISOString());
+  if (ageMinutes < 1) {
+    // Fresh: "HH:MM · now" restates itself; keep the clock time in the title.
+    el.textContent = options.compact ? "now" : "updated now";
+  } else {
+    el.textContent = options.compact
+      ? `${absolute} · ${ageLabel(ageMinutes)}`
+      : `${stale ? "stale" : "updated"} ${absolute} · ${ageLabel(ageMinutes)}`;
+  }
+  el.title = label ? `${label} · ${absolute}` : absolute;
   el.classList.toggle("stale", stale);
 }
 

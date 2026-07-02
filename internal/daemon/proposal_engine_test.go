@@ -258,7 +258,7 @@ func TestRiskReductionEmitsReduceOnly(t *testing.T) {
 	if prop.RiskExcessCurrency != "USD" {
 		t.Fatalf("risk excess currency=%q, want USD", prop.RiskExcessCurrency)
 	}
-	counts := proposalCounts([]rpc.TradeProposal{prop})
+	counts := proposalCounts([]rpc.TradeProposal{prop}, "")
 	if counts.RiskReductionExcessNotional != prop.RiskExcessNotional {
 		t.Fatalf("risk excess aggregate=%v, want %v", counts.RiskReductionExcessNotional, prop.RiskExcessNotional)
 	}
@@ -439,7 +439,7 @@ func hasStopLadderStep(steps []rpc.TradeProposalStopLadderStep, kind string, pct
 
 func TestProposalCountsSerializesZeroTheta(t *testing.T) {
 	t.Parallel()
-	raw, err := json.Marshal(proposalCounts(nil))
+	raw, err := json.Marshal(proposalCounts(nil, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestProposalEnginePreservesSnapshotOnTransientRefreshFailure(t *testing.T) 
 				Fingerprint: policyFP,
 			},
 			Proposals: []rpc.TradeProposal{prop},
-			Counts:    proposalCounts([]rpc.TradeProposal{prop}),
+			Counts:    proposalCounts([]rpc.TradeProposal{prop}, ""),
 		},
 		ignored: map[string]struct{}{},
 	}
@@ -1317,7 +1317,7 @@ func preservedProposalSnapshot(now time.Time, prop rpc.TradeProposal, blockers [
 			Fingerprint:   prop.PolicyFingerprint,
 		},
 		Proposals: []rpc.TradeProposal{prop},
-		Counts:    proposalCounts([]rpc.TradeProposal{prop}),
+		Counts:    proposalCounts([]rpc.TradeProposal{prop}, ""),
 		Blockers:  append([]rpc.TradingBlocker(nil), blockers...),
 	}
 }
@@ -2566,7 +2566,7 @@ func TestProposalCountsOmitsMixedCurrencyExcess(t *testing.T) {
 		{Bucket: rpc.TradeProposalBucketRiskReduction, RiskExcessNotional: 15_000, RiskExcessCurrency: "USD"},
 		{Bucket: rpc.TradeProposalBucketRiskReduction, RiskExcessNotional: 9_000, RiskExcessCurrency: "EUR"},
 	}
-	counts := proposalCounts(mixed)
+	counts := proposalCounts(mixed, "")
 	if counts.RiskReduction != 2 {
 		t.Fatalf("risk reduction count = %d, want 2", counts.RiskReduction)
 	}
@@ -2574,7 +2574,7 @@ func TestProposalCountsOmitsMixedCurrencyExcess(t *testing.T) {
 		t.Fatalf("mixed-currency aggregate = %v %q, want omitted: a EUR+USD raw sum is not a number in any currency",
 			counts.RiskReductionExcessNotional, counts.RiskReductionExcessCurrency)
 	}
-	single := proposalCounts(mixed[1:])
+	single := proposalCounts(mixed[1:], "")
 	if single.RiskReductionExcessNotional != 9_000 || single.RiskReductionExcessCurrency != "EUR" {
 		t.Fatalf("single-currency aggregate = %v %q, want 9000 EUR", single.RiskReductionExcessNotional, single.RiskReductionExcessCurrency)
 	}

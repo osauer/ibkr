@@ -95,7 +95,7 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 	if raw.LookAheadExcess != nil {
 		res.LookAheadExcess = *raw.LookAheadExcess
 	}
-	ledger := repairCurrencyLedgerFXRates(ctx, c, raw.CurrencyLedger, res.BaseCurrency)
+	ledger := s.repairCurrencyLedgerFXRatesCached(ctx, c, raw.CurrencyLedger, res.BaseCurrency)
 	res.CurrencyExposure = buildCurrencyExposure(ledger, res.BaseCurrency)
 	// Daily P&L: read the connector's most-recent reqPnL frame. ok=false
 	// before the first frame arrives — leave pointers nil (no fabrication).
@@ -323,7 +323,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	rawAccount := c.AccountSummaryRaw()
 	baseCcy := normCcy(baseCurrencyFromRaw(rawAccount))
 	netLiquidationBase := netLiquidationBaseFromRaw(rawAccount, baseCcy)
-	ledger := repairCurrencyLedgerFXRates(ctx, c, c.CurrencyLedgerSnapshot(), baseCcy)
+	ledger := s.repairCurrencyLedgerFXRatesCached(ctx, c, c.CurrencyLedgerSnapshot(), baseCcy)
 	missing := missingPositionFXCurrencies(res.Stocks, res.Options, ledger, baseCcy)
 	if baseCcy == "" || netLiquidationBase == nil || len(missing) > 0 {
 		if raw, err := c.RequestAccountSummary(ctx, 3*time.Second); err == nil {
@@ -336,7 +336,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 			if netLiquidationBase == nil {
 				netLiquidationBase = raw.NetLiquidation
 			}
-			freshLedger := repairCurrencyLedgerFXRates(ctx, c, raw.CurrencyLedger, baseCcy)
+			freshLedger := s.repairCurrencyLedgerFXRatesCached(ctx, c, raw.CurrencyLedger, baseCcy)
 			ledger = mergeCurrencyLedgers(freshLedger, ledger)
 		} else {
 			s.logger.Debugf("positions FX ledger refresh failed for %v: %v", missing, err)

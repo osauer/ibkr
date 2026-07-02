@@ -303,7 +303,10 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function canaryProtectionCoverageFor(snap = state.snapshot || {}, canary = snap.canary || {})",
 		"function protectionCoverageDetailFact(coverage = null, baseCurrency = \"\")",
 		"function protectionCoverageCanaryLine(canary = {}, snap = state.snapshot || {})",
-		`? compactWholeMoney(counts.risk_reduction_excess_notional, riskExcessCurrency)`,
+		"function protectionRiskExcessSummary(counts = {})",
+		"compactWholeMoney(counts.risk_reduction_excess_notional, riskExcessCurrency)",
+		"counts.risk_reduction_excess_notional_base",
+		"counts.theta_per_day_base",
 		"compactWholeMoney(proposal.risk_excess_notional, proposal.risk_excess_currency || \"\")",
 		"function compactWholeMoney(value, currency)",
 		"function protectionQuoteLine(proposal = {})",
@@ -443,7 +446,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		`id="underlyingWinnerPnl"`,
 		`Loser daily P/L`,
 		`id="underlyingLoserPnl"`,
-		`Purge all!`,
+		`Purge all`,
 		`Restore all`,
 		`Rebuild all`,
 		`id="underlyingBookListPanel" hidden`,
@@ -742,7 +745,8 @@ func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
 	render := jsFunctionBlock(t, js, "renderProtectionPanel")
 	for _, want := range []string{
 		`setMetricTone(thetaEl, hasNumericValue(theta.value) && theta.value > 0 ? "risk" : "neutral")`,
-		`setMetricTone(riskExcessEl, hasNumericValue(riskExcess) && riskExcess > 0 ? "risk" : "neutral")`,
+		`setMetricTone(riskExcessEl, riskExcess.risk ? "risk" : "neutral")`,
+		`money(theta.value, theta.currency)`,
 		`const noStop = protectionNoStopExposureSummary(rows, marketEvents, currentProtectionCoverage());`,
 		`$("protectionNoStopExposure")`,
 	} {
@@ -915,6 +919,47 @@ func TestAppJSProtectionFastPathKeepsHardMarketEventBlocker(t *testing.T) {
 		body := jsFunctionBlock(t, js, name)
 		if !strings.Contains(body, "protectionEffectiveBlockers(proposal, state.snapshot?.market_events || {})") {
 			t.Fatalf("%s must gate against current market events", name)
+		}
+	}
+}
+
+// Money formatters must never invent a currency: an amount whose currency is
+// genuinely unknown renders bare (no symbol), never with a coerced USD label.
+// This is the static twin of the 2026-07-02 money-flap fix — a EUR-base
+// account once showed "$729.87" next to "€12K" because money(value, "")
+// defaulted to USD.
+func TestAppJSMoneyFormattersNeverDefaultToUSD(t *testing.T) {
+	t.Parallel()
+	data, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	js := string(data)
+	if strings.Contains(js, `"USD"`) {
+		t.Fatalf(`app.js hardcodes a "USD" currency literal; thread the real currency or render the amount bare`)
+	}
+	moneyFn := jsFunctionBlock(t, js, "money")
+	for _, want := range []string{
+		"const ccy = normalizeCurrency(currency);",
+		"return ccy ? `${amount} ${ccy}` : amount;",
+	} {
+		if !strings.Contains(moneyFn, want) {
+			t.Fatalf("money() missing bare-render contract %q", want)
+		}
+	}
+	for _, want := range []string{
+		// Formatter-level guards.
+		"function protectionLossCurrency(usedBase, risk = {})",
+		// [trading].max_notional is defined in the account currency.
+		`money(notional, state.snapshot?.account?.base_currency || "")`,
+		// Sweep risk cuts are base-currency dollar-delta, not contract currency.
+		`deriskLegRow(leg, Boolean(d.submitted), res.base_currency || "")`,
+		"money(leg.risk_contribution_cut, baseCurrency)",
+		// Base-converted day-change money must not inherit the contract currency.
+		`signedMoneyRead(dayMoney, proposal.position_day_change_currency || "")`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("app.js missing currency-threading contract %q", want)
 		}
 	}
 }

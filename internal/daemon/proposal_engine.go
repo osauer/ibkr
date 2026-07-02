@@ -511,7 +511,7 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		SourceFingerprints: sources,
 		MarketEvents:       marketEvents,
 		Proposals:          proposals,
-		Counts:             proposalCounts(proposals),
+		Counts:             proposalCounts(proposals, protectionCoverageBaseCurrency(pos)),
 	}
 	return e.installScoped(snap, scope, show, thetaSuppressions), nil
 }
@@ -571,10 +571,15 @@ func (e *proposalEngine) journalThetaSuppressions(snap rpc.TradeProposalSnapshot
 func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, status rpc.ProtectionPolicyStatus, acct *rpc.AccountResult, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, scope brokerStateScope, now time.Time) ([]rpc.TradeProposal, []thetaSuppression) {
 	var out []rpc.TradeProposal
 	var suppressions []thetaSuppression
+	baseCcy := protectionCoverageBaseCurrency(pos)
 	if policy.Buckets.ThetaHygiene.Enabled {
 		for _, row := range pos.Options {
 			p, ok, supp := thetaProposal(policy, status, row, sources, now)
 			if ok {
+				if rate, rateOK := positionBaseRate(row, baseCcy); rateOK && p.ThetaPerDay > 0 {
+					base := p.ThetaPerDay * rate
+					p.ThetaPerDayBase = &base
+				}
 				enrichProposalPositionContext(&p, row, acct)
 				applyMarketEventFlagsToProposal(&p, marketEvents)
 				if !e.isIgnored(scope, p.Key) {
@@ -1007,6 +1012,10 @@ func riskReductionProposal(policy protectionPolicy, status rpc.ProtectionPolicyS
 	p.MarketValuePctNLV = cloneFloat64Ptr(group.GroupMarketValuePctNLV)
 	p.RiskExcessNotional = excessNotional
 	p.RiskExcessCurrency = p.Contract.Currency
+	if group.GroupMarketValueBase != nil {
+		base := math.Abs(*group.GroupMarketValueBase) * (excessPct / pct)
+		p.RiskExcessNotionalBase = &base
+	}
 	p.Score = pct
 	return p, true
 }
@@ -2252,9 +2261,11 @@ func emptyProposalSnapshot(now time.Time) rpc.TradeProposalSnapshot {
 	return rpc.TradeProposalSnapshot{Kind: rpc.TradeProposalSnapshotKind, SchemaVersion: rpc.TradeProposalSnapshotSchemaVersion, AsOf: now, Revision: "empty", Proposals: []rpc.TradeProposal{}}
 }
 
-func proposalCounts(proposals []rpc.TradeProposal) rpc.TradeProposalCounts {
+func proposalCounts(proposals []rpc.TradeProposal, baseCurrency string) rpc.TradeProposalCounts {
 	var out rpc.TradeProposalCounts
 	out.Total = len(proposals)
+	var thetaBase, riskBase float64
+	thetaBaseOK, riskBaseOK := true, true
 	for _, p := range proposals {
 		if len(p.Blockers) == 0 {
 			out.Actionable++
@@ -2264,10 +2275,21 @@ func proposalCounts(proposals []rpc.TradeProposal) rpc.TradeProposalCounts {
 		case rpc.TradeProposalBucketThetaHygiene:
 			out.ThetaHygiene++
 			out.ThetaPerDay += p.ThetaPerDay
+			out.ThetaPerDayCurrency = mergedCurrency(out.ThetaPerDayCurrency, p.Contract.Currency)
+			if p.ThetaPerDayBase != nil {
+				thetaBase += *p.ThetaPerDayBase
+			} else {
+				thetaBaseOK = false
+			}
 		case rpc.TradeProposalBucketRiskReduction:
 			out.RiskReduction++
 			out.RiskReductionExcessNotional += p.RiskExcessNotional
 			out.RiskReductionExcessCurrency = mergedCurrency(out.RiskReductionExcessCurrency, p.RiskExcessCurrency)
+			if p.RiskExcessNotionalBase != nil {
+				riskBase += *p.RiskExcessNotionalBase
+			} else {
+				riskBaseOK = false
+			}
 		case rpc.TradeProposalBucketTrailingStop:
 			out.TrailingStop++
 		}
@@ -2279,6 +2301,25 @@ func proposalCounts(proposals []rpc.TradeProposal) rpc.TradeProposalCounts {
 	if out.RiskReductionExcessCurrency == "MIX" {
 		out.RiskReductionExcessNotional = 0
 		out.RiskReductionExcessCurrency = ""
+	}
+	// ThetaPerDay has no omitempty and legacy renderers print it raw, so a
+	// mixed-currency sum keeps its value and only loses the label — zeroing
+	// it would read as "no theta action pending", which is a lie.
+	if out.ThetaPerDayCurrency == "MIX" {
+		out.ThetaPerDayCurrency = ""
+	}
+	// Base twins: served only when every contributing proposal converted
+	// (nil means unavailable, not zero) and the account base is known.
+	if baseCurrency = normCcy(baseCurrency); baseCurrency != "" {
+		if out.ThetaHygiene > 0 && thetaBaseOK {
+			out.ThetaPerDayBase = &thetaBase
+		}
+		if out.RiskReduction > 0 && riskBaseOK {
+			out.RiskReductionExcessNotionalBase = &riskBase
+		}
+		if out.ThetaPerDayBase != nil || out.RiskReductionExcessNotionalBase != nil {
+			out.BaseCurrency = baseCurrency
+		}
 	}
 	return out
 }

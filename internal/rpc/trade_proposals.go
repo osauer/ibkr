@@ -115,6 +115,16 @@ type TradeProposalCounts struct {
 	ThetaPerDay                 float64 `json:"theta_per_day"`
 	RiskReductionExcessNotional float64 `json:"risk_reduction_excess_notional,omitempty"`
 	RiskReductionExcessCurrency string  `json:"risk_reduction_excess_currency,omitempty"`
+	// ThetaPerDayCurrency labels the ThetaPerDay sum. Omitted when the
+	// contributing proposals span more than one contract currency — the raw
+	// sum is kept for legacy renderers, but a currency label would lie.
+	ThetaPerDayCurrency string `json:"theta_per_day_currency,omitempty"`
+	// Base-currency twins of the money aggregates, converted per proposal
+	// at build time. Nil means unavailable (some contributor lacked an FX
+	// rate), never zero. BaseCurrency labels both.
+	ThetaPerDayBase                 *float64 `json:"theta_per_day_base,omitempty"`
+	RiskReductionExcessNotionalBase *float64 `json:"risk_reduction_excess_notional_base,omitempty"`
+	BaseCurrency                    string   `json:"base_currency,omitempty"`
 }
 
 type TradeProposal struct {
@@ -147,7 +157,12 @@ type TradeProposal struct {
 	Notional           float64                          `json:"notional,omitempty"`
 	RiskExcessNotional float64                          `json:"risk_excess_notional,omitempty"`
 	RiskExcessCurrency string                           `json:"risk_excess_currency,omitempty"`
-	MarketValuePctNLV  *float64                         `json:"market_value_pct_nlv,omitempty"`
+	// Base-currency twins of ThetaPerDay / RiskExcessNotional, converted
+	// from the position row's FX rate at build time. Nil means the FX rate
+	// was unavailable, never zero.
+	ThetaPerDayBase        *float64 `json:"theta_per_day_base,omitempty"`
+	RiskExcessNotionalBase *float64 `json:"risk_excess_notional_base,omitempty"`
+	MarketValuePctNLV      *float64 `json:"market_value_pct_nlv,omitempty"`
 	// Holding-level decision context: the full exposure being acted on, not
 	// the order size. PositionMarketValue is in Contract.Currency;
 	// MarketValuePctNLV is its share of net liquidation. PositionDayChange* is

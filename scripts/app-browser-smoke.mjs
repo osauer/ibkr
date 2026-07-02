@@ -630,9 +630,9 @@ async function exerciseUnderlyingPanelFixture(page) {
     throw new Error(`underlying row still contains placeholder action copy: ${JSON.stringify(row.buttons)}`);
   }
   const bulkLabels = info.bulkButtons.map((item) => item.text);
-  const expectedBulkLabels = ["Purge all!", "Restore all", "Rebuild all"];
+  const expectedBulkLabels = ["Purge all", "Restore all", "Rebuild all"];
   if (JSON.stringify(bulkLabels) !== JSON.stringify(expectedBulkLabels)) {
-    throw new Error(`bulk underlying controls should be ordered Purge all!, Restore all, Rebuild all: ${JSON.stringify(info.bulkButtons)}`);
+    throw new Error(`bulk underlying controls should be ordered Purge all, Restore all, Rebuild all: ${JSON.stringify(info.bulkButtons)}`);
   }
   for (const label of expectedBulkLabels) {
     const button = info.bulkButtons.find((item) => item.text === label);

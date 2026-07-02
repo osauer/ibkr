@@ -104,6 +104,12 @@ type Server struct {
 	minTickMu      sync.Mutex
 	minTickByConID map[int]float64
 
+	// fxRates keeps last-known-good BASE-per-CCY exchange rates so one
+	// failed FX snapshot quote cannot strip base-currency decoration from
+	// a single positions/account response (see
+	// repairCurrencyLedgerFXRatesCached in fx_cache.go).
+	fxRates *fxRateCache
+
 	listener net.Listener
 
 	mu               sync.Mutex
@@ -432,6 +438,7 @@ func New(opts Options) *Server {
 		prevCloses:     newPrevCloseCache(),
 		greeks:         newGreeksCache(),
 		zeroGamma:      newGammaZeroCache(),
+		fxRates:        newFXRateCache(),
 	}
 	s.attempterFactory = s.buildAttempter
 	s.installSubs()
@@ -455,7 +462,24 @@ func New(opts Options) *Server {
 	s.installRegimeSeriesCache()
 	s.installRegimeHistoryCache()
 	s.installGammaZeroCache()
+	s.installFXRateCache()
 	return s
+}
+
+// installFXRateCache replaces the bootstrap in-memory FX-rate cache
+// with a store-backed one so last-known-good rates survive a daemon
+// restart (IBKR's nightly server-reset window, weekends). Best-effort:
+// a missing XDG_CACHE_HOME / HOME pair leaves the in-memory cache in
+// place — every restart starts cold and *_base fields stay nil until
+// the first successful live resolution, but the daemon itself starts
+// fine.
+func (s *Server) installFXRateCache() {
+	dir, err := fxRateStoreDefaultDir()
+	if err != nil {
+		s.logger.Warnf("fx rate cache: resolve dir: %v (persistence disabled)", err)
+		return
+	}
+	s.fxRates = newFXRateCacheWithStore(newFXRateStore(dir), time.Now, s.logger)
 }
 
 // installGammaZeroCache replaces the bootstrap in-memory gamma cache
