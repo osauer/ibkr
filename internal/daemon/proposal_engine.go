@@ -1439,7 +1439,7 @@ func (e *proposalEngine) Preview(ctx context.Context, p rpc.TradeProposalPreview
 		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, Preview: sanitizeProposalPreviewForProposal(preview, prop), Blockers: blockers, AsOf: now}, nil
 	}
 	if !preview.SubmitEligible {
-		blockers := previewNotSubmitEligibleBlockers()
+		blockers := previewNotSubmitEligibleBlockers(preview)
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalPreviewResult{Proposal: prop, PreviewTokenID: preview.PreviewTokenID, PreviewTokenExpiresAt: preview.PreviewTokenExpiresAt, SubmitEligible: false, Preview: sanitizeProposalPreviewForProposal(preview, prop), Blockers: blockers, AsOf: now}, nil
 	}
@@ -1563,7 +1563,7 @@ func (e *proposalEngine) Submit(ctx context.Context, p rpc.TradeProposalSubmitPa
 		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreviewForProposal(preview, prop), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
 	if !preview.SubmitEligible {
-		blockers := previewNotSubmitEligibleBlockers()
+		blockers := previewNotSubmitEligibleBlockers(preview)
 		e.appendBlocked(prop, prop.Key, prop.Revision, blockers, nil)
 		return rpc.TradeProposalSubmitResult{Proposal: prop, Preview: sanitizeProposalPreviewForProposal(preview, prop), PreviewTokenID: preview.PreviewTokenID, Blockers: blockers, AsOf: now}, nil
 	}
@@ -1706,12 +1706,37 @@ func equivalentStockSecType(a, b string) bool {
 	return norm(a) == norm(b)
 }
 
-func previewNotSubmitEligibleBlockers() []rpc.TradingBlocker {
-	return []rpc.TradingBlocker{{
+// previewNotSubmitEligibleBlockers keeps the stable blocker code but carries
+// the broker's own WhatIf verdict as the message when one exists — "error
+// code 110: price does not conform to the minimum price variation" is
+// actionable, "did not make this submit-eligible" is not. Every surface that
+// renders blockers (SPA leg rows, CLI JSON) gets the concrete cause for free.
+func previewNotSubmitEligibleBlockers(preview *rpc.OrderPreviewResult) []rpc.TradingBlocker {
+	blocker := rpc.TradingBlocker{
 		Code:    "preview_not_submit_eligible",
 		Message: "broker WhatIf did not make this proposal submit-eligible",
 		Action:  "Resolve broker WhatIf availability and preview again before submitting a broker-managed stop.",
-	}}
+	}
+	if preview != nil {
+		if cause := strings.TrimSpace(preview.WhatIf.Message); cause != "" {
+			blocker.Message = truncateBlockerCause(cause)
+		}
+		if action := strings.TrimSpace(preview.WhatIf.Action); action != "" {
+			blocker.Action = action
+		}
+	}
+	return []rpc.TradingBlocker{blocker}
+}
+
+// truncateBlockerCause bounds broker-originated text so a verbose reject
+// cannot flood the mobile leg rows or the journal.
+func truncateBlockerCause(s string) string {
+	const maxRunes = 200
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 func (e *proposalEngine) Ignore(p rpc.TradeProposalIgnoreParams) rpc.TradeProposalIgnoreResult {

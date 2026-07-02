@@ -30,19 +30,22 @@ type opportunityEngine struct {
 	snapshot rpc.OpportunitySnapshot
 	ignored  map[string]struct{}
 
+	refreshFailStreak int
+	refreshFailSince  time.Time
+	refreshFailCodes  []string
+
 	kickOnce sync.Once
 	kick     chan struct{}
-
-	healthMu sync.Mutex
-	health   opportunityRefreshHealth
 }
 
+// opportunityRefreshHealth is the engine's refresh-streak view for the
+// status.health opportunities subsystem row, mirroring
+// proposalRefreshHealth.
 type opportunityRefreshHealth struct {
 	Streak     int
-	LastError  string
-	LastAt     time.Time
-	LastCodes  []string
-	LastServed time.Time
+	Since      time.Time
+	Codes      []string
+	ServedAsOf time.Time
 }
 
 type opportunityEvent struct {
@@ -118,10 +121,13 @@ func (e *opportunityEngine) Run(ctx context.Context) {
 		case <-e.kickCh():
 		case <-timer.C:
 		}
+		// Refresh records the outcome itself (noteRefreshOutcome); a second
+		// call here would double-count the failure streak, halving the
+		// warn threshold and inflating the "blocked N consecutive times"
+		// status trail.
 		snap, err := e.Refresh(ctx, false)
-		e.noteRefreshOutcome(snap, err)
 		wait := next
-		if err != nil || len(snap.Blockers) > 0 {
+		if err != nil || opportunityRefreshTransient(snap) {
 			wait = minDuration(maxDuration(time.Duration(max(e.RefreshHealth().Streak, 1))*opportunityRefreshRetryBase, opportunityRefreshRetryBase), next)
 		}
 		timer.Reset(wait)
@@ -170,47 +176,94 @@ func (e *opportunityEngine) Refresh(ctx context.Context, show bool) (rpc.Opportu
 	return snap, err
 }
 
+// RefreshHealth reports the current transient-failure streak and the as_of
+// of the snapshot being served. Zero streak means the last refresh
+// installed cleanly.
 func (e *opportunityEngine) RefreshHealth() opportunityRefreshHealth {
 	if e == nil {
 		return opportunityRefreshHealth{}
 	}
-	e.healthMu.Lock()
-	defer e.healthMu.Unlock()
-	out := e.health
-	out.LastCodes = append([]string(nil), e.health.LastCodes...)
-	return out
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return opportunityRefreshHealth{
+		Streak:     e.refreshFailStreak,
+		Since:      e.refreshFailSince,
+		Codes:      append([]string(nil), e.refreshFailCodes...),
+		ServedAsOf: e.snapshot.AsOf,
+	}
 }
 
+// noteRefreshOutcome advances the transient-failure streak after every
+// refresh, regardless of caller, and emits the throttled log trail.
+// Transient failures preserve the last-good snapshot and return err == nil
+// — the blocker codes are the only signal — so this is where a stalled
+// panel becomes diagnosable. Quiet below proposalRefreshWarnStreak, then
+// one warn per failed attempt: Run's backoff paces those at 30s/1m/2m/…
+// capped at the cadence, so a persistent outage logs once per escalation
+// and then once per cadence, not once per poll. One info line closes the
+// streak when a refresh finally lands. Mirrors the proposals engine's
+// trail so both broker-state feeds diagnose the same way.
 func (e *opportunityEngine) noteRefreshOutcome(snap rpc.OpportunitySnapshot, err error) {
 	if e == nil {
 		return
 	}
-	e.healthMu.Lock()
-	defer e.healthMu.Unlock()
-	e.health.LastAt = e.clock()
-	e.health.LastCodes = opportunityBlockerCodes(snap, err)
-	if err != nil || len(snap.Blockers) > 0 {
-		e.health.Streak++
-		if err != nil {
-			e.health.LastError = err.Error()
-		} else if len(snap.Blockers) > 0 {
-			e.health.LastError = snap.Blockers[0].Message
+	failed := err != nil || opportunityRefreshTransient(snap)
+	now := e.clock()
+	e.mu.Lock()
+	if !failed {
+		streak, since := e.refreshFailStreak, e.refreshFailSince
+		e.refreshFailStreak, e.refreshFailSince, e.refreshFailCodes = 0, time.Time{}, nil
+		e.mu.Unlock()
+		if streak >= proposalRefreshWarnStreak && e.server != nil {
+			e.server.infof("opportunities: refresh recovered after %d blocked attempts over %s", streak, now.Sub(since).Round(time.Second))
 		}
 		return
 	}
-	e.health.Streak = 0
-	e.health.LastError = ""
-	e.health.LastServed = snap.AsOf
+	e.refreshFailStreak++
+	if e.refreshFailStreak == 1 {
+		e.refreshFailSince = now
+	}
+	e.refreshFailCodes = opportunityBlockerCodes(snap, err)
+	streak, since, codes := e.refreshFailStreak, e.refreshFailSince, e.refreshFailCodes
+	e.mu.Unlock()
+	if streak < proposalRefreshWarnStreak || e.server == nil {
+		return
+	}
+	e.server.warnf("opportunities: refresh blocked %d consecutive times over %s (codes: %s); serving snapshot as_of %s (%s old)",
+		streak, now.Sub(since).Round(time.Second), strings.Join(codes, ","),
+		snap.AsOf.Format(time.RFC3339), now.Sub(snap.AsOf).Round(time.Second))
 }
 
+// opportunityRefreshTransient reports whether the installed snapshot is
+// blocked on a condition the next broker heartbeat can clear (connection
+// not yet up, session identity not yet concrete, session switch still
+// settling). Refresh failures that preserve a last-good snapshot return
+// err == nil but still carry these blocker codes, so the codes are the
+// signal, not the returned error. Deliberately excludes
+// opportunities_disabled and policy drift/error blockers: those are
+// operator-owned states, not outages, and must not count as refresh
+// failures.
+func opportunityRefreshTransient(snap rpc.OpportunitySnapshot) bool {
+	for _, b := range snap.Blockers {
+		switch b.Code {
+		case "opportunity_scope_unavailable", "opportunity_scope_mismatch", "account_unavailable", "positions_unavailable", "positions_pending":
+			return true
+		}
+	}
+	return false
+}
+
+// opportunityBlockerCodes flattens the installed snapshot's blocker codes
+// for the refresh-streak trail; the raw fetch error stands in when a
+// failure path produced no blockers.
 func opportunityBlockerCodes(snap rpc.OpportunitySnapshot, err error) []string {
 	var out []string
 	for _, blocker := range snap.Blockers {
-		if blocker.Code != "" {
+		if blocker.Code != "" && !slices.Contains(out, blocker.Code) {
 			out = append(out, blocker.Code)
 		}
 	}
-	if err != nil {
+	if len(out) == 0 && err != nil {
 		out = append(out, err.Error())
 	}
 	return out
@@ -252,27 +305,50 @@ func (e *opportunityEngine) refresh(ctx context.Context, show bool) (rpc.Opportu
 	}
 	acct, err := e.server.handleAccountSummary(ctx)
 	if err != nil {
+		blockers := []rpc.TradingBlocker{{Code: "account_unavailable", Message: err.Error()}}
+		if snap, ok := e.preserveSnapshotOnRefreshFailure(scope, status, policyStatus, blockers, show); ok {
+			return snap, nil
+		}
 		snap := emptyOpportunitySnapshot(now)
 		snap.Status = status
 		snap.PolicyStatus = policyStatus
 		snap.Trading = status.Trading
 		snap.AccountID = scope.Account
 		snap.AccountMode = scope.Mode
-		snap.Blockers = []rpc.TradingBlocker{{Code: "account_unavailable", Message: err.Error()}}
+		snap.Blockers = blockers
 		e.installSnapshot(snap, show)
 		return snap, err
 	}
 	pos, err := e.server.handlePositionsList(ctx, &rpc.Request{})
 	if err != nil {
+		blockers := []rpc.TradingBlocker{{Code: "positions_unavailable", Message: err.Error()}}
+		if snap, ok := e.preserveSnapshotOnRefreshFailure(scope, status, policyStatus, blockers, show); ok {
+			return snap, nil
+		}
 		snap := emptyOpportunitySnapshot(now)
 		snap.Status = status
 		snap.PolicyStatus = policyStatus
 		snap.Trading = status.Trading
 		snap.AccountID = scope.Account
 		snap.AccountMode = scope.Mode
-		snap.Blockers = []rpc.TradingBlocker{{Code: "positions_unavailable", Message: err.Error()}}
+		snap.Blockers = blockers
 		e.installSnapshot(snap, show)
 		return snap, err
+	}
+	if proposalPositionsUnprimed(pos, acct) {
+		blockers := []rpc.TradingBlocker{{Code: "positions_pending", Message: "portfolio stream not yet primed; account summary reports open positions"}}
+		if snap, ok := e.preserveSnapshotOnRefreshFailure(scope, status, policyStatus, blockers, show); ok {
+			return snap, nil
+		}
+		snap := emptyOpportunitySnapshot(now)
+		snap.Status = status
+		snap.PolicyStatus = policyStatus
+		snap.Trading = status.Trading
+		snap.AccountID = scope.Account
+		snap.AccountMode = scope.Mode
+		snap.Blockers = blockers
+		e.installSnapshot(snap, show)
+		return snap, nil
 	}
 	accountFP := rpc.BuildAccountFingerprint(acct)
 	positionsFP := rpc.BuildPositionsFingerprint(pos, acct.NetLiquidation)
@@ -753,6 +829,72 @@ func (e *opportunityEngine) installSnapshot(snap rpc.OpportunitySnapshot, show b
 			e.server.warnf("opportunities: save current snapshot: %v", err)
 		}
 	}
+	if show {
+		e.appendShownEvents(snap)
+	}
+}
+
+// preserveSnapshotOnRefreshFailure keeps serving the last-good snapshot
+// through a transient fetch failure instead of clobbering it with an empty
+// blocker shell — without it, every daemon boot wiped the snapshot just
+// re-adopted from disk because the startup kick races the gateway connect.
+// The transient blockers are merged in so callers still see why the data
+// is stale. Mirrors the proposals engine's guard.
+func (e *opportunityEngine) preserveSnapshotOnRefreshFailure(scope brokerStateScope, status rpc.OpportunityStatus, policyStatus rpc.OpportunityPolicyStatus, blockers []rpc.TradingBlocker, show bool) (rpc.OpportunitySnapshot, bool) {
+	e.mu.Lock()
+	snap := cloneOpportunitySnapshot(e.snapshot)
+	e.mu.Unlock()
+	if !opportunitySnapshotUsable(snap) || !sameOpportunityPolicy(snap, policyStatus) {
+		return rpc.OpportunitySnapshot{}, false
+	}
+	// Preserving last-good opportunities through a transient fetch failure
+	// is only safe when they were generated for the same session: a paper
+	// snapshot preserved through the reconnect blips of a paper→live
+	// switch would resurface paper opportunities under live.
+	if !sameBrokerScope(brokerStateScope{Account: snap.AccountID, Mode: snap.AccountMode}, scope) {
+		if e.server != nil {
+			e.server.warnf("opportunities: dropping preserved snapshot on refresh failure: snapshot scope %q/%q does not match connected session %q/%q", snap.AccountID, snap.AccountMode, scope.Account, scope.Mode)
+		}
+		return rpc.OpportunitySnapshot{}, false
+	}
+	snap.Status = status
+	snap.PolicyStatus = policyStatus
+	snap.Trading = status.Trading
+	merged := append([]rpc.TradingBlocker(nil), blockers...)
+	for _, blocker := range snap.Blockers {
+		merged = appendTradingBlockerOnce(merged, blocker)
+	}
+	snap.Blockers = merged
+	e.installPreservedSnapshot(snap, show)
+	return snap, true
+}
+
+// opportunitySnapshotUsable reports whether snap carries generated
+// opportunities worth preserving; blocker shells and never-generated
+// snapshots regenerate instead.
+func opportunitySnapshotUsable(snap rpc.OpportunitySnapshot) bool {
+	return snap.Kind == rpc.OpportunitySnapshotKind && snap.Revision != "" && snap.Revision != "empty" && len(snap.Opportunities) > 0
+}
+
+func sameOpportunityPolicy(snap rpc.OpportunitySnapshot, status rpc.OpportunityPolicyStatus) bool {
+	if snap.PolicyID != "" && status.PolicyID != "" && snap.PolicyID != status.PolicyID {
+		return false
+	}
+	if snap.PolicyVersion != 0 && status.PolicyVersion != 0 && snap.PolicyVersion != status.PolicyVersion {
+		return false
+	}
+	if snap.PolicyFingerprint.Key != "" && status.Fingerprint.Key != "" && snap.PolicyFingerprint.Key != status.Fingerprint.Key {
+		return false
+	}
+	return true
+}
+
+// installPreservedSnapshot swaps the served snapshot without persisting:
+// the preserved copy carries transient blockers that must not survive a
+// restart, and the on-disk last-good copy is exactly what preservation is
+// protecting.
+func (e *opportunityEngine) installPreservedSnapshot(snap rpc.OpportunitySnapshot, show bool) {
+	e.replaceSnapshot(snap)
 	if show {
 		e.appendShownEvents(snap)
 	}

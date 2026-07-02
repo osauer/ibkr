@@ -3709,14 +3709,14 @@ func (s *Server) opportunitySubsystemHealth() (rpc.SubsystemHealth, bool) {
 	if h.Streak >= proposalRefreshWarnStreak {
 		sub.Status = "degraded"
 		refreshMessage := fmt.Sprintf("refresh blocked %d consecutive times since %s; serving snapshot as_of %s",
-			h.Streak, h.LastAt.Format(time.RFC3339), h.LastServed.Format(time.RFC3339))
+			h.Streak, h.Since.Format(time.RFC3339), h.ServedAsOf.Format(time.RFC3339))
 		if sub.Message != "" {
 			sub.Message += "; " + refreshMessage
 		} else {
 			sub.Message = refreshMessage
 		}
-		sub.LastError = strings.Join(h.LastCodes, ",")
-		sub.LastErrorAt = h.LastAt
+		sub.LastError = strings.Join(h.Codes, ",")
+		sub.LastErrorAt = h.Since
 	}
 	return sub, true
 }

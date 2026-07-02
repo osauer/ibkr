@@ -36,7 +36,7 @@ const state = {
   protectionSnapshotNotice: "",
   protectionQuoteTicks: {},
   protectionQtyOverrides: {},
-  protectionDerisk: { percent: 25, busy: "", result: null, submitted: null, requestRef: "" },
+  protectionDerisk: { percent: 25, busy: "", result: null, submitted: null, requestRef: "", previewedAt: 0, abort: null },
   opportunityPreviewBusy: "",
   opportunityPreviews: {},
   opportunitySubmitBusy: "",
@@ -1998,6 +1998,7 @@ function reduceIsOption(row = {}) {
 // whether the panel is open or not. The daemon computes the basket legs; this
 // is display only.
 function renderProtectionDerisk() {
+  syncDeriskValidityTicker();
   const section = $("protectionDerisk");
   if (!section) return;
   const d = state.protectionDerisk;
@@ -2010,9 +2011,51 @@ function renderProtectionDerisk() {
   $("protectionDeriskPercent").value = String(d.percent);
   const previewBtn = $("protectionDeriskPreview");
   previewBtn.disabled = d.busy !== "";
-  previewBtn.textContent = d.busy === "preview" ? "Previewing…" : "Preview";
+  if (d.busy === "preview") previewBtn.textContent = "Previewing…";
+  else previewBtn.textContent = deriskPreviewExpired() ? "Preview again" : "Preview";
+  const cancelBtn = $("protectionDeriskCancel");
+  cancelBtn.hidden = !(d.busy === "preview" || (d.busy === "" && (d.result || d.submitted)));
+  cancelBtn.textContent = d.submitted ? "Dismiss" : "Cancel";
   renderProtectionDeriskBasket();
   $("protectionDeriskState").textContent = protectionDeriskStateText();
+}
+
+// The preview's quotes/WhatIf numbers are already sweep-duration old (tens of
+// seconds for a wide basket) when the basket first renders, and Submit makes
+// the daemon re-run the whole sweep fresh anyway — so displayed numbers and
+// placed orders diverge as the market moves. The validity window is honest-UI:
+// after it lapses the human must re-anchor on fresh numbers before submitting.
+// It is a behavioral nudge, not a safety gate (the daemon is the gate).
+const DERISK_PREVIEW_VALID_MS = 10_000;
+
+// Remaining validity in ms, or null when no countdown applies (no preview,
+// already submitted, busy, or nothing submit-eligible to protect).
+function deriskPreviewRemainingMs() {
+  const d = state.protectionDerisk;
+  if (!d.result || d.submitted || d.busy !== "" || !d.previewedAt) return null;
+  if ((d.result.eligible_count || 0) === 0) return null;
+  return Math.max(0, d.previewedAt + DERISK_PREVIEW_VALID_MS - Date.now());
+}
+
+function deriskPreviewExpired() {
+  return deriskPreviewRemainingMs() === 0;
+}
+
+// Ticker re-renders once per second while a live countdown is showing.
+// Remaining time is always derived from the previewedAt timestamp — never a
+// decremented counter — so background-tab interval throttling cannot make the
+// display lie after a tab switch. Rendering is state-derived and idempotent,
+// so the SSE-driven re-renders and this ticker can interleave freely.
+let deriskValidityTicker = 0;
+function syncDeriskValidityTicker() {
+  const remaining = deriskPreviewRemainingMs();
+  const active = remaining !== null && remaining > 0;
+  if (active && !deriskValidityTicker) {
+    deriskValidityTicker = window.setInterval(renderProtectionDerisk, 1000);
+  } else if (!active && deriskValidityTicker) {
+    window.clearInterval(deriskValidityTicker);
+    deriskValidityTicker = 0;
+  }
 }
 
 function protectionDeriskStateText() {
@@ -2036,7 +2079,13 @@ function protectionDeriskStateText() {
     if (res.fx_incomplete) line += " (partial FX)";
   }
   if (!d.submitted && (res.eligible_count || 0) > 0) {
-    line += ` — Submit sends to ${protectionWriteConfirmationLabel()}`;
+    if (deriskPreviewExpired()) {
+      line += " — preview expired; the market moved on. Preview again for fresh numbers.";
+    } else {
+      line += ` — Submit sends to ${protectionWriteConfirmationLabel()}`;
+      const remaining = deriskPreviewRemainingMs();
+      if (remaining !== null) line += ` · numbers valid ${Math.ceil(remaining / 1000)}s`;
+    }
   }
   return line;
 }
@@ -2053,6 +2102,7 @@ function renderProtectionDeriskBasket() {
     return;
   }
   box.hidden = false;
+  box.classList.toggle("protection-derisk__basket--expired", deriskPreviewExpired());
   const children = [];
   for (const b of basketBlockers) children.push(deriskBasketLine(`${b.code}: ${b.message}`, "blocked"));
   // Only render a leg that will be/was trimmed (reduce_quantity > 0, no
@@ -2068,8 +2118,9 @@ function renderProtectionDeriskBasket() {
   }
   // Two-gesture flow: the header Preview never writes. The Submit button only
   // appears after a preview that surfaced eligible legs, and is minted with a
-  // literal id so the contract test can pin it.
-  if (!d.submitted && (res.eligible_count || 0) > 0) {
+  // literal id so the contract test can pin it. An expired preview withdraws
+  // Submit entirely: the path back to a broker write is a fresh Preview.
+  if (!d.submitted && (res.eligible_count || 0) > 0 && !deriskPreviewExpired()) {
     const submit = document.createElement("button");
     submit.type = "button";
     submit.id = "protectionDeriskSubmit";
@@ -2148,7 +2199,10 @@ async function previewProtectionDerisk() {
   d.busy = "preview";
   d.result = null;
   d.submitted = null;
+  d.previewedAt = 0;
   d.requestRef = deriskRequestRef();
+  const abort = new AbortController();
+  d.abort = abort;
   renderProtectionDerisk();
   try {
     const res = await fetch("/api/proposals/reduce-portfolio/preview", {
@@ -2156,21 +2210,56 @@ async function previewProtectionDerisk() {
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify({ percent: d.percent, timeout_ms: 5000 }),
+      signal: abort.signal,
     });
     const body = await readJSONOrText(res);
     if (!res.ok) throw new Error(body.error || body.message || String(body));
+    if (d.abort !== abort) return; // cancelled/superseded while in flight
     d.result = body;
+    // The validity clock starts when the basket lands, not when the sweep
+    // started — the earliest legs are already sweep-duration old here.
+    d.previewedAt = Date.now();
   } catch (err) {
-    d.result = { blockers: [{ code: "preview_failed", message: err.message }] };
+    if (d.abort === abort && !abort.signal.aborted) {
+      d.result = { blockers: [{ code: "preview_failed", message: err.message }] };
+    }
   } finally {
-    if (d.busy === "preview") d.busy = "";
+    if (d.abort === abort) {
+      d.abort = null;
+      if (d.busy === "preview") d.busy = "";
+    }
     renderProtectionDerisk();
   }
+}
+
+// cancelProtectionDerisk returns the panel to idle from any non-write state:
+// it aborts an in-flight preview fetch, discards a rendered basket, or
+// dismisses a submitted result. Aborting the fetch only frees the UI and the
+// app-layer wait — the daemon dispatch loop is synchronous per connection, so
+// an already-running sweep quietly finishes server-side (read-only, no
+// orders). A busy submit is never cancellable from here.
+function cancelProtectionDerisk() {
+  const d = state.protectionDerisk;
+  if (d.busy === "submit") return;
+  if (d.busy === "preview" && d.abort) d.abort.abort();
+  d.abort = null;
+  d.busy = "";
+  d.result = null;
+  d.submitted = null;
+  d.previewedAt = 0;
+  renderProtectionDerisk();
 }
 
 async function submitProtectionDerisk() {
   const d = state.protectionDerisk;
   if (!d.result || (d.result.eligible_count || 0) === 0) return;
+  // Belt-and-braces against stale DOM: the Submit button is withdrawn at
+  // expiry by the next render, but a click racing that render must not slip
+  // through on lapsed numbers.
+  if (deriskPreviewExpired()) {
+    renderProtectionDerisk();
+    return;
+  }
   const confirmation = protectionWriteConfirmation();
   if (!confirmation) {
     d.submitted = { blockers: [{ code: "confirmation_cancelled", message: "broker submit confirmation was cancelled" }] };
@@ -7112,11 +7201,13 @@ $("stockProtectionToggle").addEventListener("change", (event) => {
 });
 $("protectionDeriskPercent").addEventListener("change", (event) => {
   state.protectionDerisk.percent = Number(event.currentTarget.value) || 25;
-  state.protectionDerisk.result = null;
-  state.protectionDerisk.submitted = null;
-  renderProtectionDerisk();
+  // A different percentage is a different sweep: abandon any in-flight
+  // preview and rendered basket rather than letting a stale-percent result
+  // land later.
+  cancelProtectionDerisk();
 });
 $("protectionDeriskPreview").addEventListener("click", previewProtectionDerisk);
+$("protectionDeriskCancel").addEventListener("click", cancelProtectionDerisk);
 
 async function enablePush() {
   if (!canUseWebPush()) {

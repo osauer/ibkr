@@ -270,7 +270,7 @@ func (s *Server) reduceLegPrepare(ctx context.Context, c reduceSweepCandidate, t
 		return leg, nil
 	}
 	if !preview.SubmitEligible {
-		leg.Blockers = previewNotSubmitEligibleBlockers()
+		leg.Blockers = previewNotSubmitEligibleBlockers(preview)
 		return leg, nil
 	}
 	return leg, preview

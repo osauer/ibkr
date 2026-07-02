@@ -2776,6 +2776,16 @@ p {
   justify-self: start;
 }
 
+/* An expired preview keeps its legs readable for orientation but visibly
+   lapsed; Submit is withdrawn by the renderer, not just dimmed. */
+.protection-derisk__basket--expired .protection-derisk__leg {
+  opacity: 0.45;
+}
+
+.protection-derisk__cancel {
+  color: var(--ink-2);
+}
+
 .protection-derisk__note {
   margin: 0;
   font-size: 12px;

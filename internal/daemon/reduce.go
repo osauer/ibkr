@@ -265,7 +265,7 @@ func (s *Server) tradeProposalReducePreview(ctx context.Context, p rpc.TradeProp
 	res.SubmitEligible = preview.SubmitEligible
 	res.Preview = sanitizeProposalPreviewForProposal(preview, rpc.TradeProposal{})
 	if !preview.SubmitEligible {
-		res.Blockers = previewNotSubmitEligibleBlockers()
+		res.Blockers = previewNotSubmitEligibleBlockers(preview)
 		return &res, nil
 	}
 	res.Accepted = true
@@ -303,7 +303,7 @@ func (s *Server) tradeProposalReduceSubmit(ctx context.Context, p rpc.TradePropo
 		return &res, nil
 	}
 	if !preview.SubmitEligible {
-		res.Blockers = previewNotSubmitEligibleBlockers()
+		res.Blockers = previewNotSubmitEligibleBlockers(preview)
 		return &res, nil
 	}
 	place, err := s.proposalPlaceOrder(ctx, rpc.OrderPlaceParams{PreviewToken: preview.PreviewToken, TimeoutMs: p.TimeoutMs, Origin: p.Origin})

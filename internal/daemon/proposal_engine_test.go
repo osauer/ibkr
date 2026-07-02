@@ -2684,3 +2684,33 @@ func TestProposalEngineKickWakesRunAndResetsLadder(t *testing.T) {
 		t.Fatal("Run did not stop on context cancel")
 	}
 }
+
+func TestPreviewNotSubmitEligibleBlockersCarriesWhatIfCause(t *testing.T) {
+	generic := previewNotSubmitEligibleBlockers(nil)[0]
+	if generic.Code != "preview_not_submit_eligible" || !strings.Contains(generic.Message, "did not make this proposal submit-eligible") {
+		t.Fatalf("nil preview blocker = %+v, want generic message with stable code", generic)
+	}
+	if got := previewNotSubmitEligibleBlockers(&rpc.OrderPreviewResult{})[0]; got.Message != generic.Message {
+		t.Fatalf("empty WhatIf blocker message = %q, want generic %q", got.Message, generic.Message)
+	}
+	enriched := previewNotSubmitEligibleBlockers(&rpc.OrderPreviewResult{WhatIf: rpc.OrderWhatIfResult{
+		Status:  "rejected",
+		Message: "broker rejected WhatIf request with error code 110: The price does not conform to the minimum price variation for this contract.",
+		Action:  "Adjust the draft and run order preview again before any submit attempt.",
+	}})[0]
+	if enriched.Code != "preview_not_submit_eligible" {
+		t.Fatalf("enriched blocker code = %q, want stable preview_not_submit_eligible", enriched.Code)
+	}
+	if !strings.Contains(enriched.Message, "error code 110") {
+		t.Fatalf("enriched blocker message = %q, want the broker WhatIf cause", enriched.Message)
+	}
+	if !strings.Contains(enriched.Action, "Adjust the draft") {
+		t.Fatalf("enriched blocker action = %q, want the WhatIf action", enriched.Action)
+	}
+	long := previewNotSubmitEligibleBlockers(&rpc.OrderPreviewResult{WhatIf: rpc.OrderWhatIfResult{
+		Message: strings.Repeat("x", 400),
+	}})[0]
+	if n := len([]rune(long.Message)); n != 200 {
+		t.Fatalf("truncated blocker message length = %d runes, want 200", n)
+	}
+}
