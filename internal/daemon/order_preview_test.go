@@ -21,14 +21,14 @@ func TestPreviewLimitPriceDefaultsPatientLimit(t *testing.T) {
 	bid, ask := 100.10, 100.15
 	quote := rpc.OrderQuoteSnapshot{Bid: &bid, Ask: &ask, DataType: rpc.MarketDataLive}
 
-	got, err := previewLimitPrice(rpc.OrderActionBuy, rpc.OrderStrategyPatientLimit, nil, quote)
+	got, err := previewLimitPrice(rpc.OrderActionBuy, rpc.OrderStrategyPatientLimit, nil, rpc.ContractParams{}, quote)
 	if err != nil {
 		t.Fatalf("previewLimitPrice buy: %v", err)
 	}
 	if got != 100.12 {
 		t.Fatalf("buy patient-limit = %.4f, want 100.1200", got)
 	}
-	got, err = previewLimitPrice(rpc.OrderActionSell, rpc.OrderStrategyPatientLimit, nil, quote)
+	got, err = previewLimitPrice(rpc.OrderActionSell, rpc.OrderStrategyPatientLimit, nil, rpc.ContractParams{}, quote)
 	if err != nil {
 		t.Fatalf("previewLimitPrice sell: %v", err)
 	}
@@ -37,12 +37,52 @@ func TestPreviewLimitPriceDefaultsPatientLimit(t *testing.T) {
 	}
 }
 
+func TestPreviewLimitPatientLimitOptionBandRounding(t *testing.T) {
+	t.Parallel()
+	opt := rpc.ContractParams{SecType: "OPT", Symbol: "MSFT"}
+	cases := []struct {
+		name     string
+		contract rpc.ContractParams
+		action   string
+		bid, ask float64
+		want     float64
+	}{
+		// Live-evidence shape (2026-07-02): nickel-quoted tape above $3.00
+		// must not draft the raw penny midpoint (19.63 drew broker 110).
+		{name: "sell above band on nickel tape rounds up to nickel", contract: opt, action: rpc.OrderActionSell, bid: 19.60, ask: 19.65, want: 19.65},
+		{name: "buy above band on nickel tape rounds down to nickel", contract: opt, action: rpc.OrderActionBuy, bid: 19.60, ask: 19.65, want: 19.60},
+		{name: "penny tape above band proves penny grid", contract: opt, action: rpc.OrderActionSell, bid: 19.62, ask: 19.64, want: 19.63},
+		// Wire quotes are float32-truncated (live MSFT 260821C400 tape,
+		// 2026-07-02): 19.05/19.60 read back off-grid and must not count
+		// as penny proof.
+		{name: "float32 wire noise is not penny proof", contract: opt, action: rpc.OrderActionSell, bid: 19.049999237060547, ask: 19.600000381469727, want: 19.35},
+		{name: "below band keeps penny grid", contract: opt, action: rpc.OrderActionSell, bid: 2.40, ask: 2.43, want: 2.42},
+		{name: "sub-dollar option never drafts sub-penny", contract: opt, action: rpc.OrderActionSell, bid: 0.40, ask: 0.45, want: 0.43},
+		{name: "penny tape below band proves nothing above it", contract: opt, action: rpc.OrderActionBuy, bid: 2.98, ask: 3.15, want: 3.05},
+		{name: "broker min-tick coarsens below band", contract: rpc.ContractParams{SecType: "OPT", Symbol: "XYZ", MinTick: 0.05}, action: rpc.OrderActionSell, bid: 2.40, ask: 2.45, want: 2.45},
+		{name: "stock keeps static penny grid", contract: rpc.ContractParams{SecType: "STK", Symbol: "MSFT"}, action: rpc.OrderActionSell, bid: 19.60, ask: 19.65, want: 19.63},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			quote := rpc.OrderQuoteSnapshot{Bid: &tc.bid, Ask: &tc.ask, DataType: rpc.MarketDataLive}
+			got, err := previewLimitPrice(tc.action, rpc.OrderStrategyPatientLimit, nil, tc.contract, quote)
+			if err != nil {
+				t.Fatalf("previewLimitPrice: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("%s %s bid %.2f ask %.2f = %.4f, want %.4f", tc.action, tc.contract.SecType, tc.bid, tc.ask, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPreviewLimitRejectsDelayedPatientLimit(t *testing.T) {
 	t.Parallel()
 	bid, ask := 100.10, 100.15
 	quote := rpc.OrderQuoteSnapshot{Bid: &bid, Ask: &ask, DataType: rpc.MarketDataDelayed}
 
-	if _, err := previewLimitPrice(rpc.OrderActionBuy, rpc.OrderStrategyPatientLimit, nil, quote); err == nil {
+	if _, err := previewLimitPrice(rpc.OrderActionBuy, rpc.OrderStrategyPatientLimit, nil, rpc.ContractParams{}, quote); err == nil {
 		t.Fatal("patient-limit on delayed data should fail")
 	}
 }
@@ -57,7 +97,7 @@ func TestPreviewLimitRejectsStaleOrClosedPatientLimit(t *testing.T) {
 		Stale:       true,
 		StaleReason: "price timestamp is 20m old during market hours",
 	}
-	if _, err := previewLimitPrice(rpc.OrderActionBuy, rpc.OrderStrategyPatientLimit, nil, stale); err == nil || !strings.Contains(err.Error(), "fresh quote data") {
+	if _, err := previewLimitPrice(rpc.OrderActionBuy, rpc.OrderStrategyPatientLimit, nil, rpc.ContractParams{}, stale); err == nil || !strings.Contains(err.Error(), "fresh quote data") {
 		t.Fatalf("stale patient-limit err = %v, want freshness rejection", err)
 	}
 
@@ -67,7 +107,7 @@ func TestPreviewLimitRejectsStaleOrClosedPatientLimit(t *testing.T) {
 		DataType:       rpc.MarketDataLive,
 		SessionContext: &rpc.MarketSession{Market: "de", State: "closed", IsOpen: false},
 	}
-	if _, err := previewLimitPrice(rpc.OrderActionSell, rpc.OrderStrategyPatientLimit, nil, closed); err == nil || !strings.Contains(err.Error(), "open market session") {
+	if _, err := previewLimitPrice(rpc.OrderActionSell, rpc.OrderStrategyPatientLimit, nil, rpc.ContractParams{}, closed); err == nil || !strings.Contains(err.Error(), "open market session") {
 		t.Fatalf("closed-session patient-limit err = %v, want session rejection", err)
 	}
 }

@@ -777,7 +777,7 @@ func previewOrderPricing(action, orderType, rawStrategy string, explicit *float6
 			return "", 0, nil, 0, errBadRequest("LMT order preview must not include trail fields")
 		}
 		strategy = normalizePreviewStrategy(rawStrategy, explicit)
-		limit, err = previewLimitPrice(action, strategy, explicit, quote)
+		limit, err = previewLimitPrice(action, strategy, explicit, contract, quote)
 		return strategy, limit, nil, limit, err
 	case rpc.OrderTypeTRAIL, rpc.OrderTypeTRAILLIMIT:
 		strategy = strings.ToLower(strings.TrimSpace(rawStrategy))
@@ -964,7 +964,7 @@ func (s *Server) previewQuote(ctx context.Context, contract rpc.ContractParams, 
 	return out, nil
 }
 
-func previewLimitPrice(action, strategy string, explicit *float64, quote rpc.OrderQuoteSnapshot) (float64, error) {
+func previewLimitPrice(action, strategy string, explicit *float64, contract rpc.ContractParams, quote rpc.OrderQuoteSnapshot) (float64, error) {
 	switch strategy {
 	case rpc.OrderStrategyExplicitLimit:
 		if explicit == nil {
@@ -988,12 +988,12 @@ func previewLimitPrice(action, strategy string, explicit *float64, quote rpc.Ord
 			return 0, errBadRequest("patient-limit requires a positive two-sided bid/ask")
 		}
 		mid := (*quote.Bid + *quote.Ask) / 2
-		tick := priceTick(mid)
+		tick := patientLimitTick(contract, quote, mid)
 		switch action {
 		case rpc.OrderActionBuy:
-			return roundPrice(max(math.Floor(mid/tick)*tick, *quote.Bid)), nil
+			return roundPrice(max(floorPriceToTick(mid, tick), *quote.Bid)), nil
 		case rpc.OrderActionSell:
-			return roundPrice(min(math.Ceil(mid/tick)*tick, *quote.Ask)), nil
+			return roundPrice(min(ceilPriceToTick(mid, tick), *quote.Ask)), nil
 		default:
 			return 0, errBadRequest("action must be buy or sell")
 		}
@@ -1025,6 +1025,54 @@ func priceTick(price float64) float64 {
 		return 0.0001
 	}
 	return 0.01
+}
+
+// US option exchanges enforce minimum price variations in bands: $0.01 below
+// $3.00 and $0.05 at/above for penny-program classes, coarser for the rest.
+// Contract-details MinTick is the cross-venue minimum (the penny grid), so it
+// alone under-rounds above the band boundary — broker error 110 at WhatIf.
+const (
+	optionPennyBandCeiling = 3.00
+	optionCoarseTick       = 0.05
+)
+
+// patientLimitTick returns the price grid a patient-limit draft must land on.
+// Stocks keep the static grid. Options step on the banded MPV grid above:
+// $0.05 at/above $3.00 unless the live tape proves the class quotes pennies
+// there, never finer than $0.01, and never finer than the broker-reported
+// MinTick. reqMarketRule would be the precise per-class source; until that
+// plumbing exists this conservative band keeps drafts on the enforceable grid
+// and broker WhatIf stays the fail-closed backstop.
+func patientLimitTick(contract rpc.ContractParams, quote rpc.OrderQuoteSnapshot, mid float64) float64 {
+	if strings.ToUpper(strings.TrimSpace(contract.SecType)) != "OPT" {
+		return priceTick(mid)
+	}
+	tick := 0.01
+	if mid >= optionPennyBandCeiling && !quoteProvesPennyIncrements(quote) {
+		tick = optionCoarseTick
+	}
+	return max(tick, contract.MinTick)
+}
+
+// quoteProvesPennyIncrements reports whether the live tape shows the venue
+// accepting penny option prices at/above the band boundary: a bid or ask
+// at/above $3.00 sitting off the nickel grid can only print for a class
+// quoting pennies at that level. Quote sides below $3.00 prove nothing —
+// penny-program classes quote pennies there yet still step $0.05 above.
+func quoteProvesPennyIncrements(quote rpc.OrderQuoteSnapshot) bool {
+	for _, side := range []*float64{quote.Bid, quote.Ask} {
+		if side == nil || *side < optionPennyBandCeiling {
+			continue
+		}
+		// Wire quotes arrive float32-truncated (19.05 reads back as
+		// 19.049999...): snap to the penny grid before testing nickel
+		// alignment, or the noise itself reads as penny proof.
+		cents := math.Round(*side * 100)
+		if math.Mod(cents, 5) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func roundPrice(price float64) float64 {
