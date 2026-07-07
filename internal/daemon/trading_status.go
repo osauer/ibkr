@@ -228,7 +228,7 @@ func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteA
 		add("order_journal_unavailable", "order writes require a writable local order journal", "Fix the daemon state directory before enabling trading.")
 	}
 	if s.tradingFrozen() {
-		add(tradingFrozenBlockerCode, "trading writes are frozen by runtime platform settings", "Run `ibkr settings set trading.freeze=false` to resume broker writes; cancels remain allowed while frozen.")
+		add(tradingFrozenBlockerCode, "trading writes are frozen by runtime platform settings", "Run `ibkr settings set trading.freeze=false` to resume broker writes; new orders, modifies, and reduce sweeps are all blocked while frozen — only cancels remain allowed.")
 	}
 	auth.Blockers = blockers
 	auth.Allowed = len(blockers) == 0

@@ -398,14 +398,16 @@ func (s *Server) reducePortfolioSubmit(ctx context.Context, p rpc.TradeProposalR
 		res.Blockers = []rpc.TradingBlocker{{Code: "bad_request", Message: fmt.Sprintf("percent %d must be between 1 and 100", p.Percent), Action: "Choose 25, 50, 75, or 100."}}
 		return res, nil
 	}
-	if cached, ok := s.reduceBasketReplay(p.RequestRef); ok {
-		return cached, nil
-	}
-	// Write gate once: a frozen/non-writable origin touches zero legs. Not
-	// cached, so a retry after unfreezing re-attempts rather than replaying.
+	// Write gate before the dedupe replay: a freeze engaged between the
+	// original call and a RequestRef retry must surface as a blocker, not
+	// replay a pre-freeze "ok" result. Blocked results are never cached, so
+	// a retry after unfreezing re-attempts rather than replaying.
 	if blockers := s.proposalSubmitWriteBlockers(p.Origin); len(blockers) > 0 {
 		res.Blockers = blockers
 		return res, nil
+	}
+	if cached, ok := s.reduceBasketReplay(p.RequestRef); ok {
+		return cached, nil
 	}
 	pos, err := s.handlePositionsList(ctx, &rpc.Request{})
 	if err != nil {

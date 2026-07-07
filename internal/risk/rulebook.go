@@ -229,12 +229,34 @@ func (c *ruleContext) singleNameExposure() RuleRow {
 		}
 		// A policy-hedge index name carrying net-short delta is the hedge:
 		// rule 12 owns its sizing, and double-flagging it here would bury
-		// the real concentration offenders. Disclosed via Exempt, never
-		// silently dropped.
+		// the real concentration offenders. Exempt only what rule 12 can
+		// actually size (long puts with delta); short stock or short calls
+		// in a hedge symbol are directional shorts, not a sized hedge, and
+		// any residual beyond the sized legs stays a concentration input.
+		// Disclosed via Exempt, never silently dropped.
 		if c.pol.IsHedgeSymbol(n.Symbol) && n.ExposureBase < 0 {
-			hedges = append(hedges, RuleOffender{Symbol: n.Symbol,
-				Observed: round1(pct(math.Abs(n.ExposureBase), c.nlv)),
-				Note:     "hedge-classified short exposure — sized by rule 12, not concentration"})
+			sized := 0.0
+			for _, l := range n.Legs {
+				if rule12HedgeLeg(l) {
+					sized += math.Abs(*l.Delta * l.Quantity * l.Multiplier * *l.Underlying)
+				}
+			}
+			exempt := math.Min(sized, math.Abs(n.ExposureBase))
+			if exempt > 0 {
+				hedges = append(hedges, RuleOffender{Symbol: n.Symbol,
+					Observed: round1(pct(exempt, c.nlv)),
+					Note:     "hedge-classified short exposure — sized by rule 12, not concentration"})
+			}
+			resid := math.Abs(n.ExposureBase) - exempt
+			if resid <= 0 {
+				continue
+			}
+			p := pct(resid, c.nlv)
+			worst = math.Max(worst, p)
+			if p >= watch {
+				offenders = append(offenders, RuleOffender{Symbol: n.Symbol, Observed: round1(p),
+					ImpactBase: resid, Note: "short exposure beyond rule-12-sized hedge legs"})
+			}
 			continue
 		}
 		p := pct(math.Abs(n.ExposureBase), c.nlv)
@@ -762,6 +784,14 @@ func (c *ruleContext) greenDayAction(rows []RuleRow) RuleRow {
 	return row
 }
 
+// rule12HedgeLeg reports whether rule 12 sizes this leg as a hedge: a long
+// put on a hedge-listed underlying with delta and underlying present. Rule
+// 1's concentration exemption uses the same predicate so nothing is exempted
+// from the cap that rule 12 cannot size.
+func rule12HedgeLeg(l LegInput) bool {
+	return l.HedgeListed && isPut(l.Right) && l.Quantity > 0 && l.Delta != nil && l.Underlying != nil
+}
+
 func (c *ruleContext) hedgeIntegrity() RuleRow {
 	row := RuleRow{ID: RuleHedgeIntegrity, Number: 12, Title: "Hedge sized to the book", Unit: "% gross long"}
 	if g := c.portfolioGate(row.ID, row.Number, row.Title); g != nil {
@@ -779,7 +809,7 @@ func (c *ruleContext) hedgeIntegrity() RuleRow {
 			grossLong += n.ExposureBase
 		}
 		for _, l := range n.Legs {
-			if l.HedgeListed && isPut(l.Right) && l.Quantity > 0 && l.Delta != nil && l.Underlying != nil {
+			if rule12HedgeLeg(l) {
 				short := math.Abs(*l.Delta * l.Quantity * l.Multiplier * *l.Underlying)
 				hedgeShort += short
 				hedgeLegs = append(hedgeLegs, RuleOffender{Symbol: n.Symbol, Leg: l.Desc, Observed: round1(short), Note: "classified hedge"})

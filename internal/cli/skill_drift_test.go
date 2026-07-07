@@ -160,6 +160,7 @@ func TestAgentPolicyDocsDoNotClaimLiveAgentHardBlock(t *testing.T) {
 		"../../README.md",
 		"../../SECURITY.md",
 		"../../docs/design/agent-origin-gating.md",
+		"../../docs/design/trading-paper-smoke.md",
 		"../../docs/templates/daemon-cli-trading-contract.md",
 		"../../skills/ibkr/SKILL.md",
 		"../../.agents/skills/ibkr/SKILL.md",
@@ -179,6 +180,8 @@ func TestAgentPolicyDocsDoNotClaimLiveAgentHardBlock(t *testing.T) {
 			"human must run live",
 			"paper-ready trading state",
 			"live and unknown states remain blocked",
+			"daemon-side agent-origin block remain",
+			"cannot run paper-smoke (daemon-side",
 		} {
 			if strings.Contains(lower, stale) {
 				t.Errorf("%s contains stale live-agent policy phrase %q", path, stale)

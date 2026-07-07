@@ -179,9 +179,10 @@ never relays lifecycle claims — otherwise evidence would trust the client):
 > `live_confirmation` request field, and the `live_confirmation_required`
 > blocker were removed end-to-end; the app HTTP layer strict-decodes every
 > broker-write body and rejects the field as unknown. Server-validated
-> `confirm_account`/`confirm_mode` and the daemon-side agent-origin block
-> remain. The bullets below describe the v1.9.0 mechanism for historical
-> context only.
+> `confirm_account`/`confirm_mode` remain. (The daemon-side agent-origin
+> live block was likewise removed on 2026-06-20 — origin is audit/policy
+> metadata now; see `docs/design/agent-origin-gating.md`.) The bullets below
+> describe the v1.9.0 mechanism for historical context only.
 
 - HTTP: `orderModifyRequest` and `purgeActionRequest` gain
   `live_confirmation` mapped onto the rpc params (proposals submit already
@@ -196,9 +197,11 @@ never relays lifecycle claims — otherwise evidence would trust the client):
 
 ## Safety Invariants
 
-- Agent-origin requests cannot run paper-smoke (daemon-side, no override) —
-  producing live-gate evidence is treated as a live-adjacent write even
-  though the order itself is paper.
+- Paper-smoke is deliberately open to automated origins: since 2026-06-10
+  the evidence is a release-pipeline quality gate (`make release` aborts
+  without a passing round-trip), not a runtime live precondition, so an
+  origin restriction would only obstruct release automation. The order
+  transmits on the paper route, which is open to agents by policy.
 - The smoke only ever transmits on the paper route; a live-routed gate
   refuses before any broker call.
 - Evidence is daemon-authored only: valid MAC requires the daemon's key, and

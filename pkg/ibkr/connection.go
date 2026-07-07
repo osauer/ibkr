@@ -2627,7 +2627,11 @@ func (c *Connection) handleSystemNotification(fields []string) {
 			aliasEntry = entry
 			symbolAlias = entry.symbol
 			if symbolAlias != "" {
-				scope = fmt.Sprintf("reqID=%d (%s)", note.tickerID, symbolAlias)
+				label := symbolAlias
+				if entry.secType != "" {
+					label += " " + entry.secType
+				}
+				scope = fmt.Sprintf("reqID=%d (%s)", note.tickerID, label)
 			} else {
 				scope = fmt.Sprintf("reqID=%d", note.tickerID)
 			}
@@ -2650,6 +2654,15 @@ func (c *Connection) handleSystemNotification(fields []string) {
 		// unexpected notices containing "error" from being silently downgraded.
 		shouldWarn = strings.Contains(msgLower, "error")
 	}
+	// Definition-missing on derivative/probe requests is routine, not a
+	// warning: option fan-outs subscribe secDefOptParams strike supersets
+	// where some (expiry, strike, right) triples are unlisted (gamma counts
+	// these as contract_missing_legs), and FX resolution quotes both pair
+	// directions when only one is listed (the fx cache absorbs the miss).
+	// The requester classifies the rejection either way, so the wire echo
+	// is debug-grade. STK and alias-less requests keep the WARN trail —
+	// that is the signal feeding inactive marking for dead symbols.
+	definitionProbe := note.code == 200 && (aliasEntry.secType == "OPT" || aliasEntry.secType == "CASH")
 	upperMsg := strings.ToUpper(note.message)
 	parserMisalign := strings.Contains(upperMsg, "MART") || strings.Contains(upperMsg, "'BOE") || strings.Contains(upperMsg, "\"BOE") || strings.Contains(upperMsg, " BOE")
 	context := ""
@@ -2673,6 +2686,8 @@ func (c *Connection) handleSystemNotification(fields []string) {
 		switch {
 		case parserMisalign:
 			ibkrLogger.Errorf(format, args...)
+		case definitionProbe:
+			ibkrLogger.Debugf(format, args...)
 		case shouldWarn:
 			ibkrLogger.Warnf(format, args...)
 		default:
@@ -2687,6 +2702,8 @@ func (c *Connection) handleSystemNotification(fields []string) {
 	switch {
 	case parserMisalign:
 		ibkrLogger.Errorf(format, args...)
+	case definitionProbe:
+		ibkrLogger.Debugf(format, args...)
 	case shouldWarn:
 		ibkrLogger.Warnf(format, args...)
 	default:

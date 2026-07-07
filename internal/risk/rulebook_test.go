@@ -292,6 +292,50 @@ func TestSingleNameExposureExemptsShortHedge(t *testing.T) {
 	}
 }
 
+// The exemption covers only what rule 12 can size (long puts with delta).
+// Short stock or short calls in a hedge symbol are directional shorts: the
+// residual beyond the sized legs stays a concentration offender.
+func TestSingleNameExposureResidualBeyondSizedHedge(t *testing.T) {
+	in := healthyInputs()
+	// Fixture SPY puts size to 0.24*40*100*752 = 721,920 short delta-dollars.
+	// Net short 900k leaves a 178,080 residual = 72.7% of the 245k NLV.
+	in.Names[3].ExposureBase = -900000
+	ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+	row := rowByID(t, ev, RuleSingleNameExposure)
+	var spy *RuleOffender
+	for i := range row.Offenders {
+		if row.Offenders[i].Symbol == "SPY" {
+			spy = &row.Offenders[i]
+		}
+	}
+	if spy == nil || spy.Observed < 72 || spy.Observed > 73 {
+		t.Fatalf("residual short beyond sized hedge legs must be an offender near 72.7%%, got %+v", row.Offenders)
+	}
+	if len(row.Exempt) == 0 || row.Exempt[0].Symbol != "SPY" {
+		t.Fatalf("sized portion must still be disclosed in Exempt, got %+v", row.Exempt)
+	}
+
+	// A hedge-symbol short with NO rule-12-sizeable legs (e.g. short stock,
+	// puts stripped) is pure concentration: no Exempt row at all.
+	in = healthyInputs()
+	in.Names[3].ExposureBase = -640000
+	in.Names[3].Legs = nil
+	ev = EvaluateRulebook(in, DefaultRulebookPolicy())
+	row = rowByID(t, ev, RuleSingleNameExposure)
+	if len(row.Exempt) != 0 {
+		t.Fatalf("unsized hedge-symbol short must not be exempted, got %+v", row.Exempt)
+	}
+	found := false
+	for _, o := range row.Offenders {
+		if o.Symbol == "SPY" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unsized hedge-symbol short must be a concentration offender, got %+v", row.Offenders)
+	}
+}
+
 func TestRankingHardestFirst(t *testing.T) {
 	ev := EvaluateRulebook(healthyInputs(), DefaultRulebookPolicy())
 	if len(ev.Ranked) != 12 {
