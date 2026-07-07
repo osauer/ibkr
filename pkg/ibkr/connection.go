@@ -38,7 +38,6 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -3527,12 +3526,11 @@ func (c *Connection) sendContractDetailsRequest(contract Contract, reqID int) er
 
 	msg := c.encodeMsg(fields...)
 
-	if contract.SecType == "STK" && contract.PrimaryExch == "" {
-		stack := make([]byte, 16384)
-		stackLen := runtime.Stack(stack, false)
-		decoded := c.decodeMessage(msg)
-		wireLogger.Warnf("[cid=%d] reqContractData anomaly symbol=%s reqID=%d primary='' local=%q class=%q fields=%v\n%s",
-			c.config.ClientID, contract.Symbol, reqID, localSymbol, tradingClass, decoded, string(stack[:stackLen]))
+	// By-fields STK discovery legitimately sends primary='' with conID=0
+	// (see primaryField above); trace the wire shape only under debug.
+	if contract.SecType == "STK" && contract.PrimaryExch == "" && logging.LevelEnabled(logging.LevelDebug) {
+		wireLogger.Debugf("[cid=%d] reqContractData by-fields STK discovery symbol=%s reqID=%d local=%q class=%q fields=%v",
+			c.config.ClientID, contract.Symbol, reqID, localSymbol, tradingClass, c.decodeMessage(msg))
 	}
 
 	return c.sendMessage(msg)
