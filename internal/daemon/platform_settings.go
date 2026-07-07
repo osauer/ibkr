@@ -39,6 +39,14 @@ type platformRegimeJournalSettingsData struct {
 type platformFeatureSettingsData struct {
 	PurgeRestore    platformPurgeRestoreSettingsData    `json:"purge_restore"`
 	StockProtection platformStockProtectionSettingsData `json:"stock_protection"`
+	Rulebook        platformRulebookSettingsData        `json:"rulebook"`
+}
+
+type platformRulebookSettingsData struct {
+	Enabled *bool `json:"enabled,omitempty"`
+	// EarningsOverrides maps SYMBOL → "YYYY-MM-DD" or "YYYY-MM-DDTamc"/
+	// "Tbmo"; overrides are authoritative over fetched dates (rules 6-8).
+	EarningsOverrides map[string]string `json:"earnings_overrides,omitempty"`
 }
 
 type platformPurgeRestoreSettingsData struct {
@@ -280,11 +288,73 @@ func applyFeatureSettingsPatch(next *platformSettingsData, raw json.RawMessage) 
 					return errBadRequest("unknown settings field features.stock_protection." + skey)
 				}
 			}
+		case "rulebook":
+			var rb map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &rb); err != nil {
+				return errBadRequest("features.rulebook must be an object")
+			}
+			for rkey, rraw := range rb {
+				switch rkey {
+				case "enabled":
+					v, err := nullableBool(rraw)
+					if err != nil {
+						return errBadRequest("features.rulebook.enabled must be true, false, or null")
+					}
+					next.Features.Rulebook.Enabled = v
+				case "earnings_overrides":
+					v, err := nullableEarningsOverrides(rraw)
+					if err != nil {
+						return err
+					}
+					next.Features.Rulebook.EarningsOverrides = v
+				default:
+					return errBadRequest("unknown settings field features.rulebook." + rkey)
+				}
+			}
 		default:
 			return errBadRequest("unknown settings field features." + key)
 		}
 	}
 	return nil
+}
+
+// nullableEarningsOverrides validates a SYMBOL → date map; null clears all
+// overrides, a null value clears one symbol. Dates must be "YYYY-MM-DD"
+// optionally suffixed with "Tamc"/"Tbmo" — a bad override must fail loudly
+// here, not silently skew rules 6-8 later.
+func nullableEarningsOverrides(raw json.RawMessage) (map[string]string, error) {
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	var m map[string]*string
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, errBadRequest("features.rulebook.earnings_overrides must be an object of SYMBOL to date strings or null")
+	}
+	out := map[string]string{}
+	for sym, v := range m {
+		sym = strings.ToUpper(strings.TrimSpace(sym))
+		if sym == "" {
+			return nil, errBadRequest("features.rulebook.earnings_overrides keys must be symbols")
+		}
+		if v == nil {
+			continue
+		}
+		date, half, hasHalf := strings.Cut(*v, "T")
+		if hasHalf {
+			h := strings.ToLower(half)
+			if h != "amc" && h != "bmo" {
+				return nil, errBadRequest("features.rulebook.earnings_overrides." + sym + " suffix must be Tamc or Tbmo")
+			}
+		}
+		if _, err := time.Parse("2006-01-02", date); err != nil {
+			return nil, errBadRequest("features.rulebook.earnings_overrides." + sym + " must be YYYY-MM-DD with optional Tamc/Tbmo suffix")
+		}
+		out[sym] = *v
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 func applyTradingSettingsPatch(next *platformSettingsData, raw json.RawMessage, writable bool, reason string) error {
@@ -396,6 +466,10 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 	if data.Features.StockProtection.Enabled != nil {
 		stockProtectionEnabled = *data.Features.StockProtection.Enabled
 	}
+	rulebookEnabled := true
+	if data.Features.Rulebook.Enabled != nil {
+		rulebookEnabled = *data.Features.Rulebook.Enabled
+	}
 	limitAccess := rpc.SettingsAccessRead
 	if limitsWritable {
 		limitAccess = rpc.SettingsAccessWrite
@@ -415,6 +489,12 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 			},
 			StockProtection: rpc.StockProtectionSettings{
 				Enabled: rpc.SettingsBool{Value: stockProtectionEnabled, Access: rpc.SettingsAccessWrite, Source: rpc.SettingsSourceRuntime},
+			},
+			Rulebook: rpc.RulebookSettings{
+				Enabled: rpc.SettingsBool{Value: rulebookEnabled, Access: rpc.SettingsAccessWrite, Source: rpc.SettingsSourceRuntime},
+				EarningsOverrides: rpc.SettingsStringMap{Value: data.Features.Rulebook.EarningsOverrides,
+					Access: rpc.SettingsAccessWrite, Source: rpc.SettingsSourceRuntime,
+					Reason: "SYMBOL to YYYY-MM-DD (optional Tamc/Tbmo); authoritative over fetched earnings for rules 6-8"},
 			},
 		},
 		Trading: rpc.PlatformTradingSettings{

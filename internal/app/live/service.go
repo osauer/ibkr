@@ -42,6 +42,7 @@ type Snapshot struct {
 	MarketEvents  *rpc.MarketEventsResult    `json:"market_events,omitempty"`
 	Regime        *rpc.RegimeMonitorResult   `json:"regime,omitempty"`
 	Canary        *rpc.CanaryResult          `json:"canary,omitempty"`
+	Rules         *rpc.RulesResult           `json:"rules,omitempty"`
 	Trading       *rpc.TradingStatus         `json:"trading,omitempty"`
 	AutoTrade     *rpc.AutoTradeStatus       `json:"auto_trade,omitempty"`
 	Opportunities *rpc.OpportunitySnapshot   `json:"opportunities,omitempty"`
@@ -338,6 +339,18 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 				if s.OnCanary != nil {
 					go s.OnCanary(ctx, *canary)
 				}
+			}
+		}
+		// Rules ride the canary cadence: same inputs (positions/account),
+		// same daily-discipline freshness needs, no extra poll knob.
+		if rules, err := s.client.Rules(ctx); err != nil {
+			errors = append(errors, sourceErr("rules", err, now))
+			snap.Sources["rules"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+		} else {
+			snap.Rules = rules
+			snap.Sources["rules"] = SourceMeta{UpdatedAt: now}
+			if s.changed("rules", rules) {
+				events = append(events, Event{Type: "rules", Data: rules})
 			}
 		}
 		s.mu.Lock()

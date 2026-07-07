@@ -161,6 +161,18 @@
               </div>
             </div>
           </div>
+          <div class="canary-rules" id="canaryRulesCard" hidden>
+            <div class="canary-rules__head">
+              <span class="signal-half__label">Rules</span>
+              <span class="canary-rules__counts" id="canaryRulesCounts">--</span>
+              <button class="signal-half__toggle" id="canaryRulesToggle" type="button" aria-expanded="false" aria-controls="canaryRulesDetailPanel">Show rules</button>
+            </div>
+            <div class="canary-rules__brief" id="canaryRulesBrief"></div>
+            <p class="canary-rules__note" id="canaryRulesNote" hidden></p>
+          </div>
+          <div class="detail-panel detail-panel--dark canary-rules-detail" id="canaryRulesDetailPanel" hidden>
+            <div class="detail-grid" id="canaryRulesGrid"></div>
+          </div>
           <div class="alert-focus" id="selectedAlertPanel" hidden>
             <div>
               <span>Selected alert</span>

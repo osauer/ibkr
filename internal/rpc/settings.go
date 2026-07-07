@@ -69,6 +69,7 @@ type RegimeJournalSettings struct {
 type PlatformFeatureSettings struct {
 	PurgeRestore    PurgeRestoreSettings    `json:"purge_restore"`
 	StockProtection StockProtectionSettings `json:"stock_protection"`
+	Rulebook        RulebookSettings        `json:"rulebook"`
 }
 
 type PurgeRestoreSettings struct {
@@ -77,6 +78,28 @@ type PurgeRestoreSettings struct {
 
 type StockProtectionSettings struct {
 	Enabled SettingsBool `json:"enabled"`
+}
+
+// RulebookSettings controls the advisory trading rulebook
+// (docs/design/trading-rulebook.md): the 12-rule daily checklist plus its
+// manual earnings-date overrides. Disabling hides the SPA card, empties
+// rules.snapshot, and stops advisory rule_* preview warnings; it cannot
+// affect broker-write gating in either direction.
+type RulebookSettings struct {
+	Enabled SettingsBool `json:"enabled"`
+	// EarningsOverrides maps SYMBOL → "YYYY-MM-DD" (optional "Tamc"/"Tbmo"
+	// suffix). Overrides are authoritative over fetched dates for rules
+	// 6-8; set a symbol to null to clear it.
+	EarningsOverrides SettingsStringMap `json:"earnings_overrides"`
+}
+
+// SettingsStringMap is a map-valued setting with the standard
+// access/source/reason contract.
+type SettingsStringMap struct {
+	Value  map[string]string `json:"value,omitempty"`
+	Access string            `json:"access"`
+	Source string            `json:"source"`
+	Reason string            `json:"reason,omitempty"`
 }
 
 type PlatformTradingSettings struct {

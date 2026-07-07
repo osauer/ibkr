@@ -23,6 +23,7 @@ type Client interface {
 	MarketEvents(context.Context, rpc.MarketEventsParams) (*rpc.MarketEventsResult, error)
 	Canary(context.Context) (*rpc.CanaryResult, error)
 	CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error)
+	Rules(context.Context) (*rpc.RulesResult, error)
 	TradingStatus(context.Context) (*rpc.TradingStatus, error)
 	AutoTradeStatus(context.Context) (*rpc.AutoTradeStatus, error)
 	OpportunitiesStatus(context.Context) (*rpc.OpportunityStatus, error)
@@ -162,6 +163,14 @@ func (c Real) CanaryWithRegime(ctx context.Context) (*rpc.CanaryResult, *rpc.Reg
 	}
 	monitor := rpc.CompactRegimeMonitor(&regime)
 	return &canary, &monitor, nil
+}
+
+func (c Real) Rules(ctx context.Context) (*rpc.RulesResult, error) {
+	var out rpc.RulesResult
+	if err := c.call(ctx, rpc.MethodRulesSnapshot, rpc.RulesSnapshotParams{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c Real) TradingStatus(ctx context.Context) (*rpc.TradingStatus, error) {

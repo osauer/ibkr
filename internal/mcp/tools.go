@@ -777,6 +777,27 @@ var Tools = []Tool{
 		},
 	},
 	{
+		Name:        "ibkr_rules",
+		Title:       "IBKR Trading Rulebook",
+		Description: "Advisory 12-rule daily trading checklist evaluated daemon-side against the live book: per-name exposure cap, single option-line premium cap, negative-cash sell-only mode, portfolio extrinsic (theta-rent) budget, expiry runway on long options, catalyst coverage vs earnings, overwrites spanning earnings, pre-earnings size freeze, red-on-green-tape relative weakness, winner-trim into strength, green-day execution nudge, and hedge-band integrity. Use when the user asks \"what should I fix today?\", \"which rules am I breaking?\", \"is my book within my own risk rules?\", or wants a daily discipline review. Rows are ranked hardest-first (`ranked` indexes: act > watch > unknown, then base-currency impact); statuses are pass/info/watch/act/unknown/not_evaluated where `unknown` means an input was missing (positions pending, earnings unknown, Greeks gaps) — never treat unknown as pass. `earnings[]` shows each name's next earnings date with source (fetched/override/unknown, with estimated and stale flags); `input_health[]` is the result-level gate. Advisory only: verdicts never block orders; order previews may carry matching advisory `rule_*` warnings. NOT for the market-regime × portfolio alert verdict (use `ibkr_canary`), NOT for executable protective-stop candidates (use `ibkr_proposals`), and NOT a data source for positions themselves (use `ibkr_positions`).",
+		JSONSchema: schemaObject(map[string]json.RawMessage{
+			"symbol": json.RawMessage(`{"type":"string","description":"optional underlying symbol (case-insensitive) to narrow per-rule offender lists; portfolio verdicts are unaffected"}`),
+		}, nil),
+		Handler: func(ctx context.Context, conn *dial.Conn, args json.RawMessage) (json.RawMessage, error) {
+			var in struct {
+				Symbol string `json:"symbol"`
+			}
+			if err := unmarshalArgs(args, &in); err != nil {
+				return nil, err
+			}
+			var res rpc.RulesResult
+			if err := conn.Call(ctx, rpc.MethodRulesSnapshot, rpc.RulesSnapshotParams{Symbol: in.Symbol}, &res); err != nil {
+				return nil, err
+			}
+			return json.Marshal(res)
+		},
+	},
+	{
 		Name:        "ibkr_proposals",
 		Title:       "IBKR Protection Proposals",
 		Description: "Read daemon-owned protection proposals for existing positions. Use when the user asks what protective actions ibkr currently recommends — broker-side trailing stops (TRAIL/TRAIL LIMIT for stocks/ETFs and, when policy opts in, single-leg option premium trails; each row carries the trail spec, computed initial stop, trail_sizing explanation including dynamic ATR/spread sizing or explicit policy fallback, execution_semantics, stop_risk, and stop_ladder), theta hygiene (close/reduce short-dated options), or single-name risk reduction — or asks why a proposal is blocked (per-row blockers include codes like stock_protection_disabled with remediation text). `execution_semantics` discloses reference side, trigger method, TRAIL market-order conversion, and TRAIL LIMIT non-fill tradeoff; `stop_risk` includes estimated stop loss, % NLV when computable, and a fixed 5% gap/slippage scenario. Estimates are advisory diagnostics, not fill guarantees. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview, submit, place, modify, cancel, transmit, or expose raw preview tokens. For coverage of existing open stop orders use `ibkr_positions` with `view:\"risk\"`; for broad risk evidence use `ibkr_canary` or `ibkr_regime`; for local order-entry readiness use `ibkr_trading_status`.",

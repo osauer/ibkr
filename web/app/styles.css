@@ -995,6 +995,67 @@ p {
   line-height: 1;
 }
 
+.canary-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.canary-rules__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.canary-rules__counts {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.canary-rules__brief {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.canary-rules__brief:empty {
+  display: none;
+}
+
+.canary-rules__pill.risk {
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.canary-rules__pill.warn {
+  border-color: var(--amber);
+  color: #a86d00;
+}
+
+.canary-rules__note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.canary-rules-detail {
+  margin-top: 8px;
+}
+
+.canary-rules__offenders {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .canary-summary-actions {
   display: flex;
   align-items: center;

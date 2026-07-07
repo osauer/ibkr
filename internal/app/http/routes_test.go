@@ -799,6 +799,10 @@ func (routeFakeClient) CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rp
 		nil
 }
 
+func (routeFakeClient) Rules(context.Context) (*rpc.RulesResult, error) {
+	return &rpc.RulesResult{Enabled: true, Status: "ok"}, nil
+}
+
 func (routeFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
 	return &rpc.TradingStatus{
 		Mode:       "paper",

@@ -425,6 +425,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 			Message:  "outside_rth=true was explicitly requested.",
 		})
 	}
+	warnings = append(warnings, rulebookPreviewWarnings(s.rulesForPreview(ctx), draft, position)...)
 	tokenMinted := token != "" && tokenID != ""
 	submitEligible := tokenMinted && whatIf.Status == rpc.OrderWhatIfStatusAccepted && !whatIf.RequiredForSubmit
 

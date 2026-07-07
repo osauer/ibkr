@@ -412,6 +412,10 @@ func (c *fakeClient) CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.
 	return c.canary, c.regime, nil
 }
 
+func (c *fakeClient) Rules(context.Context) (*rpc.RulesResult, error) {
+	return &rpc.RulesResult{Enabled: true, Status: "ok"}, nil
+}
+
 func (c *fakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
 	return c.trading, nil
 }

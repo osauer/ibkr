@@ -9,6 +9,7 @@ const state = {
   connectionOK: false,
   accountValueVisible: localStorage.getItem("ibkrAccountValueVisible") === "true",
   canaryDetailOpen: false,
+  rulesDetailOpen: false,
   regimeDetailOpen: false,
   regimeCanaryExpansionInitialized: false,
   detailPreferenceSet: false,
@@ -290,7 +291,7 @@ function connectEvents() {
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules"]) {
     es.addEventListener(type, (event) => {
       const data = JSON.parse(event.data);
       if (type === "snapshot") state.snapshot = data;
@@ -360,6 +361,7 @@ function renderAll() {
   canarySummaryEl.textContent = firstClause(canarySummaryFull);
   canarySummaryEl.title = canarySummaryFull;
   renderCanaryStatus(canary);
+  renderRulesCard(snap.rules);
   renderCanaryTimestamp(canary);
   renderSelectedAlert();
   renderProtectionPanel(snap.proposals || {}, snap.auto_trade || {}, snap.market_events || {});
@@ -1833,6 +1835,104 @@ function currentAccountContext(account = {}) {
     modeLabel,
     hasAccount: Boolean(accountLabel || aggregate),
   };
+}
+
+const RULE_TONES = { act: "risk", watch: "warn", pass: "ok", info: "neutral", unknown: "neutral", not_evaluated: "neutral" };
+
+function ruleTone(status) {
+  return RULE_TONES[status] || "neutral";
+}
+
+function ruleStatusLabel(status) {
+  if (status === "not_evaluated") return "idle";
+  return status || "--";
+}
+
+// Rules card: advisory 12-rule daily checklist from snapshot.rules
+// (daemon-owned verdicts and ranking; this renderer adds no policy). The
+// brief row shows the worst three non-pass rows hardest-first; the detail
+// grid shows all rows. Read-only by design — no order actions here.
+function renderRulesCard(rules) {
+  const card = $("canaryRulesCard");
+  const detail = $("canaryRulesDetailPanel");
+  if (!card || !detail) return;
+  if (!rules || rules.enabled === false || !Array.isArray(rules.rules) || rules.rules.length === 0) {
+    card.hidden = true;
+    detail.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  const counts = rules.breach_counts || {};
+  const summaryBits = [];
+  if (counts.act) summaryBits.push(`${counts.act} act`);
+  if (counts.watch) summaryBits.push(`${counts.watch} watch`);
+  if (counts.unknown) summaryBits.push(`${counts.unknown} unknown`);
+  $("canaryRulesCounts").textContent = summaryBits.length ? summaryBits.join(" · ") : "all pass";
+
+  const order = Array.isArray(rules.ranked) && rules.ranked.length === rules.rules.length
+    ? rules.ranked
+    : rules.rules.map((_, i) => i);
+  const brief = $("canaryRulesBrief");
+  brief.replaceChildren();
+  let shown = 0;
+  for (const ix of order) {
+    const r = rules.rules[ix];
+    if (!r || r.status === "pass" || r.status === "not_evaluated") continue;
+    if (shown >= 3) break;
+    shown++;
+    const pill = document.createElement("span");
+    pill.className = `severity-pill canary-rules__pill ${ruleTone(r.status)}`;
+    pill.textContent = `${r.number} · ${r.title}`;
+    pill.title = r.evidence || "";
+    brief.appendChild(pill);
+  }
+  const note = $("canaryRulesNote");
+  const degraded = (rules.input_health || []).filter((h) => h.status && h.status !== "ok");
+  if (rules.status === "degraded" && degraded.length) {
+    note.hidden = false;
+    note.textContent = `Inputs degraded (${degraded.map((h) => `${h.source}: ${h.status}`).join(", ")}) — unknown rows are not passes.`;
+  } else {
+    note.hidden = true;
+  }
+
+  const button = $("canaryRulesToggle");
+  button.setAttribute("aria-expanded", state.rulesDetailOpen ? "true" : "false");
+  button.textContent = state.rulesDetailOpen ? "Hide rules" : "Show rules";
+  detail.hidden = !state.rulesDetailOpen;
+  if (state.rulesDetailOpen) {
+    renderRulesGrid(rules, order);
+  }
+}
+
+function renderRulesGrid(rules, order) {
+  const grid = $("canaryRulesGrid");
+  if (!grid) return;
+  grid.replaceChildren();
+  for (const ix of order) {
+    const r = rules.rules[ix];
+    if (!r) continue;
+    const cardEl = document.createElement("div");
+    cardEl.className = `detail-card ${ruleTone(r.status)}`;
+    const label = document.createElement("span");
+    label.textContent = `Rule ${r.number} · ${ruleStatusLabel(r.status)}`;
+    const title = document.createElement("b");
+    title.textContent = r.title;
+    const body = document.createElement("p");
+    let text = r.evidence || "--";
+    if (typeof r.observed === "number" && typeof r.threshold === "number") {
+      text += ` (observed ${r.observed} vs ${r.threshold}${r.unit ? " " + r.unit : ""})`;
+    }
+    body.textContent = text;
+    cardEl.append(label, title, body);
+    const offenders = (r.offenders || []).slice(0, 3);
+    if (offenders.length) {
+      const list = document.createElement("p");
+      list.className = "canary-rules__offenders";
+      list.textContent = offenders.map((o) => (o.leg || o.symbol) + (o.note ? ` — ${o.note}` : "")).join(" · ");
+      cardEl.appendChild(list);
+    }
+    grid.appendChild(cardEl);
+  }
 }
 
 function renderCanaryDetail(canary, snap = state.snapshot || {}) {
@@ -7220,6 +7320,10 @@ $("accountOverviewToggle").addEventListener("click", () => {
 $("accountPanel").addEventListener("click", (event) => handleAccountPanelTap(event));
 $("canaryDetailToggle").addEventListener("click", () => {
   setRegimeCanaryExpansion("canary", !state.canaryDetailOpen);
+});
+$("canaryRulesToggle").addEventListener("click", () => {
+  state.rulesDetailOpen = !state.rulesDetailOpen;
+  renderRulesCard(state.snapshot?.rules);
 });
 $("protectionToggle").addEventListener("click", () => {
   setProtectionExpansion(!state.protectionOpen);

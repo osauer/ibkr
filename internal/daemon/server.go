@@ -328,12 +328,20 @@ type Server struct {
 	// platformSettings persists daemon-owned runtime preferences. Gateway,
 	// account, trading mode, and build capability stay config/build owned;
 	// this store only carries settings ibkr may edit at runtime.
-	platformSettings     *platformSettingsStore
-	protectionPolicies   *protectionPolicyManager
-	tradeProposals       *proposalEngine
-	opportunityPolicies  *opportunityPolicyManager
-	opportunities        *opportunityEngine
-	marketEvents         *marketEventCache
+	platformSettings    *platformSettingsStore
+	protectionPolicies  *protectionPolicyManager
+	tradeProposals      *proposalEngine
+	opportunityPolicies *opportunityPolicyManager
+	opportunities       *opportunityEngine
+	marketEvents        *marketEventCache
+	// earnings backs the trading rulebook's catalyst rules (6-8); LKG cache,
+	// async refresh only — never fetched on a snapshot or preview path.
+	earnings *earningsCache
+	// lastRules memoizes the most recent rulebook evaluation for advisory
+	// preview causes (rulesPreviewTTL) and the transitions journal.
+	rulesMu              sync.Mutex
+	lastRules            *rpc.RulesResult
+	lastRulesAt          time.Time
 	proposalsStarted     sync.Once
 	opportunitiesStarted sync.Once
 	// orderTokens signs preview tokens. Tokens are local intent artifacts;
@@ -463,6 +471,7 @@ func New(opts Options) *Server {
 	s.installRegimeHistoryCache()
 	s.installGammaZeroCache()
 	s.installFXRateCache()
+	s.installEarningsCache()
 	return s
 }
 
@@ -480,6 +489,18 @@ func (s *Server) installFXRateCache() {
 		return
 	}
 	s.fxRates = newFXRateCacheWithStore(newFXRateStore(dir), time.Now, s.logger)
+}
+
+// installEarningsCache wires the rulebook's earnings LKG cache. Best-effort
+// like the fx cache: an unresolvable cache dir means fetches still work but
+// nothing survives a restart.
+func (s *Server) installEarningsCache() {
+	dir, err := fxRateStoreDefaultDir()
+	if err != nil {
+		s.logger.Warnf("earnings cache: resolve dir: %v (persistence disabled)", err)
+		dir = ""
+	}
+	s.earnings = newEarningsCache(dir, s.logger.Warnf)
 }
 
 // installGammaZeroCache replaces the bootstrap in-memory gamma cache
@@ -2247,6 +2268,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleTradingPaperSmoke(ctx, req) })
 	case rpc.MethodAutoTradeStatus:
 		s.unary(req, enc, func() (any, error) { return s.handleAutoTradeStatus(), nil })
+	case rpc.MethodRulesSnapshot:
+		s.unary(req, enc, func() (any, error) { return s.handleRulesSnapshot(ctx, req) })
 	case rpc.MethodTradeProposalsSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsSnapshot(req), nil })
 	case rpc.MethodTradeProposalsRefresh:

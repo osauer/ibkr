@@ -12,7 +12,7 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
-  Bash(ibkr canary*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr opportunities status*) Bash(ibkr opportunities list*) Bash(ibkr opportunities refresh*) Bash(ibkr backtest research-opportunity*) Bash(ibkr settings show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr orders history*) Bash(ibkr order status*) Bash(ibkr order preview*)
+  Bash(ibkr canary*) Bash(ibkr rules*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr opportunities status*) Bash(ibkr opportunities list*) Bash(ibkr opportunities refresh*) Bash(ibkr backtest research-opportunity*) Bash(ibkr settings show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr orders history*) Bash(ibkr order status*) Bash(ibkr order preview*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
@@ -38,6 +38,18 @@ quality state, run `ibkr canary --json`. Canary answers with top-level
 `action`, `market_confirmation`, `portfolio_fit`, `input_health`,
 planner readiness, and evidence rows. It does not choose hedges, size trades,
 preview orders, or execute.
+
+If the user asks "what should I fix today", which of their own trading rules
+they are breaking, or wants the daily discipline checklist, run
+`ibkr rules --json`. It returns the advisory 12-rule rulebook (per-name
+exposure cap, option-line premium cap, sell-only cash floor, extrinsic
+budget, expiry runway, earnings catalyst/overwrite/size-freeze checks, tape
+rules, green-day nudge, hedge band) ranked hardest-first, with per-name
+earnings context and result-level input health. Statuses pass/info/watch/act/
+unknown/not_evaluated: `unknown` means an input was missing and must never be
+read as pass. Verdicts are advisory — nothing here blocks or authorizes an
+order; use `ibkr canary` for the regime × portfolio alert and
+`ibkr proposals` for executable protective candidates.
 
 If the user asks whether a held or requested stock/ETF has borrow, Reg SHO,
 LULD, or halt context, run `ibkr market-events --json` with `--symbol` when

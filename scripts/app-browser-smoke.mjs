@@ -99,7 +99,7 @@ await context.addInitScript(() => {
   globalThis.EventSource = function smokeEventSource(url, options) {
     const es = new NativeEventSource(url, options);
     globalThis.__ibkrSmoke.openedEvents++;
-    for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "canary", "heartbeat"]) {
+    for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "canary", "rules", "heartbeat"]) {
       es.addEventListener(type, (event) => {
         globalThis.__ibkrSmoke.eventCounts[type] = (globalThis.__ibkrSmoke.eventCounts[type] || 0) + 1;
         if (type === "snapshot" || type === "canary") {
@@ -109,6 +109,15 @@ await context.addInitScript(() => {
             globalThis.__ibkrSmoke.latestCanaryHeldStress = canary?.portfolio?.held_stress?.length || 0;
           } catch {
             // Smoke assertions below stay DOM-based when payload inspection fails.
+          }
+        }
+        if (type === "snapshot" || type === "rules") {
+          try {
+            const data = JSON.parse(event.data);
+            const rules = type === "snapshot" ? data?.rules : data;
+            globalThis.__ibkrSmoke.latestRulesCount = rules?.rules?.length || 0;
+          } catch {
+            // DOM assertions still cover the card when payload capture fails.
           }
         }
       });
@@ -147,6 +156,7 @@ try {
   const canaryControls = await exerciseCanaryControlsRemoved(page);
   const underlyingBookFixture = await exerciseUnderlyingPanelFixture(page);
   const canaryDetail = await exerciseCanaryDetail(page);
+  const rulesCard = await exerciseRulesCard(page);
   const marketContext = await exerciseMarketContext(page);
   const portfolioDetail = await exercisePortfolioDetail(page);
   const protectionRiskRendering = await exerciseProtectionRiskRendering(page);
@@ -185,6 +195,7 @@ try {
     canary_controls: canaryControls,
     underlying_book_fixture: underlyingBookFixture,
     canary_detail: canaryDetail,
+    rules_card: rulesCard,
     market_context: marketContext,
     portfolio_detail: portfolioDetail,
     protection_risk_rendering: protectionRiskRendering,
@@ -715,6 +726,47 @@ async function exerciseCanaryDetail(page) {
 
 function canaryTimestampMissing(value) {
   return !value || value === "--" || value === "updated --" || value === "no timestamp";
+}
+
+async function exerciseRulesCard(page) {
+  // The rules card renders only once snapshot.rules arrives (canary
+  // cadence); a fresh instance may legitimately not have it yet. Absent
+  // card + no rules payload = pass with exercised:false, but a payload
+  // without a card is a rendering bug.
+  const hasPayload = await page.evaluate(() => (globalThis.__ibkrSmoke?.latestRulesCount || 0) > 0);
+  const visible = await page.locator("#canaryRulesCard").evaluate((el) => !el.hidden).catch(() => false);
+  if (!visible) {
+    if (hasPayload) {
+      throw new Error("snapshot.rules payload present but #canaryRulesCard is hidden");
+    }
+    return { exercised: false, reason: "no rules payload yet" };
+  }
+  const counts = (await page.locator("#canaryRulesCounts").textContent())?.trim() || "";
+  if (!counts || counts === "--") {
+    throw new Error("rules card visible without a counts summary");
+  }
+  const initiallyOpen = await page.locator("#canaryRulesDetailPanel").evaluate((el) => !el.hidden);
+  if (initiallyOpen) {
+    throw new Error("rules detail should be collapsed by default");
+  }
+  await page.locator("#canaryRulesToggle").click();
+  await page.waitForFunction(() => {
+    const panel = document.getElementById("canaryRulesDetailPanel");
+    return panel && !panel.hidden && (document.getElementById("canaryRulesGrid")?.children.length || 0) >= 12;
+  }, { timeout: 5000 });
+  const grid = await page.evaluate(() => {
+    const cards = [...(document.getElementById("canaryRulesGrid")?.children || [])];
+    return {
+      cards: cards.length,
+      unknown_as_pass: cards.some((c) => /unknown/i.test(c.textContent || "") && c.classList.contains("ok")),
+    };
+  });
+  if (grid.unknown_as_pass) {
+    throw new Error("a rules row renders unknown status with a pass tone — unknown must never read as pass");
+  }
+  await page.locator("#canaryRulesToggle").click();
+  await page.waitForFunction(() => document.getElementById("canaryRulesDetailPanel")?.hidden, { timeout: 5000 });
+  return { exercised: true, counts, cards: grid.cards };
 }
 
 async function exerciseMarketContext(page) {

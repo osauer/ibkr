@@ -30,12 +30,12 @@ chmod +x "$stub_dir/ibkr"
 
 live_ready="$work/live-ready.json"
 cat >"$live_ready" <<'JSON'
-{"mode":"live","blocked":false,"live_override":"ready","can_write":true,"account":"U0000000","gateway_port":7496,"write_blockers":[]}
+{"mode":"live","blocked":false,"live_override":"ready","can_write":true,"account":"U1234567","gateway_port":7496,"write_blockers":[]}
 JSON
 
 live_frozen="$work/live-frozen.json"
 cat >"$live_frozen" <<'JSON'
-{"mode":"live","blocked":false,"live_override":"ready","can_write":false,"account":"U0000000","gateway_port":7496,"write_blockers":[{"code":"trading_frozen"}]}
+{"mode":"live","blocked":false,"live_override":"ready","can_write":false,"account":"U1234567","gateway_port":7496,"write_blockers":[{"code":"trading_frozen"}]}
 JSON
 
 mode_disabled="$work/disabled.json"

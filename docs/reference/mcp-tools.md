@@ -4,7 +4,7 @@
 
 These are the tools `ibkr mcp` exposes to MCP clients (Claude Code, claude-desktop, any other MCP host). Each entry lists the tool name an LLM picks against, the description the LLM reads to decide whether to invoke, and the parameter schema the LLM binds against.
 
-**25 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
+**26 tools** total. Listed in registration order, aligned with the agent-appropriate CLI commands. Local lifecycle commands such as `setup`, `update`, `restart`, `mcp`, `daemon`, and `version` are intentionally excluded from MCP tools.
 
 ## `ibkr_status`
 
@@ -273,6 +273,16 @@ Live stateless portfolio canary for scheduled checks every few minutes: it combi
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `view` | string | no | response shape: full returns the existing canary evidence payload (default); alert returns compact monitor headline, source health, portfolio/market summaries including held_stress, protection_coverage, option health, hedge offset, warnings, and non-observe flags |
+
+## `ibkr_rules`
+
+Advisory 12-rule daily trading checklist evaluated daemon-side against the live book: per-name exposure cap, single option-line premium cap, negative-cash sell-only mode, portfolio extrinsic (theta-rent) budget, expiry runway on long options, catalyst coverage vs earnings, overwrites spanning earnings, pre-earnings size freeze, red-on-green-tape relative weakness, winner-trim into strength, green-day execution nudge, and hedge-band integrity. Use when the user asks "what should I fix today?", "which rules am I breaking?", "is my book within my own risk rules?", or wants a daily discipline review. Rows are ranked hardest-first (`ranked` indexes: act > watch > unknown, then base-currency impact); statuses are pass/info/watch/act/unknown/not_evaluated where `unknown` means an input was missing (positions pending, earnings unknown, Greeks gaps) — never treat unknown as pass. `earnings[]` shows each name's next earnings date with source (fetched/override/unknown, with estimated and stale flags); `input_health[]` is the result-level gate. Advisory only: verdicts never block orders; order previews may carry matching advisory `rule_*` warnings. NOT for the market-regime × portfolio alert verdict (use `ibkr_canary`), NOT for executable protective-stop candidates (use `ibkr_proposals`), and NOT a data source for positions themselves (use `ibkr_positions`).
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `symbol` | string | no | optional underlying symbol (case-insensitive) to narrow per-rule offender lists; portfolio verdicts are unaffected |
 
 ## `ibkr_proposals`
 
