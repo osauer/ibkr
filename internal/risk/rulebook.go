@@ -219,12 +219,22 @@ func (c *ruleContext) singleNameExposure() RuleRow {
 	}
 	watch, act := c.pol.SingleNameWatchPct, c.pol.SingleNameActPct
 	row.Threshold = new(act)
-	var offenders, gaps []RuleOffender
+	var offenders, gaps, hedges []RuleOffender
 	worst := 0.0
 	for _, n := range c.in.Names {
 		if c.greeksGapMaterial(n) {
 			gaps = append(gaps, RuleOffender{Symbol: n.Symbol, Observed: pct(n.GreeksGapNotionalBase, c.nlv),
 				Note: "delta unavailable on material legs; exposure understated"})
+			continue
+		}
+		// A policy-hedge index name carrying net-short delta is the hedge:
+		// rule 12 owns its sizing, and double-flagging it here would bury
+		// the real concentration offenders. Disclosed via Exempt, never
+		// silently dropped.
+		if c.pol.IsHedgeSymbol(n.Symbol) && n.ExposureBase < 0 {
+			hedges = append(hedges, RuleOffender{Symbol: n.Symbol,
+				Observed: round1(pct(math.Abs(n.ExposureBase), c.nlv)),
+				Note:     "hedge-classified short exposure — sized by rule 12, not concentration"})
 			continue
 		}
 		p := pct(math.Abs(n.ExposureBase), c.nlv)
@@ -237,6 +247,7 @@ func (c *ruleContext) singleNameExposure() RuleRow {
 	sortOffenders(offenders)
 	row.Observed = new(round1(worst))
 	row.Offenders = offenders
+	row.Exempt = hedges
 	switch {
 	case len(gaps) > 0:
 		row.Status = RuleStatusUnknown

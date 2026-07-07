@@ -257,6 +257,41 @@ func TestHedgeExemptionSuppressedWhenOverHedged(t *testing.T) {
 	}
 }
 
+// A policy-hedge index name with net-short delta belongs to rule 12, not the
+// concentration cap — but it must surface in rule 1's Exempt list, never
+// silently vanish (2026-07-07 live finding: 40 SPY puts ≈ 234% of NLV in
+// absolute delta-dollars outranked every real concentration offender).
+func TestSingleNameExposureExemptsShortHedge(t *testing.T) {
+	in := healthyInputs()
+	in.Names[3].ExposureBase = -640000 // oversized SPY hedge, short delta
+	ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+	row := rowByID(t, ev, RuleSingleNameExposure)
+	for _, o := range row.Offenders {
+		if o.Symbol == "SPY" {
+			t.Fatalf("short hedge SPY must not be a concentration offender: %+v", row.Offenders)
+		}
+	}
+	found := false
+	for _, e := range row.Exempt {
+		if e.Symbol == "SPY" && strings.Contains(e.Note, "rule 12") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("short hedge must be disclosed in Exempt, got %+v", row.Exempt)
+	}
+	if row.Status != RuleStatusAct || row.Offenders[0].Symbol != "NOW" {
+		t.Fatalf("real concentration offender should lead: status=%s offenders=%+v", row.Status, row.Offenders)
+	}
+	// A LONG position in a hedge-listed index is ordinary concentration.
+	in.Names[3].ExposureBase = 640000
+	ev = EvaluateRulebook(in, DefaultRulebookPolicy())
+	row = rowByID(t, ev, RuleSingleNameExposure)
+	if len(row.Offenders) == 0 || row.Offenders[0].Symbol != "SPY" {
+		t.Fatalf("long index exposure must still count as concentration, got %+v", row.Offenders)
+	}
+}
+
 func TestRankingHardestFirst(t *testing.T) {
 	ev := EvaluateRulebook(healthyInputs(), DefaultRulebookPolicy())
 	if len(ev.Ranked) != 12 {
