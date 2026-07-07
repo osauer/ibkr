@@ -21,6 +21,7 @@
   --market-blue: #1268d8;
   --market-red: #e00022;
   --market-green: #008a22;
+  --market-amber: #b45309;
   --market-divider: #d7dce3;
   --amber: #ffb521;
   --orange: #ff6b2c;
@@ -120,8 +121,8 @@ button {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 18px;
-  margin-bottom: 10px;
+  gap: 12px;
+  margin-bottom: 6px;
 }
 
 .brand-block {
@@ -133,10 +134,10 @@ button {
 
 .brand-mark {
   flex: 0 0 auto;
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  box-shadow: 0 10px 22px rgba(9, 15, 24, 0.12);
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  box-shadow: 0 6px 14px rgba(9, 15, 24, 0.08);
 }
 
 .brand-copy {
@@ -185,7 +186,7 @@ p {
   grid-template-columns: minmax(0, 1fr);
   gap: 3px;
   min-height: 0;
-  margin: -2px 0 12px;
+  margin: 0 0 10px;
   padding: 0;
   color: var(--ink-2);
 }
@@ -444,7 +445,7 @@ p {
 .tab-panels,
 .dashboard {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .tab-panel {
@@ -793,8 +794,8 @@ p {
 .panel-head .panel-time {
   margin-left: auto;
   color: var(--muted-2);
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 10px;
+  font-weight: 600;
   letter-spacing: 0;
   text-transform: none;
 }
@@ -901,13 +902,22 @@ p {
   font-size: 10px;
 }
 
-/* Below 900px the split stacks (regime above canary, full-bleed) and each
-   half's own 3px accent border-top separates them; the side-by-side layout
-   is desktop-only via the min-width: 900px media block.
-   scripts/app-browser-smoke.mjs asserts both postures. */
+/* The split is side-by-side at every width — market regime left, portfolio
+   canary right — so both reads land in one glance even on phones.
+   scripts/app-browser-smoke.mjs asserts the side-by-side posture. */
 .signal-split {
   display: grid;
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+}
+
+.signal-half--regime {
+  padding-right: 12px;
+}
+
+.signal-half--canary {
+  padding-left: 12px;
+  border-left: 1px solid var(--line-soft);
 }
 
 .signal-detail-deck {
@@ -946,14 +956,14 @@ p {
 .signal-half__toggle {
   display: inline-flex;
   align-items: center;
-  min-height: 22px;
+  min-height: 24px;
   margin-left: auto;
-  padding: 0 8px;
+  padding: 2px 10px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface-soft);
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 720;
   line-height: 1;
 }
@@ -974,8 +984,8 @@ p {
   justify-self: start;
   display: inline-flex;
   align-items: center;
-  min-height: 21px;
-  padding: 0 7px;
+  min-height: 24px;
+  padding: 0 9px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface-soft);
@@ -1394,8 +1404,8 @@ p {
 }
 
 .regime-detail-panel {
-  margin-top: 14px;
-  padding-top: 13px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid var(--line-soft);
 }
 
@@ -1474,7 +1484,6 @@ p {
   align-content: start;
   gap: 5px;
   min-width: 0;
-  min-height: 67px;
 }
 
 .canary-hero__copy {
@@ -1482,7 +1491,6 @@ p {
   align-content: start;
   gap: 5px;
   min-width: 0;
-  min-height: 50px;
 }
 
 .regime-summary b,
@@ -1491,7 +1499,7 @@ p {
   color: var(--ink);
   font-size: clamp(15px, 4.3vw, 18px);
   font-weight: 760;
-  line-height: 1.1;
+  line-height: 1.25;
   letter-spacing: 0;
   text-transform: none;
 }
@@ -1513,7 +1521,7 @@ p {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   color: var(--muted);
   font-size: 12px;
   font-weight: 460;
@@ -1551,11 +1559,11 @@ p {
 }
 
 .account-panel__freshness {
-  color: var(--muted);
+  color: var(--muted-2);
   font-size: 10px;
-  font-weight: 760;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: none;
 }
 
 .account-panel__identity b {
@@ -1582,8 +1590,8 @@ p {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
@@ -1609,12 +1617,12 @@ p {
 .trading-env-pill {
   display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  padding: 0 9px;
+  min-height: 22px;
+  padding: 0 8px;
   border-radius: 999px;
   background: var(--line-soft);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 780;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -1631,8 +1639,8 @@ p {
 }
 
 .account-privacy-toggle svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
@@ -1690,6 +1698,20 @@ p {
   border-left: 1px solid var(--line-soft);
 }
 
+/* Daily P&L: value and %-today share a baseline row instead of stacking —
+   saves a text row when the metric wraps to full width on phones. */
+.account-primary:has(small) {
+  grid-template-columns: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 7px;
+}
+
+.account-primary:has(small) > span {
+  flex-basis: 100%;
+}
+
 .account-primary:first-child {
   padding-left: 0;
   border-left: 0;
@@ -1736,8 +1758,12 @@ p {
 
 .account-overview-detail {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   padding-top: 3px;
+}
+
+.account-risk-item--button:not(:disabled):hover {
+  background: var(--surface-soft);
 }
 
 .account-risk-strip {
@@ -1829,15 +1855,13 @@ p {
   display: flex;
   align-items: center;
   gap: 9px;
-  min-height: 62px;
+  min-height: 52px;
   margin: 0;
   padding: 12px 15px;
 }
 
 .underlying-panel__head .panel-chevron {
   margin-left: 0;
-  width: 38px;
-  height: 38px;
 }
 
 .underlying-panel[data-open="true"] .panel-chevron::after {
@@ -1868,9 +1892,9 @@ p {
 .underlying-pnl-card span {
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
-  font-weight: 780;
-  letter-spacing: 0.07em;
+  font-size: 11px;
+  font-weight: 620;
+  letter-spacing: 0.04em;
   line-height: 1.15;
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -1880,7 +1904,7 @@ p {
 .underlying-pnl-card b {
   min-width: 0;
   overflow: hidden;
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 790;
   line-height: 1;
   text-overflow: ellipsis;
@@ -2224,7 +2248,7 @@ p {
   border-radius: 7px;
   background: var(--surface);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 690;
 }
 
@@ -2252,10 +2276,22 @@ p {
   opacity: 0.48;
 }
 
+.underlying-action:not(:disabled):active {
+  opacity: 0.88;
+  transform: scale(0.98);
+}
+
+.underlying-bulk-note {
+  align-self: center;
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
 .protection-panel {
   display: grid;
+  align-content: start;
   gap: 8px;
-  min-height: 150px;
   padding: 13px;
   border-top: 3px solid var(--blue);
   cursor: pointer;
@@ -2282,10 +2318,9 @@ p {
 
 .protection-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
-  align-items: stretch;
-  min-height: 67px;
+  align-items: start;
 }
 
 .protection-summary div,
@@ -2318,6 +2353,13 @@ p {
   color: var(--market-red);
 }
 
+/* "alert" is the actionable-but-not-breached tier: amber keeps the metric
+   legible as a caution without spending red, which is reserved for a genuine
+   threshold breach (risk over target). */
+.protection-summary b.metric-alert {
+  color: var(--market-amber);
+}
+
 .protection-summary b.metric-neutral {
   color: var(--ink);
 }
@@ -2340,8 +2382,8 @@ p {
 .protection-exposure-note span {
   color: var(--muted-2);
   font-size: 10px;
-  font-weight: 760;
-  letter-spacing: 0.08em;
+  font-weight: 650;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 
@@ -2359,10 +2401,9 @@ p {
 }
 
 .protection-auto {
-  align-self: end;
-  min-width: 58px;
-  min-height: 32px;
-  padding: 0 11px;
+  min-width: 50px;
+  min-height: 28px;
+  padding: 0 10px;
   border-radius: 8px;
   font-size: 12px;
   font-weight: 650;
@@ -2683,8 +2724,8 @@ p {
 .protection-derisk {
   display: grid;
   gap: 8px;
-  margin-top: 10px;
-  padding-top: 10px;
+  margin-top: 0;
+  padding-top: 8px;
   border-top: 1px solid var(--line);
 }
 
@@ -2696,8 +2737,9 @@ p {
 }
 
 .protection-derisk__label {
+  font-size: 13px;
   font-weight: 600;
-  color: var(--ink);
+  color: var(--ink-2);
 }
 
 .protection-derisk__controls select {
@@ -2804,8 +2846,8 @@ p {
 
 .opportunities-panel {
   display: grid;
+  align-content: start;
   gap: 8px;
-  min-height: 132px;
   padding: 13px;
   border-top: 3px solid var(--green);
   cursor: pointer;
@@ -3023,10 +3065,6 @@ p {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .protection-auto {
-    justify-self: start;
-  }
-
   .protection-row {
     grid-template-columns: minmax(0, 1fr);
     align-items: start;
@@ -3106,7 +3144,7 @@ p {
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--ink);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 760;
   letter-spacing: 0;
   line-height: 1.08;
@@ -3809,7 +3847,7 @@ p {
 .sync-strip__auto {
   min-width: 0;
   color: var(--ink-2);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .sync-strip__label {
@@ -3828,7 +3866,14 @@ p {
 }
 
 .sync-strip__auto {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(120, 132, 150, 0.08);
   color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
   white-space: nowrap;
 }
 
@@ -3874,18 +3919,12 @@ p {
     grid-column: 1 / -1;
   }
 
-  .signal-split {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0;
-  }
-
   .signal-half--regime {
     padding-right: 18px;
   }
 
   .signal-half--canary {
     padding-left: 18px;
-    border-left: 1px solid var(--line-soft);
   }
 
   .signal-detail-deck:has(.signal-detail-col:not([hidden]) ~ .signal-detail-col:not([hidden])) {
@@ -4124,6 +4163,7 @@ p {
   }
 
   .account-primary:nth-child(3) {
+    grid-column: 1 / -1;
     padding-left: 0;
     border-left: 0;
   }

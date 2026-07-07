@@ -299,6 +299,7 @@ async function exerciseAccountPanel(page) {
     accountLabel: document.getElementById("accountLabel")?.textContent?.trim() || "",
     pill: document.getElementById("tradingEnvPill")?.textContent?.trim() || "",
     freshness: document.getElementById("accountAsOf")?.textContent?.trim() || "",
+    freshnessQuiet: !!document.getElementById("accountAsOf")?.hidden,
     dailyPnl: document.getElementById("dailyPnl")?.textContent?.trim() || "",
     dailyPnlPct: document.getElementById("dailyPnlPct")?.textContent?.trim() || "",
     riskValues: [
@@ -312,8 +313,14 @@ async function exerciseAccountPanel(page) {
   if (panel.accountMenuPresent || panel.accountMenuTogglePresent) {
     throw new Error(`account dropdown DOM should be removed: ${JSON.stringify(panel)}`);
   }
-  if (!panel.accountLabel || !panel.pill || !panel.freshness || !panel.dailyPnlPct || panel.riskValues.some((value) => !value)) {
+  // Freshness runs quiet-when-fresh: a hidden empty badge is the healthy
+  // state; visible text is required only when the badge is shown (stale or
+  // missing timestamp).
+  if (!panel.accountLabel || !panel.pill || !panel.dailyPnlPct || panel.riskValues.some((value) => !value)) {
     throw new Error(`account panel is missing values: ${JSON.stringify(panel)}`);
+  }
+  if (!panel.freshnessQuiet && !panel.freshness) {
+    throw new Error(`account freshness badge is visible but empty: ${JSON.stringify(panel)}`);
   }
   if (panel.dailyPnl !== "--" && (panel.dailyPnlPct === "******" || !panel.dailyPnlPct.includes("%"))) {
     throw new Error(`account Daily P/L percent should stay visible in privacy mode: ${JSON.stringify(panel)}`);
@@ -479,11 +486,9 @@ async function assertNoViewportOverflow(page) {
       const canary = document.querySelector("#signalSplit .signal-half--canary")?.getBoundingClientRect();
       const dashboard = document.getElementById("dashboard")?.getBoundingClientRect();
       const signalLayout = regime && canary ? {
-        // <900px: the split stacks — regime above canary, both full-bleed.
-        stackedVertically: regime.top < canary.top - 4 && Math.abs(regime.left - canary.left) <= 4,
-        // >=900px: the split sits side by side, sharing a row, roughly
-        // splitting signalPanel's width; signalPanel itself spans the full
-        // two-column dashboard width rather than pairing with a sibling.
+        // The split is side by side at every width: regime and canary share
+        // a row, roughly splitting signalPanel's width; signalPanel itself
+        // spans the full dashboard width rather than pairing with a sibling.
         sameRow: Math.abs(regime.top - canary.top) <= 4,
         regimeFirst: regime.left < canary.left,
         similarWidths: Math.abs(regime.width - canary.width) <= 24,
@@ -512,11 +517,8 @@ async function assertNoViewportOverflow(page) {
     if (info.pageScrollWidth > info.clientWidth + 1) {
       throw new Error(`page overflows at ${size.width}px: ${JSON.stringify(info)}`);
     }
-    if (size.width >= 900 && (!info.signalLayout?.sameRow || !info.signalLayout?.regimeFirst || !info.signalLayout?.similarWidths || !info.signalLayout?.signalPanelFullWidth)) {
+    if (!info.signalLayout?.sameRow || !info.signalLayout?.regimeFirst || !info.signalLayout?.similarWidths || !info.signalLayout?.signalPanelFullWidth) {
       throw new Error(`Regime and Portfolio halves should align side-by-side inside a full-width combined panel at ${size.width}px: ${JSON.stringify(info.signalLayout)}`);
-    }
-    if (size.width < 900 && !info.signalLayout?.stackedVertically) {
-      throw new Error(`Regime and Portfolio halves should stack vertically below 900px: ${JSON.stringify(info.signalLayout)}`);
     }
   }
   return results;
@@ -660,8 +662,11 @@ async function exerciseUnderlyingPanelFixture(page) {
 }
 
 async function exerciseCanaryDetail(page) {
+  // Quiet-when-fresh blanks and hides the badge while the snapshot is fresh;
+  // that is the healthy state, not a missing timestamp.
+  const quietFresh = await page.locator("#canaryAsOf").evaluate((el) => el.hidden && !el.textContent.trim());
   let timestamp = (await page.locator("#canaryAsOf").textContent())?.trim() || "";
-  if (canaryTimestampMissing(timestamp)) {
+  if (!quietFresh && canaryTimestampMissing(timestamp)) {
     try {
       await page.waitForFunction(() => {
         const text = document.getElementById("canaryAsOf")?.textContent?.trim() || "";
@@ -674,7 +679,7 @@ async function exerciseCanaryDetail(page) {
       // assertion below still pins the rendered no-data contract.
     }
   }
-  const timestampMissing = canaryTimestampMissing(timestamp);
+  const timestampMissing = !quietFresh && canaryTimestampMissing(timestamp);
   const initiallyOpen = await page.locator("#canaryDetailPanel").evaluate((el) => !el.hidden);
   if (initiallyOpen) {
     throw new Error("Portfolio Canary detail should be collapsed by default");

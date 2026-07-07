@@ -347,13 +347,18 @@ function renderAll() {
   renderAccountPanel(account, positions, canary);
   renderUnderlyings(positions, account, snap.market_events || {});
   renderSensitiveText("cushion", typeof account.cushion === "number" ? pct(account.cushion * 100) : "--", typeof account.cushion === "number");
-  renderFreshnessTimestamp("positionsAsOf", positions.as_of, { staleMinutes: 15 });
+  renderFreshnessTimestamp("positionsAsOf", positions.as_of, { staleMinutes: 15, quietWhenFresh: true });
   $("stockCount").textContent = (positions.stocks || []).length;
   $("optionCount").textContent = (positions.options || []).length;
   $("baseCurrency").textContent = account.base_currency || positions.portfolio?.base_currency || "--";
   $("canarySeverity").textContent = labelize(canary.severity || "--");
   $("canaryAction").textContent = canaryStageLabel(canary);
-  $("canarySummary").textContent = canarySummaryText(canary, snap);
+  // The hero clamps to 2 lines; cutting at the first clause reads cleaner
+  // than a mid-word ellipsis, and the full text stays one tap away in detail.
+  const canarySummaryFull = canarySummaryText(canary, snap);
+  const canarySummaryEl = $("canarySummary");
+  canarySummaryEl.textContent = firstClause(canarySummaryFull);
+  canarySummaryEl.title = canarySummaryFull;
   renderCanaryStatus(canary);
   renderCanaryTimestamp(canary);
   renderSelectedAlert();
@@ -769,7 +774,7 @@ function renderAccountPanel(account = {}, positions = {}, canary = {}) {
   $("accountLabel").textContent = accountContext.accountLabel;
   $("tradingEnvPill").textContent = accountContext.modeLabel;
   $("tradingEnvPill").className = "trading-env-pill " + accountContext.modeClass;
-  renderFreshnessTimestamp("accountAsOf", account.as_of, { staleMinutes: 15 });
+  renderFreshnessTimestamp("accountAsOf", account.as_of, { staleMinutes: 15, quietWhenFresh: true });
 
   const button = $("accountPrivacyToggle");
   button.classList.toggle("is-visible", state.accountValueVisible);
@@ -900,7 +905,7 @@ function renderUnderlyings(positions = {}, account = {}, marketEvents = {}) {
       || (virtualCount > 0 ? "Includes virtual purge-book records" : heldCount > 0 ? "Current held underlyings" : "Waiting for positions or purge book");
   }
   if (freshness) {
-    renderFreshnessTimestamp(freshness, positions.as_of, { staleMinutes: 15 });
+    renderFreshnessTimestamp(freshness, positions.as_of, { staleMinutes: 15, quietWhenFresh: true });
   }
   const panel = $("underlyingPanel");
   if (panel && (state.underlyingBusy || state.underlyingNotice)) {
@@ -928,6 +933,19 @@ function renderUnderlyingBulkActions(rows) {
   setUnderlyingActionButtonState("buildAllUnderlyingsButton", virtualCount > 0 && !state.underlyingBusy, virtualCount > 0 ? "Build a non-executing restore draft for all purged rows" : "No purged rows to build");
   setUnderlyingActionButtonState("purgeAllUnderlyingsButton", heldCount > 0 && canWriteUnderlyings(trading) && !state.underlyingBusy, underlyingWriteReason("Purge all held underlyings", heldCount > 0, trading));
   setUnderlyingActionButtonState("restoreAllUnderlyingsButton", virtualCount > 0 && canWriteUnderlyings(trading) && !state.underlyingBusy, underlyingWriteReason("Restore all purged rows", virtualCount > 0, trading));
+  // Tooltips are invisible on touch; when every bulk action is disabled, say
+  // why in one muted line instead of presenting three dead buttons.
+  const bulkNote = $("underlyingBulkNote");
+  if (bulkNote) {
+    const allDisabled = ["buildAllUnderlyingsButton", "purgeAllUnderlyingsButton", "restoreAllUnderlyingsButton"]
+      .every((id) => $(id)?.disabled);
+    bulkNote.hidden = !allDisabled;
+    if (allDisabled) {
+      bulkNote.textContent = heldCount > 0
+        ? underlyingWriteReason("Purge all held underlyings", true, trading)
+        : "No held or purged underlyings to act on";
+    }
+  }
 }
 
 function setUnderlyingActionButtonState(id, enabled, reason) {
@@ -1923,7 +1941,7 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   const thetaEl = $("protectionTheta");
   thetaEl.textContent = hasNumericValue(theta.value) ? money(theta.value, theta.currency) : theta.mixed ? "Mixed" : "--";
   thetaEl.title = theta.title;
-  setMetricTone(thetaEl, hasNumericValue(theta.value) && theta.value > 0 ? "risk" : "neutral");
+  setMetricTone(thetaEl, hasNumericValue(theta.value) && theta.value > 0 ? "alert" : "neutral");
   const riskExcessEl = $("protectionRiskExcess");
   const riskExcess = protectionRiskExcessSummary(counts);
   riskExcessEl.textContent = riskExcess.text;
@@ -1933,7 +1951,7 @@ function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}
   const noStopEl = $("protectionNoStopExposure");
   noStopEl.textContent = noStop.text;
   noStopEl.title = noStop.title;
-  setMetricTone(noStopEl, noStop.risk ? "risk" : "neutral");
+  setMetricTone(noStopEl, noStop.risk ? "alert" : "neutral");
   $("protectionActions").textContent = String(counts.actionable ?? rows.length ?? 0);
   renderProtectionExposure();
   renderMarketFlagRail("protectionFlagRail", protectionHeroMarketFlags(rows, marketEvents));
@@ -2064,7 +2082,7 @@ function protectionDeriskStateText() {
   if (d.busy === "submit") return "Submitting the basket; fresh broker WhatIf per leg";
   const res = d.submitted || d.result;
   if (!res) return "Choose a percentage, then Preview to see the basket.";
-  if ((res.blockers || []).length > 0) return `${res.blockers[0].code}: ${res.blockers[0].message}`;
+  if ((res.blockers || []).length > 0) return blockerText(res.blockers[0]);
   const verb = d.submitted ? "placed" : "eligible";
   let line = `${res.eligible_count || 0} ${verb} · ${res.blocked_count || 0} blocked`;
   if (res.target_dollar_delta) {
@@ -2104,7 +2122,7 @@ function renderProtectionDeriskBasket() {
   box.hidden = false;
   box.classList.toggle("protection-derisk__basket--expired", deriskPreviewExpired());
   const children = [];
-  for (const b of basketBlockers) children.push(deriskBasketLine(`${b.code}: ${b.message}`, "blocked"));
+  for (const b of basketBlockers) children.push(deriskBasketLine(blockerText(b), "blocked"));
   // Only render a leg that will be/was trimmed (reduce_quantity > 0, no
   // blocker) or that carries a disclosed problem (a blocker — e.g.
   // delta_unavailable, wide_spread, preview_failed). The daemon already omits
@@ -2125,7 +2143,10 @@ function renderProtectionDeriskBasket() {
     submit.type = "button";
     submit.id = "protectionDeriskSubmit";
     submit.className = "protection-submit protection-derisk__submit";
-    submit.textContent = `Submit ${res.eligible_count} order${res.eligible_count === 1 ? "" : "s"}`;
+    let submitLabel = `Submit ${res.eligible_count} order${res.eligible_count === 1 ? "" : "s"}`;
+    const remaining = deriskPreviewRemainingMs();
+    if (remaining !== null) submitLabel += ` · ${Math.ceil(remaining / 1000)}s`;
+    submit.textContent = submitLabel;
     submit.disabled = d.busy !== "";
     submit.addEventListener("click", submitProtectionDerisk);
     children.push(submit);
@@ -2721,7 +2742,7 @@ function renderProtectionTimestamp(proposals = {}) {
   // threshold; a 15m override keeps the historical 20m.
   const cadence = goDurationMinutes(proposals.auto_trade?.proposal_cadence) ?? 0.5;
   const staleMinutes = Math.ceil(cadence + Math.max(3, cadence / 3));
-  renderFreshnessTimestamp("protectionAsOf", proposals.as_of, { staleMinutes });
+  renderFreshnessTimestamp("protectionAsOf", proposals.as_of, { staleMinutes, quietWhenFresh: true });
 }
 
 // goDurationMinutes parses a Go time.Duration string ("2m0s", "1h2m3s",
@@ -2766,7 +2787,7 @@ function renderProtectionExposure() {
 
 function protectionReason(proposals = {}, autoTrade = {}) {
   const blocker = (proposals.blockers || autoTrade.blockers || [])[0];
-  if (blocker) return `${blocker.code}: ${blocker.message}`;
+  if (blocker) return blockerText(blocker);
   if (autoTrade.policy?.status && autoTrade.policy.status !== "active" && autoTrade.policy.status !== "default") {
     return `Policy ${autoTrade.policy.status}`;
   }
@@ -3708,7 +3729,7 @@ function protectionContractLabel(contract = {}) {
 function protectionPreviewGate(proposal = {}) {
   const trading = state.snapshot?.trading || {};
   const blocker = protectionEffectiveBlockers(proposal, state.snapshot?.market_events || {})[0];
-  if (blocker) return { ready: false, reason: `${blocker.code}: ${blocker.message}` };
+  if (blocker) return { ready: false, reason: blockerText(blocker) };
   if (!trading.can_preview) return { ready: false, reason: "Broker preview is not enabled by trading.status" };
   return { ready: true, reason: "Preview this protection proposal with broker WhatIf; no order is placed" };
 }
@@ -3716,7 +3737,7 @@ function protectionPreviewGate(proposal = {}) {
 function protectionSubmitGate(proposal = {}) {
   const trading = state.snapshot?.trading || {};
   const blocker = protectionEffectiveBlockers(proposal, state.snapshot?.market_events || {})[0];
-  if (blocker) return { ready: false, reason: `${blocker.code}: ${blocker.message}` };
+  if (blocker) return { ready: false, reason: blockerText(blocker) };
   if (!trading.can_write) return { ready: false, reason: protectionWriteUnavailableReason(trading) };
   const calendar = protectionMarketCalendar(proposal);
   const session = calendar?.session;
@@ -3733,7 +3754,7 @@ function protectionPreviewSubmitGate(proposal = {}, previewResult = null) {
   if (!previewResult) return { ready: false, reason: "Run preview first" };
   if (previewResult.pending) return { ready: false, reason: "Broker WhatIf preview is still running" };
   const blocker = (previewResult.blockers || [])[0];
-  if (blocker) return { ready: false, reason: `${blocker.code}: ${blocker.message}` };
+  if (blocker) return { ready: false, reason: blockerText(blocker) };
   if (!protectionPreviewSubmitEligible(previewResult)) {
     return { ready: false, reason: protectionPreviewSubmitBlockedReason(previewResult) };
   }
@@ -3766,7 +3787,7 @@ function protectionPreviewText(result = null, proposal = {}) {
   }
   if (result.pending) return "Previewing broker WhatIf; no order is placed";
   const blocker = (result.blockers || [])[0];
-  if (blocker) return `Preview blocked; no order placed · ${blocker.code}: ${blocker.message}`;
+  if (blocker) return `Preview blocked; no order placed · ${blockerText(blocker)}`;
   const preview = result.preview || {};
   const whatIfStatus = String(preview.what_if?.status || "").trim();
   const submitEligible = result.submit_eligible || preview.submit_eligible;
@@ -3848,7 +3869,7 @@ function protectionSubmitStateClass({ result = null, gate = {}, busy = false } =
 function protectionSubmitResultText(result = {}) {
   if (result.local && result.pending) return "Submitting order; fresh broker WhatIf running";
   const blocker = (result.blockers || [])[0];
-  if (blocker) return `Submit blocked · ${blocker.code}: ${blocker.message}`;
+  if (blocker) return `Submit blocked · ${blockerText(blocker)}`;
   const orderRef = result.order_ref || result.place?.order_ref || "";
   const placeStatus = result.place?.lifecycle_status || result.place?.status || result.place?.send_state || "";
   if (result.accepted || result.place?.accepted) {
@@ -3896,7 +3917,7 @@ function protectionStopDraftSummary(proposal = {}) {
 function protectionBlockerText(proposal = {}) {
   const blockers = proposal.blockers || [];
   if (blockers.length === 0) return "Proposal is blocked";
-  return blockers.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
+  return blockers.map(blockerText).join("; ");
 }
 
 // Risk-over-target prefers the daemon's base-currency aggregate so the
@@ -4158,12 +4179,21 @@ function renderOpportunitiesPanel(opportunities = {}) {
 function renderOpportunitiesTimestamp(opportunities = {}) {
   const cadence = goDurationMinutes(opportunities.status?.refresh_cadence) ?? 2;
   const staleMinutes = Math.ceil(cadence + Math.max(3, cadence / 3));
-  renderFreshnessTimestamp("opportunitiesAsOf", opportunities.as_of, { staleMinutes });
+  renderFreshnessTimestamp("opportunitiesAsOf", opportunities.as_of, { staleMinutes, quietWhenFresh: true });
+}
+
+// Blockers arrive as machine {code, message}. Users read the sentence; the
+// code stays as a greppable suffix instead of leading the line.
+function blockerText(blocker) {
+  if (!blocker) return "";
+  const msg = String(blocker.message || "").trim() || labelize(String(blocker.code || ""));
+  const human = msg.charAt(0).toUpperCase() + msg.slice(1);
+  return blocker.code ? `${human} (${blocker.code})` : human;
 }
 
 function opportunityReason(opportunities = {}) {
   const blocker = (opportunities.blockers || opportunities.status?.blockers || opportunities.policy_status?.blockers || [])[0];
-  if (blocker) return `${blocker.code}: ${blocker.message}`;
+  if (blocker) return blockerText(blocker);
   const policy = opportunities.policy_status || opportunities.status?.policy || {};
   if (policy.status && policy.status !== "active" && policy.status !== "default") {
     return `Policy ${policy.status}${policy.policy_id ? ` · ${policy.policy_id} v${policy.policy_version || "--"}` : ""}`;
@@ -4376,7 +4406,7 @@ function opportunityPreviewGate(opportunity = {}) {
 
 function opportunitySubmitGate(opportunity = {}, previewResult = null) {
   const blocker = (opportunity.blockers || [])[0];
-  if (blocker) return { ready: false, reason: `${blocker.code}: ${blocker.message}` };
+  if (blocker) return { ready: false, reason: blockerText(blocker) };
   if (!previewResult) return { ready: false, reason: "Run preview first" };
   if (previewResult.pending) return { ready: false, reason: "Exercise preview is still running" };
   const previewBlocker = (previewResult.blockers || [])[0];
@@ -4437,7 +4467,7 @@ function opportunitySubmitResultText(result = {}) {
 
 function opportunityBlockerText(blockers = []) {
   if (blockers.length === 0) return "Opportunity is blocked";
-  return blockers.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
+  return blockers.map(blockerText).join("; ");
 }
 
 function opportunityPreviewStale(result = {}, opportunity = {}) {
@@ -4624,6 +4654,15 @@ function canaryStageLabel(canary) {
   return labelize(canary.action || "--");
 }
 
+// First sentence or semicolon-clause of a summary, with terminal punctuation
+// normalized to a period.
+function firstClause(text) {
+  const s = String(text || "").trim();
+  const m = s.match(/^[^.;]*[.;]/);
+  if (!m) return s;
+  return m[0].replace(/;$/, ".");
+}
+
 function canarySummaryText(canary, snap = {}) {
   const fallback = canary.summary || "Waiting for canary snapshot.";
   if (canaryHasProvisionalOnlyMarketWarning(canary)) {
@@ -4789,7 +4828,7 @@ function protectionCoverageCanaryLine(canary = {}, snap = state.snapshot || {}) 
 }
 
 function renderCanaryTimestamp(canary) {
-  renderFreshnessTimestamp("canaryAsOf", canary.as_of, { staleMinutes: 5, compact: true });
+  renderFreshnessTimestamp("canaryAsOf", canary.as_of, { staleMinutes: 5, compact: true, quietWhenFresh: true });
   reconcileSignalPanelTimes();
 }
 
@@ -4801,9 +4840,11 @@ function reconcileSignalPanelTimes() {
   const canary = $("canaryAsOf");
   if (!regime || !canary) return;
   const duplicate = regime.textContent === canary.textContent;
-  canary.hidden = duplicate;
+  canary.hidden = canary.hidden || duplicate;
+  // The separator only earns ink when both sides render text (quiet-when-
+  // fresh can blank either side independently).
   const sep = canary.parentElement?.querySelector(".panel-time-sep");
-  if (sep) sep.hidden = duplicate;
+  if (sep) sep.hidden = duplicate || regime.hidden || canary.hidden || !regime.textContent;
 }
 
 function renderMarketContext(snap) {
@@ -4888,7 +4929,10 @@ function marketQuoteSourceLine(quote, marketQuotes, fallback) {
   if (quality && quality !== "firm") parts.push(labelize(quality));
   if (dataType && dataType !== "live") parts.push(labelize(dataType));
   const uniqueParts = [...new Set(parts)];
-  if (uniqueParts.length === 0) uniqueParts.push(quote ? "IBKR quote" : fallback || "Quote pending");
+  // A healthy live quote is the default state; naming the source 6× across
+  // the rail is noise. The label only appears when there is no quote yet;
+  // degraded states (stale/frozen/delayed) keep their explicit words.
+  if (uniqueParts.length === 0 && !quote) uniqueParts.push(fallback || "Quote pending");
   const at = quote?.quote_price_at || quote?.price_at || quote?.as_of || marketQuotes?.as_of;
   if (at) uniqueParts.push(quoteTime(at));
   return uniqueParts.join(" · ");
@@ -4921,6 +4965,7 @@ function renderRegimePanel(snap) {
   renderFreshnessTimestamp("regimeAsOf", latestRegimeTimestamp(canary, indicators), {
     staleMinutes: regimeStaleBudgetMinutes(snap),
     compact: true,
+    quietWhenFresh: true,
   });
   reconcileSignalPanelTimes();
   renderMarketWeather(posture);
@@ -5347,20 +5392,47 @@ function renderRegimeDetail(indicators, snap = {}, canary = {}) {
     const title = document.createElement("b");
     title.textContent = indicator.name || "Indicator";
     const at = document.createElement("span");
-    at.textContent = indicator.as_of || "--";
+    at.textContent = indicatorAsOfLabel(indicator.as_of);
+    if (indicator.as_of) at.title = indicator.as_of;
     head.append(title, at);
     const reading = document.createElement("p");
-    reading.textContent = indicator.reading || "--";
+    reading.textContent = humanizeStalenessSeconds(indicator.reading || "--");
     body.append(head, reading);
     if (indicator.comment) {
       const comment = document.createElement("small");
-      comment.textContent = indicator.comment;
+      comment.textContent = humanizeStalenessSeconds(indicator.comment);
       body.append(comment);
     }
     row.append(dot, body);
     return row;
   }));
   renderRegimeQualityRemarks(snap, canary);
+}
+
+// Indicator cards all carry an as-of date; "today" is the expected state and
+// a full ISO date restates it eight times, so only older reads keep the date.
+function indicatorAsOfLabel(value) {
+  if (!value) return "--";
+  const at = parseDate(value);
+  if (!at) return String(value);
+  const now = new Date();
+  const dayMS = 24 * 60 * 60 * 1000;
+  const days = Math.floor((new Date(now.getFullYear(), now.getMonth(), now.getDate()) - new Date(at.getFullYear(), at.getMonth(), at.getDate())) / dayMS);
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  return String(value);
+}
+
+// Daemon staleness estimates arrive as raw seconds ("est 68519s"); render
+// them as approximate human durations.
+function humanizeStalenessSeconds(text) {
+  return String(text).replace(/\b(\d{3,})s\b/g, (all, secs) => {
+    const s = Number(secs);
+    if (!Number.isFinite(s)) return all;
+    if (s < 5400) return `~${Math.round(s / 60)}m`;
+    if (s < 129600) return `~${Math.round(s / 3600)}h`;
+    return `~${Math.round(s / 86400)}d`;
+  });
 }
 
 function regimeFallbackIndicators(snap = {}, canary = {}) {
@@ -7370,10 +7442,12 @@ function compactWholeMoney(value, currency) {
   return ccy ? `${amount} ${ccy}` : amount;
 }
 
+// "risk" (red) is reserved for a breached threshold; "alert" (amber) marks
+// actionable-but-not-breached metrics so red keeps its scarcity value.
 function setMetricTone(el, tone = "neutral") {
   if (!el) return;
-  el.classList.remove("metric-risk", "metric-neutral");
-  el.classList.add(tone === "risk" ? "metric-risk" : "metric-neutral");
+  el.classList.remove("metric-risk", "metric-alert", "metric-neutral");
+  el.classList.add(tone === "risk" ? "metric-risk" : tone === "alert" ? "metric-alert" : "metric-neutral");
 }
 
 function renderSensitiveSignedMoney(id, value, currency) {
@@ -7506,6 +7580,9 @@ function renderFreshnessTimestamp(target, value, options = {}) {
   const label = el.dataset.freshnessLabel;
   const at = value instanceof Date ? value : parseDate(value);
   if (!at) {
+    // A missing timestamp is a degraded state, so it stays visible even for
+    // quiet-when-fresh callers.
+    el.hidden = false;
     el.textContent = options.fallback || "no timestamp";
     el.title = label;
     el.classList.add("stale");
@@ -7516,6 +7593,17 @@ function renderFreshnessTimestamp(target, value, options = {}) {
   const staleMinutes = typeof options.staleMinutes === "number" ? options.staleMinutes : 15;
   const stale = ageMinutes >= staleMinutes;
   const absolute = shortTime(at.toISOString());
+  // Monitor panel heads run quiet: freshness is the expected state, so only
+  // staleness earns ink. The footer sync strip stays the one always-on clock.
+  if (options.quietWhenFresh) {
+    el.hidden = !stale;
+    if (!stale) {
+      el.textContent = "";
+      el.title = label ? `${label} · ${absolute}` : absolute;
+      el.classList.remove("stale");
+      return;
+    }
+  }
   if (ageMinutes < 1) {
     // Fresh: "HH:MM · now" restates itself; keep the clock time in the title.
     el.textContent = options.compact ? "now" : "updated now";

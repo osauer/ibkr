@@ -202,7 +202,15 @@ if has_re '(^|[[:space:]/])ibkr[[:space:]]+(order|orders|trading|trade|trades|pr
   exit 0
 fi
 
-if has_re '(^|[[:space:]/])ibkr[[:space:]]+(order[[:space:]]+(preview|status)|orders[[:space:]]+(open|history)|trading[[:space:]]+status|proposals[[:space:]]+(status|refresh|list)|opportunities[[:space:]]+(status|refresh|list))([[:space:]]|$)'; then
+# The plural `orders` noun is a read-only journal surface end to end (open/
+# history listings); only the singular `order` verb tree can reach broker
+# writes. Allow the whole plural tree so flags like `ibkr orders --json`
+# don't fall through to the write gate.
+if has_re '(^|[[:space:]/])ibkr[[:space:]]+orders([[:space:]]|$)'; then
+  exit 0
+fi
+
+if has_re '(^|[[:space:]/])ibkr[[:space:]]+(order[[:space:]]+(preview|status)|trading[[:space:]]+status|proposals[[:space:]]+(status|refresh|list)|opportunities[[:space:]]+(status|refresh|list))([[:space:]]|$)'; then
   exit 0
 fi
 

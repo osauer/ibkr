@@ -744,7 +744,7 @@ func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
 	js := string(jsData)
 	render := jsFunctionBlock(t, js, "renderProtectionPanel")
 	for _, want := range []string{
-		`setMetricTone(thetaEl, hasNumericValue(theta.value) && theta.value > 0 ? "risk" : "neutral")`,
+		`setMetricTone(thetaEl, hasNumericValue(theta.value) && theta.value > 0 ? "alert" : "neutral")`,
 		`setMetricTone(riskExcessEl, riskExcess.risk ? "risk" : "neutral")`,
 		`money(theta.value, theta.currency)`,
 		`const noStop = protectionNoStopExposureSummary(rows, marketEvents, currentProtectionCoverage());`,
@@ -773,7 +773,7 @@ func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
 		}
 	}
 	css := string(cssData)
-	for _, want := range []string{".protection-summary b.metric-risk", ".protection-summary b.metric-neutral", ".detail-fact.risk", ".protection-row__risk-ticket", ".protection-coverage-ledger", ".protection-row__ladder"} {
+	for _, want := range []string{".protection-summary b.metric-risk", ".protection-summary b.metric-alert", ".protection-summary b.metric-neutral", ".detail-fact.risk", ".protection-row__risk-ticket", ".protection-coverage-ledger", ".protection-row__ladder"} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("styles.css missing protection metric tone rule %q", want)
 		}

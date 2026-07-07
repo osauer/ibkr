@@ -197,6 +197,7 @@
           <div class="panel-head">
             <span>Protection</span>
             <span class="panel-time" id="protectionAsOf">--</span>
+            <button class="text-button protection-auto" id="protectionAutoButton" type="button" disabled>Auto</button>
             <button class="panel-chevron" id="protectionToggle" type="button" aria-expanded="false" aria-controls="protectionDetailPanel">
               Show proposals
             </button>
@@ -218,13 +219,12 @@
               <span>Actions</span>
               <b id="protectionActions">--</b>
             </div>
-            <button class="text-button protection-auto" id="protectionAutoButton" type="button" disabled>Auto</button>
           </div>
           <div class="protection-exposure-note" id="protectionExposure" hidden></div>
           <div class="market-flag-rail" id="protectionFlagRail" hidden></div>
           <section class="protection-derisk" id="protectionDerisk" hidden>
             <div class="protection-derisk__controls">
-              <span class="protection-derisk__label" title="Hedges are never touched — trimming one would increase net risk, not reduce it.">Trim delta-adjusted risk</span>
+              <span class="protection-derisk__label" title="Hedges are never touched — trimming one would increase net risk, not reduce it.">Trim Δ-adjusted risk</span>
               <select id="protectionDeriskPercent" aria-label="Trim percentage">
                 <option value="25">25%</option>
                 <option value="50">50%</option>
@@ -292,6 +292,7 @@
               <button class="underlying-action underlying-action--purge" id="purgeAllUnderlyingsButton" type="button">Purge all</button>
               <button class="underlying-action underlying-action--restore" id="restoreAllUnderlyingsButton" type="button">Restore all</button>
               <button class="underlying-action underlying-action--build" id="buildAllUnderlyingsButton" type="button">Rebuild all</button>
+              <span class="underlying-bulk-note" id="underlyingBulkNote" hidden></span>
             </div>
             <div class="underlying-action-result" id="underlyingActionResult" hidden></div>
             <div class="underlying-book__list-panel" id="underlyingBookListPanel" hidden>

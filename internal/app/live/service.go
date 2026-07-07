@@ -418,7 +418,7 @@ var marketQuoteContracts = []marketQuoteContract{
 	},
 	{
 		label:    "QQQ",
-		contract: rpc.ContractParams{Symbol: "QQQ", SecType: "STK", Exchange: "SMART", PrimaryExch: "ARCA", Currency: "USD"},
+		contract: rpc.ContractParams{Symbol: "QQQ", SecType: "STK", Exchange: "SMART", PrimaryExch: "NASDAQ", Currency: "USD"},
 	},
 	{
 		label:    "IWM",
@@ -434,7 +434,7 @@ var marketQuoteContracts = []marketQuoteContract{
 	},
 	{
 		label:    "TLT",
-		contract: rpc.ContractParams{Symbol: "TLT", SecType: "STK", Exchange: "SMART", PrimaryExch: "ARCA", Currency: "USD"},
+		contract: rpc.ContractParams{Symbol: "TLT", SecType: "STK", Exchange: "SMART", PrimaryExch: "NASDAQ", Currency: "USD"},
 	},
 }
 

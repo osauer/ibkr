@@ -56,7 +56,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -250,6 +250,7 @@ plugin-check: ## Validate plugin/marketplace manifests with `claude plugin valid
 	@command -v claude >/dev/null 2>&1 || { echo "claude CLI not on PATH; install Claude Code or skip with: make check plugin-check= "; exit 1; }
 	claude plugin validate .
 	@$(MAKE) --no-print-directory hook-version-check
+	@$(MAKE) --no-print-directory hook-behavior-check
 	@$(MAKE) --no-print-directory registry-version-check
 
 # Root server.json is the MCP Registry template: release-registry-server
@@ -266,6 +267,14 @@ registry-version-check: ## Ensure server.json version tracks .claude-plugin/plug
 		echo "registry-version-check: server.json version ($$reg) != .claude-plugin/plugin.json version ($$plg); keep them in lockstep" >&2; \
 		exit 1; \
 	fi
+
+# The pre-tool-use hook is a broker guardrail with real routing logic
+# (read-only allowlists, write gates, composition checks). It shipped for
+# weeks blocking the read-only `ibkr orders` journal view, caught only by
+# a human. Table-driven behavior cases keep both failure directions gated:
+# false-allow (agent reaches a write) and false-block (read paths break).
+hook-behavior-check: ## Run table-driven allow/block cases against hooks/ibkr-pre-tool-use.sh
+	@bash hooks/ibkr-pre-tool-use_test.sh
 
 # Drift gate for the session-start hook's fallback plugin version. When
 # CLAUDE_PLUGIN_ROOT is unset the hook compares the binary against this
