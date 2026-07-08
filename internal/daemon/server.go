@@ -339,11 +339,20 @@ type Server struct {
 	earnings *earningsCache
 	// lastRules memoizes the most recent rulebook evaluation for advisory
 	// preview causes (rulesPreviewTTL) and the transitions journal.
-	rulesMu              sync.Mutex
-	lastRules            *rpc.RulesResult
-	lastRulesAt          time.Time
-	proposalsStarted     sync.Once
-	opportunitiesStarted sync.Once
+	rulesMu     sync.Mutex
+	lastRules   *rpc.RulesResult
+	lastRulesAt time.Time
+	// rulesRegimeStage latches the bucketed regime lifecycle stage for the
+	// rulebook's regime-conditional thresholds, persisted across restarts
+	// (rules-regime-stage.json) so a bounce mid-stress cannot reset
+	// thresholds to calm. The kick fields single-flight the async refresh.
+	rulesRegimeStageMu     sync.Mutex
+	rulesRegimeStage       rulesRegimeStageState
+	rulesRegimeStageLoaded bool
+	rulesRegimeKickAt      time.Time
+	rulesRegimeKickBusy    atomic.Bool
+	proposalsStarted       sync.Once
+	opportunitiesStarted   sync.Once
 	// orderTokens signs preview tokens. Tokens are local intent artifacts;
 	// they are not broker orders and cannot submit anything until a separate
 	// gated place handler exists.

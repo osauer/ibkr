@@ -12,7 +12,7 @@ import (
 const MethodRulesSnapshot = "rules.snapshot"
 
 // RulesSnapshotParams selects optional evaluation scope. Zero value means the
-// full 12-rule checklist over all held names.
+// full 14-rule checklist over all held names.
 type RulesSnapshotParams struct {
 	// Symbol narrows per-name offender lists to one underlying; portfolio
 	// rules still evaluate portfolio-wide.
@@ -46,8 +46,8 @@ type RulesResult struct {
 	Enabled bool   `json:"enabled"`
 	Status  string `json:"status"` // ok | degraded | disabled
 	// Rules holds all rows in rulebook order; Ranked holds indexes into
-	// Rules sorted hardest-first (rule 13) so renderers agree on ordering
-	// without re-deriving it.
+	// Rules sorted hardest-first so renderers agree on ordering without
+	// re-deriving it.
 	Rules  []risk.RuleRow `json:"rules"`
 	Ranked []int          `json:"ranked,omitempty"`
 	// BreachCounts summarizes row counts by status for compact surfaces.

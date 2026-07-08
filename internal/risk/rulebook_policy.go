@@ -9,7 +9,27 @@ import (
 	"strings"
 )
 
-// RulebookPolicy carries the operator-tunable thresholds for the 12-rule
+// Regime stage buckets consumed by the regime-conditional rules (3, 4, 12).
+// The daemon buckets the regime lifecycle stage into these three before
+// mapping RuleInputs; the evaluator never sees raw lifecycle stage names.
+const (
+	RegimeBucketCalm         = "calm"
+	RegimeBucketEarlyWarning = "early_warning"
+	RegimeBucketConfirmed    = "confirmed"
+)
+
+// RegimeThresholds is one stage's threshold set for the regime-conditional
+// rules: rule 3 cash floor, rule 4 extrinsic budget (ex-hedge), rule 12
+// hedge band.
+type RegimeThresholds struct {
+	CashSellOnlyPct   float64 `toml:"cash_sell_only_pct" json:"cash_sell_only_pct"`
+	ExtrinsicWatchPct float64 `toml:"extrinsic_watch_pct" json:"extrinsic_watch_pct"`
+	ExtrinsicActPct   float64 `toml:"extrinsic_act_pct" json:"extrinsic_act_pct"`
+	HedgeBandMinPct   float64 `toml:"hedge_band_min_pct" json:"hedge_band_min_pct"`
+	HedgeBandMaxPct   float64 `toml:"hedge_band_max_pct" json:"hedge_band_max_pct"`
+}
+
+// RulebookPolicy carries the operator-tunable thresholds for the 14-rule
 // daily trading rulebook (docs/design/trading-rulebook.md). Sibling
 // thresholds measuring the same aggregation live in the canary policy
 // (compiled, single-name watch 35) and the protection policy (TOML,
@@ -24,20 +44,24 @@ type RulebookPolicy struct {
 	SingleNameActPct   float64 `toml:"single_name_act_pct" json:"single_name_act_pct"`
 
 	// Rule 2 — option_line_premium (% of NLV, long option line market value).
+	// Hedge-classified legs (rule12HedgeLeg) evaluate against the hedge tier;
+	// rule 12 owns hedge sizing, this tier only bounds premium at risk.
 	OptionLineWatchPct float64 `toml:"option_line_watch_pct" json:"option_line_watch_pct"`
 	OptionLineActPct   float64 `toml:"option_line_act_pct" json:"option_line_act_pct"`
-
-	// Rule 3 — cash_sell_only (% of NLV; act when cash ratio is below).
-	CashSellOnlyPct float64 `toml:"cash_sell_only_pct" json:"cash_sell_only_pct"`
-
-	// Rule 4 — extrinsic_budget (% of NLV, Σ long-option extrinsic).
-	ExtrinsicWatchPct float64 `toml:"extrinsic_watch_pct" json:"extrinsic_watch_pct"`
-	ExtrinsicActPct   float64 `toml:"extrinsic_act_pct" json:"extrinsic_act_pct"`
+	HedgeLineWatchPct  float64 `toml:"hedge_line_watch_pct" json:"hedge_line_watch_pct"`
+	HedgeLineActPct    float64 `toml:"hedge_line_act_pct" json:"hedge_line_act_pct"`
 
 	// Rule 5 — expiry_runway (calendar DTE bounds for long options).
 	RunwayWatchDTE      int     `toml:"runway_watch_dte" json:"runway_watch_dte"`
 	RunwayActDTE        int     `toml:"runway_act_dte" json:"runway_act_dte"`
 	RunwayITMDeltaFloor float64 `toml:"runway_itm_delta_floor" json:"runway_itm_delta_floor"`
+
+	// Rule 7 — overwrite_earnings short-put act tier: a spanning short put
+	// escalates from watch to act when its assignment notional reaches the
+	// line share of NLV, or a name's spanning short puts together reach the
+	// name share.
+	ShortPutActLinePctNLV float64 `toml:"short_put_act_line_pct_nlv" json:"short_put_act_line_pct_nlv"`
+	ShortPutActNamePctNLV float64 `toml:"short_put_act_name_pct_nlv" json:"short_put_act_name_pct_nlv"`
 
 	// Rule 8 — earnings_size_freeze (US sessions to earnings).
 	EarningsFreezeSessions int `toml:"earnings_freeze_sessions" json:"earnings_freeze_sessions"`
@@ -48,11 +72,28 @@ type RulebookPolicy struct {
 	WinnerTrimDayUpPct    float64 `toml:"winner_trim_day_up_pct" json:"winner_trim_day_up_pct"`
 	WinnerTrimMinExpoPct  float64 `toml:"winner_trim_min_exposure_pct" json:"winner_trim_min_exposure_pct"`
 
-	// Rule 12 — hedge_integrity band (% of gross long delta-dollars).
-	HedgeBandMinPct float64 `toml:"hedge_band_min_pct" json:"hedge_band_min_pct"`
-	HedgeBandMaxPct float64 `toml:"hedge_band_max_pct" json:"hedge_band_max_pct"`
+	// Rules 3/4/12 — regime-conditional threshold sets. The calm set carries
+	// the rulebook-v1 numbers; a fresh regime stage selects its set; a
+	// carried or never-seen stage evaluates the carried set AND the calm set
+	// and keeps the worse verdict, so stale regime data can hold or tighten
+	// a verdict but never relax it.
+	RegimeCalm         RegimeThresholds `toml:"regime_calm" json:"regime_calm"`
+	RegimeEarlyWarning RegimeThresholds `toml:"regime_early_warning" json:"regime_early_warning"`
+	RegimeConfirmed    RegimeThresholds `toml:"regime_confirmed" json:"regime_confirmed"`
+	// RegimeStageMaxAgeMinutes bounds trust in the latched regime stage;
+	// older stages evaluate as carried (worse-of semantics above).
+	RegimeStageMaxAgeMinutes int `toml:"regime_stage_max_age_minutes" json:"regime_stage_max_age_minutes"`
+
+	// Rule 13 — exit_discipline (% of premium paid lost on a long line).
+	ExitWatchLossPct float64 `toml:"exit_watch_loss_pct" json:"exit_watch_loss_pct"`
+	ExitActLossPct   float64 `toml:"exit_act_loss_pct" json:"exit_act_loss_pct"`
+
+	// Rule 14 — fx_exposure (% of NLV held in non-base currencies).
+	// Watch-only in v2: a structural breach must not light a permanent act.
+	FXExposureWatchPct float64 `toml:"fx_exposure_watch_pct" json:"fx_exposure_watch_pct"`
+
 	// HedgeSymbols is the policy-owned index list whose long puts classify
-	// as hedges (rules 5 and 12). Uppercased on load.
+	// as hedges (rules 1, 2, 5, 12, 13). Uppercased on load.
 	HedgeSymbols []string `toml:"hedge_symbols" json:"hedge_symbols"`
 
 	// GreeksGapFloorPctNLV is the materiality floor: a name whose legs
@@ -65,32 +106,72 @@ type RulebookPolicy struct {
 	EarningsStaleDays int `toml:"earnings_stale_days" json:"earnings_stale_days"`
 }
 
-// DefaultRulebookPolicy returns the embedded rulebook-v1 defaults — the
-// numbers agreed with the operator on 2026-07-07 from the trader review.
+// DefaultRulebookPolicy returns the embedded rulebook-v2 defaults — the
+// rulebook-v1 numbers agreed with the operator on 2026-07-07, amended by the
+// dual senior review of 2026-07-08 (hedge premium tier, short-put act tier,
+// regime-conditional sets, exit discipline, FX watch).
 func DefaultRulebookPolicy() RulebookPolicy {
 	return RulebookPolicy{
-		ID:                     "rulebook-v1",
-		Version:                1,
+		ID:                     "rulebook-v2",
+		Version:                2,
 		SingleNameWatchPct:     30,
 		SingleNameActPct:       40,
 		OptionLineWatchPct:     5,
 		OptionLineActPct:       10,
-		CashSellOnlyPct:        -25,
-		ExtrinsicWatchPct:      10,
-		ExtrinsicActPct:        15,
+		HedgeLineWatchPct:      15,
+		HedgeLineActPct:        25,
 		RunwayWatchDTE:         14,
 		RunwayActDTE:           7,
 		RunwayITMDeltaFloor:    0.70,
+		ShortPutActLinePctNLV:  10,
+		ShortPutActNamePctNLV:  20,
 		EarningsFreezeSessions: 3,
 		RedOnGreenNameDropPct:  -1.5,
 		RedOnGreenSPYUpPct:     0.5,
 		WinnerTrimDayUpPct:     4,
 		WinnerTrimMinExpoPct:   15,
-		HedgeBandMinPct:        25,
-		HedgeBandMaxPct:        35,
-		HedgeSymbols:           []string{"SPY", "SPX", "SPXW", "QQQ", "IWM"},
-		GreeksGapFloorPctNLV:   1,
-		EarningsStaleDays:      10,
+		RegimeCalm: RegimeThresholds{
+			CashSellOnlyPct:   -25,
+			ExtrinsicWatchPct: 10,
+			ExtrinsicActPct:   15,
+			HedgeBandMinPct:   25,
+			HedgeBandMaxPct:   35,
+		},
+		RegimeEarlyWarning: RegimeThresholds{
+			CashSellOnlyPct:   0,
+			ExtrinsicWatchPct: 7.5,
+			ExtrinsicActPct:   12,
+			HedgeBandMinPct:   30,
+			HedgeBandMaxPct:   50,
+		},
+		RegimeConfirmed: RegimeThresholds{
+			CashSellOnlyPct:   10,
+			ExtrinsicWatchPct: 5,
+			ExtrinsicActPct:   10,
+			HedgeBandMinPct:   40,
+			HedgeBandMaxPct:   70,
+		},
+		RegimeStageMaxAgeMinutes: 240,
+		ExitWatchLossPct:         40,
+		ExitActLossPct:           60,
+		FXExposureWatchPct:       60,
+		HedgeSymbols:             []string{"SPY", "SPX", "SPXW", "QQQ", "IWM"},
+		GreeksGapFloorPctNLV:     1,
+		EarningsStaleDays:        10,
+	}
+}
+
+// SetForBucket returns the threshold set for a regime bucket; unrecognized
+// buckets fall to the early-warning set (middle, disclosed by the caller),
+// never silently to calm.
+func (p RulebookPolicy) SetForBucket(bucket string) RegimeThresholds {
+	switch bucket {
+	case RegimeBucketCalm:
+		return p.RegimeCalm
+	case RegimeBucketConfirmed:
+		return p.RegimeConfirmed
+	default:
+		return p.RegimeEarlyWarning
 	}
 }
 
@@ -104,22 +185,33 @@ func (p *RulebookPolicy) Normalize() {
 }
 
 // FingerprintKey hashes the full policy so every result discloses exactly
-// which thresholds produced it (mirrors risk.Policy.FingerprintKey).
+// which thresholds produced it (mirrors risk.Policy.FingerprintKey). Every
+// field must appear here: a threshold outside the fingerprint is a silent
+// policy change.
 func (p RulebookPolicy) FingerprintKey() string {
 	q := p
 	q.Normalize()
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%d|%d|%.4f|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%s|%.4f|%d",
+	fmt.Fprintf(h, "%s|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%d|%d|%.4f|%.4f|%.4f|%d|%.4f|%.4f|%.4f|%.4f",
 		q.ID, q.Version,
 		q.SingleNameWatchPct, q.SingleNameActPct,
 		q.OptionLineWatchPct, q.OptionLineActPct,
-		q.CashSellOnlyPct,
-		q.ExtrinsicWatchPct, q.ExtrinsicActPct,
+		q.HedgeLineWatchPct, q.HedgeLineActPct,
 		q.RunwayWatchDTE, q.RunwayActDTE, q.RunwayITMDeltaFloor,
+		q.ShortPutActLinePctNLV, q.ShortPutActNamePctNLV,
 		q.EarningsFreezeSessions,
 		q.RedOnGreenNameDropPct, q.RedOnGreenSPYUpPct,
 		q.WinnerTrimDayUpPct, q.WinnerTrimMinExpoPct,
-		q.HedgeBandMinPct, q.HedgeBandMaxPct,
+	)
+	for _, rt := range []RegimeThresholds{q.RegimeCalm, q.RegimeEarlyWarning, q.RegimeConfirmed} {
+		fmt.Fprintf(h, "|%.4f|%.4f|%.4f|%.4f|%.4f",
+			rt.CashSellOnlyPct, rt.ExtrinsicWatchPct, rt.ExtrinsicActPct,
+			rt.HedgeBandMinPct, rt.HedgeBandMaxPct)
+	}
+	fmt.Fprintf(h, "|%d|%.4f|%.4f|%.4f|%s|%.4f|%d",
+		q.RegimeStageMaxAgeMinutes,
+		q.ExitWatchLossPct, q.ExitActLossPct,
+		q.FXExposureWatchPct,
 		strings.Join(q.HedgeSymbols, ","),
 		q.GreeksGapFloorPctNLV, q.EarningsStaleDays,
 	)

@@ -77,7 +77,7 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 		}
 	}
 	if shown == 0 {
-		fmt.Fprintln(env.Stdout, "All 12 rules pass. Rerun with --all to see the full checklist.")
+		fmt.Fprintf(env.Stdout, "All %d rules pass. Rerun with --all to see the full checklist.\n", len(res.Rules))
 	}
 	passes := res.BreachCounts[risk.RuleStatusPass]
 	fmt.Fprintf(env.Stdout, "\n%d act, %d watch, %d unknown, %d info, %d pass",

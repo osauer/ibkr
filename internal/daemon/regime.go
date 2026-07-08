@@ -74,6 +74,7 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	res.Posture = rpc.BuildRegimePosture(res)
 	res.Fingerprint = rpc.BuildRegimeFingerprint(res)
 	s.updateRegimeStatusQuality(res)
+	s.latchRulesRegimeStage(res)
 	s.journalRegimeDecision(res)
 	return res, nil
 }

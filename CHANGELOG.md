@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.16.0 — 2026-07-08 17:36 CEST
+
+### What's new
+
+- Trading rulebook v2, from the 2026-07-08 dual senior review against a live confirmed-stress tape. The checklist grows from 12 to 14 rules: **rule 13 `exit_discipline`** fences long-option losses at −40% of premium paid (watch) / −60% (act), with classified hedge legs exempt — the hedge is allowed to decay — and an advisory preview warning when a draft would average down into a flagged line (averaging down resets the basis; the fence does not follow it down). **Rule 14 `fx_exposure`** makes non-base-currency NLV explicit (watch-only above 60% — a structural breach must inform, not become a permanently lit act). Rules 3/4/12 thresholds are now **regime-conditional**: the daemon latches the regime lifecycle stage (persisted across restarts, so a bounce mid-stress cannot reset thresholds to calm), buckets it calm / early_warning / confirmed (cash floor −25/0/+10% of NLV; ex-hedge extrinsic budget 10-15/7.5-12/5-10%; hedge band 25-35/30-50/40-70%), and a carried or never-seen stage evaluates BOTH the carried and calm sets and reports the worse verdict — stale regime data can hold or tighten a verdict, never relax it, in either band direction. Partial data may now indict but never acquit: rule 1 reports provable lower-bound breaches ("at least X% of NLV", `observed_is_lower_bound`) from signed interval arithmetic when deltas are missing, instead of hiding a certain breach behind `unknown`.
+
+### Added
+
+- Rule 2 hedge-premium tier: option lines classified as rule-12 hedges measure against 15%/25% of NLV instead of the 5%/10% speculative tier, disclosed per offender — the designated hedge no longer tops the premium list every single day (alarm-fatigue fix), while rule 12 gains an act tier at more than twice the band top ("a directional short wearing a hedge's clothing"). The two changes ship atomically: a hedge past twice the band top always keeps an act somewhere.
+- Rule 7 now covers short puts spanning an earnings print: watch by default, act when the line's assignment notional reaches 10% of NLV (or a name's spanning short puts together reach 20%) — a gap through the strike is a forced size-up on earnings day.
+- Option legs whose greeks tick carried no underlying spot now borrow the same-name stock leg's account mark (disclosed as `stock_leg_mark`, quality-gated, never classifying hedge legs), so rules 4 and 6 evaluate pre-market for stock-backed names instead of reporting unknown until the option surface opens.
+- The rules result's `input_health` gains a `regime_stage` row; row notes disclose which regime threshold set applied and why.
+
+### Fixed
+
+- Rule 6 (`catalyst_coverage`) could assert **pass** with every option leg's OTM-ness unassessable: legs with no underlying spot were silently skipped, so pre-market the rule passed a book holding an OTM call that expires five days before its name's earnings — a live violation of the never-false-pass invariant, observed 2026-07-08. Such legs are now named unknowns, and the property test covers per-leg nil underlying with healthy positions.
+- Rule 8 (`earnings_size_freeze`) had the same silent-skip shape: names with material greeks gaps were dropped from the sweep entirely, letting the rule pass while rule 1 reported the same name unknown. Gapped names now stay unknown offenders unless earnings are provably beyond the freeze window.
+- The rules-decisions journal now creates its state directory before appending (matches the order/regime journals); previously a missing `~/.local/state/ibkr/` made journaling silently no-op.
+
+### Changed
+
+- Rulebook policy `rulebook-v1` → `rulebook-v2` (version 2): every new threshold is part of the policy fingerprint, and the flat rule-3/4/12 threshold fields moved into the three regime sets (the calm set carries the v1 numbers unchanged).
+- Design doc corrected where it had drifted from the implementation: the rules-decisions journal lives under `~/.local/state/ibkr/`, rules 9/10 read a dedicated best-effort SPY snapshot quote (not the regime snapshot), and the operator TOML policy override is documented as planned, not shipped.
+
 ## v1.15.1 — 2026-07-08 08:42 CEST
 
 ### What's new

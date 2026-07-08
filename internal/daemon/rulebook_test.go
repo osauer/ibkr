@@ -112,7 +112,7 @@ func TestMapRuleNamesExposureMatchesGroups(t *testing.T) {
 			},
 		},
 	}
-	names := mapRuleNames(pos, risk.DefaultRulebookPolicy())
+	names := mapRuleNames(pos, risk.DefaultRulebookPolicy(), "EUR")
 	if len(names) != 2 {
 		t.Fatalf("names = %d, want 2", len(names))
 	}
@@ -133,6 +133,177 @@ func TestMapRuleNamesExposureMatchesGroups(t *testing.T) {
 	}
 	if bysym["NOW"].Legs[0].DTE <= 0 {
 		t.Fatalf("DTE = %d, want positive", bysym["NOW"].Legs[0].DTE)
+	}
+}
+
+// TestMapRuleNamesCostBasisJoinAndCompleteness covers the v2 input assembly:
+// multiplier-inclusive cost basis with the same-currency FX path (a
+// zero-marked line must keep its cost basis — that is rule 13's −100% case),
+// the stock-leg underlying join with its quality gate, and the exposure
+// completeness signal that guards rule 1's lower bound.
+func TestMapRuleNamesCostBasisJoinAndCompleteness(t *testing.T) {
+	pos := &rpc.PositionsResult{
+		ByUnderlying: []rpc.PositionGroup{
+			{
+				Underlying:           "AAA",
+				GroupDollarDeltaBase: new(50000.0),
+				Stock:                &rpc.PositionView{Symbol: "AAA", Quantity: 100, Mark: 100, Currency: "USD"},
+				Options: []rpc.PositionView{
+					// FXRate present: cost = 250 × 2 × 0.9, no ×multiplier.
+					{Symbol: "AAA", Quantity: 2, Multiplier: 100, Expiry: "20260821", Strike: 110, Right: "C",
+						AvgCost: 250, Mark: 3, Currency: "USD", FXRate: new(0.9),
+						MarketValue: 600, MarketValueBase: new(540.0)},
+					// No greeks-tick spot: joins the stock mark, disclosed —
+					// and a delta WITHOUT a spot marks the sum incomplete.
+					{Symbol: "AAA", Quantity: 1, Multiplier: 100, Expiry: "20260918", Strike: 120, Right: "C",
+						AvgCost: 100, Mark: 1, Currency: "USD", FXRate: new(0.9), Delta: new(0.3),
+						MarketValue: 100, MarketValueBase: new(90.0)},
+				},
+			},
+			{
+				Underlying:           "BBB",
+				GroupDollarDeltaBase: new(0.0),
+				Options: []rpc.PositionView{
+					// Same-currency book, marked to zero: the MV ratio is
+					// undefined but positionBaseRate resolves fx=1, so the
+					// −100% line keeps its cost basis for rule 13.
+					{Symbol: "BBB", Quantity: 1, Multiplier: 100, Expiry: "20260821", Strike: 10, Right: "C",
+						AvgCost: 500, Mark: 0, Currency: "EUR", MarketValue: 0},
+				},
+			},
+			{
+				Underlying:           "STALE",
+				GroupDollarDeltaBase: new(1000.0),
+				Stock:                &rpc.PositionView{Symbol: "STALE", Quantity: 10, Mark: 50, Stale: true, Currency: "EUR"},
+				Options: []rpc.PositionView{
+					{Symbol: "STALE", Quantity: 1, Multiplier: 100, Expiry: "20260821", Strike: 60, Right: "C",
+						AvgCost: 100, Mark: 1, Currency: "EUR", MarketValue: 100},
+				},
+			},
+		},
+	}
+	names := mapRuleNames(pos, risk.DefaultRulebookPolicy(), "EUR")
+	bysym := map[string]risk.NameInput{}
+	for _, n := range names {
+		bysym[n.Symbol] = n
+	}
+
+	aaa := bysym["AAA"]
+	if got := aaa.Legs[0].CostBasisBase; got == nil || *got != 450 {
+		t.Errorf("FXRate leg cost basis = %v, want 450 (AvgCost×|qty|×fx, no multiplier)", got)
+	}
+	if aaa.Legs[1].Underlying == nil || *aaa.Legs[1].Underlying != 100 ||
+		aaa.Legs[1].UnderlyingSource != risk.UnderlyingSourceStockLegMark {
+		t.Errorf("spotless leg must join the stock mark with disclosure, got %+v/%q",
+			aaa.Legs[1].Underlying, aaa.Legs[1].UnderlyingSource)
+	}
+	if aaa.ExposureBaseComplete {
+		t.Error("delta-without-spot leg must mark the exposure sum incomplete")
+	}
+
+	bbb := bysym["BBB"]
+	if got := bbb.Legs[0].CostBasisBase; got == nil || *got != 500 {
+		t.Errorf("same-currency zero-marked leg cost basis = %v, want 500 — the -100%% line must stay visible to rule 13", got)
+	}
+
+	if got := bysym["STALE"].Legs[0].Underlying; got != nil {
+		t.Errorf("stale stock mark must not join as underlying, got %v", *got)
+	}
+}
+
+// TestNonBaseExposure pins rule 14's corroboration: an empty currency report
+// is only trusted as base-only when a healthy positions snapshot shows no
+// non-base holdings — an unprimed or absent snapshot must stay unknown
+// (never-false-pass; a $LEDGER flake must not pass a 90%-USD book).
+func TestNonBaseExposure(t *testing.T) {
+	acct := func(rows ...rpc.CurrencyExposure) *rpc.AccountResult {
+		return &rpc.AccountResult{BaseCurrency: "EUR", CurrencyExposure: rows}
+	}
+	posWith := func(ccy string) *rpc.PositionsResult {
+		return &rpc.PositionsResult{ByUnderlying: []rpc.PositionGroup{{
+			Underlying: "AAA",
+			Stock:      &rpc.PositionView{Symbol: "AAA", Quantity: 1, Currency: ccy},
+		}}}
+	}
+
+	if got, _ := nonBaseExposure(acct(), nil); got != nil {
+		t.Errorf("empty report with no corroborating snapshot = %v, want nil (unknown)", *got)
+	}
+	if got, _ := nonBaseExposure(acct(), posWith("USD")); got != nil {
+		t.Errorf("empty report with a USD leg = %v, want nil (report contradicted)", *got)
+	}
+	if got, _ := nonBaseExposure(acct(), posWith("EUR")); got == nil || *got != 0 {
+		t.Errorf("empty report corroborated base-only = %v, want 0 (legitimate pass)", got)
+	}
+	got, ccys := nonBaseExposure(acct(
+		rpc.CurrencyExposure{Currency: "USD", NetLiquidationCcy: 100000, ExchangeRate: 0.9, NetLiquidationBase: 90000},
+		rpc.CurrencyExposure{Currency: "EUR", NetLiquidationCcy: 5000, ExchangeRate: 1, NetLiquidationBase: 5000},
+	), posWith("USD"))
+	if got == nil || *got != 90000 || len(ccys) != 1 || ccys[0] != "USD" {
+		t.Errorf("non-base sum = %v/%v, want 90000/[USD] (base row excluded)", got, ccys)
+	}
+	if got, _ := nonBaseExposure(acct(
+		rpc.CurrencyExposure{Currency: "USD", NetLiquidationCcy: 100000, ExchangeRate: 0},
+	), posWith("USD")); got != nil {
+		t.Errorf("missing exchange rate = %v, want nil (conversion unavailable)", *got)
+	}
+}
+
+func TestBucketRegimeStage(t *testing.T) {
+	cases := map[string]string{
+		rpc.LifecycleQuiet:           risk.RegimeBucketCalm,
+		rpc.LifecycleOpportunity:     risk.RegimeBucketCalm,
+		rpc.LifecycleEarlyWarning:    risk.RegimeBucketEarlyWarning,
+		rpc.LifecycleStabilization:   risk.RegimeBucketEarlyWarning,
+		rpc.LifecycleConfirmedStress: risk.RegimeBucketConfirmed,
+		rpc.LifecyclePanic:           risk.RegimeBucketConfirmed,
+		rpc.LifecycleForcedDefense:   risk.RegimeBucketConfirmed,
+		rpc.LifecycleDataQuality:     "", // hold the previous latch
+		"":                           "",
+		"some_future_stage":          risk.RegimeBucketEarlyWarning, // middle, never silently calm
+	}
+	for stage, want := range cases {
+		if got := bucketRegimeStage(stage); got != want {
+			t.Errorf("bucketRegimeStage(%q) = %q, want %q", stage, got, want)
+		}
+	}
+}
+
+// TestRulesRegimeStagePersistence pins restart-mid-stress: a latched stage
+// survives into a fresh Server via the state file, and a skewed stored
+// bucket is re-derived from the stage rather than trusted.
+func TestRulesRegimeStagePersistence(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	s := &Server{}
+	s.latchRulesRegimeStage(&rpc.RegimeSnapshotResult{Lifecycle: rpc.LifecycleState{Stage: rpc.LifecycleConfirmedStress}})
+	if st := s.rulesRegimeStageSnapshot(); st.Bucket != risk.RegimeBucketConfirmed {
+		t.Fatalf("latched bucket = %q, want confirmed", st.Bucket)
+	}
+
+	fresh := &Server{}
+	st := fresh.rulesRegimeStageSnapshot()
+	if st.Bucket != risk.RegimeBucketConfirmed || st.Stage != rpc.LifecycleConfirmedStress {
+		t.Fatalf("restart lost the stage: %+v", st)
+	}
+
+	// data_quality must hold the previous latch, not clear it.
+	s.latchRulesRegimeStage(&rpc.RegimeSnapshotResult{Lifecycle: rpc.LifecycleState{Stage: rpc.LifecycleDataQuality}})
+	if st := s.rulesRegimeStageSnapshot(); st.Bucket != risk.RegimeBucketConfirmed {
+		t.Errorf("data_quality stage cleared the latch: %+v", st)
+	}
+
+	// A skewed stored bucket is re-derived from the stage on load.
+	path, err := defaultTradingStatePath(rulesRegimeStageFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateStateAtomic(path, []byte(`{"version":1,"bucket":"calm","stage":"panic","as_of":"2026-07-08T10:00:00Z"}`)); err != nil {
+		t.Fatal(err)
+	}
+	skewed := &Server{}
+	if st := skewed.rulesRegimeStageSnapshot(); st.Bucket != risk.RegimeBucketConfirmed {
+		t.Errorf("stored bucket was trusted over the stage: %+v", st)
 	}
 }
 
@@ -173,6 +344,21 @@ func TestRulebookPreviewWarnings(t *testing.T) {
 	}
 	if warns := rulebookPreviewWarnings(nil, buyStock, rpc.OrderPositionImpact{Effect: "increase"}); warns != nil {
 		t.Error("nil rules result must be silent")
+	}
+
+	// Rule 13: only averaging down into the SAME flagged line warns — a
+	// different strike (a roll) must not.
+	res.Rules = append(res.Rules, risk.RuleRow{ID: risk.RuleExitDiscipline, Number: 13, Status: risk.RuleStatusWatch,
+		Offenders: []risk.RuleOffender{{Symbol: "NOW", Leg: "NOW 20260821 C 115"}}})
+	sameLeg := rpc.OrderDraft{Action: "BUY", Contract: rpc.ContractParams{
+		Symbol: "NOW", SecType: "OPT", Expiry: "2026-08-21", Right: "c", Strike: 115}}
+	if codes := warningCodes(rulebookPreviewWarnings(res, sameLeg, rpc.OrderPositionImpact{Effect: "increase"})); !codes["rule_exit_discipline"] {
+		t.Errorf("averaging down into a flagged line must warn (dash expiry + lowercase right normalized), got %v", codes)
+	}
+	otherStrike := rpc.OrderDraft{Action: "BUY", Contract: rpc.ContractParams{
+		Symbol: "NOW", SecType: "OPT", Expiry: "20260821", Right: "C", Strike: 120}}
+	if codes := warningCodes(rulebookPreviewWarnings(res, otherStrike, rpc.OrderPositionImpact{Effect: "increase"})); codes["rule_exit_discipline"] {
+		t.Error("rolling to a different strike must not inherit the exit-discipline warning")
 	}
 }
 

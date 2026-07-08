@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -102,7 +103,7 @@ func (s *Server) rulesForPreview(ctx context.Context) *rpc.RulesResult {
 func (s *Server) evaluateRules(ctx context.Context, includeTape bool) *rpc.RulesResult {
 	now := time.Now()
 	pol := risk.DefaultRulebookPolicy()
-	fp := rpc.Fingerprint{Version: "rulebook-fp-v1", Key: pol.FingerprintKey()}
+	fp := rpc.Fingerprint{Version: "rulebook-fp-v2", Key: pol.FingerprintKey()}
 	res := &rpc.RulesResult{
 		AsOf:              now,
 		Enabled:           s.rulebookEnabled(),
@@ -152,8 +153,43 @@ func (s *Server) evaluateRules(ctx context.Context, includeTape bool) *rpc.Rules
 		in.SessionOpen = session.IsOpen && session.State != marketcal.StateClosed && session.State != marketcal.StateHoliday
 	}
 
+	// Rule 14 inputs: base-normalized non-base NLV, corroborated against the
+	// positions snapshot so an empty currency report on a book with non-base
+	// legs degrades to unknown instead of passing (never-false-pass). An
+	// unhealthy or unprimed snapshot cannot corroborate anything — pass nil
+	// so the empty-report case stays unknown during boot races.
+	if acct != nil {
+		corr := pos
+		if !in.Positions.Healthy {
+			corr = nil
+		}
+		in.NonBaseNLVBase, in.NonBaseCurrencies = nonBaseExposure(acct, corr)
+	}
+
+	// Rules 3/4/12 regime-conditional thresholds: serve the latched stage,
+	// mark it carried past the policy max age, and self-heal a cold or stale
+	// latch with one async refresh (single-flight; never from previews).
+	if st := s.rulesRegimeStageSnapshot(); st.Bucket != "" {
+		in.RegimeStage = st.Bucket
+		in.RegimeStageAsOf = st.AsOf
+		maxAge := time.Duration(pol.RegimeStageMaxAgeMinutes) * time.Minute
+		in.RegimeStageCarried = time.Since(st.AsOf) > maxAge
+		stageStatus := "ok"
+		if in.RegimeStageCarried {
+			stageStatus = "stale"
+		}
+		health = append(health, rpc.SourceHealth{Source: "regime_stage", Status: stageStatus, AsOf: st.AsOf,
+			Notes: []string{fmt.Sprintf("stage %s (%s bucket)", st.Stage, st.Bucket)}})
+	} else {
+		health = append(health, rpc.SourceHealth{Source: "regime_stage", Status: "unavailable",
+			Notes: []string{"no regime stage observed yet; calm thresholds apply until a regime snapshot lands"}})
+	}
+	if includeTape && (in.RegimeStage == "" || in.RegimeStageCarried) {
+		s.kickRulesRegimeStageRefresh(ctx)
+	}
+
 	if in.Positions.Healthy && pos != nil {
-		in.Names = mapRuleNames(pos, pol)
+		in.Names = mapRuleNames(pos, pol, in.BaseCurrency)
 		earnings, infos := s.assembleEarnings(ctx, in.Names, pol, cal, now)
 		in.Earnings = earnings
 		res.Earnings = infos
@@ -194,21 +230,41 @@ func (s *Server) evaluateRules(ctx context.Context, includeTape bool) *rpc.Rules
 // mapRuleNames converts the positions snapshot into pure rule inputs. The
 // exposure figure is the same DollarDeltaBase the canary reads — one
 // aggregation, several bars (design: "Which verdict wins when").
-func mapRuleNames(pos *rpc.PositionsResult, pol risk.RulebookPolicy) []risk.NameInput {
+func mapRuleNames(pos *rpc.PositionsResult, pol risk.RulebookPolicy, baseCcy string) []risk.NameInput {
 	loc, _ := time.LoadLocation("America/New_York")
 	today := time.Now().In(loc)
 	names := make([]risk.NameInput, 0, len(pos.ByUnderlying))
 	for _, g := range pos.ByUnderlying {
 		n := risk.NameInput{Symbol: g.Underlying}
+		// ExposureBaseComplete guards rule 1's lower bound: the group sum
+		// excludes legs the aggregator couldn't price (delta without spot,
+		// markless stock, missing FX) — a bound seeded from a partial sum
+		// could overstate, and "proven ≥" must never overstate.
+		n.ExposureBaseComplete = g.GroupDollarDeltaBase != nil
 		if g.GroupDollarDeltaBase != nil {
 			n.ExposureBase = *g.GroupDollarDeltaBase
 		}
 		if g.GroupMarketValueBase != nil {
 			n.MarketValueBase = *g.GroupMarketValueBase
 		}
+		var stockSpot *float64
 		if g.Stock != nil && g.Stock.Quantity != 0 {
 			n.HasStockLeg = true
 			n.StockDayChangePct = g.Stock.DayChangePct
+			// The account mark that values the book is good enough to assess
+			// an option leg's OTM-ness/extrinsic when the leg's own greeks
+			// tick carried no spot (routine off-session). Stale marks are
+			// not: nil stays nil rather than valuing against a dead price.
+			// Indicative is deliberately NOT gated: it describes the quote
+			// enrichment layer, not the account mark, and pre-market — where
+			// every stock row is indicative — is exactly when this join
+			// earns its keep.
+			if g.Stock.Mark > 0 && !g.Stock.Stale {
+				stockSpot = new(g.Stock.Mark)
+			}
+			if g.Stock.Mark <= 0 {
+				n.ExposureBaseComplete = false
+			}
 		}
 		for _, o := range g.Options {
 			if o.Quantity == 0 {
@@ -225,16 +281,39 @@ func mapRuleNames(pos *rpc.PositionsResult, pol risk.RulebookPolicy) []risk.Name
 				Delta:       o.Delta,
 				HedgeListed: pol.IsHedgeSymbol(g.Underlying),
 			}
+			if o.Delta != nil && o.Underlying == nil {
+				// The aggregator can't pair this delta with a spot, so the
+				// group sum excluded the leg — no lower bound may build on it.
+				n.ExposureBaseComplete = false
+			}
+			if leg.Underlying == nil && stockSpot != nil {
+				leg.Underlying = stockSpot
+				leg.UnderlyingSource = risk.UnderlyingSourceStockLegMark
+			}
 			if o.MarketValueBase != nil {
 				leg.MarketValueBase = *o.MarketValueBase
 			} else {
 				leg.MarketValueBase = o.MarketValue
 			}
+			// FX path: same-currency is implicitly 1 and non-base uses the
+			// gateway rate (positionBaseRate) — the MV ratio is only a
+			// fallback and is undefined on a zero-marked leg, which is
+			// exactly the −100% line rule 13 exists to catch.
+			if rate, ok := positionBaseRate(o, baseCcy); ok {
+				leg.FXToBase = &rate
+			} else if o.MarketValueBase != nil && o.MarketValue != 0 {
+				leg.FXToBase = new(*o.MarketValueBase / o.MarketValue)
+			}
+			// IBKR AvgCost is multiplier-inclusive on options: cost basis is
+			// AvgCost × |contracts| × fx, with NO extra multiplier.
+			if leg.FXToBase != nil && o.AvgCost > 0 {
+				leg.CostBasisBase = new(o.AvgCost * math.Abs(o.Quantity) * *leg.FXToBase)
+			}
 			if exp, err := time.ParseInLocation("20060102", o.Expiry, loc); err == nil {
 				leg.Expiry = exp
 				leg.DTE = int(exp.Sub(time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, loc)).Hours() / 24)
 			}
-			if extPerShare, ok := risk.OptionExtrinsicPerShare(o.Right, o.Underlying, o.Strike, o.Mark); ok && o.Quantity > 0 {
+			if extPerShare, ok := risk.OptionExtrinsicPerShare(o.Right, leg.Underlying, o.Strike, o.Mark); ok && o.Quantity > 0 {
 				ext := extPerShare * o.Quantity * leg.Multiplier
 				if o.MarketValueBase != nil && o.MarketValue != 0 {
 					ext *= *o.MarketValueBase / o.MarketValue
@@ -259,6 +338,57 @@ func mapRuleNames(pos *rpc.PositionsResult, pol risk.RulebookPolicy) []risk.Name
 
 func legDesc(o rpc.PositionView) string {
 	return fmt.Sprintf("%s %s %s %s", o.Symbol, o.Expiry, o.Right, trimFloat(o.Strike))
+}
+
+// nonBaseExposure sums base-normalized NLV held outside the account's base
+// currency (rule 14). nil = unavailable: an empty currency report is only
+// trusted as "base-only" when the positions snapshot corroborates it —
+// $LEDGER flakes must degrade to unknown, never pass a 90%-USD book.
+func nonBaseExposure(acct *rpc.AccountResult, pos *rpc.PositionsResult) (*float64, []string) {
+	base := strings.ToUpper(strings.TrimSpace(acct.BaseCurrency))
+	if base == "" {
+		return nil, nil
+	}
+	if len(acct.CurrencyExposure) == 0 {
+		if positionsCarryNonBase(pos, base) {
+			return nil, nil // report absent but the book visibly holds non-base legs
+		}
+		return new(0.0), nil // documented same-currency shape, corroborated
+	}
+	total := 0.0
+	var ccys []string
+	for _, row := range acct.CurrencyExposure {
+		ccy := strings.ToUpper(strings.TrimSpace(row.Currency))
+		if ccy == "" || ccy == base || ccy == "BASE" {
+			continue
+		}
+		if row.ExchangeRate == 0 || (row.NetLiquidationBase == 0 && row.NetLiquidationCcy != 0) {
+			return nil, nil // FX conversion unavailable for this slice of NLV
+		}
+		total += row.NetLiquidationBase
+		ccys = append(ccys, ccy)
+	}
+	return &total, ccys
+}
+
+func positionsCarryNonBase(pos *rpc.PositionsResult, base string) bool {
+	if pos == nil {
+		return true // can't corroborate — stay unknown
+	}
+	for _, g := range pos.ByUnderlying {
+		if g.Stock != nil && g.Stock.Currency != "" && !strings.EqualFold(g.Stock.Currency, base) {
+			return true
+		}
+		for _, o := range g.Options {
+			if o.Currency != "" && !strings.EqualFold(o.Currency, base) {
+				return true
+			}
+		}
+	}
+	if pos.Portfolio != nil && pos.Portfolio.FXSensitivityPerPct != nil {
+		return true
+	}
+	return false
 }
 
 func trimFloat(v float64) string {
@@ -419,6 +549,9 @@ func (s *Server) journalRuleTransitions(res *rpc.RulesResult) {
 	if err != nil {
 		return
 	}
+	if err := ensurePrivateStateDir(path); err != nil {
+		return
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return
@@ -500,6 +633,22 @@ func rulebookPreviewWarnings(res *rpc.RulesResult, draft rpc.OrderDraft, positio
 	}
 	if r, ok := breached(risk.RuleEarningsSizeFreeze); ok && offends(r) {
 		out = append(out, warn(r, fmt.Sprintf("%s is oversized inside its pre-earnings freeze window; adding is the opposite of at-size.", sym)))
+	}
+	// Averaging down is the one behavior that resets rule 13's loss fence —
+	// warn when the drafted option leg matches a line already past it. Rule
+	// 14 (fx_exposure) deliberately has no preview cause: at structurally
+	// high non-base exposure it would fire on every ordinary order, and a
+	// warning with a 100% base rate trains the operator to ignore rule_*
+	// causes entirely.
+	if r, ok := breached(risk.RuleExitDiscipline); ok && isBuy && isOption {
+		draftDesc := fmt.Sprintf("%s %s %s %s", sym,
+			strings.ReplaceAll(draft.Contract.Expiry, "-", ""), strings.ToUpper(draft.Contract.Right), trimFloat(draft.Contract.Strike))
+		for _, o := range r.Offenders {
+			if strings.EqualFold(o.Leg, draftDesc) {
+				out = append(out, warn(r, fmt.Sprintf("%s is already past the exit-discipline loss fence; averaging down resets the basis and hides the loss.", draftDesc)))
+				break
+			}
+		}
 	}
 	return out
 }

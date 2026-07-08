@@ -81,7 +81,7 @@ type StockProtectionSettings struct {
 }
 
 // RulebookSettings controls the advisory trading rulebook
-// (docs/design/trading-rulebook.md): the 12-rule daily checklist plus its
+// (docs/design/trading-rulebook.md): the 14-rule daily checklist plus its
 // manual earnings-date overrides. Disabling hides the SPA card, empties
 // rules.snapshot, and stops advisory rule_* preview warnings; it cannot
 // affect broker-write gating in either direction.

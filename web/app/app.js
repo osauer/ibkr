@@ -1848,7 +1848,7 @@ function ruleStatusLabel(status) {
   return status || "--";
 }
 
-// Rules card: advisory 12-rule daily checklist from snapshot.rules
+// Rules card: advisory 14-rule daily checklist from snapshot.rules
 // (daemon-owned verdicts and ranking; this renderer adds no policy). The
 // brief row shows the worst three non-pass rows hardest-first; the detail
 // grid shows all rows. Read-only by design — no order actions here.
