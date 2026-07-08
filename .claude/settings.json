@@ -32,8 +32,14 @@
       "Bash(ibkr chain *)",
       "Bash(ibkr quote *)",
       "Bash(ibkr order status *)",
+      "Bash(ibkr order preview *)",
       "Bash(ibkr positions *)",
-      "Bash(ibkr breadth *)"
+      "Bash(ibkr breadth *)",
+      "Bash(ibkr rules)",
+      "Bash(ibkr rules *)",
+      "Bash(make smoke-fast)",
+      "Bash(make app-check)",
+      "Bash(make account-data-check)"
     ]
   }
 }

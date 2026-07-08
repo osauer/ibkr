@@ -60,9 +60,6 @@ Binding defaults for long sessions; rationale and measured numbers in
   once context is large; never carry a fat context across a topic pivot or
   a multi-hour pause. Handoff notes restate guardrail state: gateway pins,
   freeze status, committed vs in-flight work.
-- Batch independent one-liner probes into one call; read files by range,
-  not wholesale; after changing a file via shell, re-read the target hunk
-  before using the Edit tool on it.
 - Waits are backgrounded until-loops or Monitor conditions, never
   foreground sleeps or repeated polls from a large context.
 - `make test` already runs `check` first — run it alone, backgrounded or
@@ -86,13 +83,11 @@ When the user asks to open or show the canary/mobile app in the Codex browser si
 
 The app is the paired PWA served by `ibkr app`. Keep the shared app host on its default LAN-capable bind (`0.0.0.0:8765`) so a phone can pair through the Mac's LAN URL while the Codex Browser uses `http://127.0.0.1:8765`. For detailed SPA workflow, serving, pairing, and browser-QA rules, see `web/app/AGENTS.md` and `docs/guides/canary-spa-dev.md`.
 
-## MCP tool descriptions are documentation
-Adding or changing an entry in `internal/mcp/tools.go`: every `Description` string and every parameter `description` in the JSON schema is what an LLM reads to decide whether to invoke the tool. Hold them to documentation standard, not implementation comment standard:
-- **Tells the model when to invoke** — the use case in the user's language ("what you own", "is the regime favorable"), not just "calls handleX RPC".
-- **Tells the model when NOT to invoke** — name the overlapping tool a confused LLM might pick instead (e.g. `ibkr_quote` calls out "NOT for options — use `ibkr_chain`").
-- **Parameter descriptions explain semantics, not just type** — case-sensitivity, defaults, what good values look like.
-
-After changes run `make docs-regen` to update `docs/reference/mcp-tools.md`; `make check` enforces no drift via `docs-check`.
-
-## Adding or removing IBKR_* env vars
-Every read of an `IBKR_*` environment variable must be flagged with a `// docgen:env NAME | description` comment next to the `os.Getenv` call. `scripts/docgen/config-ref` walks the tree for these and emits `docs/reference/config.md`; `make check` fails when the generated file and source disagree. New env var → add the read, add the comment, run `make docs-regen`, commit all three together.
+## Scoped rules
+Two file-scoped invariants live in `.claude/rules/` (Claude Code loads them
+automatically when matching files are touched; other agents read them here):
+- MCP tool/parameter descriptions are LLM-facing documentation —
+  `.claude/rules/mcp-tool-descriptions.md` (applies to `internal/mcp/`).
+- Every `IBKR_*` env-var read needs a `// docgen:env` comment —
+  `.claude/rules/env-var-docgen.md`. `make check` enforces both via
+  `docs-check`; run `make docs-regen` after changes.
