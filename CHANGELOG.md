@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v1.15.1 — 2026-07-08 08:42 CEST
+
+### What's new
+
+- Inactive-symbol suppression can no longer permanently poison the daemon. During IBKR's nightly server reset the gateway can answer "No security definition" for every request while nominally connected; on 2026-07-08 that marked healthy held names (AMD, BB, IBM) and the regime engine's VIX feed as delisted, persisted the marks to a state file shared by every daemon instance, hid the held rows from `ibkr positions`, failed quotes with `symbol_inactive`, and blocked the v1.15.0 release smoke — recoverable only by hand-editing `~/.local/state/ibkr/inactive-symbols.json`. Suppression is now a bounded in-memory cache instead of a permanent on-disk verdict: no candidate counting while any market-data / historical / sec-def / connectivity farm is impaired, marks expire after 12 hours (re-marking needs fresh confirmation), an inactive mark never hides a held stock row, and `ibkr restart` clears everything. A genuinely delisted ticker still gets suppressed within two poll cycles of daemon start and now costs only two probe errors per half-day instead of permanent state.
+
+### Changed
+
+- Security bumps for the 2026-07-08 advisory batch: `golang.org/x/crypto` 0.41.0→0.52.0 and `github.com/golang-jwt/jwt/v5` 5.2.1→5.2.2 (both indirect; `govulncheck` reported zero reachable vulnerabilities in shipped binaries, so v1.15.0 was not exposed), and the Cloudflare relay's dev tooling moved to `wrangler` 4.108.0, clearing six `undici` advisories in the lockfile (dev-only; the deployed worker runtime does not consume that `undici`).
+
+### Fixed
+
+- Removed the persistent inactive-symbol store (`inactive-symbols.json`) entirely. It was added 2026-06-19 to save re-confirming dead tickers across restarts — worth roughly two wire messages per daemon rebuild — and in exchange created the poisoning class above: cross-process shared state with no TTL, no self-heal, no ops surface, and a persistence filter keyed on exactly the error message a degraded gateway mass-produces. In-memory marks (which fixed the original HGENQ churn loop and are unchanged) carry the suppression; the state file is no longer read or written and can be deleted.
+- Release-smoke, wire-smoke, and release-verify daemons now run with an isolated `XDG_STATE_HOME`/`XDG_CACHE_HOME` (as the paper smoke already did), so operator daemon state can neither fail a release nor be written to by smoke runs.
 ## v1.15.0 — 2026-07-07 19:31 CEST
 
 ### What's new

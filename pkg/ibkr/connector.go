@@ -83,7 +83,6 @@ type Connector struct {
 	inactiveMu         sync.RWMutex
 	inactiveSymbols    map[string]inactiveSymbolState
 	inactiveCandidates map[string]inactiveCandidateState
-	inactiveStore      inactiveSymbolStore
 
 	// mktDataAbsent remembers subscription keys whose market-data request
 	// the gateway terminally rejected as not-entitled (error 354), so the
@@ -178,10 +177,9 @@ func (c *Connector) DataFarmStatuses() []DataFarmStatus {
 // scaffolding was subtracted in favour of a one-client-one-connection
 // design.
 type ConnectorConfig struct {
-	ServiceName             string
-	PreferredClientID       int
-	BaseConfig              *ConnectionConfig
-	InactiveSymbolStorePath string
+	ServiceName       string
+	PreferredClientID int
+	BaseConfig        *ConnectionConfig
 }
 
 // Subscription represents a market data subscription.
@@ -318,6 +316,17 @@ func isTerminalSubscriptionError(code int) bool {
 // daemon rebuilds the Connector per connect.
 const marketDataAbsenceRetry = 30 * time.Minute
 
+// inactiveMarkTTL bounds an inactive mark the same way marketDataAbsenceRetry
+// bounds an entitlement rejection: suppression is a cache, not a verdict.
+// Marks are in-memory only — a false mark formed while the gateway answered
+// "no security definition" for everything (nightly-reset wedge, observed
+// 2026-07-08 marking held AMD/BB/IBM and VIX) heals at min(TTL, reconnect
+// rebuild) instead of persisting until a human edits state by hand. A
+// genuinely dead name (delisting, ~one per weeks) pays two confirmation
+// errors per TTL window per Connector — the same trade the absence memory
+// accepted in writing.
+const inactiveMarkTTL = 12 * time.Hour
+
 type marketDataAbsence struct {
 	code    int
 	message string
@@ -403,7 +412,7 @@ func (c *Connector) marketDataFarmImpaired() bool {
 	defer c.dataFarmMu.RUnlock()
 	for _, farm := range c.dataFarms {
 		switch farm.Type {
-		case "market", "connectivity":
+		case "market", "connectivity", "security_definition", "historical":
 			if farm.Status == "disconnected" || farm.Status == "broken" {
 				return true
 			}
@@ -517,49 +526,7 @@ func NewConnector(config *ConnectorConfig) *Connector {
 		pnl:               newPnLCache(),
 	}
 	c.fetchContractDetails = c.FetchContractDetails
-	if path := strings.TrimSpace(config.InactiveSymbolStorePath); path != "" {
-		if err := c.useInactiveSymbolStore(context.Background(), newFileInactiveSymbolStore(path)); err != nil {
-			c.logWarn("Failed to load inactive symbol store %s: %v", path, err)
-		}
-	}
 	return c
-}
-
-// useInactiveSymbolStore preloads the connector with persisted inactive
-// symbols. Unexported because the inactiveSymbolStore contract can only
-// be satisfied from inside the package.
-func (c *Connector) useInactiveSymbolStore(ctx context.Context, store inactiveSymbolStore) error {
-	if store == nil {
-		return nil
-	}
-
-	records, err := store.LoadInactiveSymbols(ctx)
-	if err != nil {
-		return err
-	}
-
-	var loaded int
-	c.inactiveMu.Lock()
-	c.inactiveStore = store
-	if c.inactiveSymbols == nil {
-		c.inactiveSymbols = make(map[string]inactiveSymbolState, len(records))
-	}
-	for sym, state := range records {
-		upper := strings.ToUpper(strings.TrimSpace(sym))
-		if upper == "" {
-			continue
-		}
-		c.inactiveSymbols[upper] = state
-		loaded++
-	}
-	c.inactiveMu.Unlock()
-
-	if loaded > 0 {
-		// Debug, not Info: re-emitted on every reconnect-cycle rebuild while
-		// the gateway is down (see the demotion note in Start).
-		c.logDebug("Loaded %d inactive symbols from store", loaded)
-	}
-	return nil
 }
 
 func (c *Connector) logInfo(format string, args ...any) {
@@ -591,6 +558,17 @@ func (c *Connector) inactiveReason(symbol string) (string, bool) {
 	state, ok := c.inactiveSymbols[symbol]
 	c.inactiveMu.RUnlock()
 	if !ok {
+		return "", false
+	}
+	// Lazy TTL expiry, mirroring the absence memory: an expired mark is
+	// deleted on read and the name earns a fresh probe; re-marking needs a
+	// fresh 2-in-10-min confirmation.
+	if time.Since(state.markedAt) > inactiveMarkTTL {
+		c.inactiveMu.Lock()
+		if cur, still := c.inactiveSymbols[symbol]; still && cur.markedAt.Equal(state.markedAt) {
+			delete(c.inactiveSymbols, symbol)
+		}
+		c.inactiveMu.Unlock()
 		return "", false
 	}
 	return state.reason, true
@@ -648,6 +626,14 @@ const (
 
 func (c *Connector) registerInactiveCandidate(symbol, reason string) bool {
 	if symbol == "" {
+		return false
+	}
+	// Choke-point farm guard: both write paths (subscription notices AND
+	// historical failures) converge here. While any tracked farm is
+	// impaired the gateway's definition errors are a session verdict, not
+	// a contract verdict — counting them is how a nightly-reset wedge
+	// marked held AMD/BB/IBM and VIX inactive (2026-07-08).
+	if c.marketDataFarmImpaired() {
 		return false
 	}
 	symbol = strings.ToUpper(symbol)
@@ -728,7 +714,6 @@ func (c *Connector) markSymbolInactive(symbol, reason string) {
 
 	c.dropSubscription(symbol)
 	c.logInfo("Suppressing market data for %s (inactive: %s)", symbol, reason)
-	c.persistInactiveSymbol(symbol, state)
 }
 
 func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotification) {
@@ -1402,54 +1387,6 @@ func normalizeMarketDataContract(contract Contract) Contract {
 		contract.Exchange = "SMART"
 	}
 	return contract
-}
-
-func shouldPersistInactiveReason(reason string) bool {
-	if reason == "" {
-		return false
-	}
-	upper := strings.ToUpper(reason)
-	if strings.Contains(upper, "NO SECURITY DEFINITION") {
-		return true
-	}
-	if strings.Contains(upper, "DELIST") {
-		return true
-	}
-	return false
-}
-
-func (c *Connector) getInactiveStore() inactiveSymbolStore {
-	c.inactiveMu.RLock()
-	store := c.inactiveStore
-	c.inactiveMu.RUnlock()
-	return store
-}
-
-// isCashRouteKey reports whether an inactive-record key denotes an FX/CASH
-// route — the bare dotted/slash pair form ("USD.EUR") the symbol-only
-// subscribe path uses, or a route key whose secType field is CASH. FX routes
-// are repair infrastructure (currency-ledger FX rates), not listings: the
-// inverted direction of a pair legitimately draws "no security definition",
-// and persisting that across sessions could silently break positions FX-rate
-// repair. In-memory suppression, which a restart clears, is the ceiling.
-func isCashRouteKey(key string) bool {
-	if _, _, ok := FxPair(key); ok {
-		return true
-	}
-	parts := strings.SplitN(key, "|", 3)
-	return len(parts) >= 2 && parts[1] == "CASH"
-}
-
-func (c *Connector) persistInactiveSymbol(symbol string, state inactiveSymbolState) {
-	store := c.getInactiveStore()
-	if store == nil || !shouldPersistInactiveReason(state.reason) || isCashRouteKey(symbol) {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := store.SaveInactiveSymbol(ctx, symbol, state); err != nil {
-		c.logWarn("Failed to persist inactive symbol %s: %v", symbol, err)
-	}
 }
 
 func (c *Connector) applyContractDetail(detail ContractDetailsLite, contract *Contract) bool {
@@ -3267,9 +3204,11 @@ func (c *Connector) GetCachedPositions() ([]*RawPosition, error) {
 		if pos.Contract.SecType == "STK" && pos.Contract.ConID == 0 {
 			continue
 		}
-		if pos.Contract.SecType == "STK" && c.IsSymbolInactive(pos.Contract.Symbol) && !isZeroValueStockPosition(pos) {
-			continue
-		}
+		// Inactive marks never hide a held row: for a true delisting the
+		// row is zero-value and stays visible anyway, so a mark-based skip
+		// here fired almost exclusively on FALSE marks — silently hiding
+		// healthy holdings during gateway-wide degradation (2026-07-08).
+		// A possibly-stale price beats a vanished position.
 		result = append(result, pos)
 	}
 	if len(result) == 0 {

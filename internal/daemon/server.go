@@ -1273,11 +1273,6 @@ func (s *Server) newConnector(ep discover.Endpoint) *ibkrlib.Connector {
 		PreferredClientID: ep.ClientID,
 		BaseConfig:        conn,
 	}
-	if path, err := defaultInactiveSymbolStorePath(); err == nil {
-		cc.InactiveSymbolStorePath = path
-	} else {
-		s.warnf("inactive symbol store: resolve state path: %v (restart suppression disabled)", err)
-	}
 	return ibkrlib.NewConnector(cc)
 }
 

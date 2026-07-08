@@ -56,6 +56,11 @@ LOCK="$SMOKE_DIR/ibkr.lock"
 
 export IBKR_SOCKET="$SOCKET"
 export IBKR_LOG="$LOG"
+# Isolated trading state: marks, journals, and tokens must not touch the
+# user's canonical daemon state (nor inherit it — a false inactive mark
+# in operator state failed the v1.15.0 release smoke, 2026-07-08).
+export XDG_STATE_HOME="$SMOKE_DIR/state"
+export XDG_CACHE_HOME="$SMOKE_DIR/cache"
 
 cleanup() {
     local code=$?

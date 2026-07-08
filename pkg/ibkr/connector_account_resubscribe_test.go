@@ -3,7 +3,6 @@ package ibkr
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"testing"
 	"time"
 )
@@ -118,18 +117,9 @@ func TestGetCachedPositionsKeepsZeroValueStockPositionsVisible(t *testing.T) {
 	}
 }
 
-func TestGetCachedPositionsKeepsPersistedInactiveHeldZeroValueStockVisible(t *testing.T) {
+func TestGetCachedPositionsKeepsInactiveHeldZeroValueStockVisible(t *testing.T) {
 	c, conn, _ := newAcctResubscribeRig(t)
-	if err := c.useInactiveSymbolStore(context.Background(), &stubInactiveStore{
-		load: map[string]inactiveSymbolState{
-			"HGENQ": {
-				reason:   "No security definition has been found for the request",
-				markedAt: time.Now(),
-			},
-		},
-	}); err != nil {
-		t.Fatalf("useInactiveSymbolStore: %v", err)
-	}
+	c.markSymbolInactive("HGENQ", "No security definition has been found for the request")
 	conn.positionsMu.Lock()
 	conn.positions = map[string]*RawPosition{
 		"HGENQ": {

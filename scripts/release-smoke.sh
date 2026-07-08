@@ -191,6 +191,11 @@ EOF
 export IBKR_SOCKET="$SOCKET"
 export IBKR_LOG="$LOG"
 export IBKR_CONFIG="$CONFIG"
+# Isolated trading state: marks, journals, and tokens must not touch the
+# user's canonical daemon state (nor inherit it — a false inactive mark
+# in operator state failed the v1.15.0 release smoke, 2026-07-08).
+export XDG_STATE_HOME="$SMOKE_DIR/state"
+export XDG_CACHE_HOME="$SMOKE_DIR/cache"
 export IBKR_WIRE_INTERCEPTOR=1
 export IBKR_WIRE_LOG_PATH="$WIRE_LOG"
 export IBKR_WIRE_RING_SIZE=4096
