@@ -16,7 +16,7 @@ allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-06-20 00:00 CEST
+Updated: 2026-07-09 06:45 CEST
 
 ## When to use
 
@@ -41,11 +41,12 @@ preview orders, or execute.
 
 If the user asks "what should I fix today", which of their own trading rules
 they are breaking, or wants the daily discipline checklist, run
-`ibkr rules --json`. It returns the advisory 12-rule rulebook (per-name
+`ibkr rules --json`. It returns the advisory 14-rule rulebook (per-name
 exposure cap, option-line premium cap, sell-only cash floor, extrinsic
 budget, expiry runway, earnings catalyst/overwrite/size-freeze checks, tape
-rules, green-day nudge, hedge band) ranked hardest-first, with per-name
-earnings context and result-level input health. Statuses pass/info/watch/act/
+rules, green-day nudge, hedge band, exit discipline on long-option losses,
+FX exposure) ranked hardest-first, with per-name earnings context and
+result-level input health. Statuses pass/info/watch/act/
 unknown/not_evaluated: `unknown` means an input was missing and must never be
 read as pass. Verdicts are advisory — nothing here blocks or authorizes an
 order; use `ibkr canary` for the regime × portfolio alert and

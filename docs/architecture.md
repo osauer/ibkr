@@ -11,6 +11,11 @@ state; every other surface is an adapter over typed RPC contracts.
   schedulers, journals, market-event source caches, and XDG state files. It
   serves newline-delimited JSON-RPC over a local Unix socket and must stay useful
   when the gateway is disconnected whenever a method is state/config-only.
+- `internal/risk` is the pure evaluation library behind advisory verdicts:
+  shared risk thresholds and policy fingerprints, canary signal types, option
+  math, and the daily trading rulebook (design and semantics:
+  `docs/design/trading-rulebook.md`). No I/O or broker state; keep rule and
+  threshold semantics here, not in adapters.
 - `internal/rpc` is the contract layer: method names plus request/response
   structs shared by daemon, CLI, app, and MCP. Add fields here before teaching
   surfaces to render them.
