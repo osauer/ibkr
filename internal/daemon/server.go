@@ -146,6 +146,14 @@ type Server struct {
 	// is set so a stream of `ibkr status` calls during a wedged-gateway
 	// recovery doesn't pile up parallel connect goroutines.
 	connectInFlight bool
+	// reconnectFailStreak / lastReconnectAttemptAt drive the reconnect
+	// backoff (reconnectAllowed / reconnectBackoff). The streak counts
+	// consecutive failed reconnect cycles; it is bumped in reconnectFlow on
+	// a failed cycle and reset to 0 by postConnectSetup on a successful
+	// handshake. lastReconnectAttemptAt is stamped when triggerReconnect
+	// claims the in-flight slot (start of attempt). Both guarded by s.mu.
+	reconnectFailStreak    int
+	lastReconnectAttemptAt time.Time
 	// serverCtx is captured at Start time so handlers can launch
 	// reconnect goroutines whose lifetime tracks the daemon, not the
 	// short-lived request ctx that triggered the rediscover.
@@ -1543,6 +1551,10 @@ func (s *Server) resetConnectVerdicts() bool {
 func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	s.mu.Lock()
 	s.lastConnectError = ""
+	// A completed handshake ends the outage: clear the reconnect backoff so a
+	// later drop reconnects immediately instead of inheriting an escalated
+	// quiet period (same reasoning as the gamma resetRetryBackoff below).
+	s.reconnectFailStreak = 0
 	s.mu.Unlock()
 	// A successful handshake ends any unreachable episode: clear the verdict
 	// dedupe so a later outage logs its transition afresh, and log a one-line
@@ -1913,6 +1925,48 @@ func (s *Server) handshakeWatchdog(ctx context.Context, isConnected func() bool,
 	s.logger.Warnf("Handshake watchdog: %s", hint)
 }
 
+// reconnectBackoffBase / reconnectBackoffMax bound the quiet period between
+// reconnect attempts. The cap is deliberately below the CLI's
+// handshakeWaitBudget (25s) so a user moving IBKR from Gateway to TWS still
+// recovers within a single `ibkr status` invocation.
+const (
+	reconnectBackoffBase = time.Second
+	reconnectBackoffMax  = 15 * time.Second
+)
+
+// reconnectBackoff converts a consecutive-failed-reconnect count into the
+// minimum spacing before the next attempt may start: 1s, 2s, 4s, 8s, then
+// capped at reconnectBackoffMax. Reconnection is demand-driven — every read
+// handler that finds the connector down calls triggerReconnect, and a dead
+// gateway refuses the dial instantly, so without this gate a multi-hour
+// outage retries as fast as callers poll (~2.6/s → 66,900 attempts over a 7h
+// outage, observed 2026-07-08, each emitting an identical connect-failure
+// line). Mirrors gammaRetryBackoff. The d <= 0 branch guards shift overflow
+// on absurd streaks.
+func reconnectBackoff(streak int) time.Duration {
+	if streak <= 1 {
+		return reconnectBackoffBase
+	}
+	d := reconnectBackoffBase << (streak - 1)
+	if d <= 0 || d > reconnectBackoffMax {
+		return reconnectBackoffMax
+	}
+	return d
+}
+
+// reconnectAllowed reports whether enough quiet time has elapsed since the
+// last reconnect attempt to start another, given the current consecutive-
+// failure streak. streak 0 is always allowed so a fresh gateway drop
+// reconnects immediately; the spacing is measured from attempt start, so a
+// slow handshake already counts as its own quiet period. Caller must hold
+// s.mu. Mirrors gammaSlot.retryAllowed.
+func (s *Server) reconnectAllowed(now time.Time) bool {
+	if s.reconnectFailStreak == 0 {
+		return true
+	}
+	return now.Sub(s.lastReconnectAttemptAt) >= reconnectBackoff(s.reconnectFailStreak)
+}
+
 // triggerReconnect launches a rediscover+reconnect attempt in a
 // background goroutine if (a) no connect attempt is already in flight and
 // (b) the daemon is not already healthy. Returns true iff a fresh attempt
@@ -1953,7 +2007,19 @@ func (s *Server) triggerReconnect() bool {
 		s.mu.Unlock()
 		return false
 	}
+	// Backoff gate: while the gateway is down every read handler that funnels
+	// through gatewayConnector() calls this, and a refused dial returns
+	// instantly, so absent a throttle the retries flood the log. Skip (never
+	// sleep — this runs on the request hot path) while inside the current
+	// failure streak's quiet period; the next poll after it elapses starts the
+	// real attempt.
+	now := s.now()
+	if !s.reconnectAllowed(now) {
+		s.mu.Unlock()
+		return false
+	}
 	s.connectInFlight = true
+	s.lastReconnectAttemptAt = now
 	s.lastConnectError = ""
 	ctx := s.serverCtx
 	s.mu.Unlock()
@@ -2023,6 +2089,7 @@ func (s *Server) reconnectFlow(ctx context.Context) {
 		if curWarn != prevWarn {
 			s.logger.Warnf("Reconnect: discovery: %v", derr)
 		}
+		s.noteReconnectOutcome(ctx, false)
 		return
 	}
 	const endpointFormat = "Reconnect: endpoint resolved: %s:%d (port=%s, tls=%v %s, alternates=%v)"
@@ -2033,6 +2100,28 @@ func (s *Server) reconnectFlow(ctx context.Context) {
 	}
 
 	s.connectWithFailover(ctx, ep)
+	// connectWithFailover publishes a ready connector on success (and
+	// postConnectSetup zeroes the streak); if we are still not ready this
+	// cycle failed — bump the streak so triggerReconnect's backoff paces the
+	// next attempt.
+	s.mu.Lock()
+	connected := s.connector != nil && s.connector.IsReady()
+	s.mu.Unlock()
+	s.noteReconnectOutcome(ctx, connected)
+}
+
+// noteReconnectOutcome records the result of a reconnect cycle for the backoff
+// gate: a failed cycle bumps reconnectFailStreak so triggerReconnect paces the
+// next attempt. A successful handshake is handled by postConnectSetup, which
+// zeroes the streak; a cycle cut short by daemon shutdown is ignored. Caller
+// must not hold s.mu.
+func (s *Server) noteReconnectOutcome(ctx context.Context, connected bool) {
+	if connected || ctx.Err() != nil {
+		return
+	}
+	s.mu.Lock()
+	s.reconnectFailStreak++
+	s.mu.Unlock()
 }
 
 // stopConnector tears down the IBKR connector and forgets it. Idempotent.

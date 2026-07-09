@@ -740,8 +740,15 @@ func (c *Connection) Connect(ctx context.Context) error {
 			continue
 		}
 
-		// Non-client ID error, return immediately.
-		connectLogger.Errorf("Connection failed with non-client ID error: %v", err)
+		// Non-client ID error (dial refused / TLS handshake / net error) —
+		// return immediately. Logs at Debug, not Error: the daemon owns the
+		// deduped connect verdict (see the connect-narration note above and
+		// server.connectWithFailover), so at Error this single line floods
+		// ibkr-daemon.log on every demand-driven reconnect cycle while the
+		// gateway is down — 66,900 identical "connection refused" lines over a
+		// 7h outage, observed 2026-07-08. The real 326 collision above stays at
+		// Error; the daemon paces the retries themselves via reconnectBackoff.
+		connectLogger.Debugf("Connection failed with non-client ID error: %v", err)
 		return err
 	}
 

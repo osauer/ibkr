@@ -1113,6 +1113,7 @@ func TestHandleStatusHealth_TriggersReconnectWhenDegraded(t *testing.T) {
 		logger:           NewLogger(&bytes.Buffer{}, "error"),
 		lastConnectError: "test: gateway 127.0.0.1:4001 did not complete handshake",
 		serverCtx:        context.Background(),
+		now:              time.Now,
 	}
 
 	res := srv.handleStatusHealth()
@@ -1158,6 +1159,7 @@ func TestGatewayConnector_TriggersReconnectWhenDegraded(t *testing.T) {
 		streams:   map[string]context.CancelFunc{},
 		logger:    NewLogger(&bytes.Buffer{}, "error"),
 		serverCtx: context.Background(),
+		now:       time.Now,
 	}
 
 	if got := srv.gatewayConnector(); got != nil {
