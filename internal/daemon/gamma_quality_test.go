@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func TestGammaQualityRankableCombinedSPYSPX(t *testing.T) {

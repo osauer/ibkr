@@ -18,9 +18,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/osauer/ibkr/internal/dial"
-	"github.com/osauer/ibkr/internal/rpc"
-	"github.com/osauer/ibkr/internal/update"
+	"github.com/osauer/ibkr/v2/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/update"
 )
 
 const restartDefaultTimeout = 15 * time.Second

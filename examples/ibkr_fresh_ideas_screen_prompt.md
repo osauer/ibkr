@@ -25,6 +25,8 @@ Run this first. If any hard gate fails, stop with a readiness report that names 
 2. `ibkr_calendar` with `market:"us-options"`: require US option RTH open for a live options run. If German names may be scanned, also call `market:"de"` and skip German scans when Xetra is closed.
 3. `ibkr_quote` for `["SPY"]`: require `quote_quality:"firm"` during US RTH. Treat indicative, stale, wide, or previous-close-only quotes as not trade-selectable.
 4. `ibkr_chain` for `SPY` with `require_live_iv:true` and no `expiry`: require any usable live IV and `implied_move`. This is only a live-IV readiness probe; do not require the default expiry list to include the later 90-180 DTE trade horizon.
+5. `ibkr_rules`: require a current policy fingerprint and capture breached or missing rules. If policy is unavailable or conflicting, return `insufficient_policy` and keep all candidates watch-only.
+6. `ibkr_canary`: capture the governed market/portfolio posture and input health. Do not promote a candidate when it would worsen an existing breach or when the canary says inputs need confirmation.
 
 If the SPY chain returns `live_option_iv_unavailable`, `expiry_iv_unavailable`, no implied move, or times out, stop unless `TEST_MODE=true`. Do not continue into scans with fake option confidence.
 
@@ -58,7 +60,7 @@ Pick 1-3 final ideas. Use options only when live chain data supports them.
 - For at most 2 finalists, call `ibkr_chain` without `expiry` using `min_dte:90` and `max_dte:180` (or `target_dte:120` when one expiry is enough). Choose one 90-180 DTE expiry with usable IV and 1-sigma move, then call one strike grid with small `width` and the relevant `side`. Do not use `all_expiries:true` for this path.
 - Hard-gate options on `options_tradable:false`, stale/model-only legs, subscribe errors, no bid/ask, no IV, no implied move, or `live_option_iv_unavailable`/`expiry_iv_unavailable`. Count expiry-list IV failures and untradable grids as chain failures; after two chain failures total or one hard-gated grid, stop chain probing and use shares, watch candidates, or drop.
 - Prefer simple structures: shares, long call/put, or defined-risk debit spread. No 0DTE. No multi-leg complexity unless both legs have live quotes and tight spreads.
-- Size with 1-3% NLV risk. For shares, use `ibkr_size` with entry/stop/target. For non-base trades, `ibkr_size.fx` expects quote-currency units per 1 base-currency unit; `ibkr_account.currency_exposure.exchange_rate` and `ibkr_positions.fx_rate` are base-currency units per 1 quote-currency unit, so invert those fields before passing `fx`. If no reliable FX rate is present, keep the name watch-only and say sizing is blocked. For long options, size premium risk by using contract debit x 100 as entry, stop 0, target debit x 100 when estimating R; label the result as contract count math, not an executable order.
+- Size only against the current user-approved rulebook or an explicit current-turn risk budget. For shares, use `ibkr_size` with entry/stop/target. For non-base trades, `ibkr_size.fx` expects quote-currency units per 1 base-currency unit; `ibkr_account.currency_exposure.exchange_rate` and `ibkr_positions.fx_rate` are base-currency units per 1 quote-currency unit, so invert those fields before passing `fx`. If policy or a reliable FX rate is absent, keep the name watch-only and say sizing is blocked. For long options, size premium risk by using contract debit x 100 as entry, stop 0, target debit x 100 when estimating R; label the result as contract count math, not an executable order.
 - Fit each idea against open exposure, Greeks, and regime. If it conflicts, keep it only with a countermeasure: smaller risk, staggered entry, hedge, or shares-only expression.
 
 ### 5. Compact Report
@@ -70,4 +72,4 @@ Lead with the punchline. Use compact Markdown, not HTML, unless explicitly reque
 3. **Ideas:** each idea gets thesis/catalyst, direction, instrument, entry/stop/target, size, R, PHIA probability of target, key risks, invalidation, and exposure fit.
 4. **Run Stats:** tool-call count estimate, what slowed/blocked the run, and 2-3 improvements for next cycle.
 
-Guardrails: no order placement, no stale option structures, no held-name recycling without an add-on label, no filler ideas, and no extra research branches after the call cap is hit.
+Guardrails: no order placement, no model-invented risk budget, no stale option structures, no held-name recycling without an add-on label, no filler ideas, and no extra research branches after the call cap is hit.

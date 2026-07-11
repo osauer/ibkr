@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // fakeConnector implements ibkrMarketConnector for unit-testing the
@@ -87,7 +87,7 @@ func (f *fakeConnector) UnsubscribeMarketData(symbol string) error {
 	return nil
 }
 
-func (f *fakeConnector) GetMarketData() map[string]*ibkrlib.MarketData {
+func (f *fakeConnector) MarketDataSnapshot() map[string]*ibkrlib.MarketData {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make(map[string]*ibkrlib.MarketData, len(f.cache))
@@ -98,7 +98,7 @@ func (f *fakeConnector) GetMarketData() map[string]*ibkrlib.MarketData {
 	return out
 }
 
-func (f *fakeConnector) GetMarketDataTypeForSymbol(_ string) int {
+func (f *fakeConnector) MarketDataTypeForSymbol(_ string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.dataType

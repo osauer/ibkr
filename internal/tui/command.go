@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/cli"
-	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
 type commandRunner struct {

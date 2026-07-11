@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // runScan dispatches the four shapes of `ibkr scan`:

@@ -3,7 +3,7 @@ package rpc
 import (
 	"time"
 
-	"github.com/osauer/ibkr/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/risk"
 )
 
 // CanaryInput is the pure state input shared by the CLI and MCP tool. It

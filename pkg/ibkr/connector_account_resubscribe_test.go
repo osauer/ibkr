@@ -11,7 +11,7 @@ import (
 // self-heal (maybeResubscribeAccountUpdates). The TWS account-updates
 // stream occasionally fails to start after a rapid reconnect (observed
 // 2026-06-11: one boot delivered no msgPortfolioValue at all while quotes
-// and account summary flowed normally), so GetCachedPositions resubscribes
+// and account summary flowed normally), so CachedPositions resubscribes
 // behind an empty read. Until the 2026-06-12 pre-release review only the
 // leaf predicate accountSummaryShowsPositions was covered — the trigger,
 // throttle, and guards shipped untested.
@@ -31,14 +31,14 @@ func newAcctResubscribeRig(t *testing.T) (*Connector, *Connection, *safeBuffer) 
 	return c, conn, &out
 }
 
-// TestGetCachedPositionsHealsDeadPortfolioStream pins the heal end to end:
+// TestCachedPositionsHealsDeadPortfolioStream pins the heal end to end:
 // an empty position cache while the account summary reports gross position
 // value sends exactly one reqAcctData frame, polls inside the throttle
 // window stay quiet, and the window boundary (>=) re-arms the attempt. An
 // inverted staleness comparison would fail twice here — firing inside the
 // window (and self-perpetuating, since every RequestAccountUpdates resets
 // the stamp it is compared against) and staying dead at the boundary.
-func TestGetCachedPositionsHealsDeadPortfolioStream(t *testing.T) {
+func TestCachedPositionsHealsDeadPortfolioStream(t *testing.T) {
 	c, conn, out := newAcctResubscribeRig(t)
 	conn.accountMu.Lock()
 	conn.account = "DU1234567"
@@ -53,32 +53,32 @@ func TestGetCachedPositionsHealsDeadPortfolioStream(t *testing.T) {
 	acctFrame := conn.encodeMsg(reqAcctData, "2", "1", "DU1234567")
 	frames := func() int { return bytes.Count(out.Bytes(), acctFrame) }
 
-	positions, err := c.GetCachedPositions()
+	positions, err := c.CachedPositions()
 	if err != nil || len(positions) != 0 {
-		t.Fatalf("GetCachedPositions = %v, %v; want empty, nil", positions, err)
+		t.Fatalf("CachedPositions = %v, %v; want empty, nil", positions, err)
 	}
 	if got := frames(); got != 1 {
 		t.Fatalf("first empty poll sent %d reqAcctData frames, want exactly 1", got)
 	}
 
 	now = now.Add(acctUpdatesResubscribeThrottle - time.Second)
-	if _, err := c.GetCachedPositions(); err != nil {
-		t.Fatalf("GetCachedPositions: %v", err)
+	if _, err := c.CachedPositions(); err != nil {
+		t.Fatalf("CachedPositions: %v", err)
 	}
 	if got := frames(); got != 1 {
 		t.Fatalf("poll inside throttle window sent %d reqAcctData frames, want 1", got)
 	}
 
 	now = now.Add(time.Second) // exactly acctUpdatesResubscribeThrottle after the subscribe
-	if _, err := c.GetCachedPositions(); err != nil {
-		t.Fatalf("GetCachedPositions: %v", err)
+	if _, err := c.CachedPositions(); err != nil {
+		t.Fatalf("CachedPositions: %v", err)
 	}
 	if got := frames(); got != 2 {
 		t.Fatalf("poll at throttle boundary sent %d reqAcctData frames, want 2", got)
 	}
 }
 
-func TestGetCachedPositionsKeepsZeroValueStockPositionsVisible(t *testing.T) {
+func TestCachedPositionsKeepsZeroValueStockPositionsVisible(t *testing.T) {
 	c, conn, _ := newAcctResubscribeRig(t)
 	conn.positionsMu.Lock()
 	conn.positions = map[string]*RawPosition{
@@ -99,9 +99,9 @@ func TestGetCachedPositionsKeepsZeroValueStockPositionsVisible(t *testing.T) {
 	}
 	conn.positionsMu.Unlock()
 
-	positions, err := c.GetCachedPositions()
+	positions, err := c.CachedPositions()
 	if err != nil {
-		t.Fatalf("GetCachedPositions: %v", err)
+		t.Fatalf("CachedPositions: %v", err)
 	}
 	if len(positions) != 2 {
 		t.Fatalf("positions len = %d, want AMD and HGENQ: %+v", len(positions), positions)
@@ -117,7 +117,7 @@ func TestGetCachedPositionsKeepsZeroValueStockPositionsVisible(t *testing.T) {
 	}
 }
 
-func TestGetCachedPositionsKeepsInactiveHeldZeroValueStockVisible(t *testing.T) {
+func TestCachedPositionsKeepsInactiveHeldZeroValueStockVisible(t *testing.T) {
 	c, conn, _ := newAcctResubscribeRig(t)
 	c.markSymbolInactive("HGENQ", "No security definition has been found for the request")
 	conn.positionsMu.Lock()
@@ -133,9 +133,9 @@ func TestGetCachedPositionsKeepsInactiveHeldZeroValueStockVisible(t *testing.T) 
 	}
 	conn.positionsMu.Unlock()
 
-	positions, err := c.GetCachedPositions()
+	positions, err := c.CachedPositions()
 	if err != nil {
-		t.Fatalf("GetCachedPositions: %v", err)
+		t.Fatalf("CachedPositions: %v", err)
 	}
 	if len(positions) != 1 || positions[0].Contract.Symbol != "HGENQ" {
 		t.Fatalf("held inactive zero-value stock should remain visible, got %+v", positions)
@@ -150,7 +150,7 @@ func TestGetCachedPositionsKeepsInactiveHeldZeroValueStockVisible(t *testing.T) 
 
 // TestMaybeResubscribeAccountUpdatesRequiresConnection pins the connected
 // guard: no bytes reach a disconnected wire, and a torn-down connection
-// (conn == nil, possible between GetCachedPositions' connectivity check
+// (conn == nil, possible between CachedPositions' connectivity check
 // and the heal) must not panic the poll path on the GetAccountSummary
 // dereference.
 func TestMaybeResubscribeAccountUpdatesRequiresConnection(t *testing.T) {
@@ -183,8 +183,8 @@ func TestMaybeResubscribeAccountUpdatesSkipsFlatAccount(t *testing.T) {
 	conn.accountSummary["NetLiquidation"] = "100000.00"
 	conn.accountMu.Unlock()
 
-	if _, err := c.GetCachedPositions(); err != nil {
-		t.Fatalf("GetCachedPositions: %v", err)
+	if _, err := c.CachedPositions(); err != nil {
+		t.Fatalf("CachedPositions: %v", err)
 	}
 	if got := out.Len(); got != 0 {
 		t.Fatalf("flat account put %d bytes on the wire, want none", got)

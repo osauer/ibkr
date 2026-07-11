@@ -618,13 +618,6 @@ p {
   font-size: 14px;
 }
 
-.coming-panel {
-  display: grid;
-  gap: 10px;
-  min-height: 180px;
-  align-content: start;
-}
-
 .settings-panel {
   display: grid;
   gap: 12px;
@@ -1707,37 +1700,6 @@ p {
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.8;
-}
-
-.text-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 28px;
-  padding: 0;
-  border: 0;
-  margin-left: auto;
-  background: transparent;
-  color: var(--blue);
-  font-size: 13px;
-  font-weight: 670;
-  white-space: nowrap;
-}
-
-.text-link::after {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-top: 1.8px solid currentColor;
-  border-right: 1.8px solid currentColor;
-  transform: rotate(45deg);
-}
-
-.text-link--muted {
-  margin-left: 0;
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 520;
 }
 
 .account-panel .panel-time {
@@ -3947,7 +3909,6 @@ p {
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .text-link:hover,
   .panel-chevron:hover,
   .segments button:hover,
   .bottom-tab:hover,

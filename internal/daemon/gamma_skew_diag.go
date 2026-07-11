@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // gammaSkewDiagJournal appends one JSON line per computed gamma slice

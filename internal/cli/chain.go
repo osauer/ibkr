@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // optionOffHoursBanner is the one-line disclosure shown by chain renderers

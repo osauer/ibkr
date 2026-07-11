@@ -3,8 +3,8 @@ package daemon
 import (
 	"testing"
 
-	"github.com/osauer/ibkr/internal/config"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func TestLiveOriginBlockersMatrix(t *testing.T) {

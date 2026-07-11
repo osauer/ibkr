@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/marketcal"
-	"github.com/osauer/ibkr/internal/risk"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/marketcal"
+	"github.com/osauer/ibkr/v2/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // Recorded api.nasdaq.com response shape (captured 2026-07-06; see design

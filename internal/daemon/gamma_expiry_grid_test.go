@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func testClassedGrid(dates ...string) map[string][]ibkrlib.ExpiryClassedStrikes {

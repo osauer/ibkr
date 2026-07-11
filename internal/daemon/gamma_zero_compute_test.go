@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // TestNormalizeGammaParams fills in defaults for unset / negative
@@ -606,70 +606,30 @@ func TestCompactExpiry(t *testing.T) {
 	}
 }
 
-func TestGammaKeepJobAfterPrewarm(t *testing.T) {
+func TestKeepGammaJobAfterPrewarm(t *testing.T) {
 	cases := []struct {
-		name            string
-		symbol          string
-		prewarmComplete bool
-		cached          bool
-		want            bool
+		name                             string
+		prewarmComplete, cached, blocked bool
+		want                             bool
 	}{
-		{
-			name:            "spy_incomplete_keeps_resolution_fallback",
-			symbol:          "SPY",
-			prewarmComplete: false,
-			cached:          false,
-			want:            true,
-		},
-		{
-			name:            "spy_incomplete_keeps_cached",
-			symbol:          "SPY",
-			prewarmComplete: false,
-			cached:          true,
-			want:            true,
-		},
-		{
-			name:            "spx_incomplete_keeps_resolution_fallback",
-			symbol:          "SPX",
-			prewarmComplete: false,
-			cached:          false,
-			want:            true,
-		},
-		{
-			name:            "complete_requires_cache",
-			symbol:          "SPX",
-			prewarmComplete: true,
-			cached:          false,
-			want:            false,
-		},
-		{
-			name:            "complete_keeps_cached",
-			symbol:          "SPX",
-			prewarmComplete: true,
-			cached:          true,
-			want:            true,
-		},
+		{name: "incomplete_uncached_keeps_resolution_fallback", want: true},
+		{name: "incomplete_cached_keeps_leg", cached: true, want: true},
+		{name: "complete_requires_cache", prewarmComplete: true, want: false},
+		{name: "complete_keeps_cached", prewarmComplete: true, cached: true, want: true},
+		// A blocked fallback (zero-detail / timeout prewarm failure) must
+		// not fall back to per-leg resolution, but cached contracts stay
+		// usable.
+		{name: "blocked_fallback_drops_uncached", blocked: true, want: false},
+		{name: "blocked_fallback_keeps_cached", cached: true, blocked: true, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := gammaKeepJobAfterPrewarm(tc.symbol, tc.prewarmComplete, tc.cached)
+			got := keepGammaJobAfterPrewarm(tc.prewarmComplete, tc.cached, tc.blocked)
 			if got != tc.want {
-				t.Fatalf("gammaKeepJobAfterPrewarm(%q, %v, %v)=%v, want %v",
-					tc.symbol, tc.prewarmComplete, tc.cached, got, tc.want)
+				t.Fatalf("keepGammaJobAfterPrewarm(%v, %v, %v)=%v, want %v",
+					tc.prewarmComplete, tc.cached, tc.blocked, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestGammaShouldKeepJobAfterPrewarmBlocksZeroDetailFallback(t *testing.T) {
-	if got := gammaShouldKeepJobAfterPrewarm("SPX", false, false, true); got {
-		t.Fatal("blocked prewarm fallback should not fall back to per-leg resolution")
-	}
-	if got := gammaShouldKeepJobAfterPrewarm("SPX", false, true, true); !got {
-		t.Fatal("cached contract should still be usable when prewarm fallback is blocked")
-	}
-	if got := gammaShouldKeepJobAfterPrewarm("SPX", false, false, false); !got {
-		t.Fatal("ordinary incomplete SPX prewarm should retain resolution fallback")
 	}
 }
 

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // Spec thresholds, baked from docs/specs/risk-regime-dashboard.md. The
@@ -29,7 +29,6 @@ const (
 	fundingRedBps      = 75.0
 	usdJpyMoveYellow   = 1.0  // % weekly yen strengthening
 	usdJpyMoveRed      = 2.0  // % weekly yen strengthening
-	gammaGapYellow     = 2.0  // spot within ±X% of zero-gamma
 	hygSpyNearHighProx = 0.97 // SPY ≥ 0.97 × 52-w high = "near highs"
 	breadthGreen       = 55.0 // % SPX constituents above 50-DMA
 	breadthRed         = 40.0 // < this with SPX at highs is classic divergence
@@ -1664,11 +1663,11 @@ func rowGammaCrossing(row regimeRow, r rpc.RegimeGammaZero, c *rpc.GammaZeroComp
 	if !gammaRankable {
 		return row
 	}
-	switch {
-	case *c.GapPct > gammaGapYellow:
-		row.band, row.reason = bandGreen, "spot >2% above γ-zero"
-	case *c.GapPct >= -gammaGapYellow:
-		row.band, row.reason = bandYellow, "spot within ±2% of γ-zero"
+	switch rpc.GammaRegimeFromGap(c.GapPct) {
+	case "long_gamma":
+		row.band, row.reason = bandGreen, fmt.Sprintf("spot >%.0f%% above γ-zero", rpc.GammaTransitionGapPct)
+	case "transition_gamma":
+		row.band, row.reason = bandYellow, fmt.Sprintf("spot within ±%.0f%% of γ-zero", rpc.GammaTransitionGapPct)
 	default:
 		row.band, row.reason = bandRed, "spot below γ-zero"
 	}
@@ -1866,10 +1865,10 @@ func gammaSingleRegimeBand(c *rpc.GammaZeroComputed) regimeBand {
 		return bandUnranked
 	}
 	if c.GapPct != nil {
-		switch {
-		case *c.GapPct > gammaGapYellow:
+		switch rpc.GammaRegimeFromGap(c.GapPct) {
+		case "long_gamma":
 			return bandGreen
-		case *c.GapPct >= -gammaGapYellow:
+		case "transition_gamma":
 			return bandYellow
 		default:
 			return bandRed

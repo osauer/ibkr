@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/osauer/ibkr/internal/breadth/spx"
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	"github.com/osauer/ibkr/v2/internal/breadth/spx"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // breadthFetcher adapts the daemon's gateway connector to the
@@ -46,11 +46,10 @@ func newBreadthFetcher(getConn func() *ibkrlib.Connector) *breadthFetcher {
 	}
 }
 
-// FetchDaily satisfies spx.BarFetcher. ctx is honoured for deadline
-// derivation only — the connector API takes a duration, not a context.
-// A cancelled context returns immediately with the context error so a
-// shutdown signal doesn't have to wait for an in-flight gateway
-// request to complete.
+// FetchDaily satisfies spx.BarFetcher. ctx propagates into the connector's
+// paced send and response wait; the connector clamps the effective budget
+// to ctx's deadline itself (historicalTimeoutWithinContext), so
+// defaultTimeout only rules when ctx carries no deadline.
 func (f *breadthFetcher) FetchDaily(ctx context.Context, symbol string, lookbackDays int) ([]spx.Bar, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -59,13 +58,7 @@ func (f *breadthFetcher) FetchDaily(ctx context.Context, symbol string, lookback
 	if c == nil {
 		return nil, fmt.Errorf("breadth fetcher: no gateway connector")
 	}
-	timeout := f.defaultTimeout
-	if dl, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(dl); remaining > 0 && remaining < timeout {
-			timeout = remaining
-		}
-	}
-	raw, err := c.FetchHistoricalDailyBars(symbol, lookbackDays, timeout)
+	raw, err := c.FetchHistoricalDailyBars(ctx, symbol, lookbackDays, f.defaultTimeout)
 	if err != nil {
 		return nil, err
 	}

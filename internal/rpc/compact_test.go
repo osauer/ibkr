@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/risk"
 )
 
 func TestCompactPositionsRiskOptionHealthAndHedge(t *testing.T) {

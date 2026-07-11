@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
 // TestStreamingParity is the binding gate for the streaming MCP surface.

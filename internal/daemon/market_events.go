@@ -18,9 +18,9 @@ import (
 	"sync"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 const (
@@ -993,7 +993,7 @@ func (c *marketEventCache) borrowInventory(ctx context.Context, symbols []string
 		pollErr := pollMarketData(holdCtx, connector, sym, time.Now().Add(marketEventsBorrowPollBudget), func(md *ibkrlib.MarketData) bool {
 			return md.ShortableObserved
 		})
-		if md := connector.GetMarketData()[sym]; md != nil && md.ShortableObserved {
+		if md := connector.MarketDataSnapshot()[sym]; md != nil && md.ShortableObserved {
 			probes[i].observed = true
 			if flag, ok := marketEventBorrowInventoryFlag(sym, *md, now); ok {
 				probes[i].hasFlag = true

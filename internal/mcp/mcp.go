@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
 // ProtocolVersion is the MCP spec revision we advertise. 2025-03-26 is the

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/xdgcache"
+	"github.com/osauer/ibkr/v2/internal/xdgcache"
 )
 
 const (

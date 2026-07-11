@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
-	"github.com/osauer/ibkr/internal/watchlist"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/watchlist"
 )
 
 var watchlistDefaultPath = watchlist.DefaultPath

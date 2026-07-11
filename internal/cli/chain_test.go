@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // fmtOI renders open interest compactly for the chain table. Mirrors the

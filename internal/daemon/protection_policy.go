@@ -15,7 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 const protectionPolicyKind = "ibkr.protection_policy"

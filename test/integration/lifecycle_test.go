@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
 // Lifecycle tests exercise the CLI's daemon-management surface — the path

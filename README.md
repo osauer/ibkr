@@ -3,7 +3,7 @@
 [![ci](https://github.com/osauer/ibkr/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/osauer/ibkr/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/osauer/ibkr?display_name=tag&sort=semver)](https://github.com/osauer/ibkr/releases/latest)
 [![go.mod](https://img.shields.io/github/go-mod/go-version/osauer/ibkr)](go.mod)
-[![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr.svg)](https://pkg.go.dev/github.com/osauer/ibkr)
+[![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr/v2.svg)](https://pkg.go.dev/github.com/osauer/ibkr/v2)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
 [MCP tools](docs/reference/mcp-tools.md) · [MCP resources](docs/reference/mcp-resources.md) · [Configuration](docs/reference/config.md) · [Architecture](docs/architecture.md) · [Platform settings](docs/design/platform-settings.md) · [Agentic use](docs/guides/agentic-use.md) · [Mobile app](web/app/README.md)
@@ -193,7 +193,7 @@ See [web/app/README.md](web/app/README.md) for the short operator notes and [doc
 `pkg/ibkr` speaks the TWS API protocol directly:
 
 ```go
-import "github.com/osauer/ibkr/pkg/ibkr"
+import "github.com/osauer/ibkr/v2/pkg/ibkr"
 
 cfg := ibkr.DefaultConfig()    // 127.0.0.1:4001
 cfg.Port = 4002                // paper
@@ -324,7 +324,7 @@ Per [semver](https://semver.org/), v1.x keeps broker writes unavailable. Preview
 
 ## Other install paths
 
-- **`go install`**: `go install github.com/osauer/ibkr/cmd/ibkr@latest`. Requires Go 1.26+.
+- **`go install`**: `go install github.com/osauer/ibkr/v2/cmd/ibkr@latest`. Requires Go 1.26+.
 - **Claude Desktop MCPB**: download `ibkr.mcpb` from the latest [release](https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb) and open it with Claude Desktop. The release also publishes `ibkr-vX.Y.Z.mcpb` for registry integrity and reproducible manual verification.
 - **Different install dir**: `IBKR_INSTALL_DIR=/usr/local/bin sh install.sh`. The installer won't touch your shell rc when you override; manage PATH yourself.
 - **Inspect the installer first**: `curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh -o install.sh && less install.sh && sh install.sh`.

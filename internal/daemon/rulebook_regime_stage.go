@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/osauer/ibkr/internal/risk"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // The rulebook's regime-conditional thresholds (rules 3/4/12) consume a

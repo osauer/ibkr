@@ -3,6 +3,7 @@ package ibkr
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"strconv"
@@ -327,7 +328,7 @@ func TestFetchHistoricalDailyBarsReturnsData(t *testing.T) {
 		close(done)
 	}()
 
-	bars, err := c.FetchHistoricalDailyBars("SPY", 10, time.Second)
+	bars, err := c.FetchHistoricalDailyBars(context.Background(), "SPY", 10, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -394,7 +395,7 @@ func TestFetchHistoricalDailyBarsUsesSmartExchange(t *testing.T) {
 		close(done)
 	}()
 
-	if _, err := c.FetchHistoricalDailyBars("GLD", 10, time.Second); err != nil {
+	if _, err := c.FetchHistoricalDailyBars(context.Background(), "GLD", 10, time.Second); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	<-done
@@ -468,7 +469,7 @@ func TestFetchHistoricalDailyBarsWhatToShowForcesAdjustedLast(t *testing.T) {
 		close(done)
 	}()
 
-	if _, err := c.FetchHistoricalDailyBarsWhatToShow("GLD", 10, time.Second, "ADJUSTED_LAST"); err != nil {
+	if _, err := c.FetchHistoricalDailyBarsWhatToShow(context.Background(), "GLD", 10, "ADJUSTED_LAST", time.Second); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	<-done
@@ -538,7 +539,7 @@ func TestFetchHistoricalDailyBarsWithContractUsesExplicitRoute(t *testing.T) {
 	}()
 
 	contract := Contract{Symbol: "MBG", SecType: "STK", Exchange: "SMART", PrimaryExch: "IBIS", Currency: "EUR"}
-	if _, err := c.FetchHistoricalDailyBarsWithContract(contract, 10, time.Second); err != nil {
+	if _, err := c.FetchHistoricalDailyBarsWithContract(context.Background(), contract, 10, time.Second); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	<-done
@@ -651,7 +652,7 @@ func TestFetchHistoricalDailyBarsWithContractResolvesExplicitRoute(t *testing.T)
 	}()
 
 	contract := Contract{Symbol: "MBG", SecType: "STK", Exchange: "SMART", PrimaryExch: "IBIS", Currency: "EUR"}
-	if _, err := c.FetchHistoricalDailyBarsWithContract(contract, 10, 2*time.Second); err != nil {
+	if _, err := c.FetchHistoricalDailyBarsWithContract(context.Background(), contract, 10, 2*time.Second); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	<-done
@@ -723,7 +724,7 @@ func TestFetchHistoricalDailyBarsFallbackToPrimaryExchange(t *testing.T) {
 		close(done)
 	}()
 
-	bars, err := c.FetchHistoricalDailyBars("GLD", 10, time.Second)
+	bars, err := c.FetchHistoricalDailyBars(context.Background(), "GLD", 10, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -808,7 +809,7 @@ func TestFetchHistoricalDailyBarsRetriesOn162(t *testing.T) {
 		close(done)
 	}()
 
-	bars, err := c.FetchHistoricalDailyBars("VIX", 10, time.Second)
+	bars, err := c.FetchHistoricalDailyBars(context.Background(), "VIX", 10, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -852,7 +853,7 @@ func TestFetchHistoricalDailyBarsErrorsWhenContractDetailsMissing(t *testing.T) 
 	}
 
 	start := time.Now()
-	_, err := c.FetchHistoricalDailyBars("SPY", 10, 100*time.Millisecond)
+	_, err := c.FetchHistoricalDailyBars(context.Background(), "SPY", 10, 100*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected error when contract details are unavailable")
 	}
@@ -927,7 +928,7 @@ func TestFetchHistoricalDailyBarsWaitsForLateContractDetails(t *testing.T) {
 		close(done)
 	}()
 
-	bars, err := c.FetchHistoricalDailyBars("SPY", 10, time.Second)
+	bars, err := c.FetchHistoricalDailyBars(context.Background(), "SPY", 10, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -949,7 +950,7 @@ func TestRequestHistoricalDataOrder(t *testing.T) {
 	conn.writer = bufio.NewWriter(&out)
 
 	contract := Contract{ConID: 999999, Symbol: "SPY", SecType: "STK", Exchange: "SMART", PrimaryExch: "ARCA", Currency: "USD"}
-	reqID, err := conn.RequestHistoricalData(contract, "", "5 D", "1 day", "TRADES", true, false, 1, false, nil)
+	reqID, err := conn.RequestHistoricalData(context.Background(), contract, "", "5 D", "1 day", "TRADES", true, false, 1, false, nil)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}

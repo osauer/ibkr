@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/discover"
+	"github.com/osauer/ibkr/v2/internal/discover"
 )
 
 // These tests pin the reconnect-retry log-volume fix: the connect-failure

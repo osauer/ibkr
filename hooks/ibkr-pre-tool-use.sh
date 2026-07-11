@@ -152,6 +152,10 @@ purge_read_only_command() {
 
 broker_write_command() {
   has_re '(^|[[:space:]/])ibkr[[:space:]]+proposals[[:space:]]+(preview|submit|ignore)([[:space:]]|$)' ||
+    {
+      has_re '(^|[[:space:]/])ibkr[[:space:]]+proposals[[:space:]]+reduce([[:space:]]|$)' &&
+        has_re '(^|[[:space:]])--submit(=|[[:space:]]|$)'
+    } ||
     has_re '(^|[[:space:]/])ibkr[[:space:]]+opportunities[[:space:]]+(preview|exercise|ignore)([[:space:]]|$)' ||
     has_re '(^|[[:space:]/])ibkr[[:space:]]+trading[[:space:]]+paper-smoke([[:space:]]|$)' ||
     has_re '(^|[[:space:]/])ibkr[[:space:]]+order[[:space:]]+(place|submit|execute|modify|cancel|close)([[:space:]]|$)' ||
@@ -172,8 +176,8 @@ state_write_command() {
 }
 
 cancel_command() {
-  has_re '(^|[[:space:]/])ibkr[[:space:]]+order[[:space:]]+(cancel|close)([[:space:]]|$)' ||
-    has_re '(^|[[:space:]/])ibkr[[:space:]]+(cancel|close)([[:space:]]|$)'
+  has_re '(^|[[:space:]/])ibkr[[:space:]]+order[[:space:]]+cancel([[:space:]]|$)' ||
+    has_re '(^|[[:space:]/])ibkr[[:space:]]+cancel([[:space:]]|$)'
 }
 
 if read_only_help_command; then

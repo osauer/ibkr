@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // composite-building logic. Mirrors the CLI's tallyComposite +

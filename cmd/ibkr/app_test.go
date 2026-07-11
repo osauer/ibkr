@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/app/auth"
+	"github.com/osauer/ibkr/v2/internal/app/auth"
 )
 
 func TestCreatePairingSessionUsesAppPublicURLByDefault(t *testing.T) {

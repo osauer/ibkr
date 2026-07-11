@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // pollCadence is the shared 75 ms cadence at which short-lived snapshot
@@ -84,7 +84,7 @@ func pollUntilWithReject(ctx context.Context, deadline time.Time, rejectCh <-cha
 }
 
 // pollMarketData is the common case of pollUntil: poll
-// c.GetMarketData()[key] until predicate returns true. Predicate is invoked
+// c.MarketDataSnapshot()[key] until predicate returns true. Predicate is invoked
 // only when the cache has an entry for key.
 //
 // Automatically threads the subscription's reject channel
@@ -94,7 +94,7 @@ func pollUntilWithReject(ctx context.Context, deadline time.Time, rejectCh <-cha
 // rejected" from "budget timeout" can use [IsSubscriptionRejected].
 func pollMarketData(ctx context.Context, c *ibkrlib.Connector, key string, deadline time.Time, predicate func(*ibkrlib.MarketData) bool) error {
 	return pollUntilWithReject(ctx, deadline, c.SubscriptionRejectCh(key), key, func() bool {
-		data, ok := c.GetMarketData()[key]
+		data, ok := c.MarketDataSnapshot()[key]
 		if !ok {
 			return false
 		}

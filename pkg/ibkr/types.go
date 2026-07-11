@@ -81,8 +81,10 @@ type MarketData struct {
 	IsDelayed bool   `json:"is_delayed,omitempty"`
 }
 
-// Order represents a trading order.
-type Order struct {
+// trackedOrder is the connector's in-memory record of an order it placed,
+// keyed by local ID in Connector.openOrders. The broker-facing wire type is
+// IBKROrder.
+type trackedOrder struct {
 	ID          string      `json:"id"`
 	BrokerID    string      `json:"broker_id"`
 	Symbol      string      `json:"symbol"`

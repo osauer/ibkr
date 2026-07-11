@@ -18,7 +18,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/osauer/ibkr/internal/xdgcache"
+	"github.com/osauer/ibkr/v2/internal/xdgcache"
 )
 
 // ErrInstallInProgress signals that another `ibkr update` already holds

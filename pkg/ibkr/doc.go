@@ -14,21 +14,21 @@
 //     portfolio_value (msg 7), $LEDGER:ALL multi-currency exposure. Positions
 //     come from the streaming portfolioValue subscription started by
 //     [Connector.RequestAccountUpdates]; read the cache with
-//     [Connector.GetCachedPositions]. No reqPositions round-trip on the read
+//     [Connector.CachedPositions]. No reqPositions round-trip on the read
 //     path — it would clear the cache and lose mark/value/P&L.
 //     Entry points: [Connector.RequestAccountSummary],
-//     [Connector.RequestAccountUpdates], [Connector.GetCachedPositions].
+//     [Connector.RequestAccountUpdates], [Connector.CachedPositions].
 //   - Market data, snapshot: reqMktData (1) with snapshot=true.
 //     Entry point: [Connector.FetchMarketSnapshot].
 //   - Market data, streaming: reqMktData (1) with snapshot=false; default
 //     generic-tick list 100,101,104,106,165,236 (option volume, OI, HV,
 //     averaged IV, Misc Stats 13/26/52w highs/lows, shortable shares).
 //     Entry points: [Connector.SubscribeMarketData],
-//     [Connector.EnsureMarketDataSubscription], [Connector.GetMarketData].
+//     [Connector.EnsureMarketDataSubscription], [Connector.MarketDataSnapshot].
 //   - Option chains: reqSecDefOptParams (78), tickOptionComputation (21).
 //     Entry points: [Connector.FetchOptionExpiries],
-//     [Connector.FetchOptionExpiryStrikes], [Connector.GetOptionGreeks],
-//     [Connector.GetOptionIV].
+//     [Connector.FetchOptionExpiryStrikes], [Connector.OptionGreeks],
+//     [Connector.OptionIV].
 //   - Historical bars: reqHistoricalData (20), daily granularity.
 //     Entry point: [Connector.FetchHistoricalDailyBars].
 //   - Market scanner: reqScannerSubscription (22),

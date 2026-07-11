@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
 var (

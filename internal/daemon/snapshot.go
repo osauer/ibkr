@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // briefSnapshotPriceWithClose wraps briefSnapshotFull and returns the
@@ -97,7 +97,7 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 		// symbol→reqID mapping is gone and the type would always read
 		// "unknown".
 		if dataType == "" && (bid > 0 || ask > 0 || last > 0 || mark > 0 || prevClose > 0) {
-			dataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
+			dataType = marketDataTypeName(c.MarketDataTypeForSymbol(sym))
 		}
 		// Done only when both the price triple is summarised AND
 		// Week52High has arrived. On timeout, pollMarketData returns
@@ -169,7 +169,7 @@ func briefSnapshotFullHeld(ctx context.Context, c *ibkrlib.Connector, symbol str
 			// once UnsubscribeMarketData fires (defer above), the
 			// connector's symbol→reqID mapping is gone and the type
 			// would always read "unknown".
-			dataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
+			dataType = marketDataTypeName(c.MarketDataTypeForSymbol(sym))
 		}
 		// Only a true live tick terminates the wait; close alone keeps
 		// us polling so a slow bid/ask still wins if it lands in time.

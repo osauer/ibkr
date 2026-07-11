@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -60,6 +61,9 @@ func main() {
 	envs, err := scanEnvVars(*root)
 	if err != nil {
 		fatal("scan env vars: %v", err)
+	}
+	if err := validateDocumentedEnvReads(*root, envs); err != nil {
+		fatal("validate env vars: %v", err)
 	}
 
 	body := render(toml, envs)
@@ -298,6 +302,127 @@ func scanEnvVars(root string) ([]envVar, error) {
 	}
 	sort.Slice(uniq, func(i, j int) bool { return uniq[i].Name < uniq[j].Name })
 	return uniq, nil
+}
+
+// validateDocumentedEnvReads makes the docgen comment convention enforceable.
+// It finds production os.Getenv/os.LookupEnv calls whose argument is an
+// IBKR_* string literal or package constant and requires a matching
+// // docgen:env row. Dynamic/test-only environment reads are outside the public
+// config reference.
+func validateDocumentedEnvReads(root string, documented []envVar) error {
+	type sourceFile struct {
+		path string
+		key  string
+		file *ast.File
+	}
+
+	documentedNames := make(map[string]bool, len(documented))
+	for _, env := range documented {
+		documentedNames[env.Name] = true
+	}
+
+	consts := map[string]map[string]string{}
+	var files []sourceFile
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			base := info.Name()
+			if base == "vendor" || base == ".git" || base == "node_modules" || strings.HasPrefix(base, ".") {
+				if path != root {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		key := filepath.Dir(path) + "|" + file.Name.Name
+		if consts[key] == nil {
+			consts[key] = map[string]string{}
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				values, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range values.Names {
+					if i >= len(values.Values) {
+						continue
+					}
+					lit, ok := values.Values[i].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						continue
+					}
+					value, err := strconv.Unquote(lit.Value)
+					if err == nil {
+						consts[key][name.Name] = value
+					}
+				}
+			}
+		}
+		files = append(files, sourceFile{path: path, key: key, file: file})
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	missing := map[string]string{}
+	for _, source := range files {
+		ast.Inspect(source.file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, pkgOK := sel.X.(*ast.Ident)
+			if !pkgOK || pkg.Name != "os" || (sel.Sel.Name != "Getenv" && sel.Sel.Name != "LookupEnv") {
+				return true
+			}
+			name := ""
+			switch arg := call.Args[0].(type) {
+			case *ast.BasicLit:
+				if arg.Kind == token.STRING {
+					name, _ = strconv.Unquote(arg.Value)
+				}
+			case *ast.Ident:
+				name = consts[source.key][arg.Name]
+			}
+			if strings.HasPrefix(name, "IBKR_") && !documentedNames[name] {
+				missing[name] = source.path
+			}
+			return true
+		})
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(missing))
+	for name := range missing {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, fmt.Sprintf("%s (%s)", name, missing[name]))
+	}
+	return fmt.Errorf("undocumented production environment reads: %s", strings.Join(parts, ", "))
 }
 
 // render emits the final markdown body.

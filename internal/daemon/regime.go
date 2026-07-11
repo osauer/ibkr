@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/breadth/spx"
-	"github.com/osauer/ibkr/internal/rpc"
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	"github.com/osauer/ibkr/v2/internal/breadth/spx"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // handleRegimeSnapshot fans out fetches for all risk-regime
@@ -201,7 +201,7 @@ func (s *Server) regimeContentionMessage() string {
 // wg.Wait() which would hang the handler indefinitely if any one
 // fetcher's goroutine blocked past the ctx deadline (e.g. an HMDS
 // history fetch queued behind breadth's cold-start fan-out, since the
-// legacy FetchHistoricalDailyBars didn't honour parent ctx). The CLI
+// pre-collapse FetchHistoricalDailyBars didn't honour parent ctx). The CLI
 // then timed out at its own 60 s budget and the user saw
 // "regime: context deadline exceeded" — the symptom reported on
 // 2026-05-19 that motivated v0.27.6.
@@ -211,7 +211,7 @@ func (s *Server) regimeContentionMessage() string {
 // garbage-collected once the caller has returned. Gateway slots stay
 // held only as long as the per-call timeouts the fetchers already set
 // on their own derived contexts (productionRegimeDeps uses
-// FetchHistoricalDailyBarsCtx, which respects them).
+// FetchHistoricalDailyBars, which respects them).
 //
 // contentionMsg is called fresh at the deadline-fired branch to
 // produce the partial-envelope ErrorMessage. Production wires it to
@@ -330,7 +330,7 @@ func runRegimeFanout(
 // concrete reasons:
 //
 //  1. The three fetchers all call briefSnapshotPrice +
-//     FetchHistoricalDailyBars + GetMarketData lookups, so a single
+//     FetchHistoricalDailyBars + MarketDataSnapshot lookups, so a single
 //     struct keeps the call sites uniform.
 //  2. The unit tests need to drive each fetcher with canned data
 //     without spinning up a real daemon or gateway connection.
@@ -390,10 +390,13 @@ func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, arg
 			return briefSnapshotPriceWith52WHigh(ctx, c, sym, timeout)
 		},
 		history: func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error) {
-			if historyCache != nil {
-				return historyCache.fetch(ctx, sym, days, c.FetchHistoricalDailyBarsCtx)
+			fetch := func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error) {
+				return c.FetchHistoricalDailyBars(ctx, sym, days, 0)
 			}
-			return c.FetchHistoricalDailyBarsCtx(ctx, sym, days)
+			if historyCache != nil {
+				return historyCache.fetch(ctx, sym, days, fetch)
+			}
+			return fetch(ctx, sym, days)
 		},
 		officialSeries: officialSeries,
 		vvixSeries:     fetchCBOEVVIXSeries,
@@ -1310,9 +1313,9 @@ func classifyHorizonAgreement(c *rpc.GammaZeroComputed) string {
 		name   string
 		regime string
 	}{
-		{"0dte", horizonBucketRegime(c.SpotUnderlying, c.ZeroGamma0DTE, c.GammaSign0DTE)},
-		{"1to7", horizonBucketRegime(c.SpotUnderlying, c.ZeroGamma1to7, c.GammaSign1to7)},
-		{"term", horizonBucketRegime(c.SpotUnderlying, c.ZeroGammaTerm, c.GammaSignTerm)},
+		{"0dte", rpc.GammaBucketRegime(c.SpotUnderlying, c.ZeroGamma0DTE, c.GammaSign0DTE)},
+		{"1to7", rpc.GammaBucketRegime(c.SpotUnderlying, c.ZeroGamma1to7, c.GammaSign1to7)},
+		{"term", rpc.GammaBucketRegime(c.SpotUnderlying, c.ZeroGammaTerm, c.GammaSignTerm)},
 	}
 	var usable []struct {
 		name   string
@@ -1347,18 +1350,4 @@ func classifyHorizonAgreement(c *rpc.GammaZeroComputed) string {
 		return "diverge:partial"
 	}
 	return strings.TrimSuffix(first, "_gamma") + "_only"
-}
-
-func horizonBucketRegime(spot float64, zero *float64, sign string) string {
-	if zero != nil && *zero > 0 {
-		gap := (spot - *zero) / *zero * 100
-		return gammaRegimeFromGap(&gap)
-	}
-	switch sign {
-	case "positive":
-		return "long_gamma"
-	case "negative":
-		return "short_gamma"
-	}
-	return ""
 }

@@ -3,8 +3,8 @@ package tui
 import (
 	"time"
 
-	"github.com/osauer/ibkr/internal/app/live"
-	"github.com/osauer/ibkr/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/app/live"
+	"github.com/osauer/ibkr/v2/internal/cli"
 )
 
 const maxOutputBlocks = 200

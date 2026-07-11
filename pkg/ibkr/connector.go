@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/osauer/ibkr/pkg/ibkr/internal/logging"
+	"github.com/osauer/ibkr/v2/pkg/ibkr/internal/logging"
 )
 
 var connectorLogger = logging.Component("IBKR Connector")
@@ -59,7 +59,7 @@ type Connector struct {
 	subMu         sync.RWMutex
 
 	// Order management
-	openOrders       map[string]*Order
+	openOrders       map[string]*trackedOrder
 	brokerOrderIndex map[string]string // IB order ID -> internal order ID
 	orderMu          sync.RWMutex
 	orderLifecycleMu sync.RWMutex
@@ -510,7 +510,7 @@ func NewConnector(config *ConnectorConfig) *Connector {
 		conn:              NewConnection(&connCfg),
 		subscriptions:     make(map[string]*Subscription),
 		reqIDMap:          make(map[int]string),
-		openOrders:        make(map[string]*Order),
+		openOrders:        make(map[string]*trackedOrder),
 		brokerOrderIndex:  make(map[string]string),
 		orderStatusLogSig: make(map[string]string),
 		contractCache:     make(map[string]ContractDetailsLite),
@@ -1040,7 +1040,7 @@ func (c *Connector) dropSubscription(symbol string) {
 	// CancelMarketData — that path goes through the rate limiter (up to
 	// 30 s) and the connection's writeMu, neither of which should run
 	// while subMu is held: every other subscription reader (handleTick,
-	// GetMarketData, scan enrichment) blocks on subMu.
+	// MarketDataSnapshot, scan enrichment) blocks on subMu.
 	c.subMu.Lock()
 	var cancelReqID, releaseReqID int
 	if sub, ok := c.subscriptions[upper]; ok {
@@ -1206,14 +1206,14 @@ func (c *Connector) onConnectionLost(conn *Connection) {
 	}
 }
 
-// GetMarketDataTypeForSymbol returns the gateway's per-reqID
+// MarketDataTypeForSymbol returns the gateway's per-reqID
 // market-data-type notice for the symbol's active subscription:
 // 1=RealTime, 2=Frozen, 3=Delayed, 4=DelayedFrozen, 0=unknown (no
 // subscription, or notice not yet received). The CLI uses this to
 // render an after-hours data-type badge — frozen mode delivers a single
 // snapshot per request and then goes silent, so the user needs to know
 // rather than watch a dead stream.
-func (c *Connector) GetMarketDataTypeForSymbol(symbol string) int {
+func (c *Connector) MarketDataTypeForSymbol(symbol string) int {
 	c.subMu.RLock()
 	sub, ok := c.subscriptions[strings.ToUpper(symbol)]
 	c.subMu.RUnlock()
@@ -1226,7 +1226,7 @@ func (c *Connector) GetMarketDataTypeForSymbol(symbol string) int {
 	if conn == nil {
 		return 0
 	}
-	return conn.GetMarketDataType(sub.ReqID)
+	return conn.MarketDataType(sub.ReqID)
 }
 
 // ContractDetailsLite contains the subset of details needed for calendar building.
@@ -1878,9 +1878,6 @@ func (c *Connector) awaitContractDetailCtx(ctx context.Context, symbol string, w
 	if wait <= 0 {
 		return nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	ticker := time.NewTicker(contractHydrationPoll)
@@ -1900,9 +1897,6 @@ func (c *Connector) awaitContractDetailCtx(ctx context.Context, symbol string, w
 }
 
 func historicalTimeoutWithinContext(ctx context.Context, timeout time.Duration) (time.Duration, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -2126,9 +2120,6 @@ func (c *Connector) Stop() error {
 // snapshot helpers) should pass that ctx through so the budget is honoured
 // at the slot layer instead of relying on orchestrator-level wrappers.
 func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fields []string) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	symbol = strings.ToUpper(symbol)
 	if reason, inactive := c.inactiveReason(symbol); inactive {
 		if reason == "" {
@@ -2220,9 +2211,6 @@ func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fiel
 // the venue/currency (for example German STK/IBIS/EUR) and the legacy
 // symbol-only classifier would otherwise send SMART/USD.
 func (c *Connector) SubscribeMarketDataWithContract(ctx context.Context, contract Contract, fields []string) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	contract = normalizeMarketDataContract(contract)
 	contract = c.hydrateExplicitMarketDataContract(contract)
 	key := MarketDataKeyForContract(contract)
@@ -2329,9 +2317,6 @@ func explicitContractRouteMatches(requested, candidate Contract) bool {
 // ctx bounds the slot-acquire when the market-data semaphore is
 // saturated. nil ctx is treated as context.Background().
 func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol string, fields []string, staleAfter time.Duration) (bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	symbol = strings.ToUpper(symbol)
 	if reason, inactive := c.inactiveReason(symbol); inactive {
 		if reason == "" {
@@ -2610,7 +2595,7 @@ func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *
 	if order.TrailStopPrice != 0 {
 		stopPrice = order.TrailStopPrice
 	}
-	coreOrder := &Order{
+	coreOrder := &trackedOrder{
 		ID:              localID,
 		BrokerID:        brokerID,
 		Symbol:          contract.Symbol,
@@ -2914,7 +2899,7 @@ func (c *Connector) ServerVersion() int {
 // SubscribeOption issues a streaming market-data subscription for a fully
 // specified option contract (symbol + YYYYMMDD expiry + strike + C/P right
 // + tradingClass). The result is keyed by an OPRA-style identifier so chain
-// consumers can look up the cached quote in GetMarketData. ctx cancellation
+// consumers can look up the cached quote in MarketDataSnapshot. ctx cancellation
 // aborts the underlying contract-resolution round trip; callers that already
 // have a per-request deadline should pass that ctx through.
 //
@@ -2926,9 +2911,6 @@ func (c *Connector) ServerVersion() int {
 // Multi-class callers (SPX gamma compute) MUST pass the explicit class
 // they enumerated from secDefOptParams.
 func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClass, expiryYMD string, strike float64, right string) (string, int, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if !c.isConnected() {
 		return "", 0, ErrIBKRUnavailable
 	}
@@ -2984,12 +2966,12 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClas
 	// individual OPT subscriptions the canonical per-strike IV source
 	// is the OPTION_COMPUTATION model tick (msg 21, tickType 13) which
 	// handleOptionComputation routes into optIV[OPRA_key] — readable
-	// via GetOptionIV; 106 is documented for STK/IND (the 30-day
+	// via OptionIV; 106 is documented for STK/IND (the 30-day
 	// chain-averaged IV of the underlying) and is not reliably
 	// delivered for option contracts, so callers must not depend on
 	// subscriptions[…].IV for per-strike values. We still ask for 106
 	// because it's harmless and the gateway occasionally fills it on
-	// recently-traded contracts, but GetOptionIV is the source of truth.
+	// recently-traded contracts, but OptionIV is the source of truth.
 	// OI ticks can be one-shot and arrive immediately after reqMktData.
 	// Register the reqID before the wire send so ticks 27/28 cannot race
 	// ahead of the connector routing maps.
@@ -3091,7 +3073,7 @@ func (c *Connector) PrewarmOptionChain(
 // RequestAccountUpdates subscribes to streaming account + portfolio updates.
 // The gateway pushes mark prices, market values, and unrealized P&L for each
 // open position via msgPortfolioValue, populating the internal map that
-// GetCachedPositions reads. Pass an empty account to use the connector's bound one.
+// CachedPositions reads. Pass an empty account to use the connector's bound one.
 //
 // Aggregate values ("All", comma-separated managedAccounts lists) are not
 // account codes — TWS rejects them with error 321 and the portfolio stream
@@ -3167,13 +3149,13 @@ func accountSummaryShowsPositions(summary map[string]string) bool {
 	return false
 }
 
-// GetCachedPositions returns whatever positions are currently in the
+// CachedPositions returns whatever positions are currently in the
 // connection's local cache without issuing a fresh reqPositions (which would
 // clear the map and lose mark/value/P&L populated by the streaming
 // portfolioValue subscription started by RequestAccountUpdates).
 //
 // Intended for the daemon: call RequestAccountUpdates at startup and let the
-// gateway keep the cache fresh; clients then call GetCachedPositions for a
+// gateway keep the cache fresh; clients then call CachedPositions for a
 // non-destructive read. Returns wire-level [RawPosition] rows directly —
 // downstream consumers read typed contract fields (Symbol, SecType, Expiry,
 // Right, Strike) instead of re-parsing an encoded symbol.
@@ -3181,7 +3163,7 @@ func accountSummaryShowsPositions(summary map[string]string) bool {
 // Filters out zero-quantity stale rows, degenerate STK placeholders
 // (ConID == 0), and inactive stock rows only when the broker is not
 // reporting a zero-value held position that should remain visible.
-func (c *Connector) GetCachedPositions() ([]*RawPosition, error) {
+func (c *Connector) CachedPositions() ([]*RawPosition, error) {
 	if !c.isConnected() {
 		return nil, nil
 	}
@@ -3231,7 +3213,7 @@ func isZeroValueStockPosition(pos *RawPosition) bool {
 }
 
 // RefreshPositions issues a one-shot reqPositions request, waits for
-// positionEnd, then returns the same filtered shape as GetCachedPositions.
+// positionEnd, then returns the same filtered shape as CachedPositions.
 // The underlying TWS API has no request ID for reqPositions, so callers should
 // use this sparingly and avoid concurrent refreshes.
 func (c *Connector) RefreshPositions(timeout time.Duration) ([]*RawPosition, error) {
@@ -3250,7 +3232,7 @@ func (c *Connector) RefreshPositions(timeout time.Duration) ([]*RawPosition, err
 	if err := conn.WaitForPositionsEnd(timeout); err != nil {
 		return nil, err
 	}
-	return c.GetCachedPositions()
+	return c.CachedPositions()
 }
 
 // registerHandlers sets up message handlers for IBKR responses.
@@ -3644,7 +3626,7 @@ func (c *Connector) handleTickGeneric(fields []string) {
 		c.optMu.Lock()
 		c.optIV[symbol] = iv
 		c.optMu.Unlock()
-		// Also write to the per-symbol subscription so GetMarketData sees
+		// Also write to the per-symbol subscription so MarketDataSnapshot sees
 		// it without having to consult the option-IV cache separately —
 		// scan-row enrichment and `quote --json` both read from there.
 		c.subMu.Lock()
@@ -4304,65 +4286,35 @@ func formatHistoricalDuration(lookbackDays int) string {
 	return fmt.Sprintf("%d Y", years)
 }
 
-// FetchHistoricalDailyBarsCtx is FetchHistoricalDailyBars with ctx propagated
-// through the historical request's paced send and response wait. When the
-// caller's ctx is cancelled (deadline exceeded, parent cancellation), the
-// connector leaves the HMDS pacing queue promptly and best-effort cancels any
-// already-sent historical request without blocking the caller behind that same
-// paced queue.
+// FetchHistoricalDailyBars requests HMDS daily bars for the provided symbol,
+// with ctx propagated through the historical request's paced send and
+// response wait. When ctx is cancelled (deadline exceeded, parent
+// cancellation), the connector leaves the HMDS pacing queue promptly and
+// best-effort cancels any already-sent historical request without blocking
+// the caller behind that same paced queue — blocking past a caller's budget
+// was the root cause of the v0.27.5 "regime: context deadline exceeded"
+// report.
 //
-// Use this from any caller that already has a per-request deadline it
-// wants the fetch to honour (most notably handleRegimeSnapshot's per-
-// fetcher budgets, where blocking past the budget was the root cause of
-// the v0.27.5 "regime: context deadline exceeded" report). Callers that
-// don't care about parent-ctx propagation can keep using
-// FetchHistoricalDailyBars.
-func (c *Connector) FetchHistoricalDailyBarsCtx(ctx context.Context, symbol string, lookbackDays int) ([]HistoricalBar, error) {
-	return c.fetchHistoricalDailyBarsCtx(ctx, symbol, lookbackDays, 0, "")
-}
-
-// FetchHistoricalDailyBarsWhatToShowCtx is FetchHistoricalDailyBarsWhatToShow
-// with prompt cancellation when ctx is done.
-func (c *Connector) FetchHistoricalDailyBarsWhatToShowCtx(ctx context.Context, symbol string, lookbackDays int, whatToShow string) ([]HistoricalBar, error) {
-	cleanWhat, err := normalizeHistoricalWhatToShow(whatToShow)
-	if err != nil {
-		return nil, err
-	}
-	return c.fetchHistoricalDailyBarsCtx(ctx, symbol, lookbackDays, 0, cleanWhat)
-}
-
-// FetchHistoricalDailyBarsWithContractCtx is FetchHistoricalDailyBarsWithContract
-// with prompt cancellation when ctx is done.
-func (c *Connector) FetchHistoricalDailyBarsWithContractCtx(ctx context.Context, contract Contract, lookbackDays int) ([]HistoricalBar, error) {
-	return c.fetchHistoricalDailyBarsWithContractCtx(ctx, contract, lookbackDays, 0)
-}
-
-// FetchHistoricalDailyBars requests HMDS daily bars for the provided symbol.
-// It returns an error if the connector is not ready or the request times out.
-func (c *Connector) FetchHistoricalDailyBars(symbol string, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
-	return c.fetchHistoricalDailyBars(symbol, lookbackDays, timeout, "")
+// A timeout <= 0 uses the 45 s default; a ctx deadline always caps the
+// effective budget (see historicalTimeoutWithinContext).
+func (c *Connector) FetchHistoricalDailyBars(ctx context.Context, symbol string, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
+	return c.fetchHistoricalDailyBars(ctx, symbol, lookbackDays, timeout, "")
 }
 
 // FetchHistoricalDailyBarsWhatToShow requests HMDS daily bars for the provided
 // symbol using exactly the requested IBKR whatToShow value. It does not fall
-// back to TRADES/MIDPOINT, so callers can make provenance claims about the feed
-// they actually asked the gateway to serve.
-func (c *Connector) FetchHistoricalDailyBarsWhatToShow(symbol string, lookbackDays int, timeout time.Duration, whatToShow string) ([]HistoricalBar, error) {
+// back to TRADES/MIDPOINT, so callers can make provenance claims about the
+// feed they actually asked the gateway to serve. Ctx and timeout semantics
+// match FetchHistoricalDailyBars.
+func (c *Connector) FetchHistoricalDailyBarsWhatToShow(ctx context.Context, symbol string, lookbackDays int, whatToShow string, timeout time.Duration) ([]HistoricalBar, error) {
 	cleanWhat, err := normalizeHistoricalWhatToShow(whatToShow)
 	if err != nil {
 		return nil, err
 	}
-	return c.fetchHistoricalDailyBars(symbol, lookbackDays, timeout, cleanWhat)
+	return c.fetchHistoricalDailyBars(ctx, symbol, lookbackDays, timeout, cleanWhat)
 }
 
-func (c *Connector) fetchHistoricalDailyBars(symbol string, lookbackDays int, timeout time.Duration, forceWhatToShow string) ([]HistoricalBar, error) {
-	return c.fetchHistoricalDailyBarsCtx(context.Background(), symbol, lookbackDays, timeout, forceWhatToShow)
-}
-
-func (c *Connector) fetchHistoricalDailyBarsCtx(ctx context.Context, symbol string, lookbackDays int, timeout time.Duration, forceWhatToShow string) ([]HistoricalBar, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (c *Connector) fetchHistoricalDailyBars(ctx context.Context, symbol string, lookbackDays int, timeout time.Duration, forceWhatToShow string) ([]HistoricalBar, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -4404,20 +4356,18 @@ func (c *Connector) fetchHistoricalDailyBarsCtx(ctx context.Context, symbol stri
 		Currency:    currency,
 	}
 
-	return c.fetchHistoricalDailyBarsWithBaseCtx(ctx, symbol, baseContract, primary, lookbackDays, timeout, true, forceWhatToShow)
+	return c.fetchHistoricalDailyBarsWithBase(ctx, symbol, baseContract, primary, lookbackDays, timeout, true, forceWhatToShow)
 }
 
 // FetchHistoricalDailyBarsWithContract requests HMDS daily bars using an
 // already-routed contract. It is intended for callers that learned an exchange,
 // primary exchange, currency, local symbol, or conID while resolving a quote.
-func (c *Connector) FetchHistoricalDailyBarsWithContract(contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
-	return c.fetchHistoricalDailyBarsWithContractCtx(context.Background(), contract, lookbackDays, timeout)
+// Ctx and timeout semantics match FetchHistoricalDailyBars.
+func (c *Connector) FetchHistoricalDailyBarsWithContract(ctx context.Context, contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
+	return c.fetchHistoricalDailyBarsWithContract(ctx, contract, lookbackDays, timeout)
 }
 
-func (c *Connector) fetchHistoricalDailyBarsWithContractCtx(ctx context.Context, contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (c *Connector) fetchHistoricalDailyBarsWithContract(ctx context.Context, contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -4475,13 +4425,10 @@ func (c *Connector) fetchHistoricalDailyBarsWithContractCtx(ctx context.Context,
 			c.logWarn("Routed contract details for %s unavailable (%v)", symbol, err)
 		}
 	}
-	return c.fetchHistoricalDailyBarsWithBaseCtx(ctx, symbol, contract, fallbackPrimary, lookbackDays, timeout, false, "")
+	return c.fetchHistoricalDailyBarsWithBase(ctx, symbol, contract, fallbackPrimary, lookbackDays, timeout, false, "")
 }
 
-func (c *Connector) fetchHistoricalDailyBarsWithBaseCtx(ctx context.Context, symbol string, baseContract Contract, primary string, lookbackDays int, timeout time.Duration, requireConID bool, forceWhatToShow string) ([]HistoricalBar, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (c *Connector) fetchHistoricalDailyBarsWithBase(ctx context.Context, symbol string, baseContract Contract, primary string, lookbackDays int, timeout time.Duration, requireConID bool, forceWhatToShow string) ([]HistoricalBar, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -4599,7 +4546,7 @@ func (c *Connector) fetchHistoricalDailyBarsWithBaseCtx(ctx context.Context, sym
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		bars, err := c.fetchHistoricalWithContractCtx(ctx, symbol, att.contract, lookbackDays, timeout, att.whatToShow)
+		bars, err := c.fetchHistoricalWithContract(ctx, symbol, att.contract, lookbackDays, timeout, att.whatToShow)
 		if err != nil {
 			if shouldRetryHistorical(err) && idx < len(attempts)-1 {
 				c.logWarn("Historical data attempt %s for %s failed (%v); retrying with alternate route", att.label, symbol, err)
@@ -4707,10 +4654,7 @@ func shouldRetryHistorical(err error) bool {
 	return false
 }
 
-func (c *Connector) fetchHistoricalWithContractCtx(ctx context.Context, symbol string, contract Contract, lookbackDays int, timeout time.Duration, whatToShow string) ([]HistoricalBar, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (c *Connector) fetchHistoricalWithContract(ctx context.Context, symbol string, contract Contract, lookbackDays int, timeout time.Duration, whatToShow string) ([]HistoricalBar, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -4725,7 +4669,7 @@ func (c *Connector) fetchHistoricalWithContractCtx(ctx context.Context, symbol s
 	var req *historicalRequest
 	var registeredReqID int
 	duration := formatHistoricalDuration(lookbackDays)
-	reqID, err := c.conn.RequestHistoricalDataCtx(ctx, contract, "", duration, "1 day", whatToShow, true, false, 1, false, func(id int) {
+	reqID, err := c.conn.RequestHistoricalData(ctx, contract, "", duration, "1 day", whatToShow, true, false, 1, false, func(id int) {
 		registeredReqID = id
 		req = c.createHistoricalRequest(id, symbol)
 	})
@@ -4766,49 +4710,49 @@ func (c *Connector) cancelHistoricalDataBestEffort(reqID int) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := c.conn.CancelHistoricalDataCtx(ctx, reqID); err != nil {
+		if err := c.conn.CancelHistoricalData(ctx, reqID); err != nil {
 			c.logDebug("Historical cancel reqID=%d skipped/failed: %v", reqID, err)
 		}
 	}()
 }
 
-// GetOptionIV returns last observed implied volatility for an underlying
-func (c *Connector) GetOptionIV(symbol string) (float64, bool) {
+// OptionIV returns last observed implied volatility for an underlying
+func (c *Connector) OptionIV(symbol string) (float64, bool) {
 	c.optMu.RLock()
 	defer c.optMu.RUnlock()
 	v, ok := c.optIV[symbol]
 	return v, ok
 }
 
-// GetOptionGreeks returns the last observed model-computation Greeks for an
+// OptionGreeks returns the last observed model-computation Greeks for an
 // option key (the OPRA-style key produced by SubscribeOption). The boolean
 // is true only when at least one field has been populated from a valid
 // model-computation tick — callers must not infer zero from "absent".
-func (c *Connector) GetOptionGreeks(symbol string) (Greeks, bool) {
+func (c *Connector) OptionGreeks(symbol string) (Greeks, bool) {
 	c.optMu.RLock()
 	defer c.optMu.RUnlock()
 	g, ok := c.optGreeks[symbol]
 	return g, ok
 }
 
-// GetOptionUnderlyingPrice returns the underlying spot embedded in the
+// OptionUnderlyingPrice returns the underlying spot embedded in the
 // most recent model-computation tick for an option key. This is the
 // price IBKR used to price the Greeks, so callers computing dollar-
 // delta should prefer it over an independently-fetched spot to keep
 // the two values consistent.
-func (c *Connector) GetOptionUnderlyingPrice(symbol string) (float64, bool) {
+func (c *Connector) OptionUnderlyingPrice(symbol string) (float64, bool) {
 	c.optMu.RLock()
 	defer c.optMu.RUnlock()
 	v, ok := c.optUnderlyingPx[symbol]
 	return v, ok
 }
 
-// GetOptionQuoteBidAsk returns the last observed bid and ask for an option key.
+// OptionQuoteBidAsk returns the last observed bid and ask for an option key.
 // Returns (0, 0, false) when no quote has been observed; (bid, 0, true) or
 // (0, ask, true) when only one side has been seen. Use for stale-mark
 // detection on illiquid contracts where the mark can sit in the middle of
 // a wide spread without any actual trade printing.
-func (c *Connector) GetOptionQuoteBidAsk(symbol string) (bid, ask float64, ok bool) {
+func (c *Connector) OptionQuoteBidAsk(symbol string) (bid, ask float64, ok bool) {
 	c.optMu.RLock()
 	defer c.optMu.RUnlock()
 	b, hasB := c.optQuoteBid[symbol]
@@ -4819,10 +4763,10 @@ func (c *Connector) GetOptionQuoteBidAsk(symbol string) (bid, ask float64, ok bo
 	return b, a, true
 }
 
-// GetOptionPrevClose returns the option contract's own previous regular-
+// OptionPrevClose returns the option contract's own previous regular-
 // session close (tick 9 on the option subscription, not the underlying's).
 // Required for option-level daily P&L attribution.
-func (c *Connector) GetOptionPrevClose(symbol string) (float64, bool) {
+func (c *Connector) OptionPrevClose(symbol string) (float64, bool) {
 	c.optMu.RLock()
 	defer c.optMu.RUnlock()
 	v, ok := c.optPrevClose[symbol]
@@ -4865,7 +4809,7 @@ func (c *Connector) CancelOptionIV(reqID int) {
 }
 
 // SubscribeOptionIV subscribes to an ATM-ish option contract to receive implied
-// volatility ticks. The model-computation IV is routed to GetOptionIV(symbol),
+// volatility ticks. The model-computation IV is routed to OptionIV(symbol),
 // preserving the historical underlying-keyed behavior for callers that ask for
 // one leg at a time.
 //
@@ -4878,7 +4822,7 @@ func (c *Connector) SubscribeOptionIV(ctx context.Context, symbol string, expiry
 
 // SubscribeOptionIVKeyed subscribes to one option leg and routes model IV to a
 // per-contract key. Use this for concurrent fan-out across expiries/strikes:
-// underlying-keyed GetOptionIV(symbol) would let multiple reqIDs for the same
+// underlying-keyed OptionIV(symbol) would let multiple reqIDs for the same
 // stock overwrite each other.
 func (c *Connector) SubscribeOptionIVKeyed(ctx context.Context, symbol string, expiry time.Time, strike float64, right string) (int, string, error) {
 	expStr := expiry.UTC().Format("20060102")
@@ -4891,9 +4835,6 @@ func (c *Connector) SubscribeOptionIVKeyed(ctx context.Context, symbol string, e
 }
 
 func (c *Connector) subscribeOptionIV(ctx context.Context, symbol string, expiry time.Time, strike float64, right, routeKey string) (int, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	symbol = strings.ToUpper(symbol)
 	if routeKey == "" {
 		routeKey = symbol
@@ -5402,8 +5343,8 @@ func orderBrokerErrorMessage(code int, message, advancedRejectJSON string) strin
 	return fmt.Sprintf("broker error %d: %s", code, message)
 }
 
-// GetMarketData retrieves current market data for subscribed symbols
-func (c *Connector) GetMarketData() map[string]*MarketData {
+// MarketDataSnapshot retrieves current market data for subscribed symbols
+func (c *Connector) MarketDataSnapshot() map[string]*MarketData {
 	c.subMu.RLock()
 	defer c.subMu.RUnlock()
 

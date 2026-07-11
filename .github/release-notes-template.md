@@ -53,7 +53,7 @@ sh install.sh
 
 ### Doing something custom?
 
-- **`go install`**: `go install github.com/osauer/ibkr/cmd/ibkr@__VERSION__` (or `@latest`).
+- **`go install`**: `go install github.com/osauer/ibkr/v2/cmd/ibkr@__VERSION__` (or `@latest`).
 - **Different install dir**: `IBKR_INSTALL_DIR=/usr/local/bin sh install.sh`. The installer won't touch your shell rc when you override; manage PATH yourself.
 - **Manual download**: pick a tarball or `.mcpb` from the Assets section below. Verify against `SHA256SUMS`.
 - **Cursor / Continue / Zed / other local MCP clients**: see [Pick your path](https://github.com/osauer/ibkr#claude-desktop-cursor-continue-zed) in the README for the JSON snippet (config file path differs per client).

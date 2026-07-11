@@ -1,8 +1,13 @@
 # Privacy
 
-Last reviewed: 2026-05-25 10:13 CEST
+Last reviewed: 2026-07-10 08:35 CEST
 
-`ibkr` is a local, read-only Interactive Brokers client. It does not run a hosted service, collect telemetry, or send account data to the project maintainer.
+`ibkr` is a local Interactive Brokers client. The default/read-only binary and
+the MCP surface cannot submit broker orders. A separately published
+trading-capable binary, local trading builds, and the paired PWA can expose
+gated place/modify/cancel or protection-action paths when the operator enables
+trading explicitly. The project does not collect telemetry or send account data
+to the maintainer.
 
 ## What data the tool can access
 
@@ -13,7 +18,11 @@ When you run `ibkr`, it talks to the IB Gateway or TWS instance that you run loc
 - historical daily bars and scanner results returned by your IBKR gateway
 - local configuration paths and daemon health information
 
-The tool is read-only: it does not expose order placement, order cancellation, or trade-modification commands.
+Trading is disabled by default. In a trading-capable build, broker writes remain
+behind the mode and route pins, preview/WhatIf eligibility, runtime freeze,
+journal, and daemon authorization described in
+[SECURITY.md](./SECURITY.md#agent-origin-write-gating-trading-builds). The MCP
+surface remains read-oriented; agent writes use the gated CLI.
 
 ## Where data goes
 
@@ -23,6 +32,9 @@ By default, data stays on your machine:
 - MCP tool results are sent over stdio to the local MCP client that launched `ibkr mcp`.
 - The daemon listens on a local Unix-domain socket, not a public TCP port.
 - The daemon talks to IB Gateway or TWS over the configured gateway host, normally loopback.
+- The paired PWA can be used over the LAN. If the user explicitly enables the
+  remote relay or Web Push, the relevant app traffic or redacted alert payloads
+  pass through those configured third-party services.
 
 If you paste output into a chat, connect the MCP server through a remote tunnel, or use a third-party MCP host, that host may receive the account and market data returned by the local tool. Review that host's privacy and retention policy before enabling access.
 
@@ -35,6 +47,8 @@ If you paste output into a chat, connect the MCP server through a remote tunnel,
 - local watchlists under `$XDG_DATA_HOME/ibkr/watchlist.json`, falling back to `~/.local/share/ibkr/watchlist.json`
 - optional user configuration under `~/.config/ibkr/config.toml`
 - optional user-requested regime JSONL logs at paths passed to `ibkr regime --log`
+- local order/proposal/opportunity journals and paired-app device state under
+  the configured state directories when those features are used
 - optional diagnostic wire logs only when explicitly enabled with the diagnostic environment variables documented in [SECURITY.md](./SECURITY.md#diagnostic-data-sensitivity)
 
 These files can contain account-sensitive information. Protect your local user account and avoid sharing logs without redaction.

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // ShouldColor returns false for non-*os.File writers (bytes.Buffer is the

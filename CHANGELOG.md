@@ -2,10 +2,11 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-## v1.16.0 — 2026-07-08 17:36 CEST
+## v2.0.0 — 2026-07-11 22:41 CEST
 
 ### What's new
 
+- **v2.0.0 is a Go-library major, not a product rewrite.** The `ibkr` CLI, daemon, MCP tools, and paired app behave the same as v1.15 plus the improvements below; the major bump exists because the published `pkg/ibkr` Go API modernized in one breaking pass (context-first methods, no `Get` prefixes — details under Changed) and Go-module semver therefore requires the module path to move to `github.com/osauer/ibkr/v2`. **Action required** only for Go developers importing the library: update imports to `github.com/osauer/ibkr/v2/pkg/ibkr` and installs to `go install github.com/osauer/ibkr/v2/cmd/ibkr@latest`. Binary, MCPB, and plugin users are unaffected.
 - Trading rulebook v2, from the 2026-07-08 dual senior review against a live confirmed-stress tape. The checklist grows from 12 to 14 rules: **rule 13 `exit_discipline`** fences long-option losses at −40% of premium paid (watch) / −60% (act), with classified hedge legs exempt — the hedge is allowed to decay — and an advisory preview warning when a draft would average down into a flagged line (averaging down resets the basis; the fence does not follow it down). **Rule 14 `fx_exposure`** makes non-base-currency NLV explicit (watch-only above 60% — a structural breach must inform, not become a permanently lit act). Rules 3/4/12 thresholds are now **regime-conditional**: the daemon latches the regime lifecycle stage (persisted across restarts, so a bounce mid-stress cannot reset thresholds to calm), buckets it calm / early_warning / confirmed (cash floor −25/0/+10% of NLV; ex-hedge extrinsic budget 10-15/7.5-12/5-10%; hedge band 25-35/30-50/40-70%), and a carried or never-seen stage evaluates BOTH the carried and calm sets and reports the worse verdict — stale regime data can hold or tighten a verdict, never relax it, in either band direction. Partial data may now indict but never acquit: rule 1 reports provable lower-bound breaches ("at least X% of NLV", `observed_is_lower_bound`) from signed interval arithmetic when deltas are missing, instead of hiding a certain breach behind `unknown`.
 
 ### Added
@@ -24,8 +25,13 @@ All notable changes to this project are documented here. The project adheres to 
 
 ### Changed
 
+- **Breaking — `pkg/ibkr` Go API, and the module path is now `github.com/osauer/ibkr/v2`.** The published client library dropped its pre-context idioms in one pass; the `ibkr` CLI, daemon, MCP, and app surfaces are unaffected. Accessors lose the `Get` prefix (`CachedPositions`, `OptionIV`, `OptionGreeks`, `OptionUnderlyingPrice`, `OptionQuoteBidAsk`, `OptionPrevClose`, `MarketDataTypeForSymbol`, `Connection.MarketDataType`), and `GetMarketData` is now `MarketDataSnapshot` — the bare name would collide with the `MarketData` type. The five `X`/`XCtx` method pairs collapsed to one ctx-first method each: `FetchHistoricalDailyBars(ctx, symbol, lookbackDays, timeout)`, `FetchHistoricalDailyBarsWhatToShow(ctx, symbol, lookbackDays, whatToShow, timeout)`, `FetchHistoricalDailyBarsWithContract(ctx, contract, lookbackDays, timeout)` — timeout ≤ 0 keeps the 45 s default, and a ctx deadline always caps the effective budget — plus `Connection.RequestHistoricalData(ctx, …)` and `Connection.CancelHistoricalData(ctx, reqID)`. Nil contexts are no longer tolerated (the 21 per-method `ctx == nil` guards are gone; pass `context.Background()` explicitly). The unused `Order` struct left the public surface (internal `trackedOrder` now); `IBKROrder` stays the wire type and the `OrderSide`/`OrderType`/`TimeInForce`/`OrderStatus` enums are unchanged.
 - Rulebook policy `rulebook-v1` → `rulebook-v2` (version 2): every new threshold is part of the policy fingerprint, and the flat rule-3/4/12 threshold fields moved into the three regime sets (the calm set carries the v1 numbers unchanged).
 - Design doc corrected where it had drifted from the implementation: the rules-decisions journal lives under `~/.local/state/ibkr/`, rules 9/10 read a dedicated best-effort SPY snapshot quote (not the regime snapshot), and the operator TOML policy override is documented as planned, not shipped.
+
+### Engineering notes
+
+- Repo-wide taste-review pass (2026-07-11), no behavior or rendered-output changes: the ±2% dealer-gamma band and its gap→regime classifier now live once in `internal/rpc/regime_policy.go` (`GammaRegimeFromGap`, `GammaBucketRegime`, `HeuristicThresholds`) instead of six hand-coded copies across daemon and CLI — the same single-copy treatment the 2026-06-12 incident forced on regime headlines; fixed-fractional sizing moved from the CLI adapter into `internal/risk` (`risk.ComputeSize`), so MCP no longer imports a sibling adapter for policy math; `computeGammaZeroFor` decomposed from 604 to 399 lines (contract prewarm and leg fan-out extracted with their abort machinery); dead SPA CSS and an inert `IBKR_HANDSHAKE_PERMISSIVE` test knob deleted.
 
 ## v1.15.1 — 2026-07-08 08:42 CEST
 

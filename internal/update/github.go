@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/xdgcache"
+	"github.com/osauer/ibkr/v2/internal/xdgcache"
 )
 
 // GitHubReleasesURL is the latest-release endpoint for the public repo.

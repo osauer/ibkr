@@ -7,7 +7,7 @@ import (
 
 // TestHandleOptionComputationPersistsGreeks verifies that a single model-
 // computation tick (msg 21, tickType 13) populates the optGreeks /
-// optUnderlyingPx maps, and that GetOptionGreeks returns what was stored.
+// optUnderlyingPx maps, and that OptionGreeks returns what was stored.
 //
 // Field order matches the comment in connector.go::handleOptionComputation,
 // which targets IBKR server version ≥ MIN_SERVER_VER_PRICE_BASED_VOLATILITY
@@ -38,9 +38,9 @@ func TestHandleOptionComputationPersistsGreeks(t *testing.T) {
 	}
 	conn.handleOptionComputation(fields)
 
-	g, ok := conn.GetOptionGreeks(key)
+	g, ok := conn.OptionGreeks(key)
 	if !ok {
-		t.Fatalf("GetOptionGreeks(%q): not found", key)
+		t.Fatalf("OptionGreeks(%q): not found", key)
 	}
 	if math.Abs(g.Delta-0.523) > 1e-9 {
 		t.Errorf("delta = %v, want 0.523", g.Delta)
@@ -54,10 +54,10 @@ func TestHandleOptionComputationPersistsGreeks(t *testing.T) {
 	if math.Abs(g.Theta-(-0.083)) > 1e-9 {
 		t.Errorf("theta = %v, want -0.083", g.Theta)
 	}
-	if iv, ok := conn.GetOptionIV(key); !ok || math.Abs(iv-0.275) > 1e-9 {
+	if iv, ok := conn.OptionIV(key); !ok || math.Abs(iv-0.275) > 1e-9 {
 		t.Errorf("optIV = %v ok=%v, want 0.275", iv, ok)
 	}
-	if u, ok := conn.GetOptionUnderlyingPrice(key); !ok || math.Abs(u-199.40) > 1e-9 {
+	if u, ok := conn.OptionUnderlyingPrice(key); !ok || math.Abs(u-199.40) > 1e-9 {
 		t.Errorf("underlying = %v ok=%v, want 199.40", u, ok)
 	}
 }
@@ -90,7 +90,7 @@ func TestHandleOptionComputationWireOffsetIsAtFieldOne(t *testing.T) {
 		"100",  // underlying
 	}
 	conn.handleOptionComputation(fields)
-	if _, ok := conn.GetOptionGreeks("WIRE_TEST_C100"); !ok {
+	if _, ok := conn.OptionGreeks("WIRE_TEST_C100"); !ok {
 		t.Fatalf("Greeks not routed to OPRA key — wire offset regressed")
 	}
 }
@@ -120,12 +120,12 @@ func TestHandleOptionComputationRejectsSentinelGreeks(t *testing.T) {
 	}
 	conn.handleOptionComputation(fields)
 
-	if g, ok := conn.GetOptionGreeks(key); ok {
+	if g, ok := conn.OptionGreeks(key); ok {
 		t.Errorf("expected no greeks cached on sentinel row, got %+v", g)
 	}
 	// Underlying price IS sane and should land — saneGreek doesn't gate
 	// underlying price (it has its own bound check in handleOptionComputation).
-	if u, ok := conn.GetOptionUnderlyingPrice(key); !ok || u <= 0 {
+	if u, ok := conn.OptionUnderlyingPrice(key); !ok || u <= 0 {
 		t.Errorf("underlying = %v ok=%v, want a positive value", u, ok)
 	}
 }
@@ -151,7 +151,7 @@ func TestHandleOptionComputationMalformedFields(t *testing.T) {
 	// 11 fields when 12 are required.
 	short := []string{"21", "1", "13", "0", "0.3", "0.5", "10", "0", "0.01", "20", "-0.05"}
 	conn.handleOptionComputation(short)
-	if _, ok := conn.GetOptionGreeks("X_260117C100"); ok {
+	if _, ok := conn.OptionGreeks("X_260117C100"); ok {
 		t.Fatalf("expected no entry on short row")
 	}
 }

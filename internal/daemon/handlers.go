@@ -14,11 +14,11 @@ import (
 	"sync"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/breadth/spx"
-	"github.com/osauer/ibkr/internal/marketcal"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/breadth/spx"
+	"github.com/osauer/ibkr/v2/internal/marketcal"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // handleAccountSummary issues a one-shot reqAccountSummary and converts the
@@ -214,7 +214,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	if c == nil {
 		return nil, s.gatewayUnavailableError()
 	}
-	positions, err := c.GetCachedPositions()
+	positions, err := c.CachedPositions()
 	if err != nil {
 		return nil, err
 	}
@@ -506,7 +506,7 @@ func (s *Server) snapshotHeldStockQuote(ctx context.Context, c *ibkrlib.Connecto
 		ready := q.Bid != nil || q.Ask != nil || q.Last != nil
 		fallback := quoteFallbackReady(&q, pollStarted, timeout)
 		if ready || fallback {
-			q.DataType = quoteDataTypeName(c.GetMarketDataTypeForSymbol(pollKey), ready, fallback)
+			q.DataType = quoteDataTypeName(c.MarketDataTypeForSymbol(pollKey), ready, fallback)
 		}
 		return ready || fallback
 	})
@@ -1225,13 +1225,13 @@ func captureOptionGreeks(ctx context.Context, c *ibkrlib.Connector, under, expir
 	defer func() { _ = c.UnsubscribeMarketData(key) }()
 
 	_ = pollUntilWithReject(ctx, time.Now().Add(budget), c.SubscriptionRejectCh(key), key, func() bool {
-		g, ok := c.GetOptionGreeks(key)
+		g, ok := c.OptionGreeks(key)
 		if !ok {
 			return false
 		}
 		out.value = g
 		out.ok = true
-		if u, uok := c.GetOptionUnderlyingPrice(key); uok && u > 0 {
+		if u, uok := c.OptionUnderlyingPrice(key); uok && u > 0 {
 			out.underlying = u
 		}
 		return true
@@ -1278,7 +1278,7 @@ func (s *Server) fillOptionGreeks(c *ibkrlib.Connector, options []rpc.PositionVi
 		if c == nil {
 			continue
 		}
-		if bid, ask, ok := c.GetOptionQuoteBidAsk(key); ok {
+		if bid, ask, ok := c.OptionQuoteBidAsk(key); ok {
 			if bid > 0 {
 				b := bid
 				p.OptionBid = &b
@@ -1288,11 +1288,11 @@ func (s *Server) fillOptionGreeks(c *ibkrlib.Connector, options []rpc.PositionVi
 				p.OptionAsk = &a
 			}
 		}
-		if iv, ok := c.GetOptionIV(key); ok && iv > 0 {
+		if iv, ok := c.OptionIV(key); ok && iv > 0 {
 			v := iv
 			p.IV = &v
 		}
-		if pc, ok := c.GetOptionPrevClose(key); ok {
+		if pc, ok := c.OptionPrevClose(key); ok {
 			v := pc
 			p.OptionPrevClose = &v
 		}
@@ -1792,7 +1792,7 @@ func (s *Server) handleQuoteSnapshot(ctx context.Context, req *rpc.Request) (*rp
 			// always read "". When IBKR omits that notice but only
 			// fallback ticks landed, label the row frozen so JSON consumers
 			// don't mistake mark/close-only data for a live quote.
-			q.DataType = quoteDataTypeName(c.GetMarketDataTypeForSymbol(pollKey), ready, fallback)
+			q.DataType = quoteDataTypeName(c.MarketDataTypeForSymbol(pollKey), ready, fallback)
 		}
 		return ready || fallback
 	}); err != nil {
@@ -1980,22 +1980,22 @@ func (s *Server) handleOptionQuoteSnapshot(ctx context.Context, c *ibkrlib.Conne
 		AsOf:     time.Now(),
 	}
 	if err := pollUntilWithReject(ctx, time.Now().Add(timeout), c.SubscriptionRejectCh(key), key, func() bool {
-		if d, ok := c.GetMarketData()[key]; ok {
+		if d, ok := c.MarketDataSnapshot()[key]; ok {
 			fillQuoteMarketData(q, d)
 		}
-		if bid, ask, ok := c.GetOptionQuoteBidAsk(key); ok {
+		if bid, ask, ok := c.OptionQuoteBidAsk(key); ok {
 			q.Bid = ptrIfPos(bid)
 			q.Ask = ptrIfPos(ask)
 		}
-		if prev, ok := c.GetOptionPrevClose(key); ok {
+		if prev, ok := c.OptionPrevClose(key); ok {
 			q.PrevClose = ptrIfPos(prev)
 		}
-		if iv, ok := c.GetOptionIV(key); ok && iv > 0 {
+		if iv, ok := c.OptionIV(key); ok && iv > 0 {
 			q.IV = &iv
 			q.IVStatus = "model"
 		}
 		if q.DataType == "" {
-			q.DataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(key))
+			q.DataType = marketDataTypeName(c.MarketDataTypeForSymbol(key))
 		}
 		return q.Bid != nil || q.Ask != nil || q.Last != nil || q.PrevClose != nil || q.IV != nil
 	}); err != nil && err != context.DeadlineExceeded {
@@ -2310,9 +2310,9 @@ func (s *Server) fetchQuoteHistoricalBars(ctx context.Context, c *ibkrlib.Connec
 	}
 	fallbackCtx, cancel := context.WithTimeout(ctx, quoteHistoricalFallbackTimeout(timeout))
 	defer cancel()
-	bars, err := c.FetchHistoricalDailyBarsWithContractCtx(fallbackCtx, quoteHistoricalContract(q), lookbackDays)
+	bars, err := c.FetchHistoricalDailyBarsWithContract(fallbackCtx, quoteHistoricalContract(q), lookbackDays, 0)
 	if err != nil {
-		bars, err = c.FetchHistoricalDailyBarsCtx(fallbackCtx, q.Symbol, lookbackDays)
+		bars, err = c.FetchHistoricalDailyBars(fallbackCtx, q.Symbol, lookbackDays, 0)
 	}
 	return bars, err
 }
@@ -3392,7 +3392,7 @@ func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row
 	defer poll.Stop()
 	var snap *ibkrlib.MarketData
 	for {
-		md := c.GetMarketData()
+		md := c.MarketDataSnapshot()
 		if data, ok := md[pollKey]; ok {
 			snap = data
 		}
@@ -3438,7 +3438,7 @@ func (s *Server) enrichOneScanRow(ctx context.Context, c *ibkrlib.Connector, row
 		row.Week52Low = &v
 	}
 	row.AsOf = time.Now()
-	row.DataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(pollKey))
+	row.DataType = marketDataTypeName(c.MarketDataTypeForSymbol(pollKey))
 	q := rpc.Quote{
 		Symbol:    row.Symbol,
 		Last:      row.Last,
@@ -3846,9 +3846,9 @@ func (s *Server) handleHistoryDaily(ctx context.Context, req *rpc.Request) (*rpc
 	}
 	var bars []ibkrlib.HistoricalBar
 	if whatToShow != "" {
-		bars, err = c.FetchHistoricalDailyBarsWhatToShowCtx(ctx, sym, days, whatToShow)
+		bars, err = c.FetchHistoricalDailyBarsWhatToShow(ctx, sym, days, whatToShow, 0)
 	} else {
-		bars, err = c.FetchHistoricalDailyBarsCtx(ctx, sym, days)
+		bars, err = c.FetchHistoricalDailyBars(ctx, sym, days, 0)
 	}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {

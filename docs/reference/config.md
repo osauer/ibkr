@@ -54,5 +54,8 @@ Read at process startup. Override TOML config where applicable; see the per-var 
 | `IBKR_PACKET_LOG_TEMPLATE` | Template path for raw IBKR wire-packet logs. Trailing `/` treats as directory; `%d` placeholder gets the gateway client ID. Unset disables wire logging. |
 | `IBKR_SOCKET` | Override the daemon IPC socket path. Defaults to `$XDG_RUNTIME_DIR/ibkr/ibkr.sock` or `$HOME/.cache/ibkr/ibkr.sock`. |
 | `IBKR_SPX_MEMBERS_AUTO_REFRESH` | Symmetric override of `[spx] members_auto_refresh`. `1` force-enables, `0` force-disables, unset / other defers to TOML. |
+| `IBKR_WIRE_INTERCEPTOR` | Enable the account-sensitive decoded wire-frame recorder. Unset or false disables it. |
+| `IBKR_WIRE_LOG_PATH` | Append decoded account-sensitive wire frames as JSONL at this path. Unset keeps frames in memory only. |
+| `IBKR_WIRE_RING_SIZE` | Maximum decoded wire frames retained in memory when the interceptor is enabled; default 256. |
 | `NO_COLOR` | Standard https://no-color.org/ override. Any non-empty value disables colour regardless of IBKR_COLOR (unless IBKR_COLOR=always). |
 

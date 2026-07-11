@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 const (
@@ -64,7 +64,7 @@ func (s *Server) handleTechnical(ctx context.Context, req *rpc.Request) (*rpc.Te
 		AsOf:         time.Now(),
 	}
 	benchCtx, cancelBench := context.WithTimeout(ctx, technicalPerSymbolTimeout)
-	benchBars, benchErr := c.FetchHistoricalDailyBarsCtx(benchCtx, benchmark, days)
+	benchBars, benchErr := c.FetchHistoricalDailyBars(benchCtx, benchmark, days, 0)
 	cancelBench()
 	var benchRow rpc.TechnicalRow
 	var bench63, bench126 *float64
@@ -178,7 +178,7 @@ func technicalRoute(p rpc.TechnicalParams) (rpc.ContractParams, bool, error) {
 
 func fetchTechnicalBars(ctx context.Context, c *ibkrlib.Connector, route rpc.ContractParams, routed bool, symbol string, days int) ([]ibkrlib.HistoricalBar, error) {
 	if !routed {
-		return c.FetchHistoricalDailyBarsCtx(ctx, symbol, days)
+		return c.FetchHistoricalDailyBars(ctx, symbol, days, 0)
 	}
 	params := route
 	params.Symbol = symbol
@@ -186,7 +186,7 @@ func fetchTechnicalBars(ctx context.Context, c *ibkrlib.Connector, route rpc.Con
 	if err != nil {
 		return nil, err
 	}
-	return c.FetchHistoricalDailyBarsWithContractCtx(ctx, contract, days)
+	return c.FetchHistoricalDailyBarsWithContract(ctx, contract, days, 0)
 }
 
 func normalizeTechnicalSymbols(raw []string) []string {

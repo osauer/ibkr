@@ -142,15 +142,15 @@ func TestHandleTickPrice_OptionReqUpdatesQuoteCacheAndSubscription(t *testing.T)
 	connector.handleTickPrice([]string{"1", "2", "42", "4", "1.46"})
 	connector.handleTickPrice([]string{"1", "2", "42", "9", "1.45"})
 
-	bid, ask, ok := connector.GetOptionQuoteBidAsk(key)
+	bid, ask, ok := connector.OptionQuoteBidAsk(key)
 	if !ok || bid != 1.46 || ask != 1.47 {
 		t.Fatalf("option quote cache = %.2f x %.2f ok=%v, want 1.46 x 1.47 ok=true", bid, ask, ok)
 	}
-	if prev, ok := connector.GetOptionPrevClose(key); !ok || prev != 1.45 {
+	if prev, ok := connector.OptionPrevClose(key); !ok || prev != 1.45 {
 		t.Fatalf("option prev close = %.2f ok=%v, want 1.45 ok=true", prev, ok)
 	}
 
-	md := connector.GetMarketData()[key]
+	md := connector.MarketDataSnapshot()[key]
 	if md == nil {
 		t.Fatalf("market data missing for option key %s", key)
 	}
@@ -176,11 +176,11 @@ func TestHandleTickPrice_OptionDelayedTicksUpdateQuoteCacheAndSubscription(t *te
 	connector.handleTickPrice([]string{"1", "2", "42", "68", "2.85"})
 	connector.handleTickPrice([]string{"1", "2", "42", "75", "2.80"})
 
-	bid, ask, ok := connector.GetOptionQuoteBidAsk(key)
+	bid, ask, ok := connector.OptionQuoteBidAsk(key)
 	if !ok || bid != 2.84 || ask != 2.86 {
 		t.Fatalf("delayed option quote cache = %.2f x %.2f ok=%v, want 2.84 x 2.86 ok=true", bid, ask, ok)
 	}
-	md := connector.GetMarketData()[key]
+	md := connector.MarketDataSnapshot()[key]
 	if md == nil {
 		t.Fatalf("market data missing for option key %s", key)
 	}
@@ -614,13 +614,13 @@ func TestHandleTickSize_OpenInterest(t *testing.T) {
 				t.Errorf("Observed flag not set after OI tick %s", tt.tickType)
 			}
 
-			// Round-trip: prove the OI also surfaces via GetMarketData,
+			// Round-trip: prove the OI also surfaces via MarketDataSnapshot,
 			// which is the path Phase 2 (zero-gamma) reads from. Without
 			// this, a regression on the connector→MarketData copy would
 			// silently zero out every leg's OI in the GEX integral.
-			md := c.GetMarketData()
+			md := c.MarketDataSnapshot()
 			if md[key] == nil {
-				t.Fatalf("GetMarketData missing entry for %q", key)
+				t.Fatalf("MarketDataSnapshot missing entry for %q", key)
 			}
 			if md[key].OpenInt != 12345 {
 				t.Errorf("MarketData.OpenInt: want 12345, got %d", md[key].OpenInt)
@@ -642,9 +642,9 @@ func TestHandleTickSize_OpenInterestAcceptsDecimalPayload(t *testing.T) {
 
 	c.handleTickSize([]string{"2", "6", "11", "28", "2180.0"})
 
-	md := c.GetMarketData()
+	md := c.MarketDataSnapshot()
 	if md[key] == nil {
-		t.Fatalf("GetMarketData missing entry for %q", key)
+		t.Fatalf("MarketDataSnapshot missing entry for %q", key)
 	}
 	if md[key].OpenInt != 2180 {
 		t.Fatalf("decimal OpenInt = %d, want 2180", md[key].OpenInt)
@@ -699,7 +699,7 @@ func TestHandleTickPrice_WeekRangeCapture(t *testing.T) {
 // via generic tick 106) into the per-symbol subscription struct — not
 // just into the optIV map. Without this, the scan-row IV column would
 // stay blank even when the gateway delivers the tick, because the
-// enrichment path reads from GetMarketData() which is derived from
+// enrichment path reads from MarketDataSnapshot() which is derived from
 // subscriptions.
 func TestHandleTickGeneric_IVRoutesToSubscription(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
@@ -740,7 +740,7 @@ func TestHandleTickSizeShortableSharesRoutesToMarketData(t *testing.T) {
 	// Wire tick 89 (tickSize) carries the share count for the
 	// generic-tick-236 request.
 	c.handleTickSize([]string{"2", "1", "9", "89", "750"})
-	md := c.GetMarketData()["CRWV"]
+	md := c.MarketDataSnapshot()["CRWV"]
 	if md == nil {
 		t.Fatal("market data missing for CRWV")
 	}
@@ -749,12 +749,12 @@ func TestHandleTickSizeShortableSharesRoutesToMarketData(t *testing.T) {
 	}
 }
 
-// TestGetMarketData_SurfacesWeekRangeAndIV pins the daemon-facing read
-// path: scan-row enrichment polls GetMarketData() and copies into the
+// TestMarketDataSnapshot_SurfacesWeekRangeAndIV pins the daemon-facing read
+// path: scan-row enrichment polls MarketDataSnapshot() and copies into the
 // row. If a future refactor accidentally drops the new fields from the
 // MarketData materialisation, this test catches it before the column
 // silently goes blank.
-func TestGetMarketData_SurfacesWeekRangeAndIV(t *testing.T) {
+func TestMarketDataSnapshot_SurfacesWeekRangeAndIV(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	c.subMu.Lock()
 	c.subscriptions["AAPL"] = &Subscription{
@@ -771,10 +771,10 @@ func TestGetMarketData_SurfacesWeekRangeAndIV(t *testing.T) {
 	}
 	c.subMu.Unlock()
 
-	md := c.GetMarketData()
+	md := c.MarketDataSnapshot()
 	got, ok := md["AAPL"]
 	if !ok {
-		t.Fatal("AAPL not in GetMarketData() output")
+		t.Fatal("AAPL not in MarketDataSnapshot() output")
 	}
 	if got.Week52Low != 120.00 || got.Week52High != 260.50 {
 		t.Errorf("52w range: got %.2f..%.2f, want 120.00..260.50", got.Week52Low, got.Week52High)

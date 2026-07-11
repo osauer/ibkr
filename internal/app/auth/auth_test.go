@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/app/state"
+	"github.com/osauer/ibkr/v2/internal/app/state"
 )
 
 func TestCompletePairingStoresGrantAndSession(t *testing.T) {

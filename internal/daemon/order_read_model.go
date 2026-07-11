@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/marketcal"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/marketcal"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 const (

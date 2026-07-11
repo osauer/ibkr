@@ -3,7 +3,7 @@ package daemon
 import (
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // greeksCache memoises per-option model-computation Greeks so the

@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/osauer/ibkr/internal/dial"
-	"github.com/osauer/ibkr/internal/mcp"
+	"github.com/osauer/ibkr/v2/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/mcp"
 )
 
 const (

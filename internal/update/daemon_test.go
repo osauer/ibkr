@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
 func TestRestartDaemon_InvalidPID(t *testing.T) {

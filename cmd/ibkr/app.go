@@ -16,9 +16,9 @@ import (
 
 	"github.com/skip2/go-qrcode"
 
-	mobileapp "github.com/osauer/ibkr/internal/app"
-	"github.com/osauer/ibkr/internal/app/auth"
-	"github.com/osauer/ibkr/internal/cli"
+	mobileapp "github.com/osauer/ibkr/v2/internal/app"
+	"github.com/osauer/ibkr/v2/internal/app/auth"
+	"github.com/osauer/ibkr/v2/internal/cli"
 )
 
 func runApp(args []string) int {

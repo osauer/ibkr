@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func runOpportunities(ctx context.Context, env *Env, args []string) int {

@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // combineGammaResults builds the SPY+SPX result envelope from the two
@@ -226,7 +226,7 @@ func perIndexRegime(c *rpc.GammaZeroComputed) string {
 		return ""
 	}
 	if c.ZeroGamma != nil {
-		return strings.ReplaceAll(gammaRegimeFromGap(c.GapPct), "_", "-")
+		return strings.ReplaceAll(rpc.GammaRegimeFromGap(c.GapPct), "_", "-")
 	}
 	switch c.GammaSign {
 	case "positive":

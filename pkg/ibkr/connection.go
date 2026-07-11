@@ -47,7 +47,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/osauer/ibkr/pkg/ibkr/internal/logging"
+	"github.com/osauer/ibkr/v2/pkg/ibkr/internal/logging"
 )
 
 // ConnectionStatus represents the state of an IBKR connection
@@ -2820,9 +2820,6 @@ func (c *Connection) sendMessageWithType(msg []byte, reqType RequestType) error 
 // interactive caller can leave the paced HMDS queue when its RPC deadline
 // expires instead of lingering behind background fan-out.
 func (c *Connection) sendMessageWithTypeContext(ctx context.Context, msg []byte, reqType RequestType) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	// Check connection status before queueing - reject if disconnecting
 	c.statusMu.RLock()
 	status := c.status
@@ -3587,9 +3584,9 @@ func (c *Connection) SetMarketDataType(dataType int) error {
 	return c.sendMessage(msg)
 }
 
-// GetMarketDataType returns the current market data type for a reqID.
+// MarketDataType returns the current market data type for a reqID.
 // 1=RealTime, 2=Frozen, 3=Delayed, 4=DelayedFrozen. 0 if unknown.
-func (c *Connection) GetMarketDataType(reqID int) int {
+func (c *Connection) MarketDataType(reqID int) int {
 	c.mktDataTypeMu.RLock()
 	defer c.mktDataTypeMu.RUnlock()
 	if v, ok := c.mktDataType[reqID]; ok {
@@ -4004,9 +4001,6 @@ func (c *Connection) RequestMarketDataWithContract(ctx context.Context, contract
 }
 
 func (c *Connection) requestMarketDataWithContract(ctx context.Context, contract Contract, genericTicks string, snapshot bool, regulatorySnap bool, beforeSend func(reqID int) func()) (int, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected to IBKR")
 	}
@@ -4182,19 +4176,13 @@ func normalizeResolvedOptionMarketDataContract(contract *Contract) {
 	contract.PrimaryExch = ""
 }
 
-// RequestHistoricalData submits an HMDS request for historical data.
-// The beforeSend callback is invoked after the reqID is allocated but before
-// the message is sent, allowing callers to register tracking state safely.
-func (c *Connection) RequestHistoricalData(contract Contract, endDateTime, duration, barSize, whatToShow string, useRTH bool, includeExpired bool, formatDate int, keepUpToDate bool, beforeSend func(int)) (int, error) {
-	return c.RequestHistoricalDataCtx(context.Background(), contract, endDateTime, duration, barSize, whatToShow, useRTH, includeExpired, formatDate, keepUpToDate, beforeSend)
-}
-
-// RequestHistoricalDataCtx submits an HMDS request for historical data and
-// honors ctx while waiting for rate-limiter admission.
-func (c *Connection) RequestHistoricalDataCtx(ctx context.Context, contract Contract, endDateTime, duration, barSize, whatToShow string, useRTH bool, includeExpired bool, formatDate int, keepUpToDate bool, beforeSend func(int)) (int, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// RequestHistoricalData submits an HMDS request for historical data and
+// honors ctx while waiting for rate-limiter admission. The beforeSend
+// callback is invoked after the reqID is allocated but before the message is
+// sent, allowing callers to register tracking state safely. The parameter
+// list past whatToShow mirrors the reqHistoricalData wire message
+// field-for-field (useRTH, includeExpired, formatDate, keepUpToDate).
+func (c *Connection) RequestHistoricalData(ctx context.Context, contract Contract, endDateTime, duration, barSize, whatToShow string, useRTH bool, includeExpired bool, formatDate int, keepUpToDate bool, beforeSend func(int)) (int, error) {
 	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected to IBKR")
 	}
@@ -4315,17 +4303,9 @@ func normalizeHistoricalDuration(duration string) string {
 	}
 }
 
-// CancelHistoricalData cancels an active historical data subscription/request.
-func (c *Connection) CancelHistoricalData(reqID int) error {
-	return c.CancelHistoricalDataCtx(context.Background(), reqID)
-}
-
-// CancelHistoricalDataCtx cancels an active historical request and honors ctx
+// CancelHistoricalData cancels an active historical request and honors ctx
 // while waiting for rate-limiter admission.
-func (c *Connection) CancelHistoricalDataCtx(ctx context.Context, reqID int) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (c *Connection) CancelHistoricalData(ctx context.Context, reqID int) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
@@ -4375,9 +4355,6 @@ func (c *Connection) RequestSecDefOptParams(underlyingSymbol, futFopExchange, un
 // ctx is forwarded to acquireMarketDataSlot; nil is treated as Background.
 // See RequestMarketData's docstring for F-26 lineage.
 func (c *Connection) RequestMarketDataWithPrimary(ctx context.Context, symbol string, primaryExchange string) (int, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected to IBKR")
 	}
@@ -4440,9 +4417,6 @@ func (c *Connection) RequestMarketDataWithPrimary(ctx context.Context, symbol st
 func (c *Connection) RequestOptionsMarketData(ctx context.Context, symbol string, expiry string, strike float64, right string) (int, error) {
 	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected to IBKR")
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 	if err := c.requireServerVersion("RequestOptionsMarketData"); err != nil {
 		return 0, err
@@ -4510,9 +4484,6 @@ func (c *Connection) resolveOptionContract(ctx context.Context, contract *Contra
 	}
 	if timeout <= 0 {
 		timeout = 5 * time.Second
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 
 	if c.applyCachedOptionContract(contract) {
@@ -4627,9 +4598,6 @@ func (c *Connection) fetchContractDetailFirst(ctx context.Context, contract Cont
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	detailsCh := make(chan ContractDetailsLite, 1)
 	serverVersion := c.serverVersion
 	reqID := c.GetNextRequestID()
@@ -4661,9 +4629,6 @@ func (c *Connection) fetchContractDetailFirst(ctx context.Context, contract Cont
 func (c *Connection) fetchOptionContractDetail(ctx context.Context, contract Contract, timeout time.Duration) (*ContractDetailsLite, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 
 	detailsCh := make(chan ContractDetailsLite, 8)
@@ -4797,9 +4762,6 @@ func (c *Connection) PrewarmOptionChain(
 ) []PrewarmOptionChainResult {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 	results := make([]PrewarmOptionChainResult, len(expiries))
 	if len(expiries) == 0 {
@@ -5001,7 +4963,7 @@ func (c *Connection) CancelMarketData(reqID int) error {
 
 // RequestPositions requests current positions via the one-shot reqPositions
 // wire path. Library-callable; the daemon prefers the streaming portfolio
-// path through Connector.GetCachedPositions backed by RequestAccountUpdates
+// path through Connector.CachedPositions backed by RequestAccountUpdates
 // (no reqPositions round-trip on the read path — see doc.go). Kept here so
 // downstream callers that bypass Connector can still drive the alternate
 // path. Pairs with WaitForPositionsEnd.

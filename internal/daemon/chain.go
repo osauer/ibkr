@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/marketcal"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/marketcal"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // defaultExpiryIVCap is how many expiries get IV by default — the front
@@ -451,7 +451,7 @@ func collectExpiryATMIV(ctx context.Context, c *ibkrlib.Connector, symbol, expir
 	poll := time.NewTicker(75 * time.Millisecond)
 	defer poll.Stop()
 	for {
-		if iv, ok := c.GetOptionIV(key); ok && iv > 0 {
+		if iv, ok := c.OptionIV(key); ok && iv > 0 {
 			v := iv
 			return expiryIVObservation{
 				iv:      &v,
@@ -769,7 +769,7 @@ func chainHistoricalSpotFallback(ctx context.Context, c *ibkrlib.Connector, symb
 	}
 	fallbackCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	bars, err := c.FetchHistoricalDailyBarsCtx(fallbackCtx, symbol, 10)
+	bars, err := c.FetchHistoricalDailyBars(fallbackCtx, symbol, 10, 0)
 	if err != nil {
 		return 0, ""
 	}
@@ -1130,7 +1130,7 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 		ivDeadline = deadline
 	}
 	if err := pollUntil(ctx, ivDeadline, func() bool {
-		v, ok := c.GetOptionIV(key)
+		v, ok := c.OptionIV(key)
 		if ok && v > 0 {
 			iv = v
 			asOf = time.Now()
@@ -1147,8 +1147,8 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 	// shape today; if a future chain consumer wants them we extend
 	// ChainStrike rather than fold them into the same fields.
 	var delta *float64
-	if g, ok := c.GetOptionGreeks(key); ok {
-		// GetOptionGreeks' ok flag is the "at least one field populated
+	if g, ok := c.OptionGreeks(key); ok {
+		// OptionGreeks' ok flag is the "at least one field populated
 		// from a valid model-computation tick" gate; genuine zero delta
 		// (far-OTM near expiry) must surface as a non-nil pointer per
 		// the wire contract.
@@ -1156,7 +1156,7 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 		delta = &d
 	}
 	var prevClose float64
-	if px, ok := c.GetOptionPrevClose(key); ok && px > 0 {
+	if px, ok := c.OptionPrevClose(key); ok && px > 0 {
 		prevClose = px
 	}
 	// Opportunistic OI read off the same subscription. Tick types 27
@@ -1170,7 +1170,7 @@ func fillOptionLeg(ctx context.Context, c *ibkrlib.Connector, row *rpc.ChainStri
 		oiDeadline = deadline
 	}
 	if v, observed := waitForOptionOpenInterest(ctx, oiDeadline, func() (int64, bool) {
-		if d, ok := c.GetMarketData()[key]; ok && d.OpenIntObserved {
+		if d, ok := c.MarketDataSnapshot()[key]; ok && d.OpenIntObserved {
 			return d.OpenInt, true
 		}
 		return 0, false

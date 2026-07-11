@@ -399,7 +399,7 @@ func checkChainIVSource(in checkInputs) CheckResult {
 	loose := in.Loose
 	// The IV-source bug (v0.24.x): productionLegFetcher polled
 	// MarketData.IV (fed only by generic tick 106 which IBKR doesn't
-	// deliver for OPT) instead of GetOptionIV(key) (fed by msg 21).
+	// deliver for OPT) instead of OptionIV(key) (fed by msg 21).
 	// This check catches the wire-side evidence: msg 21 frames must
 	// arrive for at least one OPT subscribe with a non-NaN IV value.
 	// Frames are filtered to msg_id=21 and we read fields[4] (IV).

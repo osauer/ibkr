@@ -178,9 +178,9 @@ func TestSubscribeOptionCapturesImmediateOpenInterestTick(t *testing.T) {
 		t.Fatalf("test writer did not observe outbound reqMktData")
 	}
 
-	md := c.GetMarketData()
+	md := c.MarketDataSnapshot()
 	if md[subKey] == nil {
-		t.Fatalf("GetMarketData missing entry for %q", subKey)
+		t.Fatalf("MarketDataSnapshot missing entry for %q", subKey)
 	}
 	if md[subKey].OpenInt != 4321 {
 		t.Fatalf("OpenInt = %d, want 4321", md[subKey].OpenInt)

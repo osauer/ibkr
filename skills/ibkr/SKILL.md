@@ -8,7 +8,7 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
   regime dashboard), checking portfolio-aware canary stress lifecycle, held-name market-event flags,
   reading daemon protection proposals, daemon opportunities, offline opportunity research diagnostics, or runtime settings/freeze state,
   or explicitly requests an order preview/status/history read. This skill is read/preview-first by default;
-  explicit broker-write requests must use the gated CLI path and report the returned artifact.
+  explicit current-turn broker-write requests must use the gated CLI path and report a redacted execution artifact.
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
@@ -86,14 +86,15 @@ query/export, trade confirmation, commission ledger, closed-position ledger, or
 broker-grade historical audit. Use `ibkr orders open` for currently working
 orders and `ibkr order status ID` for one order's full local audit trail.
 
-If the user explicitly asks for a stock/ETF order draft, use
+If the user explicitly asks in the current turn for a stock/ETF order draft, use
 `ibkr order preview` and explain `token_minted` separately from
 `submit_eligible`; only an accepted broker WhatIf for the exact draft makes a
 minted token submit-eligible. If the user explicitly asks to place, modify, or
 cancel an order, use the gated CLI flow outside this skill's default allowlist:
 `ibkr trading status --json` must be ready, the write must consume a valid
-preview token when required, and the CLI's JSON result is the execution artifact.
-Do not invent or simulate trade execution.
+preview token when required, and the CLI's redacted JSON result is the execution
+artifact. Do not submit through paired-PWA/browser automation. Do not invent or
+simulate trade execution.
 
 ## Output discipline
 
@@ -115,6 +116,8 @@ Do not invent or simulate trade execution.
   regular sessions, or the next known open.
 - Never claim an order was placed unless the CLI returned a successful broker
   write result for the requested paper or live route.
+- Redact account IDs, balances, holdings, order references, and preview tokens
+  from shared execution artifacts unless the user explicitly needs one field.
 - Never present `orders history` as official broker history or a commission/P&L
   ledger; it is local journal evidence only.
 - For opportunity research output, say "diagnostic only" unless the JSON

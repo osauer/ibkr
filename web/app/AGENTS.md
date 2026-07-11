@@ -31,6 +31,13 @@ Open the returned `.url` in the in-app Browser. Successful pairing redirects to
 
 Use the in-app Browser for visible local app QA. Do not use macOS `open`.
 
+Browser QA is read-only, even when the page is paired and trading controls are
+visible. Do not click or call submit, exercise, cancel, modify, purge, restore,
+settings-write, or other state-changing endpoints. A paired browser is stamped
+as `human-paired-device`, so browser automation would bypass agent-origin CLI
+classification. Any explicitly requested agent broker write must use the gated
+CLI path described by the root `AGENTS.md`.
+
 ## Browser Debugging
 
 The in-app Browser can read rendered DOM state, click, and inspect console logs,

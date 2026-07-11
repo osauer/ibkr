@@ -164,9 +164,7 @@ func TestHandshakeRejectsOldServerVersion(t *testing.T) {
 	}
 }
 
-func TestHandshakeFailsWhenServerSilentEvenWithPermissiveEnv(t *testing.T) {
-	t.Setenv("IBKR_HANDSHAKE_PERMISSIVE", "true")
-
+func TestHandshakeFailsWhenServerSilent(t *testing.T) {
 	client, server := net.Pipe()
 	t.Cleanup(func() {
 		client.Close()

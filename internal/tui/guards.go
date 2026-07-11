@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/cli"
 )
 
 func confirmationFor(line string, catalog []cli.CommandSpec) (*confirmation, error) {

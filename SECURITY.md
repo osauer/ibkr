@@ -60,11 +60,12 @@ Honest limits of this interlock:
   position), but note the asymmetry: cancelling a protective stop *removes*
   protection. Cancels journal their origin; a future tightening can restrict
   agent cancels to agent-placed orders.
-- An agent driving the paired PWA inherits the `human-paired-device` origin;
-  pairing approval on the phone is the human act that scopes that risk. Its
-  live submits are gated by the same preview-token and server-validated
-  account/mode confirmation fields as any app write — single-tap, no typed
-  ritual.
+- A paired PWA request carries the `human-paired-device` origin; the daemon
+  cannot distinguish a human click from browser automation. Pairing scopes
+  user-driven app access, not agent submit authority. Repo agents keep browser
+  QA read-only and use the agent-origin gated CLI for an explicitly requested
+  write. App writes still require the preview token and server-validated
+  account/mode confirmation fields.
 - **Paper-smoke evidence is MAC'd, not secret.** `ibkr trading paper-smoke`
   writes evidence signed with the order-token HMAC key, so hand-written or
   edited `trading-readiness.json` files surface as `unsigned` in trading

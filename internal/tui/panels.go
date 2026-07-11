@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/app/live"
+	"github.com/osauer/ibkr/v2/internal/app/live"
 )
 
 func statusLine(m *model) string {

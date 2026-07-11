@@ -54,7 +54,7 @@ func presubmittedFrame(orderID string) []string {
 func TestHandleOrderStatus_UnchangedRepeatsStayOffINFO(t *testing.T) {
 	out := newInfoLogCapture(t)
 	c := newOrderStatusRig(t)
-	c.openOrders["87"] = &Order{ID: "87", Symbol: "SPY", Status: OrderStatusSubmitted}
+	c.openOrders["87"] = &trackedOrder{ID: "87", Symbol: "SPY", Status: OrderStatusSubmitted}
 
 	// The flood: the same resting PreSubmitted frame re-sent many times.
 	frame := presubmittedFrame("87")
@@ -113,7 +113,7 @@ func TestOrderStatusChanged_TracksSignatureAcrossOrders(t *testing.T) {
 func TestHandleOrderStatus_TerminalForgetsSignature(t *testing.T) {
 	t.Parallel()
 	c := newOrderStatusRig(t)
-	c.openOrders["87"] = &Order{ID: "87", Symbol: "SPY", Status: OrderStatusSubmitted}
+	c.openOrders["87"] = &trackedOrder{ID: "87", Symbol: "SPY", Status: OrderStatusSubmitted}
 
 	c.handleOrderStatus(presubmittedFrame("87"))
 	c.handleOrderStatus([]string{"3", "87", "Filled", "100", "0", "50.25"})

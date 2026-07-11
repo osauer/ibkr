@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/cli"
 )
 
 type lineEditor struct {

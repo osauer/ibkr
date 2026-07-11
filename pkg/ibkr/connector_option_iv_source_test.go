@@ -10,8 +10,8 @@ import (
 //
 // When the IBKR gateway delivers an OPTION_COMPUTATION model tick for an
 // option subscription (msg 21, tickType 13), the per-strike IV lands in
-// optIV[OPRA_key] — readable via GetOptionIV — and NOT in
-// subscriptions[OPRA_key].IV (which is exposed through GetMarketData's
+// optIV[OPRA_key] — readable via OptionIV — and NOT in
+// subscriptions[OPRA_key].IV (which is exposed through MarketDataSnapshot's
 // MarketData.IV field). subscriptions[…].IV is only written by
 // handleTickGeneric when the chain-averaged underlying IV arrives (wire
 // tick 24, requested via generic tick 106); that tick is documented for
@@ -20,7 +20,7 @@ import (
 // whether the generic-tick list requests it.
 //
 // productionLegFetcher (internal/daemon/gamma_zero_compute.go) reads the
-// per-strike IV via GetOptionIV for exactly this reason. A previous
+// per-strike IV via OptionIV for exactly this reason. A previous
 // revision polled d.IV (i.e. MarketData.IV) instead and timed out every
 // leg waiting for a value the gateway never sent — the v0.24.x gamma-
 // compute "all N legs failed" bug. Anyone tempted to "simplify" the
@@ -54,27 +54,27 @@ func TestModelTickPopulatesOptionIVNotSubscriptionIV(t *testing.T) {
 	})
 
 	// optIV is the per-strike IV source the gamma compute reads.
-	iv, ok := c.GetOptionIV(opraKey)
+	iv, ok := c.OptionIV(opraKey)
 	if !ok || iv != 0.275 {
-		t.Fatalf("GetOptionIV(%q) = (%v, %v); want (0.275, true) — model tick should populate optIV",
+		t.Fatalf("OptionIV(%q) = (%v, %v); want (0.275, true) — model tick should populate optIV",
 			opraKey, iv, ok)
 	}
-	g, ok := c.GetOptionGreeks(opraKey)
+	g, ok := c.OptionGreeks(opraKey)
 	if !ok || g.Gamma != 0.0123 {
-		t.Fatalf("GetOptionGreeks(%q).Gamma = (%v, %v); want (0.0123, true)",
+		t.Fatalf("OptionGreeks(%q).Gamma = (%v, %v); want (0.0123, true)",
 			opraKey, g.Gamma, ok)
 	}
 
-	// The bug surface: anyone reading d.IV via GetMarketData sees zero
+	// The bug surface: anyone reading d.IV via MarketDataSnapshot sees zero
 	// because handleOptionComputation does not write into sub.IV. Only
 	// handleTickGeneric for wire tick 24 does — and that tick is not
 	// delivered for OPT subscriptions in practice. This assertion is
 	// the regression pin: if a future refactor makes the model tick
 	// also write to sub.IV, this test fails loudly and the maintainer
 	// has to decide whether the two surfaces should converge.
-	md, ok := c.GetMarketData()[opraKey]
+	md, ok := c.MarketDataSnapshot()[opraKey]
 	if !ok || md == nil {
-		t.Fatalf("GetMarketData()[%q] missing", opraKey)
+		t.Fatalf("MarketDataSnapshot()[%q] missing", opraKey)
 	}
 	if md.IV != 0 {
 		t.Errorf("MarketData.IV = %v; want 0 (sub.IV is the underlying-IV path, not a per-strike source)", md.IV)
@@ -129,8 +129,8 @@ func TestKeyedOptionIVRoutesSameUnderlyingToSeparateSlots(t *testing.T) {
 		"1.10", "0.45", "12.0", "0", "0.01", "22.0", "-0.04", "55",
 	})
 
-	frontIV, frontOK := c.GetOptionIV(frontKey)
-	backIV, backOK := c.GetOptionIV(backKey)
+	frontIV, frontOK := c.OptionIV(frontKey)
+	backIV, backOK := c.OptionIV(backKey)
 	if !frontOK || frontIV != 0.80 {
 		t.Fatalf("front IV = %v ok=%v, want 0.80 true", frontIV, frontOK)
 	}

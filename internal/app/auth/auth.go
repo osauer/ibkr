@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/osauer/ibkr/internal/app/state"
+	"github.com/osauer/ibkr/v2/internal/app/state"
 )
 
 const SessionTTL = 12 * time.Hour

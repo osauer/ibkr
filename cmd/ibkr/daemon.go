@@ -14,9 +14,9 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/osauer/ibkr/internal/config"
-	"github.com/osauer/ibkr/internal/daemon"
-	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon"
+	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
 func runDaemon(args []string) {

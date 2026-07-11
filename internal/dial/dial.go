@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // ErrSocketMissing indicates the daemon is not reachable: either the socket

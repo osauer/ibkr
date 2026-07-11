@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
-	"github.com/osauer/ibkr/internal/update"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/update"
 )
 
 func TestRunRestartCoreStartsWhenNoDaemonWasRunning(t *testing.T) {

@@ -93,12 +93,12 @@ func TestSecurityDefinitionFarmCountsAsImpaired(t *testing.T) {
 	}
 }
 
-// TestGetCachedPositionsNeverHidesHeldRowsOnInactiveMark pins the
+// TestCachedPositionsNeverHidesHeldRowsOnInactiveMark pins the
 // consequence-surface fix: an inactive mark must never hide a held stock
 // row. For a true delisting the row is zero-value and was always kept; the
 // removed skip branch fired almost exclusively on FALSE marks, silently
 // hiding healthy holdings during gateway-wide degradation.
-func TestGetCachedPositionsNeverHidesHeldRowsOnInactiveMark(t *testing.T) {
+func TestCachedPositionsNeverHidesHeldRowsOnInactiveMark(t *testing.T) {
 	c, conn, _ := newAcctResubscribeRig(t)
 	c.markSymbolInactive("AMD", "No security definition has been found for the request")
 
@@ -113,9 +113,9 @@ func TestGetCachedPositionsNeverHidesHeldRowsOnInactiveMark(t *testing.T) {
 	}
 	conn.positionsMu.Unlock()
 
-	positions, err := c.GetCachedPositions()
+	positions, err := c.CachedPositions()
 	if err != nil {
-		t.Fatalf("GetCachedPositions: %v", err)
+		t.Fatalf("CachedPositions: %v", err)
 	}
 	if len(positions) != 1 || positions[0].Contract.Symbol != "AMD" {
 		t.Fatalf("held marked stock must remain visible, got %+v", positions)

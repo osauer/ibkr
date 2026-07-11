@@ -21,12 +21,12 @@ import (
 	"syscall"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/breadth/spx"
-	"github.com/osauer/ibkr/internal/config"
-	"github.com/osauer/ibkr/internal/discover"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/breadth/spx"
+	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/discover"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // maxFrameBytes caps each newline-delimited JSON-RPC request the daemon will

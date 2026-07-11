@@ -29,8 +29,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/osauer/ibkr/internal/cli"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func main() {
@@ -342,9 +343,9 @@ func fixtureScan() *rpc.ScanResult {
 
 // fixtureSize mirrors a typical EUR account sizing a long AAPL trade
 // with a 2R target — covers the full screen including the reward block.
-func fixtureSize() *cli.SizeResult {
+func fixtureSize() *risk.SizeResult {
 	tgt, r, reward, be := 215.50, 2.0, 4000.0, 1.0/3.0
-	return &cli.SizeResult{
+	return &risk.SizeResult{
 		Symbol: "AAPL", Side: "long",
 		Entry: 207.50, Stop: 202.50, Target: &tgt,
 		RiskPct: 1.0, Lot: 1, FX: 1.0,

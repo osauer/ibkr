@@ -52,9 +52,6 @@ type OrderWhatIfResult struct {
 // the default build because WhatIf=true makes the broker evaluate without
 // creating a working order; PlaceOrder/CancelOrder remain guarded.
 func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (OrderWhatIfResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if order == nil {
 		return OrderWhatIfResult{}, fmt.Errorf("order is nil")
 	}

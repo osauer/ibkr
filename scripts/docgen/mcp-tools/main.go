@@ -17,7 +17,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/mcp"
+	"github.com/osauer/ibkr/v2/internal/mcp"
 )
 
 const defaultOutput = "docs/reference/mcp-tools.md"

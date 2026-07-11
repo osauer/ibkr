@@ -10,7 +10,7 @@
 set -u
 
 hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-hook="$hook_dir/ibkr-pre-tool-use.sh"
+hook="${HOOK_UNDER_TEST:-$hook_dir/ibkr-pre-tool-use.sh}"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -84,6 +84,7 @@ run_case order-preview 0 "$live_ready" none 'ibkr order preview sell BB 20260821
 run_case order-status 0 "$live_ready" none 'ibkr order status 42 --json'
 run_case order-help 0 "$live_ready" none 'ibkr order --help'
 run_case rules-future 0 "$live_ready" none 'ibkr rules --json'
+run_case reduce-preview 0 "$live_ready" none 'ibkr proposals reduce BB --percent 25 --json'
 
 # Human-only and destructive state writes stay blocked regardless of status.
 run_case settings-set 2 "$live_ready" none 'ibkr settings set trading.freeze=true'
@@ -95,10 +96,15 @@ run_case place-live-ready 0 "$live_ready" status 'ibkr order place --preview-tok
 run_case place-disabled 2 "$mode_disabled" status 'ibkr order place --preview-token tok'
 run_case cancel-frozen 0 "$live_frozen" status 'ibkr order cancel 42'
 run_case place-frozen 2 "$live_frozen" status 'ibkr order place --preview-token tok'
+run_case reduce-submit-live-ready 0 "$live_ready" status 'ibkr proposals reduce BB --percent 25 --submit --json'
+run_case reduce-submit-disabled 2 "$mode_disabled" status 'ibkr proposals reduce BB --percent 25 --submit --json'
+run_case reduce-submit-frozen 2 "$live_frozen" status 'ibkr proposals reduce BB --percent 25 --submit --json'
+run_case close-frozen 2 "$live_frozen" status 'ibkr order close 42'
 
 # Shell composition around a write is blocked before any status lookup.
 run_case compound-write 2 "$live_ready" none 'ibkr orders --json; ibkr order place --preview-token tok'
 run_case subshell-write 2 "$live_ready" none 'ibkr order place --preview-token $(cat tok)'
+run_case compound-reduce-submit 2 "$live_ready" none 'ibkr proposals reduce BB --percent 25 --submit --json; echo done'
 
 if [[ "$fails" -gt 0 ]]; then
   echo "$fails hook behavior case(s) failed" >&2

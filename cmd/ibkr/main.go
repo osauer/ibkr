@@ -20,9 +20,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/osauer/ibkr/internal/cli"
-	"github.com/osauer/ibkr/internal/dial"
-	"github.com/osauer/ibkr/internal/tui"
+	"github.com/osauer/ibkr/v2/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/tui"
 )
 
 var (

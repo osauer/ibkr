@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/config"
-	"github.com/osauer/ibkr/internal/rpc"
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // newPaperSmokeTestServer wires the preview test harness with the readiness

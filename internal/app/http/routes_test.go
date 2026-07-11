@@ -19,12 +19,12 @@ import (
 
 	hyperserve "github.com/osauer/hyperserve/pkg/server"
 
-	"github.com/osauer/ibkr/internal/app/auth"
-	"github.com/osauer/ibkr/internal/app/daemonclient"
-	"github.com/osauer/ibkr/internal/app/live"
-	"github.com/osauer/ibkr/internal/app/relay"
-	"github.com/osauer/ibkr/internal/app/state"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/app/auth"
+	"github.com/osauer/ibkr/v2/internal/app/daemonclient"
+	"github.com/osauer/ibkr/v2/internal/app/live"
+	"github.com/osauer/ibkr/v2/internal/app/relay"
+	"github.com/osauer/ibkr/v2/internal/app/state"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func TestBootstrapRequiresAuth(t *testing.T) {

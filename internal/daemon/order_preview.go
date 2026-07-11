@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/config"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 const (
@@ -1150,7 +1150,7 @@ func (s *Server) previewPositionImpact(ctx context.Context, contract rpc.Contrac
 	if c == nil {
 		return rpc.OrderPositionImpact{}, s.gatewayUnavailableError()
 	}
-	positions, err := c.GetCachedPositions()
+	positions, err := c.CachedPositions()
 	if err != nil {
 		return rpc.OrderPositionImpact{}, err
 	}

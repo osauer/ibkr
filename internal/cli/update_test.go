@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/osauer/ibkr/internal/update"
+	"github.com/osauer/ibkr/v2/internal/update"
 )
 
 // fakeFetch returns a static Release and a nil error. The Release

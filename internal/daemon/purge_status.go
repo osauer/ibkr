@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 const (

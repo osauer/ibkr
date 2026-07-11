@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // regimeDecisionJournal appends one JSON line per decision-relevant regime

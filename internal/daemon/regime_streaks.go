@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/osauer/ibkr/internal/marketcal"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/marketcal"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // StreakEntry is one indicator's persisted band history. LastBand is

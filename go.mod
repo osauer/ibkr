@@ -1,4 +1,4 @@
-module github.com/osauer/ibkr
+module github.com/osauer/ibkr/v2
 
 go 1.26.0
 

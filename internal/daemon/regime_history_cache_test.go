@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 func TestRegimeHistoryCacheFallsBackOnThinLiveBars(t *testing.T) {

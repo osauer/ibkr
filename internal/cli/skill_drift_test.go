@@ -163,7 +163,7 @@ func TestAgentPolicyDocsDoNotClaimLiveAgentHardBlock(t *testing.T) {
 		"../../docs/design/trading-paper-smoke.md",
 		"../../docs/templates/daemon-cli-trading-contract.md",
 		"../../skills/ibkr/SKILL.md",
-		"../../.agents/skills/ibkr/SKILL.md",
+		"../../.agents/skills/ibkr-harness/SKILL.md",
 		"../../.codex/rules/ibkr.rules",
 	}
 	for _, path := range paths {

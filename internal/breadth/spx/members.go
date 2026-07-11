@@ -11,7 +11,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/osauer/ibkr/internal/xdgcache"
+	"github.com/osauer/ibkr/v2/internal/xdgcache"
 )
 
 // MembersFilename is the canonical filename for the runtime-refreshed

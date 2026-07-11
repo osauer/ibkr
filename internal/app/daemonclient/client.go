@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/osauer/ibkr/internal/cli"
-	"github.com/osauer/ibkr/internal/dial"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 type Client interface {

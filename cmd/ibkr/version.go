@@ -32,7 +32,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/cli"
 )
 
 // versionInfo is the wire+text shape returned by collectVersionInfo.

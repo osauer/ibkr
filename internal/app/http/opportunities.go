@@ -3,7 +3,7 @@ package apphttp
 import (
 	nethttp "net/http"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func (h *handler) handleOpportunitiesSnapshot(w nethttp.ResponseWriter, r *nethttp.Request) {

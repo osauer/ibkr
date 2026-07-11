@@ -1,11 +1,11 @@
 # Project execpolicy rules for IBKR work.
 #
-# These rules are intentionally narrower than a global `ibkr` allow rule. The
-# hook in ../hooks/ibkr-pre-tool-use.sh handles cases that prefix rules cannot
-# express, such as flags appearing after symbols.
+# These rules are intentionally narrower than a global `ibkr` allow rule.
+# Daemon authorization is the broker-write boundary; the project hook adds
+# earlier, best-effort rejection for command shapes prefix rules cannot express.
 
 prefix_rule(
-    pattern = ["ibkr", ["status", "version", "account", "positions", "quote", "calendar", "watch", "chain", "history", "scan", "size", "technical", "market-events", "breadth", "gamma", "regime", "canary"]],
+    pattern = ["ibkr", ["status", "version", "account", "positions", "quote", "calendar", "chain", "history", "scan", "size", "technical", "market-events", "breadth", "gamma", "regime", "canary", "rules"]],
     decision = "allow",
     justification = "Read-only IBKR account, market-data, screen, regime, canary, and sizing commands are routine project work.",
     match = [
@@ -47,20 +47,29 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["ibkr", "proposals", ["status", "list", "refresh", "preview", "submit", "ignore"]],
+    pattern = ["ibkr", "proposals", ["status", "list", "refresh", "preview"]],
     decision = "allow",
-    justification = "Protection proposal surfaces are allowed at the prefix layer; preview/submit/ignore remain gated by the project hook and daemon trading policy.",
+    justification = "Protection proposal discovery and preview do not submit broker orders.",
     match = [
         "ibkr proposals refresh --json",
         "ibkr proposals preview --key abc --revision sha256:abc --json",
-        "ibkr proposals submit --key abc --revision sha256:abc --json",
     ],
 )
 
 prefix_rule(
-    pattern = ["ibkr", "order", ["place", "submit", "execute", "modify", "cancel", "close"]],
-    decision = "allow",
-    justification = "Broker writes are allowed when the project hook confirms trading.status is paper/write-ready or live/write-ready; freeze, blocked, and unknown states remain blocked by hook/daemon gates.",
+    pattern = ["ibkr", "proposals", ["submit", "reduce", "ignore"]],
+    decision = "prompt",
+    justification = "Proposal submit/reduce may reach broker writes, and ignore mutates local decision state; require a current-turn user decision.",
+    match = [
+        "ibkr proposals submit --key abc --revision sha256:abc --json",
+        "ibkr proposals reduce AAPL --percent 25 --submit --json",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "order", ["place", "submit", "execute", "modify", "cancel"]],
+    decision = "prompt",
+    justification = "Broker writes require an explicit transaction-specific current-turn instruction in addition to hook and daemon gates.",
     match = [
         "ibkr order place --preview-token TOKEN --json",
         "ibkr order cancel ORDER_ID --json",
@@ -68,12 +77,20 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["ibkr", "opportunities", ["status", "list", "refresh", "preview", "exercise", "ignore"]],
+    pattern = ["ibkr", "opportunities", ["status", "list", "refresh", "preview"]],
     decision = "allow",
-    justification = "Opportunity discovery is read-oriented; preview/exercise/ignore remain gated by the project hook and daemon trading policy.",
+    justification = "Opportunity discovery and preview do not submit broker orders.",
     match = [
         "ibkr opportunities status --json",
         "ibkr opportunities preview KEY REVISION --json",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "opportunities", ["exercise", "ignore"]],
+    decision = "prompt",
+    justification = "Exercise reaches a broker write and ignore mutates local decision state; require a current-turn user decision.",
+    match = [
         "ibkr opportunities exercise KEY REVISION --json",
     ],
 )
@@ -105,8 +122,8 @@ prefix_rule(
 
 prefix_rule(
     pattern = ["ibkr", "purge", "--all"],
-    decision = "allow",
-    justification = "Purge execution is allowed when the project hook confirms trading.status is paper/write-ready or live/write-ready; freeze, blocked, and unknown states remain blocked by hook/daemon gates.",
+    decision = "prompt",
+    justification = "Purge execution is a broker write and requires a transaction-specific current-turn instruction.",
     match = [
         "ibkr purge --all",
     ],
@@ -114,8 +131,8 @@ prefix_rule(
 
 prefix_rule(
     pattern = ["ibkr", "purge", "execute"],
-    decision = "allow",
-    justification = "Purge execution is allowed when the project hook confirms trading.status is paper/write-ready or live/write-ready; freeze, blocked, and unknown states remain blocked by hook/daemon gates.",
+    decision = "prompt",
+    justification = "Purge execution is a broker write and requires a transaction-specific current-turn instruction.",
     match = [
         "ibkr purge execute --all --json",
     ],
@@ -123,11 +140,29 @@ prefix_rule(
 
 prefix_rule(
     pattern = ["ibkr", "purge", "restore"],
-    decision = "allow",
-    justification = "Restore preview is read-only; restore execution is allowed only when the project hook confirms trading.status is paper/write-ready or live/write-ready.",
+    decision = "prompt",
+    justification = "Restore preview is read-only but the same prefix can carry --execute; require review at this boundary.",
     match = [
         "ibkr purge restore --all --json",
         "ibkr purge restore --all --execute --json",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "settings", "set"],
+    decision = "forbidden",
+    justification = "Runtime settings, freeze, and trading-limit changes are human-only in agent sessions.",
+    match = [
+        "ibkr settings set trading.freeze=true",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "daemon", ["purge", "reset", "wipe"]],
+    decision = "forbidden",
+    justification = "Destructive daemon maintenance is human-only in agent sessions.",
+    match = [
+        "ibkr daemon wipe",
     ],
 )
 

@@ -1,9 +1,9 @@
 ---
-name: ibkr
-description: Use the local IBKR project tooling to answer account, position, P&L, quote, option-chain, scanner, calendar, history, technical, regime, canary, market-event, protection-proposal, opportunity, offline opportunity backtest/research diagnostics, settings/freeze, order-preview, order-status, and order-history questions. Prefer read-only MCP tools when available or `ibkr ... --json` when using the CLI. This skill is read/preview-first by default; explicit broker-write requests must use the gated CLI path and report the returned artifact.
+name: ibkr-harness
+description: Use repo-local IBKR MCP/CLI for account, market, rulebook, canary, proposal, opportunity, and order investigations while developing the trading harness. Read/preview first; explicit current-turn broker writes use only the gated CLI.
 ---
 
-Updated: 2026-06-20 00:00 CEST
+Updated: 2026-07-10 08:35 CEST
 
 ## Contract
 
@@ -11,8 +11,8 @@ Use this skill when the user asks about their IBKR account, positions, exposure,
 daily P&L, watchlist, quotes, calendars, option chains, daily history, scanners,
 technical screens, fixed-fractional sizing, broad-market regime, dealer gamma,
 market breadth, portfolio canary posture, held-name market events, protection
-proposals, option-exercise opportunities, runtime settings/freeze state, order
-preview, order status, or order history.
+proposals, option-exercise opportunities, trading-rulebook status, runtime
+settings/freeze state, order preview, order status, or order history.
 
 Prefer MCP tools for read-only snapshots when the `ibkr` MCP server is available.
 Use the CLI with `--json` when the MCP surface is not available or when a project
@@ -37,13 +37,13 @@ query/export, trade confirmation, commission ledger, closed-position ledger, or
 broker-grade historical audit. Prefer `ibkr orders open` for current working
 orders and `ibkr order status ID` for one order's full local audit trail.
 
-The MCP surface remains read-oriented for agents. Explicit broker writes,
-including live writes, are allowed only through the gated CLI flow: trading
-status must be write-ready, preview tokens and broker checks must pass, and the
-CLI JSON result is the artifact. Never attempt live-trading enablement, settings
-freeze changes, or destructive daemon maintenance from an agent session. Order
-preview can mint a local token; `token_minted` is not the same as
-`submit_eligible`.
+The MCP surface remains read-oriented for agents. Explicit current-turn broker
+writes, including live writes, are allowed only through the gated CLI flow:
+trading status must be write-ready, preview tokens and broker checks must pass,
+and the redacted CLI JSON result is the artifact. Never attempt live-trading
+enablement, settings freeze changes, or destructive daemon maintenance from an
+agent session. Order preview can mint a local token; `token_minted` is not the
+same as `submit_eligible`.
 
 ## Output Discipline
 
@@ -64,7 +64,7 @@ preview can mint a local token; `token_minted` is not the same as
 
 ## Canonical References
 
-This skill is the Codex-native wrapper. To avoid drift, detailed command
+This skill is the repo development wrapper. To avoid drift, detailed command
 semantics and response schemas remain in the existing project references:
 
 - [command catalog](../../../skills/ibkr/SKILL.md)
@@ -85,8 +85,8 @@ make restart-daemon
 ibkr status --json
 ```
 
-Then run a command that exercises the changed behavior and include that output
-in the completion message. `make smoke-fast` is the default per-change live
-gateway gate; full `make smoke` is binding for daemon/CLI/wire-path changes and
-release work. A skip means the live artifact was not exercised and must be
-reported as such.
+Then run a command that exercises the changed behavior and include only its
+redacted contract evidence in the completion message. `make smoke-fast` is the
+default per-change live gateway gate; full `make smoke` is binding for
+daemon/CLI/wire-path changes and release work. A skip means the live artifact
+was not exercised and must be reported as such.

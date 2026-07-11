@@ -1,17 +1,26 @@
 # Project-scoped Codex settings for the IBKR repo.
 # Loaded only after this project is trusted by Codex.
 
-sandbox_mode = "danger-full-access"
+# Keep routine code work inside the checkout. Commands that need to install a
+# binary, mutate runtime state, or reach outside the workspace must cross the
+# normal approval boundary instead of inheriting host-wide write access.
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
 [features]
 hooks = true
 multi_agent = true
 
 [agents]
 max_threads = 4
+max_depth = 1
 
 [agents.trading_safety_reviewer]
 description = "Read-only review of broker-adjacent semantics, trading safety, data quality, and gates."
 config_file = "./agents/trading-safety-reviewer.toml"
+
+[agents.risk_governance_reviewer]
+description = "Read-only review of risk policy, pre/post-trade controls, reporting authority, exceptions, and operating cadence."
+config_file = "./agents/risk-governance-reviewer.toml"
 
 [agents.spa_authority_reviewer]
 description = "Read-only review of Canary SPA authority, live snapshot semantics, and rendered QA gates."

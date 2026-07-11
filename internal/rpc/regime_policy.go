@@ -366,3 +366,61 @@ func stageConfirmsStress(stage string) bool {
 		return false
 	}
 }
+
+// GammaTransitionGapPct is the ± band, in percent of the zero-gamma level,
+// inside which dealer positioning reads as transitional rather than long or
+// short gamma. Single copy: the daemon gamma rows and every CLI renderer
+// classify through GammaRegimeFromGap, and prose that names the band derives
+// its number from this constant.
+const GammaTransitionGapPct = 2.0
+
+// GammaRegimeFromGap maps the signed spot-vs-zero-gamma gap (percent of the
+// zero-gamma level, positive = spot above) to its wire regime label. A nil
+// gap — no measurable crossing — is transitional: without a gap the
+// classifier must not claim direction.
+func GammaRegimeFromGap(gapPct *float64) string {
+	if gapPct == nil {
+		return "transition_gamma"
+	}
+	switch {
+	case *gapPct > GammaTransitionGapPct:
+		return "long_gamma"
+	case *gapPct >= -GammaTransitionGapPct:
+		return "transition_gamma"
+	default:
+		return "short_gamma"
+	}
+}
+
+// GammaBucketRegime classifies one horizon bucket (0DTE / 1-7 / term) from
+// its zero-gamma level and profile sign. With a usable crossing the gap
+// classifies through GammaRegimeFromGap; without one the swept profile's
+// sign decides, and an unknown sign yields "" (bucket unavailable).
+func GammaBucketRegime(spot float64, zero *float64, sign string) string {
+	if zero != nil && *zero > 0 {
+		gap := (spot - *zero) / *zero * 100
+		return GammaRegimeFromGap(&gap)
+	}
+	switch sign {
+	case "positive":
+		return "long_gamma"
+	case "negative":
+		return "short_gamma"
+	}
+	return ""
+}
+
+// HeuristicThresholds builds the heuristic/pending-backtest threshold
+// metadata shared by the daemon regime rows and the backtest builder. The
+// Heuristic and PendingBacktest bits are policy: they mark bands whose
+// values have not yet earned promotion through the decisions journal.
+func HeuristicThresholds(label, green, yellow, red string) *RegimeThresholds {
+	return &RegimeThresholds{
+		Label:           label,
+		Green:           green,
+		Yellow:          yellow,
+		Red:             red,
+		Heuristic:       true,
+		PendingBacktest: true,
+	}
+}

@@ -3,7 +3,7 @@ package daemon
 import (
 	"context"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func (s *Server) handleAutoTradeStatus() *rpc.AutoTradeStatus {

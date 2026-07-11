@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/dial"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // Resource template URIs exposed by the streaming MCP surface. Stock

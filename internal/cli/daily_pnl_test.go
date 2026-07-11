@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // TestRenderAccount_DailyPnLBlock pins the Daily P&L row + reqPnL-stream

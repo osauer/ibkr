@@ -1,6 +1,9 @@
 package cli
 
-import "github.com/osauer/ibkr/internal/rpc"
+import (
+	"github.com/osauer/ibkr/v2/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+)
 
 // Preview* expose the user-facing text renderers to the cmd/_preview tool
 // so it can demo the visual output with synthetic fixture data — useful
@@ -42,7 +45,7 @@ func PreviewRenderScan(env *Env, r *rpc.ScanResult) {
 	renderScanText(env, r)
 }
 
-func PreviewRenderSize(env *Env, r *SizeResult) {
+func PreviewRenderSize(env *Env, r *risk.SizeResult) {
 	renderSizeText(env, r)
 }
 

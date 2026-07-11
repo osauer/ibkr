@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/risk"
 )
 
 const (

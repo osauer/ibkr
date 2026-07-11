@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func buildGammaLegDiagnostics(underlying string, legs []legData, spot float64) *rpc.GammaLegDiagnostics {

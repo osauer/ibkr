@@ -47,7 +47,7 @@ Rules:
 
 - The top summary is required. It must use `ibkr_canary.action`, `ibkr_canary.market_confirmation`, `ibkr_canary.portfolio_fit`, `ibkr_canary.input_health`, `ibkr_canary.planner_mode_hint`, `ibkr_canary.planner_readiness`, and `ibkr_canary.summary`.
 - Preserve and display `ibkr_canary.fingerprint` exactly. This is the monitor dedupe key.
-- Preserve `ibkr_canary.source_fingerprints.account`, `ibkr_canary.source_fingerprints.positions`, and `ibkr_canary.source_fingerprints.regime` when handing the result to another workflow or alert destination.
+- Preserve `ibkr_canary.source_fingerprints.account`, `ibkr_canary.source_fingerprints.positions`, `ibkr_canary.source_fingerprints.regime`, and `ibkr_canary.source_fingerprints.market_events` when present and handing the result to another workflow or alert destination.
 - Display `source_health[]` compactly and treat stale/degraded/partial statuses as readiness evidence.
 - Use `ibkr_canary.flags` as concise supporting status labels. Use `portfolio`, `market`, `option_health`, and `source_health` for evidence and wording.
 - Use `ibkr_canary.portfolio.held_stress[]` when present to name material held underlyings with daily P&L shock, near-expiry held-option delta concentration, or held-name liquidity degradation. These are positions-only probes; do not call `ibkr_positions` in the monitor profile just to expand them.

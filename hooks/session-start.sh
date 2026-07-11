@@ -11,7 +11,7 @@
 set +e
 
 if ! command -v ibkr >/dev/null 2>&1; then
-	printf '\n[ibkr plugin] The `ibkr` binary is not on your PATH.\nInstall it with one of:\n  curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh\n  go install github.com/osauer/ibkr/cmd/ibkr@latest\n  make install   (from a checkout of github.com/osauer/ibkr)\nThen restart your Claude Code session.\n\n' >&2
+	printf '\n[ibkr plugin] The `ibkr` binary is not on your PATH.\nInstall it with one of:\n  curl -fsSL https://raw.githubusercontent.com/osauer/ibkr/main/install.sh | sh\n  go install github.com/osauer/ibkr/v2/cmd/ibkr@latest\n  make install   (from a checkout of github.com/osauer/ibkr)\nThen restart your Claude Code session.\n\n' >&2
 	exit 0
 fi
 
@@ -37,7 +37,7 @@ plugin_semver=""
 if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
 	plugin_semver=$(jq -r '.version // empty' "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null)
 fi
-[ -z "$plugin_semver" ] && plugin_semver="1.15.0"
+[ -z "$plugin_semver" ] && plugin_semver="2.0.0"
 
 bin_mm=$(printf '%s' "$bin_semver" | awk -F. 'NF>=2 {print $1 "." $2}')
 plg_mm=$(printf '%s' "$plugin_semver" | awk -F. 'NF>=2 {print $1 "." $2}')

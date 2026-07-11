@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: protocol.md sha256:7220321f6681fcaf351f9607dee04b73bb747abcd192fa11415b13a7fe7e2ad9 -->
+<!-- md-source: protocol.md sha256:198f34e0d0e03cff3ecdbd7c3abc2de4c40ff2f636595fc86ddc576e89cb4f37 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -178,12 +178,12 @@
 <thead><tr><th>Capability</th><th>Wire opcodes</th><th>Library entry point</th><th>Status</th></tr></thead>
 <tbody>
 <tr><td>Account summary</td><td><code>reqAccountSummary</code> (62), <code>accountSummary</code> (63), <code>acctValue</code> (6)</td><td><code>Connector.RequestAccountSummary</code>, <code>GetAccountSummary</code></td><td>ready</td></tr>
-<tr><td>Positions + portfolio</td><td><code>reqPositions</code> (61), <code>position</code> (61), <code>portfolioValue</code> (7), <code>$LEDGER:ALL</code></td><td><code>Connector.GetCachedPositions</code></td><td>ready</td></tr>
+<tr><td>Positions + portfolio</td><td><code>reqPositions</code> (61), <code>position</code> (61), <code>portfolioValue</code> (7), <code>$LEDGER:ALL</code></td><td><code>Connector.CachedPositions</code></td><td>ready</td></tr>
 <tr><td>Snapshot quote</td><td><code>reqMktData</code> (1) snapshot=true, <code>tickPrice</code> (1), <code>tickSnapshotEnd</code> (57)</td><td><code>Connector.FetchMarketSnapshot</code></td><td>ready</td></tr>
-<tr><td>Streaming quote</td><td><code>reqMktData</code> (1) snapshot=false, <code>tickPrice</code> / <code>tickSize</code> / <code>tickGeneric</code> / <code>tickString</code></td><td><code>Connector.SubscribeMarketData</code>, <code>GetMarketData</code></td><td>ready</td></tr>
+<tr><td>Streaming quote</td><td><code>reqMktData</code> (1) snapshot=false, <code>tickPrice</code> / <code>tickSize</code> / <code>tickGeneric</code> / <code>tickString</code></td><td><code>Connector.SubscribeMarketData</code>, <code>MarketDataSnapshot</code></td><td>ready</td></tr>
 <tr><td>Generic-tick set</td><td>gen-ticks 100, 101, 104, 106, 165 (option vol, OI, HV, IV, misc stats including range / average volume)</td><td>populated into <code>MarketData</code> automatically</td><td>ready</td></tr>
 <tr><td>Contract resolution</td><td><code>reqContractData</code> (9), <code>contractData</code> (10)</td><td><code>Connector.FetchContractDetails</code></td><td>ready</td></tr>
-<tr><td>Option chains</td><td><code>reqSecDefOptParams</code> (78), <code>tickOptionComputation</code> (21)</td><td><code>Connector.FetchOptionExpiries</code>, <code>FetchOptionExpiryStrikes</code>, <code>GetOptionGreeks</code>, <code>GetOptionIV</code></td><td>ready</td></tr>
+<tr><td>Option chains</td><td><code>reqSecDefOptParams</code> (78), <code>tickOptionComputation</code> (21)</td><td><code>Connector.FetchOptionExpiries</code>, <code>FetchOptionExpiryStrikes</code>, <code>OptionGreeks</code>, <code>OptionIV</code></td><td>ready</td></tr>
 <tr><td>Daily historical bars</td><td><code>reqHistoricalData</code> (20), <code>historicalData</code> (17)</td><td><code>Connector.FetchHistoricalDailyBars</code></td><td>ready</td></tr>
 <tr><td>Market scanner</td><td><code>reqScannerSubscription</code> (22), <code>reqScannerParameters</code> (24)</td><td><code>Connector.RunScannerSubscription</code>, <code>RunScannerParameters</code></td><td>ready</td></tr>
 <tr><td>Market-data type switch</td><td><code>reqMarketDataType</code> (59), <code>marketDataType</code> (58)</td><td><code>Connector.SetMarketDataType</code></td><td>ready</td></tr>

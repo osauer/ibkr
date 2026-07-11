@@ -23,8 +23,11 @@ const (
 
 // wireEnv keys
 const (
-	envWireEnable   = "IBKR_WIRE_INTERCEPTOR"
-	envWireLogPath  = "IBKR_WIRE_LOG_PATH"
+	// docgen:env IBKR_WIRE_INTERCEPTOR | Enable the account-sensitive decoded wire-frame recorder. Unset or false disables it.
+	envWireEnable = "IBKR_WIRE_INTERCEPTOR"
+	// docgen:env IBKR_WIRE_LOG_PATH | Append decoded account-sensitive wire frames as JSONL at this path. Unset keeps frames in memory only.
+	envWireLogPath = "IBKR_WIRE_LOG_PATH"
+	// docgen:env IBKR_WIRE_RING_SIZE | Maximum decoded wire frames retained in memory when the interceptor is enabled; default 256.
 	envWireRingSize = "IBKR_WIRE_RING_SIZE"
 )
 

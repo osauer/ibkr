@@ -3,7 +3,7 @@ package daemon
 import (
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // streakIndicator is the per-indicator surface populateStreaks iterates.

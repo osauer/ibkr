@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // defaultCoalesceInterval is the cadence at which the per-symbol tick loop
@@ -39,8 +39,8 @@ type ibkrMarketConnector interface {
 	SubscribeMarketData(ctx context.Context, symbol string, fields []string) error
 	SubscribeMarketDataWithContract(ctx context.Context, contract ibkrlib.Contract, fields []string) (string, error)
 	UnsubscribeMarketData(symbol string) error
-	GetMarketData() map[string]*ibkrlib.MarketData
-	GetMarketDataTypeForSymbol(symbol string) int
+	MarketDataSnapshot() map[string]*ibkrlib.MarketData
+	MarketDataTypeForSymbol(symbol string) int
 }
 
 type marketSubscribeFunc func(context.Context, ibkrMarketConnector) (string, error)
@@ -205,8 +205,8 @@ func (m *subManager) acquire(ctx context.Context, sym string, addTap bool, subsc
 	seedExisting := tap != nil && e.emitted
 	e.mu.Unlock()
 	if seedExisting {
-		if md, ok := c.GetMarketData()[subKey]; ok {
-			frame := buildFrame(md, marketDataTypeName(c.GetMarketDataTypeForSymbol(subKey)))
+		if md, ok := c.MarketDataSnapshot()[subKey]; ok {
+			frame := buildFrame(md, marketDataTypeName(c.MarketDataTypeForSymbol(subKey)))
 			select {
 			case tap.ch <- frame:
 			default:
@@ -272,7 +272,7 @@ func (m *subManager) SubscribeContract(ctx context.Context, contract ibkrlib.Con
 
 // Hold acquires a market-data reference without subscribing to the frame
 // fan-out. Used by the snapshot path: it wants the IBKR line to stay open
-// while it polls the cached tick state via Connector.GetMarketData(), but
+// while it polls the cached tick state via Connector.MarketDataSnapshot(), but
 // it doesn't consume per-tick frames.
 //
 // ctx bounds the cold-path slot-acquire; see acquire.
@@ -371,12 +371,12 @@ func (m *subManager) tickLoop(e *subEntry) {
 					"IB Gateway connection dropped during streaming subscription")
 				return
 			}
-			data := c.GetMarketData()
+			data := c.MarketDataSnapshot()
 			md, ok := data[e.sym]
 			if !ok {
 				continue
 			}
-			dt := marketDataTypeName(c.GetMarketDataTypeForSymbol(e.sym))
+			dt := marketDataTypeName(c.MarketDataTypeForSymbol(e.sym))
 
 			e.mu.Lock()
 			if e.emitted &&

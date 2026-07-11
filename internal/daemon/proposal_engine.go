@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 const (
@@ -704,10 +704,10 @@ func (e *proposalEngine) fetchStockTrailVolatility(ctx context.Context, row rpc.
 	contract, _, _, err := normaliseStockQuoteContract(contractParams)
 	var bars []ibkrlib.HistoricalBar
 	if err == nil {
-		bars, err = c.FetchHistoricalDailyBarsWithContractCtx(fetchCtx, contract, stockTrailVolatilityDays)
+		bars, err = c.FetchHistoricalDailyBarsWithContract(fetchCtx, contract, stockTrailVolatilityDays, 0)
 	}
 	if err != nil {
-		bars, err = c.FetchHistoricalDailyBarsCtx(fetchCtx, row.Symbol, stockTrailVolatilityDays)
+		bars, err = c.FetchHistoricalDailyBars(fetchCtx, row.Symbol, stockTrailVolatilityDays, 0)
 	}
 	if err != nil {
 		return stockTrailVolatility{MissingReasons: []string{"atr_14_unavailable", "history_unavailable"}}

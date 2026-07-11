@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func runSettings(ctx context.Context, env *Env, args []string) int {

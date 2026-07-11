@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/marketcal"
-	"github.com/osauer/ibkr/internal/risk"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/marketcal"
+	"github.com/osauer/ibkr/v2/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // Trading rulebook assembly (docs/design/trading-rulebook.md). The pure

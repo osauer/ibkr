@@ -1,6 +1,6 @@
 # Agent session hygiene
 
-Last updated: 2026-06-12 08:54 CEST
+Last updated: 2026-07-10 08:35 CEST
 
 Rationale and measured numbers behind the binding session-hygiene rules in
 `AGENTS.md`. Source: the 2026-06-12 audit of two days of agent sessions in
@@ -40,34 +40,29 @@ state note and end the session.
 Measured benchmark from the audit: the same fix+test+commit work cost
 ~80k context/call in a fresh worktree agent vs 300–450k/call inline in a
 fat main session — a 4–6x difference. Exploration/verification belongs in
-read-only (`Explore`) agents; long reviews run in the background while the
+read-only agents; long reviews run in the background while the
 main session continues.
 
 **Batch tiny probes; read by range.** 524 sub-2KB-output one-liners
 (grep/ls/status) were issued from >200k contexts in two days, each paying a
 full-context round-trip (~156M tokens raw). Batch independent probes 3–4:1
-into one compound call or parallel tool blocks. Use ranged reads around the
+into one programmatic or parallel call. Use ranged reads around the
 hit instead of whole-file dumps (one 35KB whole-file read was carried by
-651 subsequent calls); `git diff --stat` first, then scoped diffs. After
-modifying a file via shell (heredoc/perl/sed -i) in the same session,
-re-read the target hunk before using the Edit tool on it — Edit's
-file-state tracking does not see shell writes, and the audit measured 12
-failed-Edit retries at 330–460k context each.
+651 subsequent calls); `git diff --stat` first, then scoped diffs. Use
+`apply_patch` for intentional file edits so changes stay reviewable.
 
 **Waits are background jobs, not polls.** Foreground sleeps and repeated
 one-shot status greps from a large context burned ~7M tokens/day plus
-12–18 min/day of wall time. Use a backgrounded until-loop (the harness
-re-invokes on exit) or a Monitor until-condition. Background waiters need a
-bounded timeout and must never bounce the daemon themselves.
+12–18 min/day of wall time. Start the wait asynchronously through the current
+client's background mechanism and retain its session or log handle. Background
+waiters need a bounded timeout and must never bounce the daemon themselves.
 
 **Long gates: run once, backgrounded or teed.** `make test` runs `check`
-as its first prerequisite — never prefix it with `make check &&`. Never run
-a 10-minute gate as a foreground pipe (`... 2>&1 | tail`): the 600s Bash
-tool cap kills the pipeline and all output is lost — this happened three
-times in the audit window (~30 wasted minutes). Run it with
-`run_in_background`, or `> /tmp/test.log 2>&1` and tail the file. The
-gateway lock prints a keepalive every 30s while waiting; prolonged silence
-means the gate itself is running, not queued.
+as its first prerequisite — never prefix it with `make check &&`. Never run a
+long gate as a foreground pipe whose client timeout can kill the pipeline and
+lose its output. Start it asynchronously, or write to a stable local log and
+retain the process handle. The gateway lock prints a keepalive while waiting;
+prolonged silence means the gate itself is running, not queued.
 
 **Pre-warm the daily govulncheck scan.** The first gate run of each day
 pays the cold scan (measured 8–10 min). `make govuln-prewarm-install` sets

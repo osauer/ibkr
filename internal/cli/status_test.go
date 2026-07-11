@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // TestRenderStatus_BackgroundLine pins the rendering contract: the

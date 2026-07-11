@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/app/push"
-	"github.com/osauer/ibkr/internal/app/state"
-	"github.com/osauer/ibkr/internal/risk"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/app/push"
+	"github.com/osauer/ibkr/v2/internal/app/state"
+	"github.com/osauer/ibkr/v2/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func TestShouldAlertModes(t *testing.T) {

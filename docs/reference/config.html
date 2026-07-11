@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: config.md sha256:a3e1b0ea64ff226dd6618cddd576064b00324f392a7c4db8d693fe3358827cf3 -->
+<!-- md-source: config.md sha256:9b66f525900a8639bbc43f5e85dbd7e6496e4e1bf3aeddaa364bef9af2d54197 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -210,6 +210,9 @@
 <tr><td><code>IBKR_PACKET_LOG_TEMPLATE</code></td><td>Template path for raw IBKR wire-packet logs. Trailing <code>/</code> treats as directory; <code>%d</code> placeholder gets the gateway client ID. Unset disables wire logging.</td></tr>
 <tr><td><code>IBKR_SOCKET</code></td><td>Override the daemon IPC socket path. Defaults to <code>$XDG_RUNTIME_DIR/ibkr/ibkr.sock</code> or <code>$HOME/.cache/ibkr/ibkr.sock</code>.</td></tr>
 <tr><td><code>IBKR_SPX_MEMBERS_AUTO_REFRESH</code></td><td>Symmetric override of <code>[spx] members_auto_refresh</code>. <code>1</code> force-enables, <code>0</code> force-disables, unset / other defers to TOML.</td></tr>
+<tr><td><code>IBKR_WIRE_INTERCEPTOR</code></td><td>Enable the account-sensitive decoded wire-frame recorder. Unset or false disables it.</td></tr>
+<tr><td><code>IBKR_WIRE_LOG_PATH</code></td><td>Append decoded account-sensitive wire frames as JSONL at this path. Unset keeps frames in memory only.</td></tr>
+<tr><td><code>IBKR_WIRE_RING_SIZE</code></td><td>Maximum decoded wire frames retained in memory when the interceptor is enabled; default 256.</td></tr>
 <tr><td><code>NO_COLOR</code></td><td>Standard https://no-color.org/ override. Any non-empty value disables colour regardless of IBKR_COLOR (unless IBKR_COLOR=always).</td></tr>
 </tbody>
 </table>

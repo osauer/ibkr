@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/osauer/ibkr/internal/config"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func runTrading(ctx context.Context, env *Env, args []string) int {

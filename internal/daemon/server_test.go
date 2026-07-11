@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/breadth/spx"
-	"github.com/osauer/ibkr/internal/config"
-	"github.com/osauer/ibkr/internal/discover"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/breadth/spx"
+	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/discover"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // shortTempDir returns a tempdir under /tmp so Unix socket paths stay

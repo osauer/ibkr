@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // Default calibration window for the zero-gamma compute. Tuned for
@@ -335,7 +335,7 @@ type legFetcher func(
 // the data-collection pattern in handlers.go's fillOptionLeg (the chain
 // command's per-strike fill): subscribe the option, wait for the
 // open-interest tick to land in the MarketData cache, then read the
-// per-strike IV from GetOptionIV and the Greeks from GetOptionGreeks.
+// per-strike IV from OptionIV and the Greeks from OptionGreeks.
 //
 // Two-stage data collection:
 //
@@ -412,10 +412,10 @@ func productionLegFetcher(
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	var iv, gamma float64
 	err = pollUntilWithReject(ctx, deadline, c.SubscriptionRejectCh(key), key, func() bool {
-		if v, found := c.GetOptionIV(key); found && v > 0 {
+		if v, found := c.OptionIV(key); found && v > 0 {
 			iv = v
 		}
-		if g, found := c.GetOptionGreeks(key); found {
+		if g, found := c.OptionGreeks(key); found {
 			gamma = g.Gamma
 		}
 		return iv > 0
@@ -443,13 +443,13 @@ func productionLegFetcher(
 	}
 	// Stage 2: BS-IV fallback when model tick never arrived.
 	// Back-solve σ from the option's bid/ask mid or prior-session close.
-	bid, ask, hasQuote := c.GetOptionQuoteBidAsk(key)
+	bid, ask, hasQuote := c.OptionQuoteBidAsk(key)
 	var price float64
 	var ivSource string
 	if hasQuote && bid > 0 && ask > 0 {
 		price = (bid + ask) / 2
 		ivSource = gammaIVSourceLiveMid
-	} else if px, ok := c.GetOptionPrevClose(key); ok && px > 0 {
+	} else if px, ok := c.OptionPrevClose(key); ok && px > 0 {
 		price = px
 		ivSource = gammaIVSourcePrevClose
 	}
@@ -514,7 +514,7 @@ func optionOpenInterest(c *ibkrlib.Connector, key string) (int64, bool) {
 	if c == nil || key == "" {
 		return 0, false
 	}
-	if d, ok := c.GetMarketData()[key]; ok {
+	if d, ok := c.MarketDataSnapshot()[key]; ok {
 		return d.OpenInt, d.OpenIntObserved
 	}
 	return 0, false
@@ -695,13 +695,12 @@ func computeGammaZeroFor(
 	if oiStateErr != nil {
 		log.Warnf("gamma.oi_store.load err=%v", oiStateErr)
 	}
-	liveOIUpdates := map[string]gammaOIRecord{}
 	log.Infof("gamma.kickoff underlying=%s workers=%d expiry_count=%d strike_width_pct=%.2f sweep_range_pct=%.2f",
 		sym, params.WorkerCount, params.ExpiryCount, params.StrikeWidthPct, params.SweepRangePct)
 
 	// 1. Underlying spot snapshot.
 	progress.Store(2)
-	spot, bid, ask, last, dataType := snapshotUnderlyingForGamma(ctx, c, sym, 5*time.Second)
+	spot, dataType := snapshotUnderlyingForGamma(ctx, c, sym, 5*time.Second)
 	if spot <= 0 {
 		return nil, fmt.Errorf("zero-gamma: no %s spot available (gateway returned no live tick)", sym)
 	}
@@ -709,9 +708,6 @@ func computeGammaZeroFor(
 		return nil, fmt.Errorf("zero-gamma: %s spot is %s; refusing to compute on stale data", sym, dataType)
 	}
 	spotAt := now()
-	_ = bid
-	_ = ask
-	_ = last
 
 	// 2. Expirations + strikes. The secDefOptParams response is large
 	// and streams in over tens of seconds for SPX — see
@@ -777,96 +773,12 @@ func computeGammaZeroFor(
 	}
 	log.Infof("gamma.jobs total=%d picked=%d spot=%.2f", len(jobs), len(picked), spot)
 
-	// Bulk-prewarm option contracts before the worker fan-out. This is the
-	// load-bearing optimization: without it, each of the ~1600 legs would
-	// independently pay a reqContractDetails round-trip with up-to-4-exchange
-	// retry loop, which the IBKR per-account throttle caps at ~50 attempts
-	// before aborting the whole fan-out. The bulk prewarm issues one
-	// partial-Contract reqContractDetails per expiration (no Strike, no
-	// Right) and the gateway streams every listed strike × C/P back in one
-	// burst — same primitive TWS uses internally to populate a chain
-	// instantly. Round-trip count drops from ~1600 to len(picked) (~6).
-	//
-	// TradingClass is load-bearing: omitting it interleaves multi-class
-	// listings (SPY+SPYW, SPX+SPXW) and cache entries shadow each other.
-	// SPY+weeklies all share class "SPY"; SPX has two distinct classes
-	// (SPX-AM + SPXW-PM) which require independent prewarm passes.
-	//
-	// Errors per expiry are localised — one timed-out expiry doesn't fail
-	// the others, and the per-leg fetcher still has its own
-	// resolveOptionContract fallback for cache misses. The prewarm is a
-	// fast path, not a hard dependency.
-	expsByClass := map[string][]string{}
-	for _, p := range picked {
-		expsByClass[p.tradingClass] = append(expsByClass[p.tradingClass], p.expiryYMD)
-	}
-	prewarmStart := now()
-	prewarmTotal := 0
-	prewarmComplete := make(map[string]bool, len(picked))
-	prewarmBlocksFallback := make(map[string]bool, len(picked))
-	for class, ymds := range expsByClass {
-		prewarmResults := c.PrewarmOptionChain(ctx, sym, ymds, class, 30*time.Second)
-		for _, r := range prewarmResults {
-			key := gammaPrewarmKey(class, r.Expiry)
-			prewarmComplete[key] = r.Err == nil && r.Dropped == 0
-			prewarmBlocksFallback[key] = r.Dropped > 0 || gammaPrewarmFailureBlocksFallback(r.Err)
-			collection.notePrewarm(class, r.Expiry, r.Cached, r.Dropped, r.Err)
-			if r.Err != nil {
-				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=%v",
-					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond), r.Err)
-				continue
-			}
-			if r.Dropped > 0 {
-				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=contract details truncated",
-					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
-				continue
-			}
-			log.Infof("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s",
-				class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
-			prewarmTotal += r.Cached
-		}
-	}
-	log.Infof("gamma.prewarm.done total_cached=%d wall_clock=%s",
-		prewarmTotal, time.Since(prewarmStart).Round(time.Millisecond))
-
-	// Filter jobs to only those whose (symbol, expiry, strike, right)
-	// is cached. secDefOptParams returns a SUPERSET of strikes across
-	// exchanges, so the original enumeration includes strikes that
-	// don't exist as listed contracts on every expiry. Those cache
-	// misses would force the per-leg fetcher to call
-	// resolveOptionContract → fetchOptionContractDetail, which under
-	// burst load times out at 5s × 4-exchange-attempts and counts as
-	// Throttle=true. Even 5% of such failures trip the throttle-abort
-	// detector and kill the fan-out before legitimate legs complete.
-	//
-	// The prewarm response IS the gateway's authoritative list of
-	// listed contracts; if a strike isn't in the cache after prewarm,
-	// no contract exists for it on this expiry. Skip those jobs.
-	beforeFilter := len(jobs)
-	filteredJobs := jobs[:0]
-	incompletePrewarmKept := 0
-	for _, j := range jobs {
-		prewarmKey := gammaPrewarmKey(j.tradingClass, j.expiryYMD)
-		complete := prewarmComplete[prewarmKey]
-		cached := c.IsOptionContractCached(sym, j.tradingClass, j.expiryYMD, j.strike, j.right)
-		if gammaShouldKeepJobAfterPrewarm(sym, complete, cached, prewarmBlocksFallback[prewarmKey]) {
-			filteredJobs = append(filteredJobs, j)
-			collection.noteRequested(j)
-			if !complete {
-				incompletePrewarmKept++
-			}
-		} else {
-			collection.noteFailure(j, gammaLegFailureContractMissing)
-		}
-	}
-	jobs = filteredJobs
-	if len(jobs) < beforeFilter {
-		log.Infof("gamma.filter dropped=%d kept_incomplete_prewarm=%d from=%d to=%d (strikes not in complete prewarm cache)",
-			beforeFilter-len(jobs), incompletePrewarmKept, beforeFilter, len(jobs))
-	}
-	if len(jobs) == 0 {
-		return nil, fmt.Errorf("zero-gamma: no cached option contracts after prewarm (prewarm landed %d total)",
-			prewarmTotal)
+	// 4b. Bulk-prewarm contracts and drop jobs the gateway does not list —
+	// the load-bearing round-trip and throttle optimisation (rationale on
+	// prewarmGammaContracts).
+	jobs, err = prewarmGammaContracts(ctx, c, sym, picked, jobs, collection, log, now)
+	if err != nil {
+		return nil, err
 	}
 
 	// Keep the connection's default MarketDataType (type=2, frozen-aware).
@@ -881,143 +793,26 @@ func computeGammaZeroFor(
 	// now treats OI as opportunistic — see the productionLegFetcher
 	// comment — so this trade-off goes away.
 
-	// 5. Fan-out. Mutex around shared aggregation slice; the contention
-	// is bounded at one append per completed leg (cheap relative to the
-	// per-leg roundtrip).
-	var (
-		legs            []legData
-		mu              sync.Mutex
-		done            atomic.Int32
-		noContract      atomic.Int32
-		derivedIVs      atomic.Int32
-		modelTickIVs    atomic.Int32
-		derivedMidIVs   atomic.Int32
-		derivedCloseIVs atomic.Int32
-		throttledAbort  atomic.Bool
-		earlyAbort      atomic.Bool
-		total           = int32(len(jobs))
-	)
-
-	// Early-abort watchdog. After earlyAbortAfter elapses, if zero legs
-	// have landed in the aggregator, the gateway is not delivering the
-	// ticks we need (entitlement gap, model-computation queue idle,
-	// session-boundary feed pause, …). Aborting fast surfaces a precise
-	// error rather than running the full fan-out against a feed that
-	// won't produce. With the post-fix per-leg budget of 5 s and 4
-	// workers, healthy runs see their first usable leg in <2 s; 30 s of
-	// silence is the right threshold.
-	abortTimer := time.AfterFunc(earlyAbortAfter, func() {
-		mu.Lock()
-		landed := len(legs)
-		mu.Unlock()
-		if landed == 0 {
-			earlyAbort.Store(true)
-		}
-	})
-	defer abortTimer.Stop()
-
-	runBounded(jobs, params.WorkerCount, func(j gammaLegSpec) {
-		if ctx.Err() != nil || throttledAbort.Load() || earlyAbort.Load() {
-			return
-		}
-		r := fetch(ctx, c, sym, j.tradingClass, j.expiryYMD, j.strike, j.right, spot, spotAt)
-		// Always increment the progress counter — failed legs still
-		// represent work attempted. 10 % is consumed by spot+expiries
-		// stages above; the fan-out scales linearly from 10 → 85.
-		d := done.Add(1)
-		if r.Throttle {
-			nc := noContract.Add(1)
-			if throttleDetected(d, nc) {
-				throttledAbort.Store(true)
-			}
-		}
-		if total > 0 {
-			progress.Store(10 + int32(75*float64(d)/float64(total)))
-		}
-		if !r.OK {
-			collection.noteFailure(j, r.Failure)
-			return
-		}
-		dte := dteYears(j.expiryYMD, j.tradingClass, spotAt)
-		if dte <= 0 || r.IV <= 0 {
-			// Belt-and-suspenders: skip legs whose DTE/IV degenerate
-			// after fetch (in flight expiry rollover, or a partial OI
-			// tick that snuck past the fetcher's gate).
-			collection.noteFailure(j, gammaLegFailureTimeout)
-			return
-		}
-		ivSource := gammaIVSource(r)
-		switch ivSource {
-		case gammaIVSourceLiveMid:
-			derivedIVs.Add(1)
-			derivedMidIVs.Add(1)
-		case gammaIVSourcePrevClose:
-			derivedIVs.Add(1)
-			derivedCloseIVs.Add(1)
-		default:
-			modelTickIVs.Add(1)
-		}
-		oi, oiObserved, oiLive, oiCarried, oiObservedAt := gammaOIForLegResult(
-			sym, j.tradingClass, j.expiryYMD, j.strike, j.right, r, oiState, spotAt)
-		if oiLive {
-			key := gammaOIKey(sym, j.tradingClass, j.expiryYMD, j.strike, j.right)
-			mu.Lock()
-			liveOIUpdates[key] = gammaOIRecordForLeg(sym, j.tradingClass, j.expiryYMD, j.strike, j.right, oi, oiObservedAt)
-			mu.Unlock()
-		}
-		collection.notePriced(j, ivSource, oi, oiObserved, oiLive, oiCarried, oiObservedAt)
-		mu.Lock()
-		legs = append(legs, legData{
-			expiryYMD:       j.expiryYMD,
-			dte:             dte,
-			strike:          j.strike,
-			right:           j.right,
-			tradingClass:    j.tradingClass,
-			isCall:          j.right == "C",
-			iv:              r.IV,
-			ivSource:        ivSource,
-			oi:              oi,
-			oiObserved:      oiObserved,
-			oiLive:          oiLive,
-			oiCarried:       oiCarried,
-			oiObservedAt:    oiObservedAt,
-			gammaAtSnapshot: r.Gamma,
-		})
-		mu.Unlock()
-	})
-
-	fanoutElapsed := time.Since(startWall).Round(time.Millisecond)
-	if ctx.Err() != nil {
-		log.Warnf("gamma.abort reason=ctx_cancelled landed=%d/%d elapsed=%s err=%v",
-			len(legs), len(jobs), fanoutElapsed, ctx.Err())
-		return nil, ctx.Err()
+	// 5. Fan-out over the worker pool. The abort machinery and per-leg
+	// aggregation live on gammaLegFanout; everything it learns comes back
+	// through its stats so the assembly stages below stay lock-free.
+	fan := &gammaLegFanout{
+		c:          c,
+		sym:        sym,
+		spot:       spot,
+		spotAt:     spotAt,
+		fetch:      fetch,
+		workers:    params.WorkerCount,
+		progress:   progress,
+		collection: collection,
+		oiState:    oiState,
+		startWall:  startWall,
+		log:        log,
 	}
-	if len(legs) == 0 {
-		switch {
-		case earlyAbort.Load():
-			log.Warnf("gamma.abort reason=early_abort landed=%d/%d elapsed=%s no_contract=%d",
-				len(legs), len(jobs), fanoutElapsed, noContract.Load())
-			// Both the model-tick path AND the BS-IV fallback failed
-			// to produce a single usable leg in 30 s. With the v0.26.0
-			// BS-IV fallback the pre-market case is supposed to
-			// recover; if we land here it usually means the gateway
-			// dropped model/price ticks entirely (entitlement gap,
-			// feed-farm outage, or session-boundary pause).
-			return nil, fmt.Errorf("zero-gamma: no option data landed in first %ds (neither model ticks nor prior-session prices for BS-IV fallback). Check gateway entitlement and farm-connection notices in the daemon log",
-				int(earlyAbortAfter.Seconds()))
-		case throttledAbort.Load():
-			log.Warnf("gamma.abort reason=throttled landed=%d/%d elapsed=%s no_contract=%d",
-				len(legs), len(jobs), fanoutElapsed, noContract.Load())
-			return nil, fmt.Errorf("zero-gamma: gateway throttled (%d of %d first-wave legs failed contract resolution); aborted to avoid compounding rate-limit pressure",
-				noContract.Load(), done.Load())
-		default:
-			log.Warnf("gamma.abort reason=no_legs landed=%d/%d elapsed=%s",
-				len(legs), len(jobs), fanoutElapsed)
-			return nil, fmt.Errorf("zero-gamma: all %d legs failed to return usable IV/pricing", len(jobs))
-		}
+	legs, liveOIUpdates, stats, err := fan.run(ctx, jobs)
+	if err != nil {
+		return nil, err
 	}
-	log.Infof("gamma.fanout.done landed=%d/%d model_tick_iv=%d derived_mid_iv=%d derived_close_iv=%d derived_iv=%d elapsed=%s",
-		len(legs), len(jobs), modelTickIVs.Load(), derivedMidIVs.Load(), derivedCloseIVs.Load(), derivedIVs.Load(), fanoutElapsed)
 	progress.Store(85)
 
 	// 6-7. Sweep + aggregate.
@@ -1044,7 +839,7 @@ func computeGammaZeroFor(
 	// per-leg gamma via Black-Scholes from the captured IV at snapshot
 	// spot rather than reading the gateway's optional Greeks tick. The
 	// v2 code path read r.Gamma which the productionLegFetcher only
-	// populated when GetOptionGreeks returned a non-empty row — but
+	// populated when OptionGreeks returned a non-empty row — but
 	// the IV-poll loop exits as soon as IV > 0, so an IV-arrived-but-
 	// Greeks-haven't race left gammaAtSnapshot = 0 and every such leg
 	// contributed 0 to the magnitude. Off-hours, where the model-tick
@@ -1060,7 +855,7 @@ func computeGammaZeroFor(
 	gexLegs, gammaTotalAbs := prepareGEXLegs(legs, spot)
 	if len(gexLegs) == 0 {
 		diagnostic := gammaSourceFailureDiagnostic(
-			sym, spot, spotAt, picked, legs, derivedIVs.Load(), legDiagnostics, collection.finish(time.Since(startWall)),
+			sym, spot, spotAt, picked, legs, stats.derivedIVs, legDiagnostics, collection.finish(time.Since(startWall)),
 			params, startWall, now(),
 		)
 		return diagnostic, fmt.Errorf("zero-gamma: no usable GEX legs: %d priced legs landed, but none had non-zero open-interest-weighted gamma (%s)",
@@ -1068,7 +863,7 @@ func computeGammaZeroFor(
 	}
 	if len(legs) < gammaMinPricedLegs || len(gexLegs) < gammaMinGEXLegs {
 		diagnostic := gammaSourceFailureDiagnostic(
-			sym, spot, spotAt, picked, legs, derivedIVs.Load(), legDiagnostics, collection.finish(time.Since(startWall)),
+			sym, spot, spotAt, picked, legs, stats.derivedIVs, legDiagnostics, collection.finish(time.Since(startWall)),
 			params, startWall, now(),
 		)
 		return diagnostic, fmt.Errorf("zero-gamma: low usable leg count: %d priced legs/%d OI-weighted GEX legs; need at least %d/%d (%s)",
@@ -1119,7 +914,7 @@ func computeGammaZeroFor(
 	// this, a single throttled fan-out at NY-session start poisons
 	// the cache for the rest of the day (same shape as the v0.27.0
 	// breadth poison-cache bug, mitigated for breadth at v0.27.3).
-	if err := checkLegCoverage(len(legs), len(jobs), throttledAbort.Load()); err != nil {
+	if err := checkLegCoverage(len(legs), len(jobs), stats.throttled); err != nil {
 		log.Warnf("gamma.abort reason=low_coverage landed=%d/%d elapsed=%s err=%v",
 			len(legs), len(jobs), time.Since(startWall).Round(time.Millisecond), err)
 		return nil, err
@@ -1128,7 +923,7 @@ func computeGammaZeroFor(
 	// Warnings. Ordered "throttled" first because it explains why
 	// coverage is low, not the other way around.
 	var warnings []string
-	if throttledAbort.Load() {
+	if stats.throttled {
 		warnings = append(warnings, "throttled")
 	}
 	if gammaOIMissingCount(legDiagnostics) > 0 {
@@ -1164,7 +959,7 @@ func computeGammaZeroFor(
 		warnings = append(warnings, "skew_fallback:"+expYMD)
 	}
 
-	derivedCount := int(derivedIVs.Load())
+	derivedCount := stats.derivedIVs
 	if derivedCount > 0 && derivedCount == len(legs) {
 		// All legs used the BS-IV fallback — useful signal for the
 		// renderer, since the resulting flip level reflects prior-
@@ -1231,9 +1026,9 @@ func computeGammaZeroFor(
 		LegCount:                len(gexLegs),
 		PricedLegCount:          len(legs),
 		DerivedIVLegs:           derivedCount,
-		ModelTickLegs:           int(modelTickIVs.Load()),
-		DerivedLiveMidLegs:      int(derivedMidIVs.Load()),
-		DerivedPrevCloseLegs:    int(derivedCloseIVs.Load()),
+		ModelTickLegs:           stats.modelTickIVs,
+		DerivedLiveMidLegs:      stats.derivedMidIVs,
+		DerivedPrevCloseLegs:    stats.derivedCloseIVs,
 		LegDiagnostics:          legDiagnostics,
 		CollectionDiagnostics:   collection.finish(time.Since(startWall)),
 		Warnings:                warnings,
@@ -1268,13 +1063,298 @@ func computeGammaZeroFor(
 	return hydrateGammaComputed(res), nil
 }
 
+// prewarmGammaContracts bulk-prewarms option contracts for the picked
+// expirations, then filters jobs down to the contracts the gateway actually
+// lists. The prewarm is the load-bearing optimization: without it, each of
+// the ~1600 legs would independently pay a reqContractDetails round-trip
+// with up-to-4-exchange retry loop, which the IBKR per-account throttle
+// caps at ~50 attempts before aborting the whole fan-out. The bulk prewarm
+// issues one partial-Contract reqContractDetails per expiration (no Strike,
+// no Right) and the gateway streams every listed strike × C/P back in one
+// burst — same primitive TWS uses internally to populate a chain instantly.
+// Round-trip count drops from ~1600 to len(picked) (~6).
+//
+// TradingClass is load-bearing: omitting it interleaves multi-class
+// listings (SPY+SPYW, SPX+SPXW) and cache entries shadow each other.
+// SPY+weeklies all share class "SPY"; SPX has two distinct classes
+// (SPX-AM + SPXW-PM) which require independent prewarm passes.
+//
+// Errors per expiry are localised — one timed-out expiry doesn't fail the
+// others, and the per-leg fetcher still has its own resolveOptionContract
+// fallback for cache misses. The prewarm is a fast path, not a hard
+// dependency.
+func prewarmGammaContracts(
+	ctx context.Context,
+	c *ibkrlib.Connector,
+	sym string,
+	picked []pickedExpiration,
+	jobs []gammaLegSpec,
+	collection *gammaCollectionDiagnostics,
+	log gammaLogf,
+	now func() time.Time,
+) ([]gammaLegSpec, error) {
+	expsByClass := map[string][]string{}
+	for _, p := range picked {
+		expsByClass[p.tradingClass] = append(expsByClass[p.tradingClass], p.expiryYMD)
+	}
+	prewarmStart := now()
+	prewarmTotal := 0
+	prewarmComplete := make(map[string]bool, len(picked))
+	prewarmBlocksFallback := make(map[string]bool, len(picked))
+	for class, ymds := range expsByClass {
+		prewarmResults := c.PrewarmOptionChain(ctx, sym, ymds, class, 30*time.Second)
+		for _, r := range prewarmResults {
+			key := gammaPrewarmKey(class, r.Expiry)
+			prewarmComplete[key] = r.Err == nil && r.Dropped == 0
+			prewarmBlocksFallback[key] = r.Dropped > 0 || gammaPrewarmFailureBlocksFallback(r.Err)
+			collection.notePrewarm(class, r.Expiry, r.Cached, r.Dropped, r.Err)
+			if r.Err != nil {
+				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=%v",
+					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond), r.Err)
+				continue
+			}
+			if r.Dropped > 0 {
+				log.Warnf("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s err=contract details truncated",
+					class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
+				continue
+			}
+			log.Infof("gamma.prewarm class=%s expiry=%s cached=%d dropped=%d elapsed=%s",
+				class, r.Expiry, r.Cached, r.Dropped, r.Elapsed.Round(time.Millisecond))
+			prewarmTotal += r.Cached
+		}
+	}
+	log.Infof("gamma.prewarm.done total_cached=%d wall_clock=%s",
+		prewarmTotal, time.Since(prewarmStart).Round(time.Millisecond))
+
+	// Filter jobs to only those whose (symbol, expiry, strike, right)
+	// is cached. secDefOptParams returns a SUPERSET of strikes across
+	// exchanges, so the original enumeration includes strikes that
+	// don't exist as listed contracts on every expiry. Those cache
+	// misses would force the per-leg fetcher to call
+	// resolveOptionContract → fetchOptionContractDetail, which under
+	// burst load times out at 5s × 4-exchange-attempts and counts as
+	// Throttle=true. Even 5% of such failures trip the throttle-abort
+	// detector and kill the fan-out before legitimate legs complete.
+	//
+	// The prewarm response IS the gateway's authoritative list of
+	// listed contracts; if a strike isn't in the cache after prewarm,
+	// no contract exists for it on this expiry. Skip those jobs.
+	beforeFilter := len(jobs)
+	filteredJobs := jobs[:0]
+	incompletePrewarmKept := 0
+	for _, j := range jobs {
+		prewarmKey := gammaPrewarmKey(j.tradingClass, j.expiryYMD)
+		complete := prewarmComplete[prewarmKey]
+		cached := c.IsOptionContractCached(sym, j.tradingClass, j.expiryYMD, j.strike, j.right)
+		if keepGammaJobAfterPrewarm(complete, cached, prewarmBlocksFallback[prewarmKey]) {
+			filteredJobs = append(filteredJobs, j)
+			collection.noteRequested(j)
+			if !complete {
+				incompletePrewarmKept++
+			}
+		} else {
+			collection.noteFailure(j, gammaLegFailureContractMissing)
+		}
+	}
+	jobs = filteredJobs
+	if len(jobs) < beforeFilter {
+		log.Infof("gamma.filter dropped=%d kept_incomplete_prewarm=%d from=%d to=%d (strikes not in complete prewarm cache)",
+			beforeFilter-len(jobs), incompletePrewarmKept, beforeFilter, len(jobs))
+	}
+	if len(jobs) == 0 {
+		return nil, fmt.Errorf("zero-gamma: no cached option contracts after prewarm (prewarm landed %d total)",
+			prewarmTotal)
+	}
+	return jobs, nil
+}
+
+// gammaFanoutStats carries the fan-out's aggregate counters into the result
+// assembly: the throttle verdict feeds the coverage gate and warnings, the
+// IV-source counts feed the result's provenance fields and the failure
+// diagnostics.
+type gammaFanoutStats struct {
+	throttled       bool
+	derivedIVs      int
+	modelTickIVs    int
+	derivedMidIVs   int
+	derivedCloseIVs int
+}
+
+// gammaLegFanout is stage 5 of computeGammaZeroFor: fan the filtered jobs
+// out over the worker pool and aggregate priced legs. It owns the fan-out's
+// abort machinery (early-abort watchdog, throttle detector) and the
+// shared-slice mutex; everything it learns leaves through run's return
+// values so the caller's assembly stages stay lock-free.
+type gammaLegFanout struct {
+	c          *ibkrlib.Connector
+	sym        string
+	spot       float64
+	spotAt     time.Time
+	fetch      legFetcher
+	workers    int
+	progress   *atomic.Int32
+	collection *gammaCollectionDiagnostics
+	oiState    map[string]gammaOIRecord
+	startWall  time.Time
+	log        gammaLogf
+}
+
+func (f *gammaLegFanout) run(ctx context.Context, jobs []gammaLegSpec) ([]legData, map[string]gammaOIRecord, gammaFanoutStats, error) {
+	// Mutex around the shared aggregation slice and live-OI map; the
+	// contention is bounded at one append per completed leg (cheap
+	// relative to the per-leg roundtrip).
+	var (
+		legs            []legData
+		mu              sync.Mutex
+		done            atomic.Int32
+		noContract      atomic.Int32
+		derivedIVs      atomic.Int32
+		modelTickIVs    atomic.Int32
+		derivedMidIVs   atomic.Int32
+		derivedCloseIVs atomic.Int32
+		throttledAbort  atomic.Bool
+		earlyAbort      atomic.Bool
+		total           = int32(len(jobs))
+	)
+	liveOIUpdates := map[string]gammaOIRecord{}
+
+	// Early-abort watchdog. After earlyAbortAfter elapses, if zero legs
+	// have landed in the aggregator, the gateway is not delivering the
+	// ticks we need (entitlement gap, model-computation queue idle,
+	// session-boundary feed pause, …). Aborting fast surfaces a precise
+	// error rather than running the full fan-out against a feed that
+	// won't produce. With the post-fix per-leg budget of 5 s and 4
+	// workers, healthy runs see their first usable leg in <2 s; 30 s of
+	// silence is the right threshold.
+	abortTimer := time.AfterFunc(earlyAbortAfter, func() {
+		mu.Lock()
+		landed := len(legs)
+		mu.Unlock()
+		if landed == 0 {
+			earlyAbort.Store(true)
+		}
+	})
+	defer abortTimer.Stop()
+
+	runBounded(jobs, f.workers, func(j gammaLegSpec) {
+		if ctx.Err() != nil || throttledAbort.Load() || earlyAbort.Load() {
+			return
+		}
+		r := f.fetch(ctx, f.c, f.sym, j.tradingClass, j.expiryYMD, j.strike, j.right, f.spot, f.spotAt)
+		// Always increment the progress counter — failed legs still
+		// represent work attempted. 10 % is consumed by spot+expiries
+		// stages above; the fan-out scales linearly from 10 → 85.
+		d := done.Add(1)
+		if r.Throttle {
+			nc := noContract.Add(1)
+			if throttleDetected(d, nc) {
+				throttledAbort.Store(true)
+			}
+		}
+		if total > 0 {
+			f.progress.Store(10 + int32(75*float64(d)/float64(total)))
+		}
+		if !r.OK {
+			f.collection.noteFailure(j, r.Failure)
+			return
+		}
+		dte := dteYears(j.expiryYMD, j.tradingClass, f.spotAt)
+		if dte <= 0 || r.IV <= 0 {
+			// Belt-and-suspenders: skip legs whose DTE/IV degenerate
+			// after fetch (in flight expiry rollover, or a partial OI
+			// tick that snuck past the fetcher's gate).
+			f.collection.noteFailure(j, gammaLegFailureTimeout)
+			return
+		}
+		ivSource := gammaIVSource(r)
+		switch ivSource {
+		case gammaIVSourceLiveMid:
+			derivedIVs.Add(1)
+			derivedMidIVs.Add(1)
+		case gammaIVSourcePrevClose:
+			derivedIVs.Add(1)
+			derivedCloseIVs.Add(1)
+		default:
+			modelTickIVs.Add(1)
+		}
+		oi, oiObserved, oiLive, oiCarried, oiObservedAt := gammaOIForLegResult(
+			f.sym, j.tradingClass, j.expiryYMD, j.strike, j.right, r, f.oiState, f.spotAt)
+		if oiLive {
+			key := gammaOIKey(f.sym, j.tradingClass, j.expiryYMD, j.strike, j.right)
+			mu.Lock()
+			liveOIUpdates[key] = gammaOIRecordForLeg(f.sym, j.tradingClass, j.expiryYMD, j.strike, j.right, oi, oiObservedAt)
+			mu.Unlock()
+		}
+		f.collection.notePriced(j, ivSource, oi, oiObserved, oiLive, oiCarried, oiObservedAt)
+		mu.Lock()
+		legs = append(legs, legData{
+			expiryYMD:       j.expiryYMD,
+			dte:             dte,
+			strike:          j.strike,
+			right:           j.right,
+			tradingClass:    j.tradingClass,
+			isCall:          j.right == "C",
+			iv:              r.IV,
+			ivSource:        ivSource,
+			oi:              oi,
+			oiObserved:      oiObserved,
+			oiLive:          oiLive,
+			oiCarried:       oiCarried,
+			oiObservedAt:    oiObservedAt,
+			gammaAtSnapshot: r.Gamma,
+		})
+		mu.Unlock()
+	})
+
+	stats := gammaFanoutStats{
+		throttled:       throttledAbort.Load(),
+		derivedIVs:      int(derivedIVs.Load()),
+		modelTickIVs:    int(modelTickIVs.Load()),
+		derivedMidIVs:   int(derivedMidIVs.Load()),
+		derivedCloseIVs: int(derivedCloseIVs.Load()),
+	}
+	fanoutElapsed := time.Since(f.startWall).Round(time.Millisecond)
+	if ctx.Err() != nil {
+		f.log.Warnf("gamma.abort reason=ctx_cancelled landed=%d/%d elapsed=%s err=%v",
+			len(legs), len(jobs), fanoutElapsed, ctx.Err())
+		return nil, nil, stats, ctx.Err()
+	}
+	if len(legs) == 0 {
+		switch {
+		case earlyAbort.Load():
+			f.log.Warnf("gamma.abort reason=early_abort landed=%d/%d elapsed=%s no_contract=%d",
+				len(legs), len(jobs), fanoutElapsed, noContract.Load())
+			// Both the model-tick path AND the BS-IV fallback failed
+			// to produce a single usable leg in 30 s. With the v0.26.0
+			// BS-IV fallback the pre-market case is supposed to
+			// recover; if we land here it usually means the gateway
+			// dropped model/price ticks entirely (entitlement gap,
+			// feed-farm outage, or session-boundary pause).
+			return nil, nil, stats, fmt.Errorf("zero-gamma: no option data landed in first %ds (neither model ticks nor prior-session prices for BS-IV fallback). Check gateway entitlement and farm-connection notices in the daemon log",
+				int(earlyAbortAfter.Seconds()))
+		case throttledAbort.Load():
+			f.log.Warnf("gamma.abort reason=throttled landed=%d/%d elapsed=%s no_contract=%d",
+				len(legs), len(jobs), fanoutElapsed, noContract.Load())
+			return nil, nil, stats, fmt.Errorf("zero-gamma: gateway throttled (%d of %d first-wave legs failed contract resolution); aborted to avoid compounding rate-limit pressure",
+				noContract.Load(), done.Load())
+		default:
+			f.log.Warnf("gamma.abort reason=no_legs landed=%d/%d elapsed=%s",
+				len(legs), len(jobs), fanoutElapsed)
+			return nil, nil, stats, fmt.Errorf("zero-gamma: all %d legs failed to return usable IV/pricing", len(jobs))
+		}
+	}
+	f.log.Infof("gamma.fanout.done landed=%d/%d model_tick_iv=%d derived_mid_iv=%d derived_close_iv=%d derived_iv=%d elapsed=%s",
+		len(legs), len(jobs), stats.modelTickIVs, stats.derivedMidIVs, stats.derivedCloseIVs, stats.derivedIVs, fanoutElapsed)
+	return legs, liveOIUpdates, stats, nil
+}
+
 func gammaSourceFailureDiagnostic(
 	sym string,
 	spot float64,
 	spotAt time.Time,
 	picked []pickedExpiration,
 	legs []legData,
-	derivedIVs int32,
+	derivedIVs int,
 	legDiagnostics *rpc.GammaLegDiagnostics,
 	collection []rpc.GammaCollectionDiagnostic,
 	params rpc.GammaZeroParams,
@@ -1282,7 +1362,7 @@ func gammaSourceFailureDiagnostic(
 	asOf time.Time,
 ) *rpc.GammaZeroComputed {
 	warnings := []string{"oi_missing"}
-	if derivedIVs > 0 && int(derivedIVs) == len(legs) {
+	if derivedIVs > 0 && derivedIVs == len(legs) {
 		warnings = append(warnings, "all_iv_derived")
 	}
 	modelTickIVs, derivedMidIVs, derivedCloseIVs := countGammaIVSources(legs)
@@ -1299,7 +1379,7 @@ func gammaSourceFailureDiagnostic(
 		Expirations:           pickedDatesFromPicked(picked),
 		LegCount:              0,
 		PricedLegCount:        len(legs),
-		DerivedIVLegs:         int(derivedIVs),
+		DerivedIVLegs:         derivedIVs,
 		ModelTickLegs:         modelTickIVs,
 		DerivedLiveMidLegs:    derivedMidIVs,
 		DerivedPrevCloseLegs:  derivedCloseIVs,
@@ -1381,11 +1461,10 @@ func normalizeGammaParams(p rpc.GammaZeroParams) rpc.GammaZeroParams {
 }
 
 // snapshotUnderlyingForGamma polls the connector's market-data cache for
-// the underlying spot. Returns (spot, bid, ask, last, dataType) — spot
-// picks last → mid → bid → ask → mark → close, matching the
-// briefSnapshotPrice convention. Mark (tick 37) covers most off-hours
-// frozen states; close (tick 9) is the last-resort anchor for the rare
-// case where the gateway hasn't even pushed a mark yet.
+// the underlying spot. Spot picks last → mid → bid → ask → mark → close,
+// matching the briefSnapshotPrice convention. Mark (tick 37) covers most
+// off-hours frozen states; close (tick 9) is the last-resort anchor for the
+// rare case where the gateway hasn't even pushed a mark yet.
 //
 // Caller MUST hold an active market-data subscription for sym for the
 // duration of this call AND for the lifetime of the option fan-out that
@@ -1396,16 +1475,16 @@ func normalizeGammaParams(p rpc.GammaZeroParams) rpc.GammaZeroParams {
 // Acquire via subManager.Hold at the call site so refcounting is honest
 // and the briefSnapshotFull subscribe/unsubscribe race that previously
 // tore the line down mid-fan-out is structurally excluded.
-func snapshotUnderlyingForGamma(ctx context.Context, c *ibkrlib.Connector, sym string, timeout time.Duration) (spot, bid, ask, last float64, dataType string) {
+func snapshotUnderlyingForGamma(ctx context.Context, c *ibkrlib.Connector, sym string, timeout time.Duration) (spot float64, dataType string) {
 	if c == nil {
-		return 0, 0, 0, 0, ""
+		return 0, ""
 	}
 	sym = normSym(sym)
-	var mark, closePx float64
+	var bid, ask, last, mark, closePx float64
 	_ = pollMarketData(ctx, c, sym, time.Now().Add(timeout), func(d *ibkrlib.MarketData) bool {
 		bid, ask, last, mark, closePx = d.Bid, d.Ask, d.Last, d.MarkPrice, d.Close
 		if dataType == "" && (bid > 0 || ask > 0 || last > 0 || mark > 0 || closePx > 0) {
-			dataType = marketDataTypeName(c.GetMarketDataTypeForSymbol(sym))
+			dataType = marketDataTypeName(c.MarketDataTypeForSymbol(sym))
 		}
 		return bid > 0 || ask > 0 || last > 0 || mark > 0
 	})
@@ -1426,7 +1505,7 @@ func snapshotUnderlyingForGamma(ctx context.Context, c *ibkrlib.Connector, sym s
 	if dataType == "" && spot > 0 {
 		dataType = "live"
 	}
-	return spot, bid, ask, last, dataType
+	return spot, dataType
 }
 
 // throttleDetected reports whether the fan-out's observed
@@ -1768,18 +1847,19 @@ func gammaPrewarmKey(tradingClass, expiryYMD string) string {
 	return strings.ToUpper(strings.TrimSpace(tradingClass)) + "|" + strings.TrimSpace(expiryYMD)
 }
 
-func gammaKeepJobAfterPrewarm(_ string, prewarmComplete bool, cached bool) bool {
-	if prewarmComplete {
+// keepGammaJobAfterPrewarm reports whether a leg job survives the
+// post-prewarm cache filter. A cached contract always survives. An uncached
+// job survives only while the per-leg resolver fallback is still an option:
+// its expiry's prewarm must be incomplete (a complete prewarm IS the
+// gateway's authoritative listing — absence means no such contract) and the
+// prewarm failure class must not block fallback (zero-detail and timeout
+// classes would just re-pay the timeout per leg and trip the throttle
+// detector).
+func keepGammaJobAfterPrewarm(prewarmComplete, cached, fallbackBlocked bool) bool {
+	if prewarmComplete || fallbackBlocked {
 		return cached
 	}
 	return true
-}
-
-func gammaShouldKeepJobAfterPrewarm(sym string, prewarmComplete, cached, fallbackBlocked bool) bool {
-	if fallbackBlocked {
-		return cached
-	}
-	return gammaKeepJobAfterPrewarm(sym, prewarmComplete, cached)
 }
 
 func gammaPrewarmFailureBlocksFallback(err error) bool {

@@ -6,8 +6,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/osauer/ibkr/internal/rpc"
-	ibkrlib "github.com/osauer/ibkr/pkg/ibkr"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 func (s *Server) submitOptionExercise(ctx context.Context, opp rpc.Opportunity, qty int, origin string, orderRef string) error {

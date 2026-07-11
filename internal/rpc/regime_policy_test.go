@@ -370,3 +370,29 @@ func TestCompactRegimeMonitorCarriesEligibilityWithoutTickingFields(t *testing.T
 	}
 	t.Fatal("funding indicator missing from monitor view")
 }
+
+// TestGammaRegimeFromGap pins the ±GammaTransitionGapPct band edges: the
+// band is closed (±2.0 stays transitional), only strict exceedance claims
+// direction, and a nil gap never does.
+func TestGammaRegimeFromGap(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		gap  *float64
+		want string
+	}{
+		{name: "nil gap is transition", gap: nil, want: "transition_gamma"},
+		{name: "above band is long", gap: new(2.01), want: "long_gamma"},
+		{name: "upper edge stays transition", gap: new(2.0), want: "transition_gamma"},
+		{name: "flat is transition", gap: new(0.0), want: "transition_gamma"},
+		{name: "lower edge stays transition", gap: new(-2.0), want: "transition_gamma"},
+		{name: "below band is short", gap: new(-2.01), want: "short_gamma"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := GammaRegimeFromGap(tc.gap); got != tc.want {
+				t.Fatalf("GammaRegimeFromGap(%v) = %q, want %q", tc.gap, got, tc.want)
+			}
+		})
+	}
+}

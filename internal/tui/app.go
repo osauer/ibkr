@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/app/daemonclient"
-	"github.com/osauer/ibkr/internal/app/live"
-	"github.com/osauer/ibkr/internal/cli"
-	"github.com/osauer/ibkr/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/app/daemonclient"
+	"github.com/osauer/ibkr/v2/internal/app/live"
+	"github.com/osauer/ibkr/v2/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
 // Options carries the process dependencies wired by cmd/ibkr. The TUI owns

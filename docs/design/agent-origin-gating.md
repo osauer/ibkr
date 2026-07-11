@@ -83,12 +83,12 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
 
 ## Residual risks (accepted, documented)
 
-- Agent driving the paired PWA (e.g. browser automation) inherits
-  `human-paired-device`. Since 2026-06-11 its live submits are single-tap:
-  gated by the preview token and the server-validated
-  `confirm_account`/`confirm_mode` fields, with no typed ritual. Mitigation
-  remains pairing approval as a human act on the phone; accepted as the
-  price of fast live order entry.
+- A paired PWA request is stamped `human-paired-device`; the daemon cannot tell
+  whether browser automation clicked it. This remains accepted for user-driven
+  app operation, but it is not an agent authorization path. Project agents keep
+  paired-browser QA read-only and route any explicit current-turn broker-write
+  request through the agent-origin gated CLI. The preview token and
+  server-validated `confirm_account`/`confirm_mode` fields still gate app writes.
 - Direct socket callers can claim `human-tty`. Same-uid trust boundary as
   today; the preview-token invariant, gateway pins with session cross-check,
   and the `trading.freeze` switch still apply on top (the config ack stack

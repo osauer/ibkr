@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/cli"
-	"github.com/osauer/ibkr/internal/dial"
-	"github.com/osauer/ibkr/internal/rpc"
-	"github.com/osauer/ibkr/internal/watchlist"
+	"github.com/osauer/ibkr/v2/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/watchlist"
 )
 
 // Tool is the registered shape of an MCP tool exposed by `ibkr mcp`.
@@ -896,7 +897,7 @@ var Tools = []Tool{
 			if err := conn.Call(ctx, rpc.MethodAccountSummary, nil, &acct); err != nil {
 				return nil, err
 			}
-			res, err := cli.ComputeSize(cli.SizeInput{
+			res, err := risk.ComputeSize(risk.SizeInput{
 				Symbol:      in.Symbol,
 				Side:        in.Side,
 				Entry:       in.Entry,

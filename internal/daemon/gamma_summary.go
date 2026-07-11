@@ -5,11 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 const gammaNotAdvice = "Market-structure context only; not a trade recommendation."
-const gammaTransitionGapPct = 2.0
 
 func hydrateGammaComputed(c *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
 	if c == nil {
@@ -138,7 +137,7 @@ func gammaZeroStatusAndRegime(c *rpc.GammaZeroComputed) (string, string) {
 		return "unavailable", "unavailable"
 	}
 	if c.ZeroGamma != nil {
-		return "crossing", gammaRegimeFromGap(c.GapPct)
+		return "crossing", rpc.GammaRegimeFromGap(c.GapPct)
 	}
 	if c.LegCount > 0 && c.GammaTotalAbs == 0 && gammaProfileAllZero(c.Profile) {
 		return "unavailable", "unavailable"
@@ -152,20 +151,6 @@ func gammaZeroStatusAndRegime(c *rpc.GammaZeroComputed) (string, string) {
 		return "unavailable", "unavailable"
 	default:
 		return "unavailable", "unavailable"
-	}
-}
-
-func gammaRegimeFromGap(gapPct *float64) string {
-	if gapPct == nil {
-		return "transition_gamma"
-	}
-	switch {
-	case *gapPct > gammaTransitionGapPct:
-		return "long_gamma"
-	case *gapPct >= -gammaTransitionGapPct:
-		return "transition_gamma"
-	default:
-		return "short_gamma"
 	}
 }
 

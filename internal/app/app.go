@@ -12,16 +12,16 @@ import (
 
 	hyperserve "github.com/osauer/hyperserve/pkg/server"
 
-	"github.com/osauer/ibkr/internal/app/alerts"
-	"github.com/osauer/ibkr/internal/app/auth"
-	"github.com/osauer/ibkr/internal/app/daemonclient"
-	apphttp "github.com/osauer/ibkr/internal/app/http"
-	"github.com/osauer/ibkr/internal/app/live"
-	"github.com/osauer/ibkr/internal/app/push"
-	"github.com/osauer/ibkr/internal/app/relay"
-	"github.com/osauer/ibkr/internal/app/state"
-	"github.com/osauer/ibkr/internal/rpc"
-	"github.com/osauer/ibkr/internal/xdgcache"
+	"github.com/osauer/ibkr/v2/internal/app/alerts"
+	"github.com/osauer/ibkr/v2/internal/app/auth"
+	"github.com/osauer/ibkr/v2/internal/app/daemonclient"
+	apphttp "github.com/osauer/ibkr/v2/internal/app/http"
+	"github.com/osauer/ibkr/v2/internal/app/live"
+	"github.com/osauer/ibkr/v2/internal/app/push"
+	"github.com/osauer/ibkr/v2/internal/app/relay"
+	"github.com/osauer/ibkr/v2/internal/app/state"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/xdgcache"
 )
 
 type App struct {

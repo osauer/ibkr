@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/osauer/ibkr/pkg/ibkr/internal/logging"
+	"github.com/osauer/ibkr/v2/pkg/ibkr/internal/logging"
 )
 
 var rateLimiterLogger = logging.Component("IBKR RateLimiter")
@@ -332,9 +332,6 @@ func (rl *RateLimiter) SubmitWithRetries(reqType RequestType, sendFunc func() er
 // request with a 60 s budget must leave that queue promptly when its caller is
 // gone.
 func (rl *RateLimiter) SubmitWithRetriesContext(ctx context.Context, reqType RequestType, sendFunc func() error, maxRetries int) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

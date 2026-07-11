@@ -15,13 +15,13 @@ import (
 
 	hyperserve "github.com/osauer/hyperserve/pkg/server"
 
-	"github.com/osauer/ibkr/internal/app/auth"
-	"github.com/osauer/ibkr/internal/app/daemonclient"
-	"github.com/osauer/ibkr/internal/app/live"
-	"github.com/osauer/ibkr/internal/app/relay"
-	"github.com/osauer/ibkr/internal/app/state"
-	"github.com/osauer/ibkr/internal/rpc"
-	appweb "github.com/osauer/ibkr/web/app"
+	"github.com/osauer/ibkr/v2/internal/app/auth"
+	"github.com/osauer/ibkr/v2/internal/app/daemonclient"
+	"github.com/osauer/ibkr/v2/internal/app/live"
+	"github.com/osauer/ibkr/v2/internal/app/relay"
+	"github.com/osauer/ibkr/v2/internal/app/state"
+	"github.com/osauer/ibkr/v2/internal/rpc"
+	appweb "github.com/osauer/ibkr/v2/web/app"
 )
 
 type Dependencies struct {

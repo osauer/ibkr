@@ -120,7 +120,7 @@ func TestSystemNotice354RemembersAbsence(t *testing.T) {
 	if absent.Code != 354 || absent.Key != "HGENQ" {
 		t.Fatalf("absence = %+v, want code 354 key HGENQ", absent)
 	}
-	if got := len(c.GetMarketData()); got != 0 {
+	if got := len(c.MarketDataSnapshot()); got != 0 {
 		t.Fatalf("suppressed subscribe must not create a subscription, found %d", got)
 	}
 

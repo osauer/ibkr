@@ -3,7 +3,7 @@ package rpc
 import (
 	"time"
 
-	"github.com/osauer/ibkr/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/risk"
 )
 
 // MethodRulesSnapshot returns the daily trading-rulebook checklist evaluated

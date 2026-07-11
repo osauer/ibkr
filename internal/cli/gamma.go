@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func runGamma(ctx context.Context, env *Env, args []string) int {
@@ -466,9 +466,9 @@ func localHorizonAgreement(c *rpc.GammaZeroComputed) string {
 		name   string
 		regime string
 	}{
-		{"0dte", gammaBucketRegime(c.SpotUnderlying, c.ZeroGamma0DTE, c.GammaSign0DTE)},
-		{"1to7", gammaBucketRegime(c.SpotUnderlying, c.ZeroGamma1to7, c.GammaSign1to7)},
-		{"term", gammaBucketRegime(c.SpotUnderlying, c.ZeroGammaTerm, c.GammaSignTerm)},
+		{"0dte", rpc.GammaBucketRegime(c.SpotUnderlying, c.ZeroGamma0DTE, c.GammaSign0DTE)},
+		{"1to7", rpc.GammaBucketRegime(c.SpotUnderlying, c.ZeroGamma1to7, c.GammaSign1to7)},
+		{"term", rpc.GammaBucketRegime(c.SpotUnderlying, c.ZeroGammaTerm, c.GammaSignTerm)},
 	}
 	var usable []struct {
 		name   string
@@ -503,27 +503,6 @@ func localHorizonAgreement(c *rpc.GammaZeroComputed) string {
 		return "diverge:partial"
 	}
 	return strings.TrimSuffix(first, "_gamma") + "_only"
-}
-
-func gammaBucketRegime(spot float64, zero *float64, sign string) string {
-	if zero != nil && *zero > 0 {
-		gap := (spot - *zero) / *zero * 100
-		switch {
-		case gap > gammaGapYellow:
-			return "long_gamma"
-		case gap >= -gammaGapYellow:
-			return "transition_gamma"
-		default:
-			return "short_gamma"
-		}
-	}
-	switch sign {
-	case "positive":
-		return "long_gamma"
-	case "negative":
-		return "short_gamma"
-	}
-	return ""
 }
 
 // renderGammaBucketBreakdown emits the per-bucket 0DTE / 1-7 / term
@@ -1950,10 +1929,10 @@ func gammaRegimeWord(c *rpc.GammaZeroComputed) string {
 		return "unavailable"
 	}
 	if c.GapPct != nil {
-		switch {
-		case *c.GapPct > gammaGapYellow:
+		switch rpc.GammaRegimeFromGap(c.GapPct) {
+		case "long_gamma":
 			return "long-γ"
-		case *c.GapPct >= -gammaGapYellow:
+		case "transition_gamma":
 			return "transition"
 		default:
 			return "short-γ"

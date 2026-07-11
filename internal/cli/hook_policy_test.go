@@ -44,6 +44,39 @@ func TestIBKRPreToolHookGatesOpportunitiesExercise(t *testing.T) {
 	}
 }
 
+func TestIBKRPreToolHookGatesProposalReduceSubmit(t *testing.T) {
+	t.Parallel()
+	status := `{"mode":"disabled","can_write":false,"blocked":true,"live_override":"blocked","write_blockers":[{"code":"trading_disabled"}]}`
+	res := runIBKRHook(t, hookRun{status: status, command: "ibkr proposals reduce BB --percent 25 --submit --json"})
+	if res.code != 2 {
+		t.Fatalf("hook exit=%d stderr=%s, want 2", res.code, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "Broker-adjacent") {
+		t.Fatalf("stderr missing broker-write gate: %s", res.stderr)
+	}
+}
+
+func TestIBKRPreToolHookBlocksComposedProposalReduceSubmit(t *testing.T) {
+	t.Parallel()
+	status := `{"mode":"live","can_write":true,"blocked":false,"live_override":"ready","gateway_port":4001,"account":"U1234567"}`
+	res := runIBKRHook(t, hookRun{status: status, command: "ibkr proposals reduce BB --percent 25 --submit --json; echo done"})
+	if res.code != 2 {
+		t.Fatalf("hook exit=%d stderr=%s, want 2", res.code, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "without shell composition") {
+		t.Fatalf("stderr missing composition block: %s", res.stderr)
+	}
+}
+
+func TestIBKRPreToolHookDoesNotFreezeExemptFutureClose(t *testing.T) {
+	t.Parallel()
+	status := `{"mode":"live","blocked":false,"live_override":"ready","can_write":false,"account":"U1234567","gateway_port":7496,"write_blockers":[{"code":"trading_frozen"}]}`
+	res := runIBKRHook(t, hookRun{status: status, command: "ibkr order close 42"})
+	if res.code != 2 {
+		t.Fatalf("hook exit=%d stderr=%s, want 2", res.code, res.stderr)
+	}
+}
+
 func TestIBKRPreToolHookAllowsReadOnlyPipe(t *testing.T) {
 	t.Parallel()
 	status := `{"mode":"paper","can_write":true,"blocked":false,"live_override":"blocked","gateway_port":4002,"account":"DU1234567","endpoint":"127.0.0.1:4002"}`

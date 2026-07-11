@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/mod/semver"
 
-	"github.com/osauer/ibkr/internal/update"
+	"github.com/osauer/ibkr/v2/internal/update"
 )
 
 // updateOptions is the parsed flag state for `ibkr update`. Carries

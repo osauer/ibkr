@@ -9,7 +9,7 @@ import (
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
-	"github.com/osauer/ibkr/internal/app/state"
+	"github.com/osauer/ibkr/v2/internal/app/state"
 )
 
 type Sender interface {

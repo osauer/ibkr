@@ -56,14 +56,14 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check agent-config-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
 		/^[a-zA-Z][a-zA-Z0-9_-]+:.*##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' \
 		$(MAKEFILE_LIST)
 	@echo
-	@echo "Common flow:  make fmt && make check && make test && make build"
+	@echo "Common flow:  make fmt && make test && make build   (test already runs check)"
 	@echo "Daemon flow:  make install restart-daemon   (FORCE=1 adds ibkr restart --force; refreshes any running app)"
 	@echo "Release flow: make release RELEASE_VERSION=vX.Y.Z   (clean tree + HEAD == origin/$(MAIN_BRANCH))"
 	@echo "              tags + pushes + cross-compiles + creates GitHub Release with binaries attached"
@@ -173,9 +173,9 @@ TEST_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(TEST_JOBS),)
 test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overlapped by default
 	$(MAKE) $(TEST_MAKEFLAGS) check test-pkg test-daemon
 
-# Binding pre-commit gate: formatting + go vet + staticcheck + govulncheck +
-# plugin manifest validation. Fails on stdlib vulnerabilities too — keep Go
-# patched.
+# Binding pre-commit gate: agent config/hooks + formatting + go vet +
+# staticcheck + govulncheck + plugin manifest validation. Fails on stdlib
+# vulnerabilities too — keep Go patched.
 # staticcheck and govulncheck are pinned as go.mod tool dependencies and
 # invoked via `go tool`, so CI and local runs use the same versions.
 #
@@ -187,9 +187,9 @@ test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overla
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
 CHECK_JOBS ?= 8
-CHECK_TARGETS = $(CHECK_DEPS) modernize-check docs-check docs-html-check changelog-check account-data-check app-contract-check gofmt-check vet-check staticcheck-check govulncheck-check
+CHECK_TARGETS = $(CHECK_DEPS) agent-config-check modernize-check docs-check docs-html-check changelog-check account-data-check app-contract-check gofmt-check vet-check staticcheck-check govulncheck-check
 CHECK_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(CHECK_JOBS),)
-check: ## gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin-check + parity-check + docs-check + docs-html-check + changelog-check + account-data-check + app-contract-check (binding pre-commit gate)
+check: ## agent config/hooks + gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin/parity/docs/changelog/account/app checks (binding pre-commit gate)
 	$(MAKE) $(CHECK_MAKEFLAGS) $(CHECK_TARGETS)
 
 gofmt-check: ## Verify tracked / non-gitignored Go files are gofmt'd
@@ -250,7 +250,6 @@ plugin-check: ## Validate plugin/marketplace manifests with `claude plugin valid
 	@command -v claude >/dev/null 2>&1 || { echo "claude CLI not on PATH; install Claude Code or skip with: make check plugin-check= "; exit 1; }
 	claude plugin validate .
 	@$(MAKE) --no-print-directory hook-version-check
-	@$(MAKE) --no-print-directory hook-behavior-check
 	@$(MAKE) --no-print-directory registry-version-check
 
 # Root server.json is the MCP Registry template: release-registry-server
@@ -275,6 +274,20 @@ registry-version-check: ## Ensure server.json version tracks .claude-plugin/plug
 # false-allow (agent reaches a write) and false-block (read paths break).
 hook-behavior-check: ## Run table-driven allow/block cases against hooks/ibkr-pre-tool-use.sh
 	@bash hooks/ibkr-pre-tool-use_test.sh
+	@HOOK_UNDER_TEST=.codex/hooks/ibkr-pre-tool-use.sh bash hooks/ibkr-pre-tool-use_test.sh
+
+agent-config-check: hook-behavior-check ## Validate project Codex config, hooks, and read-only reviewer roles
+	@bash -n hooks/ibkr-pre-tool-use.sh .codex/hooks/ibkr-pre-tool-use.sh scripts/codex-implement.sh
+	@jq -e . .codex/hooks.json >/dev/null
+	@go test ./internal/agentconfig/
+	@if command -v codex >/dev/null 2>&1; then \
+		read_decision=$$(codex execpolicy check --rules .codex/rules/ibkr.rules -- ibkr status --json | jq -r .decision); \
+		write_decision=$$(codex execpolicy check --rules .codex/rules/ibkr.rules -- ibkr order place --preview-token TOKEN --json | jq -r .decision); \
+		human_only_decision=$$(codex execpolicy check --rules .codex/rules/ibkr.rules -- ibkr settings set trading.freeze=true | jq -r .decision); \
+		[ "$$read_decision" = allow ] && [ "$$write_decision" = prompt ] && [ "$$human_only_decision" = forbidden ] || { \
+			echo "execpolicy decisions: read=$$read_decision write=$$write_decision human-only=$$human_only_decision" >&2; exit 1; \
+		}; \
+	fi
 
 # Drift gate for the session-start hook's fallback plugin version. When
 # CLAUDE_PLUGIN_ROOT is unset the hook compares the binary against this
@@ -318,7 +331,7 @@ hook-version-check: ## Ensure session-start.sh fallback version tracks .claude-p
 # Cheap enough to live in the pre-commit gate.
 parity-check: ## Verify MCP tool inventory matches the CLI surface
 	go test -run 'TestParity|TestStreamingParity|TestNoTradingTools|TestSchemasAreValidJSON' ./internal/mcp/
-	go test -run 'TestSkill' ./internal/cli/
+	go test -run 'TestSkill|TestAgentPolicy' ./internal/cli/
 
 # Idiom-drift gate. `go fix -diff` is the toolchain-native fixer (tracks the
 # Go version pinned in go.mod); `go tool modernize` runs the broader gopls
@@ -369,6 +382,7 @@ docs-regen: ## Regenerate docs/reference/*.md from generators
 # be skipped. Uses POSIX tempfiles (not bash process substitution) so
 # the recipe runs under /bin/sh on every host.
 docs-check: ## Verify checked-in docs/reference/*.md match what the generators emit
+	@go test ./scripts/docgen/config-ref
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 	fail=0; \
 	for gen in config-ref mcp-tools; do \

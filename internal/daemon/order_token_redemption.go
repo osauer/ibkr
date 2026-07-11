@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/internal/config"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func (s *Server) confirmPreviewTokenForPlace(token string) (orderPreviewTokenPayload, error) {

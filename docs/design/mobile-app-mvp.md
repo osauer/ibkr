@@ -2,6 +2,11 @@
 
 Updated: 2026-06-07 22:11 CEST
 
+Status: historical MVP baseline. The current paired PWA includes gated trading
+and protection actions; use `docs/design/agent-origin-gating.md`, `SECURITY.md`,
+and current app/RPC contracts for present behavior. The deferred list below
+describes the MVP release, not the current product.
+
 ## Goal
 
 Ship the smallest useful application layer for mobile access to the local IBKR
@@ -112,6 +117,8 @@ These boundaries are intentionally small so future agents can work in one layer
 without editing daemon, MCP, CLI renderers, or browser code unnecessarily.
 
 ## Deferred
+
+At the MVP release, the following work was deferred:
 
 - HTTP MCP over the app transport.
 - Mac-side pairing approval UI.

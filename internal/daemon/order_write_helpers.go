@@ -5,7 +5,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func (s *Server) openOrderViewForWrite(id string, status rpc.TradingStatus) (rpc.OrderView, error) {

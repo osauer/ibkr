@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osauer/ibkr/internal/dial"
-	"github.com/osauer/ibkr/internal/rpc"
+	"github.com/osauer/ibkr/v2/internal/dial"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func TestRenderOrderPreviewShowsTokenAndSubmitEligibility(t *testing.T) {
