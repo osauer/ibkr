@@ -12,10 +12,15 @@
 # Task lifecycle invariants (enforced, not conventions):
 #   - A fresh task requires no leftover worktree or codex/NAME branch;
 #     finish the previous task of that name with --cleanup first.
+#   - The brief is materialized and validated before any git mutation: a
+#     missing or empty brief strands no worktree, branch, or task dir.
 #   - Iteration rounds (--resume) require the task worktree to still exist:
 #     the thread's context refers to files on disk.
 #   - diff.patch is the cumulative task delta against the recorded base
 #     commit, so it stays correct even if Codex commits inside its worktree.
+#   - --cleanup is idempotent, including when the worktree directory was
+#     removed out-of-band: stale registrations are pruned before the branch
+#     is deleted.
 #
 # Safety shape (do not weaken):
 #   - The worktree is created from local main; the primary working tree and
@@ -74,10 +79,14 @@ TASK_DIR="$REPO/.claude/codex-runs/$TASK"
 
 if [[ "$CLEANUP" == 1 ]]; then
     [[ -d "$WORKTREE" ]] && git -C "$REPO" worktree remove --force "$WORKTREE"
+    # Prune before deleting the branch: if the worktree directory was
+    # removed out-of-band, the stale registration makes `git branch -D`
+    # fail with "used by worktree" — pruning first keeps cleanup
+    # idempotent in exactly the recovery case.
+    git -C "$REPO" worktree prune
     if git -C "$REPO" show-ref --verify --quiet "refs/heads/$BRANCH"; then
         git -C "$REPO" branch -D "$BRANCH"
     fi
-    git -C "$REPO" worktree prune
     echo "cleaned up: $WORKTREE and branch $BRANCH"
     [[ -d "$TASK_DIR" ]] && echo "artifacts kept: ${TASK_DIR#"$REPO"/} (prune once the work is committed)"
     exit 0
@@ -96,6 +105,21 @@ if [[ ! -d "$WORKTREE" ]]; then
         echo "error: stale branch $BRANCH exists without a worktree; run --cleanup first" >&2
         exit 2
     fi
+fi
+
+# Materialize and validate the brief before any git mutation: a missing
+# or empty brief must strand no worktree, branch, or task directory. The
+# stdin path buffers here for the same reason.
+BRIEF_TMP="$(mktemp)"
+trap 'rm -f "$BRIEF_TMP"' EXIT
+if [[ -n "$BRIEF" ]]; then
+    cp "$BRIEF" "$BRIEF_TMP"
+else
+    cat > "$BRIEF_TMP"
+fi
+[[ -s "$BRIEF_TMP" ]] || { echo "error: empty brief" >&2; exit 2; }
+
+if [[ ! -d "$WORKTREE" ]]; then
     git -C "$REPO" worktree add -b "$BRANCH" "$WORKTREE" main
     mkdir -p "$TASK_DIR"
     git -C "$REPO" rev-parse main > "$TASK_DIR/base-sha"
@@ -103,13 +127,7 @@ fi
 
 RUN_DIR="$TASK_DIR/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$RUN_DIR"
-
-if [[ -n "$BRIEF" ]]; then
-    cp "$BRIEF" "$RUN_DIR/brief.md"
-else
-    cat > "$RUN_DIR/brief.md"
-fi
-[[ -s "$RUN_DIR/brief.md" ]] || { echo "error: empty brief" >&2; exit 2; }
+mv "$BRIEF_TMP" "$RUN_DIR/brief.md"
 
 # Fixed, non-negotiable execution shape. No approval or hook-trust bypass
 # flags may be added here; headless denials failing closed is the design.

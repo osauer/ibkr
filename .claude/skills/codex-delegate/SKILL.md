@@ -3,7 +3,7 @@ name: codex-delegate
 description: Delegate a bounded implementation task to headless Codex (gpt-5.6-sol) in a sibling worktree while this session keeps planning, review, judgement, and integration. Use when asked to delegate/hand off coding to Codex, to implement via Codex, or to run reviewed independent fix batches in parallel. Never for broker writes, guardrail changes, or releases.
 ---
 
-Updated: 2026-07-12 07:29 CEST
+Updated: 2026-07-12 09:26 CEST
 
 # Codex delegation loop
 
@@ -48,8 +48,9 @@ user, per root `AGENTS.md`.
    Task names are lowercase-kebab; the worktree is `../ibkr-codex-<name>` on
    branch `codex/<name>`. The runner enforces the lifecycle: a fresh task
    refuses to start over a leftover worktree or branch (finish it with
-   `--cleanup` first), and `--resume` refuses to run once the worktree is
-   gone. Long tasks: generous Bash timeout or background the call.
+   `--cleanup` first), `--resume` refuses to run once the worktree is
+   gone, and a missing or empty brief is rejected before any git state is
+   created. Long tasks: generous Bash timeout or background the call.
    Artifacts land in `.claude/codex-runs/<name>/<stamp>/`: `brief.md`,
    `events.jsonl`, `last-message.md`, `thread-id`, `diff.patch` —
    `diff.patch` is the cumulative task delta against the recorded base
@@ -98,10 +99,11 @@ user, per root `AGENTS.md`.
    scripts/codex-implement.sh --task <name> --cleanup
    ```
 
-   This removes the worktree and branch. Artifacts stay under
-   `.claude/codex-runs/<name>/` as the gitignored audit trail; prune them
-   once the work is committed. An abandoned task ends the same way — run
-   `--cleanup` and nothing ever touched the primary tree.
+   This removes the worktree and branch, and is idempotent — it recovers
+   even when the worktree directory was removed out-of-band. Artifacts
+   stay under `.claude/codex-runs/<name>/` as the gitignored audit trail;
+   prune them once the work is committed. An abandoned task ends the same
+   way — run `--cleanup` and nothing ever touched the primary tree.
 
 ## Execution model and safety facts
 
