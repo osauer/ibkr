@@ -477,9 +477,15 @@ func NewConnector(config *ConnectorConfig) *Connector {
 		config = &ConnectorConfig{
 			ServiceName: "regime-connector",
 		}
+	} else {
+		configCopy := *config
+		config = &configCopy
 	}
 	if config.BaseConfig == nil {
 		config.BaseConfig = DefaultConfig()
+	} else {
+		baseConfigCopy := *config.BaseConfig
+		config.BaseConfig = &baseConfigCopy
 	}
 	if config.PreferredClientID == 0 {
 		config.PreferredClientID = config.BaseConfig.ClientID
@@ -2113,12 +2119,11 @@ func (c *Connector) Stop() error {
 // that race or run sequentially do not need to coordinate. Unsubscribe is
 // the symmetric tear-down.
 //
-// ctx bounds the underlying market-data slot-acquire when the slot pool
-// is saturated. A nil ctx is treated as context.Background() — equivalent
-// to the pre-F-26 behaviour where Connection.ctx (daemon lifetime) was
-// the only deadline. Callers with a per-request deadline (regime fetchers,
-// snapshot helpers) should pass that ctx through so the budget is honoured
-// at the slot layer instead of relying on orchestrator-level wrappers.
+// ctx must be non-nil and bounds the underlying market-data slot-acquire when
+// the slot pool is saturated. Pass context.Background() when no cancellation
+// is needed. Callers with a per-request deadline (regime fetchers, snapshot
+// helpers) should pass that ctx through so the budget is honoured at the slot
+// layer instead of relying on orchestrator-level wrappers.
 func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fields []string) error {
 	symbol = strings.ToUpper(symbol)
 	if reason, inactive := c.inactiveReason(symbol); inactive {
@@ -2314,8 +2319,9 @@ func explicitContractRouteMatches(requested, candidate Contract) bool {
 // If a subscription exists but appears stale (no ticks in staleAfter), it will request again.
 // Returns true if a request was sent (new or refreshed).
 //
-// ctx bounds the slot-acquire when the market-data semaphore is
-// saturated. nil ctx is treated as context.Background().
+// ctx must be non-nil and bounds the slot-acquire when the market-data
+// semaphore is saturated. Pass context.Background() when no cancellation is
+// needed.
 func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol string, fields []string, staleAfter time.Duration) (bool, error) {
 	symbol = strings.ToUpper(symbol)
 	if reason, inactive := c.inactiveReason(symbol); inactive {

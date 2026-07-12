@@ -511,6 +511,9 @@ func NewConnection(config *ConnectionConfig) *Connection {
 	if config == nil {
 		config = DefaultConfig()
 	} else {
+		configCopy := *config
+		config = &configCopy
+
 		// Fill in missing timeouts/intervals with safe defaults to avoid zero-value panics
 		def := DefaultConfig()
 		if config.ConnectTimeout == 0 {
@@ -3949,10 +3952,9 @@ func (c *Connection) IsWhatIfOrderID(orderID int) bool {
 	return ok
 }
 
-// RequestMarketData subscribes to market data for a symbol. ctx bounds the
-// market-data slot-acquire wait when the slot pool is saturated; nil ctx
-// is treated as context.Background() so historical callers that have no
-// per-request deadline see no behaviour change.
+// RequestMarketData subscribes to market data for a symbol. ctx must be
+// non-nil and bounds the market-data slot-acquire wait when the slot pool
+// is saturated. Pass context.Background() when no cancellation is needed.
 //
 // Pre-F-26 the slot-acquire used Connection.ctx (daemon lifetime), which
 // meant a caller's per-request budget (e.g. the regime fetcher's 5 s
@@ -3992,10 +3994,10 @@ func (c *Connection) RequestMarketData(ctx context.Context, symbol string) (int,
 }
 
 // RequestMarketDataWithContract issues reqMktData for the given contract.
-// ctx is forwarded to acquireMarketDataSlot so a saturated slot pool
-// honours the caller's deadline instead of Connection.ctx. Nil ctx is
-// treated as context.Background() for historical callers that don't
-// carry one. See RequestMarketData's docstring for F-26 lineage.
+// ctx must be non-nil and is forwarded to acquireMarketDataSlot so a
+// saturated slot pool honours the caller's deadline instead of
+// Connection.ctx. Pass context.Background() when no cancellation is needed.
+// See RequestMarketData's docstring for F-26 lineage.
 func (c *Connection) RequestMarketDataWithContract(ctx context.Context, contract Contract, genericTicks string, snapshot bool, regulatorySnap bool) (int, error) {
 	return c.requestMarketDataWithContract(ctx, contract, genericTicks, snapshot, regulatorySnap, nil)
 }
@@ -4352,7 +4354,8 @@ func (c *Connection) RequestSecDefOptParams(underlyingSymbol, futFopExchange, un
 
 // RequestMarketDataWithPrimary subscribes to market data with an explicit primary exchange hint.
 // This helps IBKR route to venues that provide better pre/after-hours coverage.
-// ctx is forwarded to acquireMarketDataSlot; nil is treated as Background.
+// ctx must be non-nil and is forwarded to acquireMarketDataSlot. Pass
+// context.Background() when no cancellation is needed.
 // See RequestMarketData's docstring for F-26 lineage.
 func (c *Connection) RequestMarketDataWithPrimary(ctx context.Context, symbol string, primaryExchange string) (int, error) {
 	if !c.IsConnected() {
