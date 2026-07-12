@@ -127,19 +127,34 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// daemonReachedGateway calls status.health on the freshly launched daemon
-// and returns true only when the daemon reports connected=true and a
-// non-zero server version. The daemon stays up in degraded mode when its
-// connector can't handshake; we use this signal to mark the suite as
-// "no live gateway" rather than letting every test fail with internal
-// errors.
+// daemonReachedGateway polls status.health on the freshly launched daemon
+// until it reports connected=true with a non-zero server version. The
+// daemon binds its socket before its connector finishes the async gateway
+// handshake (observably ~0.7s against paper TWS), so a single-shot check
+// here raced the handshake and could mark a healthy suite "no live
+// gateway" — every live test skipped and the run still exited 0. The
+// 25s budget mirrors the daemon's own handshake wait (`ibkr restart`).
+// A daemon whose connector entered degraded mode stays disconnected
+// forever, so a truly muted gateway still skips cleanly — it just pays
+// the full budget once.
 func daemonReachedGateway(socketPath string) bool {
+	deadline := time.Now().Add(25 * time.Second)
+	for time.Now().Before(deadline) {
+		if daemonHealthConnected(socketPath) {
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false
+}
+
+func daemonHealthConnected(socketPath string) bool {
 	conn, err := dial.Connect(socketPath)
 	if err != nil {
 		return false
 	}
 	defer conn.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	var res rpc.HealthResult
 	if err := conn.Call(ctx, rpc.MethodStatusHealth, nil, &res); err != nil {
