@@ -20,6 +20,18 @@ import (
 
 const opportunityRefreshRetryBase = 30 * time.Second
 
+// opportunityRefreshBackoffCap bounds sustained-failure retries independently
+// of the 2m refresh cadence, mirroring proposalRefreshBackoffCap. Before this
+// cap the Run loop retried (and warned) every 2m for the whole outage — a
+// multi-hour gateway-down stretch logged ~30 "refresh blocked" WARN/hour
+// (observed 652 over one weekend day) while the proposals engine, already
+// capped at 15m, logged ~4/hour for the identical outage. Capping the retry at
+// 15m thins the trail to match with no lost signal: the onset warn, the
+// per-cap heartbeat, the recovery info line, and the status "degraded" row all
+// remain, and recovery is kick-driven (postConnectSetup kicks both engines), so
+// the wider cap adds no recovery lag. (2026-07-12)
+const opportunityRefreshBackoffCap = 15 * time.Minute
+
 type opportunityEngine struct {
 	server  *Server
 	store   *opportunityStore
@@ -128,7 +140,7 @@ func (e *opportunityEngine) Run(ctx context.Context) {
 		snap, err := e.Refresh(ctx, false)
 		wait := next
 		if err != nil || opportunityRefreshTransient(snap) {
-			wait = minDuration(maxDuration(time.Duration(max(e.RefreshHealth().Streak, 1))*opportunityRefreshRetryBase, opportunityRefreshRetryBase), next)
+			wait = refreshBackoff(next, opportunityRefreshRetryBase, opportunityRefreshBackoffCap, e.RefreshHealth().Streak)
 		}
 		timer.Reset(wait)
 	}
@@ -198,11 +210,12 @@ func (e *opportunityEngine) RefreshHealth() opportunityRefreshHealth {
 // Transient failures preserve the last-good snapshot and return err == nil
 // — the blocker codes are the only signal — so this is where a stalled
 // panel becomes diagnosable. Quiet below proposalRefreshWarnStreak, then
-// one warn per failed attempt: Run's backoff paces those at 30s/1m/2m/…
-// capped at the cadence, so a persistent outage logs once per escalation
-// and then once per cadence, not once per poll. One info line closes the
-// streak when a refresh finally lands. Mirrors the proposals engine's
-// trail so both broker-state feeds diagnose the same way.
+// one warn per failed attempt: Run's backoff (refreshBackoff) paces those at
+// 30s/1m/2m/… doubling up to opportunityRefreshBackoffCap, so a persistent
+// outage logs once per escalation and then once per cap (15m), not once per
+// poll. One info line closes the streak when a refresh finally lands. Shares
+// refreshBackoff with the proposals engine so both broker-state feeds diagnose
+// the same way.
 func (e *opportunityEngine) noteRefreshOutcome(snap rpc.OpportunitySnapshot, err error) {
 	if e == nil {
 		return
@@ -1114,18 +1127,4 @@ func (s *opportunityStore) AppendEvent(ev opportunityEvent) error {
 func shortStableHash(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:8])
-}
-
-func minDuration(a, b time.Duration) time.Duration {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxDuration(a, b time.Duration) time.Duration {
-	if a > b {
-		return a
-	}
-	return b
 }

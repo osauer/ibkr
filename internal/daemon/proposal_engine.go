@@ -204,26 +204,39 @@ func (e *proposalEngine) kickCh() chan struct{} {
 	return e.kick
 }
 
-// proposalRefreshWait returns the pause before the next automatic refresh:
-// the full cadence after a clean refresh, an escalating 30s/1m/2m/…
-// backoff while refreshes keep failing on transient session conditions,
-// capped at proposalRefreshBackoffCap (or the cadence when that is longer,
-// so slow-cadence overrides never retry faster on failure than on success).
+// refreshBackoff paces a broker-state engine's automatic refresh retries
+// during a sustained transient outage. It returns the full cadence after a
+// clean refresh (failures == 0), then an escalating base<<(failures-1) backoff
+// while refreshes keep failing, capped at max(cadence, backoffCap) so a
+// slow-cadence override never retries faster on failure than on success. The
+// proposal and opportunity engines share it so both broker-state feeds throttle
+// their "refresh blocked" warn trail identically — once per escalation, then
+// once per cap for the whole outage, not once per poll. Recovery is kick-driven
+// (postConnectSetup kicks both engines), so a wide cap adds no recovery lag.
 // The wait <= 0 branch guards shift overflow on absurd streaks, mirroring
 // gammaRetryBackoff.
-func proposalRefreshWait(cadence time.Duration, failures int) time.Duration {
+func refreshBackoff(cadence, base, backoffCap time.Duration, failures int) time.Duration {
 	if failures <= 0 {
 		return cadence
 	}
 	if cadence <= 0 {
-		cadence = proposalRefreshRetryBase
+		cadence = base
 	}
-	ceil := max(cadence, proposalRefreshBackoffCap)
-	wait := proposalRefreshRetryBase << (failures - 1)
+	ceil := max(cadence, backoffCap)
+	wait := base << (failures - 1)
 	if wait <= 0 || wait > ceil {
 		return ceil
 	}
 	return wait
+}
+
+// proposalRefreshWait returns the pause before the next automatic refresh:
+// the full cadence after a clean refresh, an escalating 30s/1m/2m/… backoff
+// while refreshes keep failing on transient session conditions, capped at
+// proposalRefreshBackoffCap (or the cadence when that is longer). See
+// refreshBackoff, which the opportunity engine shares.
+func proposalRefreshWait(cadence time.Duration, failures int) time.Duration {
+	return refreshBackoff(cadence, proposalRefreshRetryBase, proposalRefreshBackoffCap, failures)
 }
 
 // proposalPositionsUnprimed reports whether an empty positions list
@@ -312,10 +325,10 @@ func (e *proposalEngine) Refresh(ctx context.Context, show bool) (rpc.TradePropo
 // Transient failures preserve the last-good snapshot and return err == nil
 // — the blocker codes are the only signal — so this is where a stalled
 // panel becomes diagnosable. Quiet below proposalRefreshWarnStreak, then
-// one warn per failed attempt: Run's backoff paces those at 30s/1m/2m/…
-// capped at the cadence, so a persistent outage logs once per escalation
-// and then once per cadence, not once per poll. One info line closes the
-// streak when a refresh finally lands.
+// one warn per failed attempt: Run's backoff (refreshBackoff) paces those at
+// 30s/1m/2m/… doubling up to proposalRefreshBackoffCap, so a persistent outage
+// logs once per escalation and then once per cap (15m), not once per poll. One
+// info line closes the streak when a refresh finally lands.
 func (e *proposalEngine) noteRefreshOutcome(snap rpc.TradeProposalSnapshot, err error) {
 	failed := err != nil || proposalRefreshTransient(snap)
 	now := e.clock()

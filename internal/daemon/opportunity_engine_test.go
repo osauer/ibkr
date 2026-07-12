@@ -413,6 +413,35 @@ func TestOpportunityNoteRefreshOutcomeStreak(t *testing.T) {
 	}
 }
 
+// TestOpportunityRefreshBackoffCap pins the Run-loop retry pacing at the
+// opportunity engine's 2m cadence: sustained transient failures retry at 30s
+// doubling up to opportunityRefreshBackoffCap (15m), NOT once per 2m cadence
+// forever. A weekend gateway outage otherwise warned ~30×/hour where the
+// proposals engine, already capped, warned ~4×/hour for the same outage.
+func TestOpportunityRefreshBackoffCap(t *testing.T) {
+	t.Parallel()
+	cadence := 2 * time.Minute
+	cases := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{0, cadence},
+		{1, 30 * time.Second},
+		{2, time.Minute},
+		{3, 2 * time.Minute},
+		{4, 4 * time.Minute},
+		{5, 8 * time.Minute},
+		{6, opportunityRefreshBackoffCap},   // 16m, capped at 15m
+		{200, opportunityRefreshBackoffCap}, // shift-overflow guard
+	}
+	for _, tc := range cases {
+		got := refreshBackoff(cadence, opportunityRefreshRetryBase, opportunityRefreshBackoffCap, tc.failures)
+		if got != tc.want {
+			t.Errorf("refreshBackoff(%v, %d) = %v, want %v", cadence, tc.failures, got, tc.want)
+		}
+	}
+}
+
 func TestOpportunityRefreshTransientCodes(t *testing.T) {
 	t.Parallel()
 	transient := []string{"opportunity_scope_unavailable", "opportunity_scope_mismatch", "account_unavailable", "positions_unavailable", "positions_pending"}
