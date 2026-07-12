@@ -3,7 +3,7 @@ name: codex-delegate
 description: Delegate a bounded implementation task to headless Codex (gpt-5.6-sol) in a sibling worktree while this session keeps planning, review, judgement, and integration. Use when asked to delegate/hand off coding to Codex, to implement via Codex, or to run reviewed independent fix batches in parallel. Never for broker writes, guardrail changes, or releases.
 ---
 
-Updated: 2026-07-11 22:45 CEST
+Updated: 2026-07-12 07:29 CEST
 
 # Codex delegation loop
 
@@ -18,6 +18,12 @@ Good: bounded, well-specified implementation — a reviewed fix batch, a
 mechanical refactor, test scaffolding, a feature slice whose contract is
 already decided. Independent tasks may run as parallel delegations under
 distinct task names.
+
+Exploration and review delegation stays with native read-only Claude
+subagents (root `AGENTS.md`); they are lower-friction and need no runner.
+This lane exists for one thing: a second model family implementing. Use a
+codex `--read-only` run only when a second-model opinion is explicitly
+wanted.
 
 Never delegate: broker writes or anything requiring live-order interaction;
 trading guardrail or freeze/settings changes; risk-policy threshold decisions;
@@ -40,10 +46,14 @@ user, per root `AGENTS.md`.
    ```
 
    Task names are lowercase-kebab; the worktree is `../ibkr-codex-<name>` on
-   branch `codex/<name>`. Use `--read-only` for delegated analysis/review
-   (no writes expected). Long tasks: generous Bash timeout or background the
-   call. Artifacts land in `.claude/codex-runs/<name>/<stamp>/`: `brief.md`,
-   `events.jsonl`, `last-message.md`, `thread-id`, `diff.patch`.
+   branch `codex/<name>`. The runner enforces the lifecycle: a fresh task
+   refuses to start over a leftover worktree or branch (finish it with
+   `--cleanup` first), and `--resume` refuses to run once the worktree is
+   gone. Long tasks: generous Bash timeout or background the call.
+   Artifacts land in `.claude/codex-runs/<name>/<stamp>/`: `brief.md`,
+   `events.jsonl`, `last-message.md`, `thread-id`, `diff.patch` —
+   `diff.patch` is the cumulative task delta against the recorded base
+   commit, correct even if Codex commits inside its worktree.
 
 3. **Review** — senior review, in this session. Read `diff.patch` fully and
    judge it against the brief. Trust the diff, not the report; the last
@@ -67,8 +77,9 @@ user, per root `AGENTS.md`.
    scripts/codex-implement.sh --task <name> --resume $(cat .claude/codex-runs/<name>/<stamp>/thread-id) --brief <feedback-file>
    ```
 
-   The thread keeps its prior context. Two or three rounds is normal; if it
-   is not converging, stop, take over in the main session, and say so.
+   The thread keeps its prior context, and the worktree must still exist —
+   never clean up between rounds. Two or three rounds is normal; if it is
+   not converging, stop, take over in the main session, and say so.
 
 6. **Integrate** — once accepted, land it from the primary tree. Prefer
    applying the reviewed patch to the primary tree over merging the branch
@@ -80,11 +91,17 @@ user, per root `AGENTS.md`.
 
    Re-run `make test` in the primary tree. Commit only when the user asks.
 
-7. **Clean up** —
+7. **Clean up** — after the patch is applied and the primary-tree gates are
+   green (never between iteration rounds):
 
    ```sh
-   git worktree remove --force ../ibkr-codex-<name> && git branch -D codex/<name>
+   scripts/codex-implement.sh --task <name> --cleanup
    ```
+
+   This removes the worktree and branch. Artifacts stay under
+   `.claude/codex-runs/<name>/` as the gitignored audit trail; prune them
+   once the work is committed. An abandoned task ends the same way — run
+   `--cleanup` and nothing ever touched the primary tree.
 
 ## Execution model and safety facts
 
@@ -102,9 +119,9 @@ user, per root `AGENTS.md`.
   either way; briefs keep ibkr usage read-only.
 - Codex reaches live read-only data through the `ibkr` MCP server (spawned
   outside the sandbox); that surface cannot submit orders.
-- Model and effort default to the user's Codex config (`gpt-5.6-sol`;
-  requires codex-cli ≥ 0.144). Override per-run with `--model`/`--effort`
-  only with a reason.
+- Model and effort come from the user's Codex config (`gpt-5.6-sol`;
+  requires codex-cli ≥ 0.144). Per-run overrides are deliberately not
+  exposed; the user's config is the single knob.
 - Launching write-mode headless Codex is itself a gated action in Claude
   sessions: expect a permission prompt per run in interactive sessions. In
   autonomous sessions it is denied unless the user has allowlisted

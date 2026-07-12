@@ -1,6 +1,6 @@
 # Codex Workflow
 
-Updated: 2026-07-11 22:39 CEST
+Updated: 2026-07-12 07:29 CEST
 
 This page is a navigation aid, not a second copy of the repo rules. The
 canonical instructions live in [`AGENTS.md`](../../AGENTS.md); use this guide to
@@ -80,8 +80,10 @@ The runner creates `../ibkr-codex-<name>` from local `main`, runs `codex exec`
 under a workspace-write seatbelt with fail-closed approvals, and captures
 `brief.md`, `events.jsonl`, `last-message.md`, `thread-id`, and `diff.patch`
 under `.claude/codex-runs/<name>/`. The orchestrator reviews the diff against
-the brief, runs the gates, iterates with `--resume <thread-id>`, and
-integrates by applying the reviewed patch in the primary tree. The full loop,
+the brief, runs the gates, iterates with `--resume <thread-id>`, integrates
+by applying the reviewed patch in the primary tree, and finishes with
+`--cleanup` (worktree and branch removal; the runner refuses fresh tasks
+over leftovers, so skipped cleanup surfaces instead of littering). The full loop,
 brief template, and sandbox facts live in
 [`.claude/skills/codex-delegate/SKILL.md`](../../.claude/skills/codex-delegate/SKILL.md).
 Broker writes, guardrail changes, and release work are never delegated.
