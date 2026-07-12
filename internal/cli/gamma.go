@@ -970,7 +970,7 @@ func fallbackGammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.Gamma
 		d.Impact = "Coverage may be incomplete; treat this slice as lower confidence."
 		d.Action = "Retry later or during regular trading hours; avoid repeated forced runs."
 	case code == "oi_missing":
-		session := gammaWarningSessionForCLI(c)
+		session, sessionFallback := gammaWarningSessionForCLI(c)
 		if gammaOIMissingUnexpectedForCLI(d.Scope, session) {
 			d.Severity = "data_quality"
 		}
@@ -984,6 +984,9 @@ func fallbackGammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.Gamma
 		}
 		if c != nil && c.PricedLegCount > 0 {
 			d.Impact = fmt.Sprintf("%d priced legs landed; %d had observed OI and %d had positive OI for dealer GEX. Missing OI is unknown, not zero.", c.PricedLegCount, gammaOIObservedCountForCLI(c), c.LegCount)
+		}
+		if sessionFallback {
+			d.Impact = strings.TrimSpace(d.Impact + " Session context was missing from the daemon snapshot; the CLI used a simplified local weekday/time fallback that does not model exchange holidays or early closes.")
 		}
 		d.Action = gammaOIMissingActionForCLI(d.Scope, session)
 	case strings.HasPrefix(code, "spx_unavailable:"):
@@ -1046,12 +1049,29 @@ func gammaIVSourceImpactForCLI(c *rpc.GammaZeroComputed) string {
 	return fmt.Sprintf("The result is more model-dependent: %d/%d priced legs used quote/close inversion (%s) instead of IBKR model-computation ticks.", c.DerivedIVLegs, denom, strings.Join(parts, ", "))
 }
 
-func gammaWarningSessionForCLI(c *rpc.GammaZeroComputed) rpc.SessionClass {
+func gammaWarningSessionForCLI(c *rpc.GammaZeroComputed) (rpc.SessionClass, bool) {
+	if c != nil && c.Quality != nil {
+		session := strings.TrimSpace(c.Quality.Session)
+		if session != "" {
+			switch session {
+			case rpc.SessionPre.String():
+				return rpc.SessionPre, false
+			case rpc.SessionRTH.String():
+				return rpc.SessionRTH, false
+			case rpc.SessionPost.String():
+				return rpc.SessionPost, false
+			case rpc.SessionClosed.String():
+				return rpc.SessionClosed, false
+			default:
+				return rpc.SessionClosed, false
+			}
+		}
+	}
 	asOf := time.Now()
 	if c != nil && !c.AsOf.IsZero() {
 		asOf = c.AsOf
 	}
-	return rpc.ClassifySession(asOf)
+	return rpc.ClassifySession(asOf), true
 }
 
 func gammaOIMissingCountForCLI(c *rpc.GammaZeroComputed) int {

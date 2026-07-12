@@ -259,6 +259,79 @@ func TestFallbackGammaWarningDetailCountsPositiveOIAsObservedForLegacyCache(t *t
 	}
 }
 
+func TestFallbackGammaWarningDetailUsesDaemonRTHSessionAt1610ET(t *testing.T) {
+	t.Parallel()
+	asOf := time.Date(2026, time.July, 13, 20, 10, 0, 0, time.UTC) // Monday 16:10 EDT.
+	if legacy := rpc.ClassifySession(asOf); legacy != rpc.SessionPost {
+		t.Fatalf("test timestamp classified as %s, want legacy post-session disagreement", legacy)
+	}
+	got := fallbackGammaWarningDetail(&rpc.GammaZeroComputed{
+		Scope: rpc.GammaZeroScopeSPY,
+		AsOf:  asOf,
+		Quality: &rpc.GammaSignalQuality{
+			Session: rpc.SessionRTH.String(),
+		},
+	}, "oi_missing")
+
+	if got.Severity != "data_quality" {
+		t.Fatalf("warning detail = %+v, want data_quality from daemon RTH session", got)
+	}
+	if !strings.Contains(got.Action, "during regular U.S. option hours") {
+		t.Fatalf("warning action did not use daemon RTH session: %+v", got)
+	}
+	if strings.Contains(got.Impact, "simplified local weekday/time fallback") {
+		t.Fatalf("warning detail disclosed a fallback despite daemon session: %+v", got)
+	}
+}
+
+func TestFallbackGammaWarningDetailUsesDaemonClosedSessionOnExchangeHoliday(t *testing.T) {
+	t.Parallel()
+	asOf := time.Date(2026, time.July, 3, 18, 0, 0, 0, time.UTC) // Friday 14:00 EDT; Independence Day observed.
+	if legacy := rpc.ClassifySession(asOf); legacy != rpc.SessionRTH {
+		t.Fatalf("test timestamp classified as %s, want legacy RTH disagreement", legacy)
+	}
+	got := fallbackGammaWarningDetail(&rpc.GammaZeroComputed{
+		Scope: rpc.GammaZeroScopeSPY,
+		AsOf:  asOf,
+		Quality: &rpc.GammaSignalQuality{
+			Session: rpc.SessionClosed.String(),
+		},
+	}, "oi_missing")
+
+	if got.Severity != "info" {
+		t.Fatalf("warning detail = %+v, want info from daemon closed session", got)
+	}
+	if !strings.Contains(got.Action, "while the regular U.S. option-data surface is closed") {
+		t.Fatalf("warning action did not use daemon closed session: %+v", got)
+	}
+	if strings.Contains(got.Action, "during regular U.S. option hours") {
+		t.Fatalf("warning action over-flagged holiday as RTH: %+v", got)
+	}
+}
+
+func TestFallbackGammaWarningDetailDisclosesEmptyDaemonSessionFallback(t *testing.T) {
+	t.Parallel()
+	got := fallbackGammaWarningDetail(&rpc.GammaZeroComputed{
+		Scope: rpc.GammaZeroScopeSPY,
+		AsOf:  time.Date(2026, time.July, 2, 19, 0, 0, 0, time.UTC), // Thursday 15:00 EDT.
+		Quality: &rpc.GammaSignalQuality{
+			Session: "",
+		},
+	}, "oi_missing")
+
+	if got.Severity != "data_quality" {
+		t.Fatalf("warning detail = %+v, want data_quality from timestamp fallback", got)
+	}
+	if !strings.Contains(got.Action, "during regular U.S. option hours") {
+		t.Fatalf("warning action did not use timestamp fallback session: %+v", got)
+	}
+	if !strings.Contains(got.Impact, "Session context was missing from the daemon snapshot") ||
+		!strings.Contains(got.Impact, "simplified local weekday/time fallback") ||
+		!strings.Contains(got.Impact, "does not model exchange holidays or early closes") {
+		t.Fatalf("warning detail did not disclose session fallback: %+v", got)
+	}
+}
+
 // TestRenderGamma_HeroHasTitleTimestampAnchor pins the shared hero
 // shape applied to gamma: a title on the same line as a timestamp
 // (joined with "  ·  "), followed by an indented SPY spot anchor.
