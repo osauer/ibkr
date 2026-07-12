@@ -464,8 +464,35 @@ func TestQuoteSnapshotReturnsPrice(t *testing.T) {
 		t.Errorf("data_type required on every quote response")
 	}
 	if q.Bid == nil && q.Ask == nil && q.Last == nil {
+		// Closed-market tolerance, gated on typed disclosures rather than
+		// error text: the daemon's official calendar must say the US equity
+		// session is closed AND the quote itself must disclose a degraded
+		// quality — the coherent closed-market shapes. An empty quote during
+		// an open session, or one claiming firm quality with no prices,
+		// still fails.
+		degraded := q.QuoteQuality == "prev_close" || q.QuoteQuality == "stale" || q.QuoteQuality == "missing"
+		if degraded && !sessionOpen(t, conn, "us") {
+			t.Skipf("US equity session closed; daemon disclosed quote_quality=%q with no bid/ask/last — nothing live to assert", q.QuoteQuality)
+		}
 		t.Errorf("AAPL snapshot delivered no bid/ask/last; suspect timeout or entitlement issue: %+v", q)
 	}
+}
+
+// sessionOpen asks the daemon's official market calendar whether the given
+// market's regular session is open right now. It is the typed authority
+// (embedded marketcal schedules: holidays, early closes) behind the
+// closed-market tolerances in the quote and chain tests — never error-text
+// matching. When the calendar call itself errors, the session is reported
+// open so no skip is licensed and the caller's original failure stands.
+func sessionOpen(t *testing.T, conn *dial.Conn, market string) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var res rpc.MarketCalendarResult
+	if err := conn.Call(ctx, rpc.MethodMarketCalendar, rpc.MarketCalendarParams{Market: market}, &res); err != nil {
+		return true
+	}
+	return res.Session.IsOpen
 }
 
 func TestUnknownMethodReturnsStructuredError(t *testing.T) {
@@ -725,6 +752,14 @@ func TestChainAAPLLegsPopulated(t *testing.T) {
 	}
 	var res rpc.ChainResult
 	if err := conn.Call(ctx, rpc.MethodChainFetch, params, &res); err != nil {
+		// Per-leg option market data does not tick outside the options
+		// session, so the daemon's classified unary timeout is the expected
+		// closed-market shape. Both gate conditions are typed — the rpc
+		// error code and the official calendar — so a timeout while the
+		// session is open (deadlocked handler, dropped socket) still fails.
+		if isRPCTimeout(err) && !sessionOpen(t, conn, "us-options") {
+			t.Skipf("chain.fetch timed out with the US options session closed: %v", err)
+		}
 		t.Fatalf("chain.fetch AAPL %s: %v", params.Expiry, err)
 	}
 	wantStrikes := 2*params.Width + 1
@@ -745,8 +780,19 @@ func TestChainAAPLLegsPopulated(t *testing.T) {
 		}
 	}
 	if populated == 0 {
+		if !sessionOpen(t, conn, "us-options") {
+			t.Skip("no strike populated with the US options session closed — frozen feed delivered nothing; the ConID regression check needs an open session")
+		}
 		t.Errorf("no strike had any leg field populated; ConID resolution likely broken again. result=%+v", res)
 	}
+}
+
+// isRPCTimeout reports whether err is the daemon's classified unary timeout
+// (rpc code "timeout"), as opposed to a client-side context expiry or any
+// other error shape.
+func isRPCTimeout(err error) bool {
+	rpcErr, ok := err.(*rpc.Error)
+	return ok && rpcErr.Code == rpc.CodeTimeout
 }
 
 // nextThirdFriday returns the third Friday of the month at least 7 days from
