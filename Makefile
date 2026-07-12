@@ -56,7 +56,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check agent-config-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check agent-config-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -118,6 +118,15 @@ app-syntax-check: ## Embedded PWA assets parse: app.js + service-worker.js (node
 	node --check web/app/app.js
 	node --check web/app/service-worker.js
 	@node -e 'JSON.parse(require("fs").readFileSync("web/app/manifest.webmanifest","utf8"))'
+
+# The hosted transport relay is a production component (architecture.md)
+# whose test suite was previously invoked by no gate — repo-wide green
+# said nothing about it. The tests import only node: builtins plus the
+# local worker module, so bare `node --test` mirrors the package's
+# `npm test` without adding npm to the binding dependency surface.
+remote-relay-check: ## Cloudflare remote-relay unit tests (node --test, no npm needed)
+	@command -v node >/dev/null 2>&1 || { echo "remote-relay-check: node not found — this gate is binding, install Node.js" >&2; exit 1; }
+	cd cloudflare/remote-relay && node --test test/*.test.js
 
 # Static drift gate between the Playwright app scripts and the SPA they
 # assert against, plus the other web/app contract tests. Born of the
@@ -198,7 +207,7 @@ test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overla
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
 CHECK_JOBS ?= 8
-CHECK_TARGETS = $(CHECK_DEPS) agent-config-check modernize-check docs-check docs-html-check changelog-check account-data-check app-contract-check app-syntax-check gofmt-check vet-check staticcheck-check govulncheck-check
+CHECK_TARGETS = $(CHECK_DEPS) agent-config-check modernize-check docs-check docs-html-check changelog-check account-data-check app-contract-check app-syntax-check remote-relay-check gofmt-check vet-check staticcheck-check govulncheck-check
 CHECK_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(CHECK_JOBS),)
 check: ## agent config/hooks + gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin/parity/docs/changelog/account/app checks (binding pre-commit gate)
 	$(MAKE) $(CHECK_MAKEFLAGS) $(CHECK_TARGETS)
