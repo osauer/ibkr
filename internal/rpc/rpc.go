@@ -2820,9 +2820,6 @@ type HealthResult struct {
 
 const (
 	TradingMCPDisabled = "disabled"
-	TradingMCPPreview  = "preview-only"
-	TradingMCPPaper    = "paper-write"
-	TradingMCPLive     = "live-write"
 
 	TradingLiveOverrideBlocked = "blocked"
 	TradingLiveOverrideReady   = "ready"

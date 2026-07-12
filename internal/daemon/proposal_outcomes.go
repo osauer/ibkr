@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,12 +18,12 @@ const (
 	proposalOutcomeStateSubmitted = "submitted"
 	proposalOutcomeStateFilled    = "filled"
 	proposalOutcomeStateMarked    = "marked"
-	proposalOutcomeStateExpired   = "expired"
 )
 
 type proposalOutcomeStore struct {
-	Path string
-	mu   sync.Mutex
+	Path        string
+	mu          sync.Mutex
+	outcomeKeys map[string]struct{}
 }
 
 type proposalOutcomeMark struct {
@@ -50,17 +49,8 @@ type proposalOutcomeMark struct {
 	MarkPrice          float64                             `json:"mark_price,omitempty"`
 	AvgFillPrice       float64                             `json:"avg_fill_price,omitempty"`
 	ExecutionPnL       float64                             `json:"execution_pnl,omitempty"`
-	ShadowHoldPnL      float64                             `json:"shadow_hold_pnl,omitempty"`
-	DrawdownAvoided    float64                             `json:"drawdown_avoided,omitempty"`
-	OpportunityCost    float64                             `json:"opportunity_cost,omitempty"`
 	BenchmarkSymbol    string                              `json:"benchmark_symbol,omitempty"`
-	BenchmarkReturnPct float64                             `json:"benchmark_return_pct,omitempty"`
-	BetaAdjustedExcess float64                             `json:"beta_adjusted_excess,omitempty"`
 	Message            string                              `json:"message,omitempty"`
-}
-
-type ProposalOutcomeMarker interface {
-	MarkProposalOutcome(context.Context, rpc.TradeProposal, time.Time) (proposalOutcomeMark, error)
 }
 
 func defaultProposalOutcomesPath() (string, error) {
@@ -105,11 +95,15 @@ func (s *proposalOutcomeStore) appendMarkLocked(mark proposalOutcomeMark) error 
 	if strings.TrimSpace(mark.ProposalKey) == "" && strings.TrimSpace(mark.OrderRef) == "" && strings.TrimSpace(mark.PreviewTokenID) == "" {
 		return fmt.Errorf("proposal outcome requires proposal_key, order_ref, or preview_token_id")
 	}
-	seen, err := s.loadOutcomeKeysLocked()
-	if err != nil {
-		return err
+	if s.outcomeKeys == nil {
+		outcomeKeys, err := s.loadOutcomeKeysLocked()
+		if err != nil {
+			return err
+		}
+		s.outcomeKeys = outcomeKeys
 	}
-	if seen[proposalOutcomeIdentity(mark)] {
+	identity := proposalOutcomeIdentity(mark)
+	if _, seen := s.outcomeKeys[identity]; seen {
 		return nil
 	}
 	if err := ensurePrivateStateDir(s.Path); err != nil {
@@ -129,13 +123,15 @@ func (s *proposalOutcomeStore) appendMarkLocked(mark proposalOutcomeMark) error 
 		return fmt.Errorf("chmod proposal outcomes: %w", err)
 	}
 	if _, err := f.Write(data); err != nil {
+		s.outcomeKeys = nil
 		return fmt.Errorf("append proposal outcome: %w", err)
 	}
+	s.outcomeKeys[identity] = struct{}{}
 	return nil
 }
 
-func (s *proposalOutcomeStore) loadOutcomeKeysLocked() (map[string]bool, error) {
-	out := map[string]bool{}
+func (s *proposalOutcomeStore) loadOutcomeKeysLocked() (map[string]struct{}, error) {
+	out := map[string]struct{}{}
 	f, err := os.Open(s.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -154,7 +150,7 @@ func (s *proposalOutcomeStore) loadOutcomeKeysLocked() (map[string]bool, error) 
 		if err := json.Unmarshal([]byte(line), &mark); err != nil {
 			return nil, fmt.Errorf("decode proposal outcome: %w", err)
 		}
-		out[proposalOutcomeIdentity(mark)] = true
+		out[proposalOutcomeIdentity(mark)] = struct{}{}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("read proposal outcomes: %w", err)
@@ -213,7 +209,7 @@ func proposalOutcomeSubmitted(prop rpc.TradeProposal, preview *rpc.OrderPreviewR
 		SourceFingerprints: prop.SourceFingerprints,
 		BaselinePrice:      baseline,
 		BenchmarkSymbol:    "SPY",
-		Message:            "proposal submitted; daily marks will compare against shadow hold",
+		Message:            "proposal submitted; daily shadow-hold marks will be recorded",
 	}
 }
 
@@ -240,7 +236,7 @@ func proposalOutcomeMarked(prop rpc.TradeProposal, at time.Time) proposalOutcome
 		BaselinePrice:      markPrice,
 		MarkPrice:          markPrice,
 		BenchmarkSymbol:    "SPY",
-		Message:            "daily proposal mark; future outcome reporting compares against shadow hold",
+		Message:            "daily shadow-hold proposal mark",
 	}
 }
 
