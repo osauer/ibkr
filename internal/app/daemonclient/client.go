@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/osauer/ibkr/v2/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/canary"
 	"github.com/osauer/ibkr/v2/internal/dial"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -144,7 +144,7 @@ func (c Real) Canary(ctx context.Context) (*rpc.CanaryResult, error) {
 		return nil, err
 	}
 	defer conn.Close()
-	out, err := cli.FetchCanary(ctx, conn)
+	out, err := canary.FetchCanary(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
@@ -157,12 +157,12 @@ func (c Real) CanaryWithRegime(ctx context.Context) (*rpc.CanaryResult, *rpc.Reg
 		return nil, nil, err
 	}
 	defer conn.Close()
-	canary, _, regime, err := cli.FetchCanarySnapshotWithRegime(ctx, conn)
+	canaryResult, _, regime, err := canary.FetchCanarySnapshotWithRegime(ctx, conn)
 	if err != nil {
 		return nil, nil, err
 	}
 	monitor := rpc.CompactRegimeMonitor(&regime)
-	return &canary, &monitor, nil
+	return &canaryResult, &monitor, nil
 }
 
 func (c Real) Rules(ctx context.Context) (*rpc.RulesResult, error) {

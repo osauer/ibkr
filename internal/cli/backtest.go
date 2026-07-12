@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	canaryengine "github.com/osauer/ibkr/v2/internal/canary"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -1092,7 +1093,7 @@ func runCanaryBacktest(observations []CanaryBacktestObservation, runAt time.Time
 	}
 	res := CanaryBacktestResult{
 		RunAt:     runAt,
-		Policy:    canaryPolicy.Name,
+		Policy:    canaryengine.PolicyName(),
 		NotAdvice: "Backtest diagnostic only; not investment advice or a trade recommendation.",
 	}
 	total := &canaryBacktestAccumulator{}

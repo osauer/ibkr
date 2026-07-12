@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/v2/internal/cli"
+	"github.com/osauer/ibkr/v2/internal/canary"
 	"github.com/osauer/ibkr/v2/internal/dial"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -767,7 +767,7 @@ var Tools = []Tool{
 			if in.View != rpc.ViewFull && in.View != rpc.ViewAlert {
 				return nil, fmt.Errorf("view must be %q or %q (got %q)", rpc.ViewFull, rpc.ViewAlert, in.View)
 			}
-			res, positions, err := cli.FetchCanarySnapshot(ctx, conn)
+			res, positions, err := canary.FetchCanarySnapshot(ctx, conn)
 			if err != nil {
 				return nil, err
 			}

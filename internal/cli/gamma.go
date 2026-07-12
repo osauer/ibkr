@@ -245,41 +245,6 @@ func gammaSignalLine(c *rpc.GammaZeroComputed) string {
 	}
 }
 
-func gammaPlainQualityReason(q *rpc.GammaSignalQuality) string {
-	if q == nil {
-		return "quality unavailable"
-	}
-	reason := strings.TrimSpace(q.RankabilityReason)
-	if reason == "" {
-		switch q.Rankability {
-		case rpc.GammaRankabilityRankable:
-			return "signal quality passed"
-		case rpc.GammaRankabilityUnavailable:
-			return "no usable gamma payload"
-		default:
-			return "quality gate did not pass"
-		}
-	}
-	if _, rest, ok := strings.Cut(reason, ": "); ok {
-		reason = rest
-	}
-	switch {
-	case reason == "market is closed; cached gamma is context only":
-		return "market is closed; cached snapshot is context only"
-	case strings.HasPrefix(reason, "SPX option chain unavailable; using SPY proxy:"):
-		return "SPX unavailable; SPY is proxy/context only"
-	case strings.HasPrefix(reason, "SPX slice is"):
-		return strings.ReplaceAll(reason, "context only", "context")
-	case reason == "all rankability gates passed":
-		return "signal quality passed"
-	default:
-		return reason
-	}
-}
-
-// gammaHeroTimestamp returns the formatted local-time stamp for the
-// hero, sourced from Result.AsOf (compute finish). Empty when no
-// payload exists yet (Computing / Error / pre-Result states).
 func gammaHeroTimestamp(r *rpc.GammaZeroSPXResult) string {
 	if r == nil || r.Result == nil || r.Result.AsOf.IsZero() {
 		return ""
@@ -913,18 +878,6 @@ func gammaWarningDetailsForRender(c *rpc.GammaZeroComputed) []rpc.GammaWarningDe
 	return warningDetailsOrFallback(c)
 }
 
-func gammaIsSPYProxy(c *rpc.GammaZeroComputed) bool {
-	if c == nil || c.Scope != rpc.GammaZeroScopeSPY {
-		return false
-	}
-	for _, d := range warningDetailsOrFallback(c) {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(d.Code)), "spx_unavailable:") {
-			return true
-		}
-	}
-	return false
-}
-
 func warningDetailsOrFallback(c *rpc.GammaZeroComputed) []rpc.GammaWarningDetail {
 	if c == nil {
 		return nil
@@ -1546,13 +1499,6 @@ func formatGEX(v float64) string {
 	}
 }
 
-// formatSpotPrice renders a per-share dollar price with 2 decimals. Reserved
-// for spot levels, γ-zero, and the absolute sweep window — values that
-// live in the $10–$10000 range and read cleanly with two decimals.
-func formatSpotPrice(v float64) string {
-	return fmt.Sprintf("$%.2f", v)
-}
-
 // isMonthlyOPEXNow reports whether the current NY-local date falls on the
 // third Friday of the month — the canonical monthly OPEX day for U.S.
 // listed options. The third Friday is the unique Friday with day-of-month
@@ -1875,102 +1821,6 @@ func trimSentencePeriod(s string) string {
 	return strings.TrimRight(strings.TrimSpace(s), ".")
 }
 
-// formatRegimeAgreement renders the RegimeAgreement classifier into a
-// one-line summary. The disagree case is the actionable signal —
-// flagged loudly so the reader doesn't skim past institutional/retail
-// positioning divergence.
-func formatRegimeAgreement(c *rpc.GammaZeroComputed) string {
-	if c == nil {
-		return "—"
-	}
-	switch c.RegimeAgreement {
-	case "agree:long-gamma":
-		return "long-γ (stabilizing regime)" + formatAgreementNoCrossingSuffix(c, "positive") + " · SPY/SPX agree"
-	case "agree:short-gamma":
-		return "short-γ (amplifying regime)" + formatAgreementNoCrossingSuffix(c, "negative") + " · SPY/SPX agree"
-	case "agree:transition-gamma":
-		spy := c.PerIndex["SPY"]
-		spx := c.PerIndex["SPX"]
-		if spy != nil && spy.ZeroGamma != nil && spx != nil && spx.ZeroGamma != nil {
-			return fmt.Sprintf("SPY γ-zero %s · SPX γ-zero %s (both near transition · agreement)",
-				formatSpotPrice(*spy.ZeroGamma), formatSpotPrice(*spx.ZeroGamma))
-		}
-		return "SPY and SPX both near γ-zero transition (agreement)"
-	case "disagree":
-		return formatRegimeDisagreement(c)
-	}
-	return "indeterminate (insufficient per-index data)"
-}
-
-func formatAgreementNoCrossingSuffix(c *rpc.GammaZeroComputed, sign string) string {
-	if c == nil {
-		return ""
-	}
-	for _, key := range []string{"SPY", "SPX"} {
-		sub := c.PerIndex[key]
-		if sub == nil || sub.ZeroGamma != nil || sub.GammaSign != sign {
-			return ""
-		}
-	}
-	return " · no γ-zero transition found in sweep"
-}
-
-// formatRegimeDisagreement renders the actionable case — one index
-// stabilising while the other is amplifying. Names both sides so the
-// reader knows which book sits where.
-func formatRegimeDisagreement(c *rpc.GammaZeroComputed) string {
-	spy := perIndexRegimeWord(c.PerIndex["SPY"])
-	spx := perIndexRegimeWord(c.PerIndex["SPX"])
-	return fmt.Sprintf("SPY %s · SPX %s (DISAGREEMENT — model regimes differ; use per-index below as primary)",
-		spy, spx)
-}
-
-// perIndexRegimeWord turns a per-index result into a short label
-// for the disagreement summary. Mirrors the RegimeAgreement classifier
-// on the daemon side.
-func perIndexRegimeWord(c *rpc.GammaZeroComputed) string {
-	if c == nil {
-		return "—"
-	}
-	if c.ZeroGamma != nil {
-		return fmt.Sprintf("%s @ %s", gammaRegimeWord(c), formatSpotPrice(*c.ZeroGamma))
-	}
-	switch c.GammaSign {
-	case "positive":
-		return "long-γ"
-	case "negative":
-		return "short-γ"
-	}
-	return "—"
-}
-
-func gammaRegimeWord(c *rpc.GammaZeroComputed) string {
-	if c == nil {
-		return "unavailable"
-	}
-	if c.GapPct != nil {
-		switch rpc.GammaRegimeFromGap(c.GapPct) {
-		case "long_gamma":
-			return "long-γ"
-		case "transition_gamma":
-			return "transition"
-		default:
-			return "short-γ"
-		}
-	}
-	switch c.GammaSign {
-	case "positive":
-		return "long-γ"
-	case "negative":
-		return "short-γ"
-	}
-	return "transition"
-}
-
-// gammaHeaderForScope returns the renderer's section header — varies
-// with Result.Scope so SPX-only and combined runs don't claim to be
-// SPY. Falls back to the SPY title for empty Scope (pre-step-5 result
-// envelopes) so old daemon → new CLI mixes render unchanged.
 func gammaHeaderForScope(r *rpc.GammaZeroSPXResult) string {
 	if r == nil || r.Result == nil {
 		return "Dealer gamma"
