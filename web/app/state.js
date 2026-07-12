@@ -1,0 +1,63 @@
+
+
+const state = {
+  snapshot: null,
+  alertSettings: { mode: "watch_and_act" },
+  alerts: [],
+  vapidPublicKey: "",
+  eventSource: null,
+  reconnectTimer: null,
+  connectionText: "Connecting",
+  connectionOK: false,
+  accountValueVisible: localStorage.getItem("ibkrAccountValueVisible") === "true",
+  canaryDetailOpen: false,
+  rulesDetailOpen: false,
+  regimeDetailOpen: false,
+  regimeCanaryExpansionInitialized: false,
+  detailPreferenceSet: false,
+  accountOverviewOpen: false,
+  underlyingDetailOpen: false,
+  portfolioDetailOpen: false,
+  accountExposureOpen: false,
+  protectionOpen: false,
+  opportunitiesOpen: false,
+  selectedMarket: localStorage.getItem("ibkrSelectedMarket") || "us",
+  marketCalendarOverride: null,
+  proposalMarketCalendars: {},
+  proposalMarketCalendarBusy: {},
+  selectedAlertID: null,
+  alertFilter: "all",
+  clearedAlertFingerprint: localStorage.getItem("ibkrClearedAlertFingerprint") || "",
+  ordersOpen: null,
+  openOrderEdits: {},
+  protectionPreviewBusy: "",
+  protectionPreviews: {},
+  protectionSubmitBusy: "",
+  protectionSubmits: {},
+  protectionSnapshotBusy: false,
+  protectionSnapshotLastAt: 0,
+  protectionSnapshotNotice: "",
+  protectionQuoteTicks: {},
+  protectionQtyOverrides: {},
+  protectionDerisk: { percent: 25, busy: "", result: null, submitted: null, requestRef: "", previewedAt: 0, abort: null },
+  opportunityPreviewBusy: "",
+  opportunityPreviews: {},
+  opportunitySubmitBusy: "",
+  opportunitySubmits: {},
+  opportunitySnapshotBusy: false,
+  opportunitySnapshotLastAt: 0,
+  opportunitySnapshotNotice: "",
+  underlyingNotice: "",
+  underlyingBusy: "",
+  latestPurgeStatus: null,
+  fallbackRefreshBusy: false,
+  settings: null,
+  activeTab: normalizedTab(localStorage.getItem("ibkrActiveTab") || "monitor"),
+};
+
+function normalizedTab(tab) {
+  if (tab === "alerts" || tab === "orders" || tab === "settings") return tab;
+  return "monitor";
+}
+
+export { normalizedTab, state };

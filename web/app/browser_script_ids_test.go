@@ -19,7 +19,7 @@ import (
 // as live-session flakiness, and v1.9.0 shipped anyway — the browser smokes
 // run outside the check/test/release chains. This test closes the gap with
 // no browser and no running app: every element id a browser script
-// references must exist in index.html (or be created by app.js through a
+// references must exist in index.html (or be created by the SPA modules through a
 // statically visible literal), and every id the smoke deliberately asserts
 // as REMOVED must stay gone from the SPA sources.
 
@@ -36,7 +36,7 @@ var browserScriptFiles = []string{
 // the rendered DOM (removed product surfaces). Each entry is drift-guarded
 // in both directions: the id must still be referenced by a browser script
 // (else the entry is stale and must be deleted), and it must not reappear in
-// index.html or app.js (else the smoke's absence assert breaks at runtime).
+// index.html or the SPA modules (else the smoke's absence assert breaks at runtime).
 // Values name the asserting function in scripts/app-browser-smoke.mjs.
 var removedSPAIDs = map[string]string{
 	"canaryWarningsToggle":      "exerciseCanaryControlsRemoved",
@@ -60,12 +60,8 @@ func TestBrowserScriptIDsMatchSPA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
 	}
-	jsData, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
 	staticIDs := htmlElementIDs(string(htmlData))
-	createdIDs := appJSCreatedIDs(string(jsData))
+	createdIDs := appJSCreatedIDs(embeddedSPASource(t))
 
 	// id -> browser script files referencing it.
 	referenced := map[string][]string{}
@@ -101,7 +97,7 @@ func TestBrowserScriptIDsMatchSPA(t *testing.T) {
 			t.Errorf("index.html re-adds id=%q, but %s asserts the surface stays removed; drop the element, or delete the smoke assert and this removedSPAIDs entry together", id, assertedIn)
 		}
 		if createdIDs[id] {
-			t.Errorf("app.js creates id=%q, but %s asserts the surface stays removed; drop the creation, or delete the smoke assert and this removedSPAIDs entry together", id, assertedIn)
+			t.Errorf("SPA modules create id=%q, but %s asserts the surface stays removed; drop the creation, or delete the smoke assert and this removedSPAIDs entry together", id, assertedIn)
 		}
 	}
 
@@ -112,7 +108,7 @@ func TestBrowserScriptIDsMatchSPA(t *testing.T) {
 		if staticIDs[id] || createdIDs[id] {
 			continue
 		}
-		t.Errorf("#%s is asserted by %s but index.html does not declare it and app.js does not create it via a literal id pattern; removing an SPA surface must update the script assertions in the same change (for a deliberate absence assert, add the id to removedSPAIDs in this test; for a dynamically built element, give it a literal id= so this gate can see it)",
+		t.Errorf("#%s is asserted by %s but index.html does not declare it and the SPA modules do not create it via a literal id pattern; removing an SPA surface must update the script assertions in the same change (for a deliberate absence assert, add the id to removedSPAIDs in this test; for a dynamically built element, give it a literal id= so this gate can see it)",
 			id, strings.Join(referenced[id], ", "))
 	}
 }

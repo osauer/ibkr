@@ -1,0 +1,151 @@
+import { refreshAlerts } from "./alerts.js";
+import { renderAll } from "./app.js";
+import { tryDeviceLogin } from "./auth.js";
+import { refreshOpenOrders } from "./orders.js";
+import { $ } from "./shared.js";
+import { refreshSelectedMarketCalendar, renderTopbar } from "./shell.js";
+import { state } from "./state.js";
+import { refreshPurgeStatus } from "./underlyings.js";
+
+async function bootstrap(options = {}) {
+  try {
+    const data = await fetchBootstrap(options);
+    if (!data) return false;
+    applyBootstrap(data);
+    return true;
+  } catch (err) {
+    if (!options.quiet) {
+      showPairing("App bootstrap failed: " + err.message);
+    }
+    return false;
+  }
+}
+
+async function fetchBootstrap(options = {}) {
+  let res = await fetch("/api/bootstrap", { credentials: "include" });
+  if (res.status === 401) {
+    const reauthed = await tryDeviceLogin();
+    if (!reauthed) {
+      if (!options.quiet) {
+        showPairing("Scan a fresh QR code from `ibkr app pair` on the Mac.");
+      }
+      return null;
+    }
+    res = await fetch("/api/bootstrap", { credentials: "include" });
+    if (res.status === 401) {
+      if (!options.quiet) {
+        showPairing("Scan a fresh QR code from `ibkr app pair` on the Mac.");
+      }
+      return null;
+    }
+  }
+  if (!res.ok) {
+    throw new Error(await res.text());
+  }
+  return res.json();
+}
+
+function applyBootstrap(data) {
+  state.snapshot = data.snapshot;
+  state.settings = data.settings || data.snapshot?.settings || state.settings;
+  if (state.snapshot && state.settings) state.snapshot.settings = state.settings;
+  state.alertSettings = data.alert_settings || state.alertSettings;
+  state.alerts = data.alerts || [];
+  state.vapidPublicKey = data.vapid_public_key || "";
+  $("pairingPanel").hidden = true;
+  $("accountPanel").hidden = false;
+  $("underlyingPanel").hidden = false;
+  $("tabPanels").hidden = false;
+  $("bottomTabs").hidden = false;
+  $("dashboard").hidden = false;
+  $("alertsPanel").hidden = false;
+  setConnection("Connected", true);
+  renderAll();
+  connectEvents();
+  refreshOpenOrders();
+  refreshPurgeStatus();
+  if (state.selectedMarket !== "us") {
+    refreshSelectedMarketCalendar();
+  }
+}
+
+function connectEvents() {
+  if (state.reconnectTimer) {
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
+  if (typeof EventSource === "undefined") {
+    setConnection("Polling", false);
+    return;
+  }
+  state.eventSource?.close();
+  const es = new EventSource("/api/events", { withCredentials: true });
+  state.eventSource = es;
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules"]) {
+    es.addEventListener(type, (event) => {
+      const data = JSON.parse(event.data);
+      if (type === "snapshot") state.snapshot = data;
+      if (type !== "snapshot") state.snapshot = { ...(state.snapshot || {}), [type]: data };
+      if (type === "snapshot" || type === "settings") state.settings = type === "settings" ? data : data.settings || state.settings;
+      state.lastEventAt = Date.now();
+      setConnection("Connected", true);
+      renderAll();
+      if (type === "canary") {
+        setTimeout(refreshAlerts, 500);
+      }
+    });
+  }
+  es.onerror = () => scheduleEventRecovery();
+}
+
+async function refreshBootstrapIfSSEUnavailable() {
+  if (!state.snapshot || state.fallbackRefreshBusy || !sseUnavailable()) return;
+  state.fallbackRefreshBusy = true;
+  try {
+    await bootstrap({ quiet: true });
+  } finally {
+    state.fallbackRefreshBusy = false;
+  }
+}
+
+function sseUnavailable() {
+  if (!state.eventSource || !state.connectionOK) return true;
+  if (typeof EventSource !== "undefined" && state.eventSource.readyState !== EventSource.OPEN) return true;
+  return false;
+}
+
+function scheduleEventRecovery() {
+  setConnection("Reconnecting", false);
+  state.eventSource?.close();
+  if (state.reconnectTimer) return;
+  state.reconnectTimer = setTimeout(async () => {
+    state.reconnectTimer = null;
+    const recovered = await bootstrap({ quiet: true });
+    if (!recovered) {
+      scheduleEventRecovery();
+    }
+  }, 1000);
+}
+
+function setConnection(text, ok) {
+  state.connectionText = text;
+  state.connectionOK = ok;
+  $("statusDot").className = "status-dot " + (ok ? "ok" : "risk");
+  const statusLabel = ok ? "App data stream connected" : "App data stream reconnecting";
+  $("statusDot").setAttribute("aria-label", statusLabel);
+  $("statusDot").title = statusLabel;
+  renderTopbar(state.snapshot || {});
+}
+
+function showPairing(text) {
+  $("pairingPanel").hidden = false;
+  $("tabPanels").hidden = true;
+  $("bottomTabs").hidden = true;
+  $("accountPanel").hidden = true;
+  $("bannerStack").hidden = true;
+  $("syncStrip").hidden = true;
+  $("pairingText").textContent = text;
+  setConnection("Locked", false);
+}
+
+export { applyBootstrap, bootstrap, connectEvents, fetchBootstrap, refreshBootstrapIfSSEUnavailable, scheduleEventRecovery, setConnection, showPairing, sseUnavailable };

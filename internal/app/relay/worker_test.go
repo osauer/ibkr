@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	appweb "github.com/osauer/ibkr/v2/web/app"
 )
 
 func TestWorkerPairingURLAddsRemoteRoute(t *testing.T) {
@@ -39,6 +41,43 @@ func TestForwardableAppPathBlocksPairingSessionCreation(t *testing.T) {
 	for _, path := range []string{"/", "/pair.html?remote=r1&pair=p&nonce=n", "/api/bootstrap", "/api/events", "/app.js?v=1"} {
 		if !forwardableAppPath(path) {
 			t.Fatalf("path %q should be forwardable", path)
+		}
+	}
+}
+
+func TestForwardableAppPathUsesEmbeddedJavaScriptFiles(t *testing.T) {
+	t.Parallel()
+
+	entries, err := appweb.Files.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read embedded app root: %v", err)
+	}
+	jsCount := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".js") {
+			continue
+		}
+		jsCount++
+		for _, path := range []string{"/" + entry.Name(), "/" + entry.Name() + "?v=test"} {
+			if !forwardableAppPath(path) {
+				t.Errorf("embedded JavaScript path %q should be forwardable", path)
+			}
+		}
+	}
+	if jsCount == 0 {
+		t.Fatal("embedded app contains no JavaScript files")
+	}
+	for _, path := range []string{
+		"/not-embedded.js",
+		"/nested/app.js",
+		"/app.js/extra",
+		"/app.js.map",
+		"/../app.js",
+		"/%2e%2e/app.js",
+		"//app.js",
+	} {
+		if forwardableAppPath(path) {
+			t.Errorf("non-embedded JavaScript path %q should not be forwardable", path)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package appweb
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -8,11 +9,7 @@ import (
 
 func TestAppJSDoesNotUseBareNotificationGlobal(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	bareNotification := regexp.MustCompile(`(^|[^.$A-Za-z0-9_])Notification([.()]|\b)`)
 	for lineNo, line := range strings.Split(js, "\n") {
 		if bareNotification.MatchString(line) && !strings.Contains(line, "globalThis.Notification") {
@@ -23,11 +20,7 @@ func TestAppJSDoesNotUseBareNotificationGlobal(t *testing.T) {
 
 func TestAppJSPushControlsUseCapabilityHelpers(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	for _, want := range []string{
 		"function notificationStateLabel()",
 		"function hasNotifications()",
@@ -43,11 +36,7 @@ func TestAppJSPushControlsUseCapabilityHelpers(t *testing.T) {
 
 func TestAppJSStalePairingURLFallsBackToDeviceLogin(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	main := jsFunctionBlock(t, js, "main")
 	for _, want := range []string{
 		`history.replaceState({}, "", "/");`,
@@ -84,11 +73,7 @@ func TestManifestUsesStableRootLaunchScope(t *testing.T) {
 
 func TestAppJSTradingStateUsesSnapshotCanWrite(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	renderSettings := jsFunctionBlock(t, js, "renderSettings")
 	if !strings.Contains(renderSettings, "const status = state.snapshot?.trading || {};") {
 		t.Fatalf("renderSettings must use live snapshot trading status, not settings.trading.status")
@@ -134,11 +119,7 @@ func TestAppJSTradingStateUsesSnapshotCanWrite(t *testing.T) {
 
 func TestAppJSConfirmInputsUsesTraderSafeCopy(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	for _, want := range []string{
 		`if (action === "confirm_inputs") return "Check data";`,
 		"function canarySummaryText(canary, snap = {})",
@@ -159,11 +140,7 @@ func TestAppJSConfirmInputsUsesTraderSafeCopy(t *testing.T) {
 
 func TestAppJSRegimeCardSeparatesDataGapsFromRegime(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	for _, want := range []string{
 		`marketRegimeLabel(posture)`,
 		"function regimePosture(snap = {}, canary = {}, market = {})",
@@ -193,15 +170,11 @@ func TestAppJSRegimeCardSeparatesDataGapsFromRegime(t *testing.T) {
 
 func TestAppJSCanaryDetailUsesSourceBackedEvidenceRows(t *testing.T) {
 	t.Parallel()
-	appData, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
+	js := embeddedSPASource(t)
 	cssData, err := Files.ReadFile("styles.css")
 	if err != nil {
 		t.Fatalf("read styles.css: %v", err)
 	}
-	js := string(appData)
 	css := string(cssData)
 
 	renderDetail := jsFunctionBlock(t, js, "renderCanaryDetail")
@@ -265,10 +238,7 @@ func TestAppJSCanaryDetailUsesSourceBackedEvidenceRows(t *testing.T) {
 
 func TestAppMobileDashboardContracts(t *testing.T) {
 	t.Parallel()
-	appData, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
+	js := embeddedSPASource(t)
 	htmlData, err := Files.ReadFile("index.html")
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
@@ -277,7 +247,6 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read styles.css: %v", err)
 	}
-	js := string(appData)
 	html := string(htmlData)
 	css := string(cssData)
 
@@ -534,11 +503,7 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 
 func TestAppJSRendersTrailSizingFallback(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	for _, want := range []string{
 		"protectionTrailSizingLabel(proposal.trail_sizing)",
 		"protectionTrailSizingFallback(proposal)",
@@ -559,11 +524,7 @@ func TestAppJSRendersTrailSizingFallback(t *testing.T) {
 // origin policy.
 func TestAppJSLiveWritesCarryNoTypedConfirmation(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	for _, banned := range []string{
 		"live_confirmation",
 		"liveWriteConfirmation",
@@ -588,11 +549,7 @@ func TestAppJSLiveWritesCarryNoTypedConfirmation(t *testing.T) {
 
 func TestAppJSProtectionQuantityStepperAcceleratesAtTenBoundary(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	stepper := jsFunctionBlock(t, js, "protectionQuantityStepper")
 	for _, want := range []string{
 		`nudgeProtectionQuantity(proposal, -1)`,
@@ -629,11 +586,7 @@ func TestAppJSProtectionQuantityStepperAcceleratesAtTenBoundary(t *testing.T) {
 
 func TestUnderlyingWinnerLoserTotalsUseDailyPnl(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	for _, name := range []string{
 		"underlyingHeldDailyPnlTotals",
 		"heldUnderlyingDailyPnl",
@@ -656,11 +609,7 @@ func TestUnderlyingWinnerLoserTotalsUseDailyPnl(t *testing.T) {
 
 func TestAppJSAccountPrivacyMasksUnderlyingPnl(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	for _, want := range []string{
 		"function setAccountValueVisible(visible)",
 		"function syncAccountPrivacyState()",
@@ -695,11 +644,7 @@ func TestAppJSAccountPrivacyMasksUnderlyingPnl(t *testing.T) {
 
 func TestAppJSRendersBorrowFeeMarketEvent(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	for _, want := range []string{
 		`case "borrow_fee_extreme": return "Fee extreme";`,
 		"function marketFlagChip(flag = {}, options = {})",
@@ -729,10 +674,7 @@ func TestAppJSRendersBorrowFeeMarketEvent(t *testing.T) {
 
 func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
 	t.Parallel()
-	jsData, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
+	js := embeddedSPASource(t)
 	htmlData, err := Files.ReadFile("index.html")
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
@@ -741,7 +683,6 @@ func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read styles.css: %v", err)
 	}
-	js := string(jsData)
 	render := jsFunctionBlock(t, js, "renderProtectionPanel")
 	for _, want := range []string{
 		`setMetricTone(thetaEl, hasNumericValue(theta.value) && theta.value > 0 ? "alert" : "neutral")`,
@@ -785,11 +726,7 @@ func TestAppJSProtectionSummaryUsesDataDrivenRiskTones(t *testing.T) {
 
 func TestAppJSRendersProtectionCoverageAndRiskTickets(t *testing.T) {
 	t.Parallel()
-	appData, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(appData)
+	js := embeddedSPASource(t)
 
 	currentCoverage := jsFunctionBlock(t, js, "currentProtectionCoverage")
 	if !strings.Contains(currentCoverage, "protectionCoverageFromPositions(state.snapshot || {})") || strings.Contains(currentCoverage, "canary") {
@@ -893,11 +830,7 @@ func TestAppJSRendersProtectionCoverageAndRiskTickets(t *testing.T) {
 
 func TestAppJSProtectionFastPathKeepsHardMarketEventBlocker(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	effectiveBlockers := jsFunctionBlock(t, js, "protectionEffectiveBlockers")
 	if !strings.Contains(effectiveBlockers, "protectionMarketEventBlocker(proposal, events)") {
 		t.Fatalf("protectionEffectiveBlockers must include current market-event blockers")
@@ -930,11 +863,7 @@ func TestAppJSProtectionFastPathKeepsHardMarketEventBlocker(t *testing.T) {
 // defaulted to USD.
 func TestAppJSMoneyFormattersNeverDefaultToUSD(t *testing.T) {
 	t.Parallel()
-	data, err := Files.ReadFile("app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	js := string(data)
+	js := embeddedSPASource(t)
 	if strings.Contains(js, `"USD"`) {
 		t.Fatalf(`app.js hardcodes a "USD" currency literal; thread the real currency or render the amount bare`)
 	}
@@ -964,15 +893,64 @@ func TestAppJSMoneyFormattersNeverDefaultToUSD(t *testing.T) {
 	}
 }
 
-func jsFunctionBlock(t *testing.T, js, name string) string {
+func embeddedSPASource(t *testing.T) string {
 	t.Helper()
-	start := strings.Index(js, "function "+name+"(")
-	if start < 0 {
-		t.Fatalf("app.js missing function %s", name)
+	modules := embeddedSPAModuleSources(t)
+	var source strings.Builder
+	for _, name := range EmbeddedJavaScriptFileNames() {
+		module, ok := modules[name]
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(&source, "\n// module: %s\n%s", name, module)
 	}
-	next := strings.Index(js[start+1:], "\nfunction ")
-	if next < 0 {
+	return source.String()
+}
+
+func embeddedSPAModuleSources(t *testing.T) map[string]string {
+	t.Helper()
+	modules := make(map[string]string)
+	for _, name := range EmbeddedJavaScriptFileNames() {
+		if name == "service-worker.js" {
+			continue
+		}
+		data, err := Files.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read embedded SPA module %s: %v", name, err)
+		}
+		modules[name] = string(data)
+	}
+	if len(modules) == 0 {
+		t.Fatal("embedded SPA contains no modules")
+	}
+	return modules
+}
+
+func jsFunctionBlock(t *testing.T, _ string, name string) string {
+	t.Helper()
+	marker := "function " + name + "("
+	var filename, js string
+	for candidate, source := range embeddedSPAModuleSources(t) {
+		if !strings.Contains(source, marker) {
+			continue
+		}
+		if filename != "" {
+			t.Fatalf("SPA function %s appears in both %s and %s", name, filename, candidate)
+		}
+		filename, js = candidate, source
+	}
+	if filename == "" {
+		t.Fatalf("SPA modules missing function %s", name)
+	}
+	start := strings.Index(js, marker)
+	end := len(js)
+	for _, nextMarker := range []string{"\nfunction ", "\nasync function ", "\nconst ", "\nlet ", "\nvar ", "\nexport {"} {
+		if next := strings.Index(js[start+1:], nextMarker); next >= 0 {
+			end = min(end, start+1+next)
+		}
+	}
+	if end == len(js) {
 		return js[start:]
 	}
-	return js[start : start+1+next]
+	return js[start:end]
 }

@@ -1,0 +1,173 @@
+import { renderAll } from "./app.js";
+import { renderCanaryDetail, renderRegimePanel } from "./canary.js";
+import { renderOpportunitiesPanel } from "./opportunities.js";
+import { setPortfolioExpansion } from "./portfolio.js";
+import { renderProtectionPanel } from "./protection.js";
+import { $ } from "./shared.js";
+import { normalizedTab, state } from "./state.js";
+import { renderAccountPanel, setUnderlyingExpansion } from "./underlyings.js";
+
+function setupBottomTabs() {
+  const tabs = $("bottomTabs");
+  if (!tabs) return;
+  if (tabs.dataset.bound !== "true") {
+    const activate = (event) => {
+      const button = event.target.closest("[data-tab]");
+      if (!button || !tabs.contains(button)) return;
+      if (event.type === "pointerup" && event.pointerType === "mouse") return;
+      if (event.type === "click" && Date.now() - Number(tabs.dataset.lastPointerActivation || 0) < 600) return;
+      if (event.type === "pointerup") {
+        tabs.dataset.lastPointerActivation = String(Date.now());
+        event.preventDefault();
+      }
+      if (button.disabled || button.getAttribute("aria-disabled") === "true") {
+        setActiveTab("monitor");
+        return;
+      }
+      setActiveTab(button.dataset.tab || "monitor");
+    };
+    tabs.addEventListener("click", activate);
+    tabs.addEventListener("pointerup", activate);
+    tabs.dataset.bound = "true";
+  }
+  setActiveTab(state.activeTab, { persist: false });
+}
+
+function setActiveTab(tab, options = {}) {
+  state.activeTab = normalizedTab(tab);
+  if (options.persist !== false) {
+    localStorage.setItem("ibkrActiveTab", state.activeTab);
+  }
+  renderTabs();
+}
+
+function renderTabs() {
+  const active = normalizedTab(state.activeTab);
+  if (active !== state.activeTab) {
+    state.activeTab = active;
+    localStorage.setItem("ibkrActiveTab", active);
+  }
+  for (const panel of document.querySelectorAll("[data-tab-panel]")) {
+    panel.hidden = panel.dataset.tabPanel !== active;
+  }
+  const accountPanel = $("accountPanel");
+  if (accountPanel) accountPanel.hidden = active === "settings";
+  for (const button of document.querySelectorAll("[data-tab]")) {
+    const selected = button.dataset.tab === active;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+  }
+}
+
+function setAccountValueVisible(visible) {
+  state.accountValueVisible = Boolean(visible);
+  localStorage.setItem("ibkrAccountValueVisible", String(state.accountValueVisible));
+  renderAll();
+}
+
+function syncAccountPrivacyState() {
+  document.body.dataset.accountValues = state.accountValueVisible ? "visible" : "hidden";
+}
+
+function resetViewportScroll() {
+  const shell = document.querySelector(".shell");
+  if (shell && (shell.scrollTop !== 0 || shell.scrollLeft !== 0)) {
+    shell.scrollTo(0, 0);
+  }
+  if (window.scrollX !== 0 || window.scrollY !== 0) {
+    window.scrollTo(0, 0);
+  }
+}
+
+function ensureRegimeCanaryExpansion(canary = {}) {
+  if (state.detailPreferenceSet || state.regimeCanaryExpansionInitialized) return;
+  state.canaryDetailOpen = false;
+  state.regimeDetailOpen = false;
+  state.regimeCanaryExpansionInitialized = true;
+}
+
+
+// Regime and canary detail can now open independently (or together) — both
+// live inside one shared deck below the split, so opening one no longer
+// changes the other's position on the page. See docs/design note in the
+// merged-panel spec: the mutual-exclusion this used to enforce existed to
+// stop two independently-tall sibling panels from fighting for vertical
+// rhythm, and that premise no longer holds once they share one deck.
+function setRegimeCanaryExpansion(which, open) {
+  state.detailPreferenceSet = true;
+  if (which === "regime") {
+    state.regimeDetailOpen = open;
+  } else {
+    state.canaryDetailOpen = open;
+  }
+  renderRegimePanel(state.snapshot || {});
+  renderCanaryDetail(state.snapshot?.canary || {});
+}
+
+function panelTapIgnored(target) {
+  return Boolean(target?.closest?.([
+    "button",
+    "a",
+    "input",
+    "select",
+    "textarea",
+    "label",
+    "summary",
+    ".detail-panel",
+    ".regime-detail-panel",
+    ".underlying-book__list-panel",
+    ".underlying-bulk-actions",
+    ".underlying-action-result",
+    ".account-overview-detail",
+    ".portfolio-detail-panel",
+    ".alert-focus",
+  ].join(",")));
+}
+
+function handleExpandablePanelTap(event, which) {
+  if (panelTapIgnored(event.target)) return;
+  const open = which === "regime" ? !state.regimeDetailOpen : !state.canaryDetailOpen;
+  setRegimeCanaryExpansion(which, open);
+}
+
+function handleUnderlyingPanelTap(event) {
+  if (panelTapIgnored(event.target)) return;
+  setUnderlyingExpansion(!state.underlyingDetailOpen);
+}
+
+function handlePortfolioPanelTap(event) {
+  if (panelTapIgnored(event.target)) return;
+  setPortfolioExpansion(!state.portfolioDetailOpen);
+}
+
+function handleProtectionPanelTap(event) {
+  if (panelTapIgnored(event.target)) return;
+  setProtectionExpansion(!state.protectionOpen);
+}
+
+function handleOpportunitiesPanelTap(event) {
+  if (panelTapIgnored(event.target)) return;
+  setOpportunitiesExpansion(!state.opportunitiesOpen);
+}
+
+function handleAccountPanelTap(event) {
+  if (panelTapIgnored(event.target)) return;
+  setAccountOverviewExpansion(!state.accountOverviewOpen);
+}
+
+function setAccountOverviewExpansion(open) {
+  state.accountOverviewOpen = Boolean(open);
+  renderAccountPanel(state.snapshot?.account || {}, state.snapshot?.positions || {}, state.snapshot?.canary || {});
+}
+
+function setProtectionExpansion(open) {
+  state.protectionOpen = Boolean(open);
+  renderProtectionPanel(state.snapshot?.proposals || {}, state.snapshot?.auto_trade || {});
+}
+
+function setOpportunitiesExpansion(open) {
+  state.opportunitiesOpen = Boolean(open);
+  renderOpportunitiesPanel(state.snapshot?.opportunities || {});
+}
+
+export { ensureRegimeCanaryExpansion, handleAccountPanelTap, handleExpandablePanelTap, handleOpportunitiesPanelTap, handlePortfolioPanelTap, handleProtectionPanelTap, handleUnderlyingPanelTap, panelTapIgnored, renderTabs, resetViewportScroll, setAccountOverviewExpansion, setAccountValueVisible, setActiveTab, setOpportunitiesExpansion, setProtectionExpansion, setRegimeCanaryExpansion, setupBottomTabs, syncAccountPrivacyState };

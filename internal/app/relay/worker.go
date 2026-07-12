@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	appweb "github.com/osauer/ibkr/v2/web/app"
 )
 
 const DefaultWorkerURL = "https://remote.osauer.dev"
@@ -485,8 +487,13 @@ func forwardableAppPath(raw string) bool {
 	if p == "/" || p == "/pair.html" || strings.HasPrefix(p, "/api/") {
 		return true
 	}
+	for _, name := range appweb.EmbeddedJavaScriptFileNames() {
+		if p == "/"+name {
+			return true
+		}
+	}
 	switch p {
-	case "/manifest.webmanifest", "/service-worker.js", "/app.js", "/styles.css",
+	case "/manifest.webmanifest", "/styles.css",
 		"/icon-192.png", "/icon-512.png", "/favicon-16.png", "/favicon-32.png", "/favicon-64.png", "/favicon.ico":
 		return true
 	default:

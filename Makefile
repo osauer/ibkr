@@ -113,10 +113,14 @@ app-check: app-contract-check app-syntax-check ## Fast SPA gate: JS syntax + sta
 # non-Go binding dependency in `make check` — deliberate: a gate that
 # self-skips when node is missing is not a gate. GitHub-hosted runners
 # ship node, and local browser smokes already require it.
-app-syntax-check: ## Embedded PWA assets parse: app.js + service-worker.js (node --check) + manifest JSON
+app-syntax-check: ## Embedded PWA assets parse: all web/app/*.js (node --check) + manifest JSON
 	@command -v node >/dev/null 2>&1 || { echo "app-syntax-check: node not found — this gate is binding, install Node.js" >&2; exit 1; }
-	node --check web/app/app.js
-	node --check web/app/service-worker.js
+	@found=0; for file in web/app/*.js; do \
+		[ -f "$$file" ] || continue; \
+		found=1; \
+		node --check "$$file" || exit; \
+	done; \
+	[ "$$found" -eq 1 ] || { echo "app-syntax-check: no web/app/*.js files found" >&2; exit 1; }
 	@node -e 'JSON.parse(require("fs").readFileSync("web/app/manifest.webmanifest","utf8"))'
 
 # The hosted transport relay is a production component (architecture.md)

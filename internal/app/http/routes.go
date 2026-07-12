@@ -56,8 +56,12 @@ func Register(deps Dependencies) {
 	srv.GET("/", h.serveIndex)
 	srv.GET("/pair.html", h.serveIndex)
 	srv.GET("/manifest.webmanifest", h.serveStatic)
-	srv.GET("/service-worker.js", h.serveStatic)
-	srv.GET("/app.js", h.serveStatic)
+	// Imported modules do not inherit app.js's query string. All embedded JS
+	// therefore uses serveStatic's no-cache revalidation; new embedded bytes
+	// become visible after reinstalling, restarting the app, and reloading.
+	for _, name := range appweb.EmbeddedJavaScriptFileNames() {
+		srv.GET("/"+name, h.serveStatic)
+	}
 	srv.GET("/styles.css", h.serveStatic)
 	srv.GET("/icon-192.png", h.serveStatic)
 	srv.GET("/icon-512.png", h.serveStatic)
@@ -109,6 +113,13 @@ func Register(deps Dependencies) {
 }
 
 func (h *handler) serveIndex(w nethttp.ResponseWriter, r *nethttp.Request) {
+	// GET / is a subtree pattern in net/http. Keep unknown JavaScript paths
+	// from falling through to index.html; only exact embedded module routes
+	// registered above may return JavaScript.
+	if strings.HasSuffix(r.URL.Path, ".js") {
+		nethttp.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-cache")
 	nethttp.ServeFileFS(w, r, appweb.Files, "index.html")
 }

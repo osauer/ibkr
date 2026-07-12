@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -25,7 +26,56 @@ import (
 	"github.com/osauer/ibkr/v2/internal/app/relay"
 	"github.com/osauer/ibkr/v2/internal/app/state"
 	"github.com/osauer/ibkr/v2/internal/rpc"
+	appweb "github.com/osauer/ibkr/v2/web/app"
 )
+
+func TestEmbeddedJavaScriptRoutes(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t).Handler()
+	entries, err := appweb.Files.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read embedded app root: %v", err)
+	}
+	jsCount := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".js") {
+			continue
+		}
+		jsCount++
+		req := httptest.NewRequest(http.MethodGet, "/"+entry.Name(), nil)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(readerFromRecorder{res}, req)
+		if res.Code != http.StatusOK {
+			t.Errorf("GET /%s status=%d, want 200; body=%s", entry.Name(), res.Code, res.Body.String())
+		}
+		if got := res.Header().Get("Content-Type"); got != "text/javascript; charset=utf-8" {
+			t.Errorf("GET /%s Content-Type=%q, want text/javascript; charset=utf-8", entry.Name(), got)
+		}
+		if got := res.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("GET /%s Cache-Control=%q, want no-cache", entry.Name(), got)
+		}
+	}
+	if jsCount == 0 {
+		t.Fatal("embedded app contains no JavaScript files")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/not-embedded.js", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(readerFromRecorder{res}, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("GET /not-embedded.js status=%d, want 404", res.Code)
+	}
+}
+
+// readerFromRecorder avoids the recursive io.Copy fallback in HyperServe's
+// logging response writer when its underlying test recorder lacks ReaderFrom.
+type readerFromRecorder struct {
+	*httptest.ResponseRecorder
+}
+
+func (r readerFromRecorder) ReadFrom(src io.Reader) (int64, error) {
+	return io.Copy(r.ResponseRecorder, src)
+}
 
 func TestBootstrapRequiresAuth(t *testing.T) {
 	t.Parallel()
