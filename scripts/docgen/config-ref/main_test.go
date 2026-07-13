@@ -48,3 +48,54 @@ func testRead() { _ = os.Getenv("IBKR_TEST_ONLY") }
 		t.Fatalf("non-public reads rejected: %v", err)
 	}
 }
+
+func TestParseStructRowsRecursesNestedAndMapStructs(t *testing.T) {
+	root := t.TempDir()
+	source := `package sample
+type Root struct {
+	// Top is a top-level scalar.
+	Top     string          ` + "`toml:\"top\"`" + `
+	Nested  Inner           ` + "`toml:\"nested\"`" + `
+	Ptr     *Inner          ` + "`toml:\"ptr\"`" + `
+	Presets map[string]Leaf ` + "`toml:\"presets\"`" + `
+}
+type Inner struct {
+	Deep Leaf ` + "`toml:\"deep\"`" + `
+}
+type Leaf struct {
+	// Value is the leaf value.
+	Value int ` + "`toml:\"value\"`" + `
+}
+`
+	path := filepath.Join(root, "sample.go")
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := parseStructRows(path, "Root")
+	if err != nil {
+		t.Fatalf("parseStructRows: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Path] = r.Doc
+	}
+	for _, want := range []string{
+		"top",
+		"nested.deep.value",
+		"ptr.deep.value",
+		"presets.<name>.value",
+	} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("missing row %q; got %v", want, got)
+		}
+	}
+	if got["top"] != "Top is a top-level scalar." {
+		t.Errorf("top doc = %q", got["top"])
+	}
+	if row := (tomlField{Path: "presets.<name>.value"}); row.Section() != "presets.<name>" || row.Field() != "value" {
+		t.Errorf("section/field split = %q/%q", row.Section(), row.Field())
+	}
+	if _, err := parseStructRows(path, "NoSuchStruct"); err == nil {
+		t.Error("unknown root struct must error")
+	}
+}

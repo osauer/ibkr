@@ -22,9 +22,10 @@ client_id = 15
 account = "DU1234567"
 
 [trading]
-enabled = true
+# mode is the only enablement switch: "disabled" (default), "paper", or "live".
+# Every broker write always requires a submit-eligible preview token; that is
+# invariant, not a config key.
 mode = "paper"
-require_preview = true
 
 max_notional = 10000
 max_option_contracts = 5

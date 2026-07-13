@@ -1,8 +1,11 @@
-// docgen/config-ref emits docs/reference/config.md from two sources:
+// docgen/config-ref emits docs/reference/config.md from two kinds of
+// sources:
 //
-//   - TOML config: AST-parse internal/config/config.go for every
-//     struct field that has a `toml:"..."` tag. Field name + tag +
-//     Go doc comment + type become a row.
+//   - Struct tables (structSources): AST-parse a Go file's root struct
+//     and every nested struct it references, recursively, collecting
+//     each field with a `toml:"..."` tag. Dotted path + Go doc comment
+//   - type become a row. Covers the TOML config plus the protection
+//     and opportunity policy files.
 //   - Environment variables: scan all .go files under the repo root
 //     for `// docgen:env NAME | description` comments. Name + the
 //     description after `|` become a row.
@@ -26,20 +29,76 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 const (
-	configPath    = "internal/config/config.go"
 	defaultOutput = "docs/reference/config.md"
 	envPrefix     = "// docgen:env "
 )
 
-// tomlField is one row in the TOML config table.
+// structSource is one generated table: a Go file, the root struct to
+// walk, and the markdown framing around the emitted rows.
+type structSource struct {
+	Path    string // Go source file, repo-relative
+	Root    string // root struct name inside that file
+	Heading string // markdown H2 title
+	Intro   string // paragraph rendered under the heading
+}
+
+// structSources drives the generated reference. Adding a settings
+// surface is one entry here plus doc comments on the struct fields.
+// The risk policy (internal/risk/constitution.go) joins once it ships.
+var structSources = []structSource{
+	{
+		Path:    "internal/config/config.go",
+		Root:    "Config",
+		Heading: "TOML config",
+		Intro: "Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.toml`, else `$HOME/.config/ibkr/config.toml`. " +
+			"Every field is optional; absent fields take their documented default. Unknown keys fail the load with a targeted error. " +
+			"Note: defining any `[scans.<name>]` preset replaces the built-in preset set — the scans table is replace-not-merge.",
+	},
+	{
+		Path:    "internal/daemon/protection_policy.go",
+		Root:    "protectionPolicy",
+		Heading: "Protection policy file",
+		Intro: "Loaded from the path in `[auto_trade].policy_file` (default `~/.config/ibkr/policies/protection-policy.toml`). " +
+			"No file is required or shipped: when absent, the daemon runs the embedded default — print it with `ibkr policy default protection`. " +
+			"Edits apply only when `policy_version` is bumped (an edited file at an unchanged version reports drift), and unknown keys fail the load. " +
+			"This policy shapes advisory protection proposals only; proposals never place broker orders by themselves.",
+	},
+	{
+		Path:    "internal/daemon/opportunity_policy.go",
+		Root:    "opportunityPolicy",
+		Heading: "Opportunity policy file",
+		Intro: "Loaded from the path in `[opportunities].policy_file` (default `~/.config/ibkr/policies/opportunity-policy.toml`). " +
+			"Same envelope and reload discipline as the protection policy; print the embedded default with `ibkr policy default opportunity`. " +
+			"Governs advisory option-exercise opportunity detection only.",
+	},
+}
+
+// tomlField is one row in a generated struct table.
 type tomlField struct {
-	Section string // e.g. "spx", "gateway"
-	Name    string // TOML field name, e.g. "members_auto_refresh"
-	GoType  string // Go type as written, e.g. "*bool"
-	Doc     string // first sentence of the Go doc comment
+	Path   string // dotted TOML path, e.g. "buckets.theta_hygiene.max_dte"
+	GoType string // Go type as written, e.g. "*bool"
+	Doc    string // first sentence of the Go doc comment
+}
+
+// Section is everything before the last path segment ("" for a
+// top-level key); Field is the last segment.
+func (f tomlField) Section() string {
+	if i := strings.LastIndex(f.Path, "."); i >= 0 {
+		return f.Path[:i]
+	}
+	return ""
+}
+
+func (f tomlField) Field() string {
+	if i := strings.LastIndex(f.Path, "."); i >= 0 {
+		return f.Path[i+1:]
+	}
+	return f.Path
 }
 
 // envVar is one row in the environment variables table.
@@ -54,9 +113,13 @@ func main() {
 	root := flag.String("root", ".", "repo root to scan for // docgen:env comments")
 	flag.Parse()
 
-	toml, err := parseTomlFields(configPath)
-	if err != nil {
-		fatal("parse config: %v", err)
+	tables := make([][]tomlField, len(structSources))
+	for i, src := range structSources {
+		rows, err := parseStructRows(filepath.Join(*root, src.Path), src.Root)
+		if err != nil {
+			fatal("parse %s: %v", src.Path, err)
+		}
+		tables[i] = rows
 	}
 	envs, err := scanEnvVars(*root)
 	if err != nil {
@@ -66,7 +129,7 @@ func main() {
 		fatal("validate env vars: %v", err)
 	}
 
-	body := render(toml, envs)
+	body := render(tables, envs)
 
 	if *output == "-" {
 		os.Stdout.WriteString(body)
@@ -82,73 +145,76 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
-// parseTomlFields walks the config.go AST and extracts every field
-// with a toml tag. Returns rows sorted by (section, name).
-//
-// Strategy: find the top-level Config struct, walk its fields to
-// learn the section name → Go type mapping (e.g. SPX → "spx"). For
-// each referenced type, walk its fields to collect the per-field
-// rows.
-func parseTomlFields(path string) ([]tomlField, error) {
+// parseStructRows walks the AST of path starting at the root struct
+// and extracts every field with a toml tag, recursively. A field whose
+// (possibly pointer) type is a struct declared in the same file
+// becomes a path prefix rather than a row; map[string]Struct recurses
+// with a `<name>` placeholder segment (the `[scans.<name>]` shape).
+// Returns rows sorted by (section, field).
+func parseStructRows(path, root string) ([]tomlField, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 	if err != nil {
 		return nil, err
 	}
 
-	// First pass: build sectionByType, e.g. {"SPX": "spx", "Gateway": "gateway"}.
-	// The top-level Config struct's fields tell us which TOML section
-	// each referenced struct populates.
-	sectionByType := map[string]string{}
+	structs := map[string]*ast.StructType{}
 	forEachStruct(file, func(name string, st *ast.StructType, _ *ast.CommentGroup) {
-		if name != "Config" {
-			return
-		}
-		for _, f := range st.Fields.List {
-			if len(f.Names) == 0 || f.Tag == nil {
-				continue
-			}
-			tag := reflect.StructTag(strings.Trim(f.Tag.Value, "`"))
-			section := stripOmit(tag.Get("toml"))
-			if section == "" {
-				continue
-			}
-			typeName := goTypeName(f.Type)
-			sectionByType[typeName] = section
-		}
+		structs[name] = st
 	})
+	rootStruct, ok := structs[root]
+	if !ok {
+		return nil, fmt.Errorf("struct %s not found in %s", root, path)
+	}
 
-	// Second pass: for every other struct that has a section mapping,
-	// walk its fields. This produces one tomlField per row.
 	var rows []tomlField
-	forEachStruct(file, func(name string, st *ast.StructType, _ *ast.CommentGroup) {
-		section, ok := sectionByType[name]
-		if !ok {
-			return
-		}
+	var walk func(st *ast.StructType, prefix string)
+	walk = func(st *ast.StructType, prefix string) {
 		for _, f := range st.Fields.List {
 			if len(f.Names) == 0 || f.Tag == nil {
 				continue
 			}
 			tag := reflect.StructTag(strings.Trim(f.Tag.Value, "`"))
-			fieldName := stripOmit(tag.Get("toml"))
-			if fieldName == "" {
+			name := stripOmit(tag.Get("toml"))
+			if name == "" {
 				continue
+			}
+			fieldPath := name
+			if prefix != "" {
+				fieldPath = prefix + "." + name
+			}
+			typ := f.Type
+			if star, isPtr := typ.(*ast.StarExpr); isPtr {
+				typ = star.X
+			}
+			if m, isMap := typ.(*ast.MapType); isMap {
+				if valIdent, isIdent := m.Value.(*ast.Ident); isIdent {
+					if child, isStruct := structs[valIdent.Name]; isStruct {
+						walk(child, fieldPath+".<name>")
+						continue
+					}
+				}
+			}
+			if ident, isIdent := typ.(*ast.Ident); isIdent {
+				if child, isStruct := structs[ident.Name]; isStruct {
+					walk(child, fieldPath)
+					continue
+				}
 			}
 			rows = append(rows, tomlField{
-				Section: section,
-				Name:    fieldName,
-				GoType:  goTypeName(f.Type),
-				Doc:     firstSentence(commentText(f.Doc)),
+				Path:   fieldPath,
+				GoType: goTypeName(f.Type),
+				Doc:    firstSentence(commentText(f.Doc)),
 			})
 		}
-	})
+	}
+	walk(rootStruct, "")
 
 	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Section != rows[j].Section {
-			return rows[i].Section < rows[j].Section
+		if rows[i].Section() != rows[j].Section() {
+			return rows[i].Section() < rows[j].Section()
 		}
-		return rows[i].Name < rows[j].Name
+		return rows[i].Field() < rows[j].Field()
 	})
 	return rows, nil
 }
@@ -426,25 +492,59 @@ func validateDocumentedEnvReads(root string, documented []envVar) error {
 }
 
 // render emits the final markdown body.
-func render(toml []tomlField, envs []envVar) string {
+func render(tables [][]tomlField, envs []envVar) string {
 	out := &strings.Builder{}
 	out.WriteString("# Configuration reference\n\n")
-	out.WriteString("*Generated by `scripts/docgen/config-ref`. Do not edit by hand — run `make docs-regen` after changing `internal/config/config.go` or adding/removing a `// docgen:env` comment.*\n\n")
+	sourceFiles := make([]string, len(structSources))
+	for i, src := range structSources {
+		sourceFiles[i] = "`" + src.Path + "`"
+	}
+	fmt.Fprintf(out, "*Generated by `scripts/docgen/config-ref`. Do not edit by hand — run `make docs-regen` after changing %s or adding/removing a `// docgen:env` comment.*\n\n",
+		strings.Join(sourceFiles, ", "))
 
-	out.WriteString("## TOML config\n\n")
-	out.WriteString("Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.toml`, else `$HOME/.config/ibkr/config.toml`. Every field is optional; absent fields take their documented default.\n\n")
-
-	if len(toml) == 0 {
-		out.WriteString("*No documented TOML fields.*\n\n")
-	} else {
+	for i, src := range structSources {
+		fmt.Fprintf(out, "## %s\n\n%s\n\n", src.Heading, src.Intro)
+		rows := tables[i]
+		if len(rows) == 0 {
+			out.WriteString("*No documented fields.*\n\n")
+			continue
+		}
 		out.WriteString("| Section | Field | Type | Description |\n")
 		out.WriteString("|---------|-------|------|-------------|\n")
-		for _, f := range toml {
-			fmt.Fprintf(out, "| `[%s]` | `%s` | `%s` | %s |\n",
-				f.Section, f.Name, f.GoType, escapeTable(f.Doc))
+		for _, f := range rows {
+			section := "*(top level)*"
+			if s := f.Section(); s != "" {
+				section = "`[" + s + "]`"
+			}
+			fmt.Fprintf(out, "| %s | `%s` | `%s` | %s |\n",
+				section, f.Field(), f.GoType, escapeTable(f.Doc))
 		}
 		out.WriteString("\n")
 	}
+
+	out.WriteString("## Runtime platform settings\n\n")
+	out.WriteString("Daemon-owned preferences stored in `$XDG_STATE_HOME/ibkr/platform-settings.json` and changed at runtime — no restart — via `ibkr settings set <key>=<value>`, the SPA Settings tab, or `PATCH /api/settings`. ")
+	out.WriteString("Setting a key to `null` clears the runtime override, and every response field carries access/source/reason metadata. ")
+	out.WriteString("Keys in the trading-limit class are writable only on experimental trading builds with `[trading].mode` set, and live routes reject agent-origin writes. ")
+	out.WriteString("Ownership and semantics: `docs/design/platform-settings.md`.\n\n")
+	out.WriteString("| Key | Value | Class | Description |\n")
+	out.WriteString("|-----|-------|-------|-------------|\n")
+	for _, spec := range rpc.SettingsKeys() {
+		key, grammar := spec.Key, ""
+		switch spec.Kind {
+		case rpc.SettingsKindBool:
+			grammar = "true/false/null"
+		case rpc.SettingsKindFloat:
+			grammar = "number/null"
+		case rpc.SettingsKindInt:
+			grammar = "integer/null"
+		case rpc.SettingsKindDateMap:
+			key += ".<SYMBOL>"
+			grammar = "YYYY-MM-DD[Tamc/Tbmo]/null"
+		}
+		fmt.Fprintf(out, "| `%s` | `%s` | %s | %s |\n", key, grammar, spec.Class, escapeTable(spec.Doc))
+	}
+	out.WriteString("\n")
 
 	out.WriteString("## Environment variables\n\n")
 	out.WriteString("Read at process startup. Override TOML config where applicable; see the per-var description for precedence rules.\n\n")

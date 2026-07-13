@@ -8,11 +8,15 @@ choices. They are not a second config system.
 The daemon stores runtime preferences in
 `$XDG_STATE_HOME/ibkr/platform-settings.json`, or
 `~/.local/state/ibkr/platform-settings.json` when `XDG_STATE_HOME` is unset.
-Only user preferences owned by `ibkr` belong in this file:
+Only user preferences owned by `ibkr` belong in this file: feature toggles,
+the `trading.freeze` brake, rulebook earnings overrides, the regime-journal
+switch, and optional experimental trading-limit overrides.
 
-- `features.purge_restore.enabled`, default `true`
-- `features.stock_protection.enabled`, default `true`
-- optional experimental trading-limit overrides
+This document owns semantics and ownership, not the key list. The writable
+keys, types, and per-key descriptions are enumerated in the generated
+[configuration reference](../reference/config.md) (single source: the settings
+key registry in `internal/rpc`); `ibkr settings set --help` prints the same
+list.
 
 TOML/config/build still own gateway endpoint, account, client ID, trading
 enablement, trading mode, and whether write-capable trading code exists. MCP
@@ -41,6 +45,22 @@ with a `stock_protection_disabled` blocker, while proposal/status surfaces
 remain readable. The setting cannot enable broker writes, option protection, or
 policy-disabled buckets.
 
+The advisory trading rulebook is enabled by default. Disabling
+`features.rulebook.enabled` hides the SPA card, empties `rules.snapshot`, and
+stops advisory `rule_*` preview warnings; it cannot affect broker-write gating
+in either direction. `features.rulebook.earnings_overrides` is authoritative
+over fetched earnings dates for rules 6-8. Override patches merge per symbol:
+a null symbol value clears that symbol, null on the whole map clears all, and
+unmentioned symbols survive.
+
+`trading.freeze` is the runtime trading brake: `true` blocks every new broker
+write while cancels stay allowed. Freeze and trading-limit changes are
+human-only policy: the patch origin is stamped and audited, and on live routes
+the daemon hard-rejects agent-origin trading patches.
+
+`regime.journal.enabled` controls the regime-decisions forward-collection
+journal (`$XDG_STATE_HOME/ibkr/regime-decisions.jsonl`).
+
 Trading mode is never writable here. Stable builds expose trading and limits as
 read-only. Experimental trading builds may edit safety limits only after
 `[trading].mode` is set to `paper` or `live` in TOML.
@@ -53,9 +73,11 @@ truth remains on quote, chain, position, and status responses.
 
 - Daemon RPC: `settings.get`, `settings.update`; both must work without gateway
   connectivity.
-- CLI: `ibkr settings show [--json]`,
-  `ibkr settings set features.purge_restore.enabled=true|false|null`, and
-  `ibkr settings set features.stock_protection.enabled=true|false|null`.
+- CLI: `ibkr settings show [--json]` and
+  `ibkr settings set <key>=<value>` for the writable keys above, e.g.
+  `features.purge_restore.enabled=true|false|null` or
+  `features.rulebook.earnings_overrides.<SYMBOL>=YYYY-MM-DD|null`.
+  `ibkr settings set --help` is the authoritative key list.
 - HTTP/app: `GET /api/settings`, `PATCH /api/settings`, `/api/bootstrap`, live
   snapshot, and SSE `settings` events.
 - MCP: read-only `ibkr_settings`; no write tool in V1.

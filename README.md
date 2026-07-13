@@ -230,44 +230,20 @@ This means your shell, Claude Desktop, Claude Code, Cursor, and other MCP client
 
 For normal read-only use, no config file is required. The daemon TCP-probes `4001` (Gateway live), `4002` (Gateway paper), `7496` (TWS live), `7497` (TWS paper), picks the first responder, and falls over to alternates if the first one accepts TCP but never completes the handshake. The account is auto-detected via `managedAccounts`. Default client ID is `15`.
 
-`config.toml` means "active local overrides." Create it only when you want to pin something. Anything present in this file is binding; anything omitted stays auto-detected. Default path: `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`.
-
-[Runtime platform preferences](docs/design/platform-settings.md) are daemon-owned and live at `$XDG_STATE_HOME/ibkr/platform-settings.json`, falling back to `~/.local/state/ibkr/platform-settings.json`. This file stores ibkr-owned preferences only, such as `features.purge_restore.enabled`; gateway pins, trading mode, account, and client ID stay in TOML-controlled surfaces, while MCP broker writes are build-owned and disabled.
-
-For example, this read-only config pins TWS live and leaves everything else automatic:
+**TOML config** (`config.toml`) means "active local overrides." Create it only when you want to pin something: anything present is binding, anything omitted stays auto-detected, and unknown keys fail at startup with a message that names them. Default path: `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`. For example, this read-only config pins TWS live and leaves everything else automatic:
 
 ```toml
 [gateway]
 port = 7496
 ```
 
-The fuller example below shows the available read-only pins:
+Every section and key — `[gateway]`, `[daemon]`, `[trading]`, `[auto_trade]`, `[opportunities]`, `[spx]`, `[scans.<name>]` — is enumerated with types, defaults, and semantics in the generated [configuration reference](docs/reference/config.md), alongside every `IBKR_*` environment variable. `ibkr status` shows what the daemon ended up using and where each value came from (`pinned` or `discovered`).
 
-```toml
-[gateway]
-host       = "127.0.0.1"
-port       = 4001          # binding: skip the probe
-client_id  = 15
-account    = ""            # empty = auto-detect via managedAccounts
-tls        = false         # binding: no TLS fallback
+**Runtime platform preferences** are daemon-owned, live at `$XDG_STATE_HOME/ibkr/platform-settings.json`, and change instantly via `ibkr settings set`, the SPA Settings tab, or `PATCH /api/settings` — feature toggles, the `trading.freeze` brake, rulebook earnings overrides, and experimental trading-limit overrides. The writable keys are listed in the [configuration reference](docs/reference/config.md); ownership and semantics live in the [platform-settings design](docs/design/platform-settings.md).
 
-[daemon]
-idle_timeout = "15m"
-log_level    = "info"
-
-[scans.top-movers]
-type     = "TOP_PERC_GAIN"
-exchange = "STK.US.MAJOR"
-limit    = 20
-```
-
-`ibkr status` shows what the daemon ended up using and where each value came from (`pinned` or `discovered`).
-
-**TLS semantics.** A pinned `tls` value (true or false) is strict. An omitted `tls` means "auto": plain first, TLS on no-handshake-data.
+**Policy files** under `~/.config/ibkr/policies/` shape the advisory engines: protection proposals (`protection-policy.toml`) and option-exercise opportunities (`opportunity-policy.toml`). None need to exist — embedded defaults apply, printable with `ibkr policy default <protection|opportunity>` — and every key is enumerated in the same [configuration reference](docs/reference/config.md).
 
 **Trading config is opt-in and experimental.** Stable `ibkr` releases are read-only. Trading builds, when built or published separately, are experimental and provided as-is for explicit operator testing. Keep trading config inactive as `~/.config/ibkr/config.toml.trading`; it has no effect with that suffix. To activate it, a human or explicitly instructed local agent removes the `.trading` suffix so the file becomes `~/.config/ibkr/config.toml`, verifies the pinned account and endpoint, then runs `ibkr restart`. The example template lives at [examples/config.toml.trading](examples/config.toml.trading).
-
-**Strict keys.** Unknown top-level keys or sections fail at startup with a message that names them — your config can't silently drop fields. Supported sections: `[gateway]`, `[daemon]`, `[trading]`, `[spx]`, `[scans.<name>]`.
 
 References:
 

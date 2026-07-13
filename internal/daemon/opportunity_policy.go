@@ -20,11 +20,16 @@ import (
 const opportunityPolicyKind = "ibkr.opportunity_policy"
 
 type opportunityPolicy struct {
-	Kind          string `toml:"kind" json:"kind"`
-	SchemaVersion int    `toml:"schema_version" json:"schema_version"`
-	PolicyID      string `toml:"policy_id" json:"policy_id"`
-	PolicyVersion int    `toml:"policy_version" json:"policy_version"`
-	Profile       string `toml:"profile" json:"profile"`
+	// Kind must be "ibkr.opportunity_policy"; any other value fails the load.
+	Kind string `toml:"kind" json:"kind"`
+	// SchemaVersion is the policy schema revision; only 1 is supported.
+	SchemaVersion int `toml:"schema_version" json:"schema_version"`
+	// PolicyID is the required identity string for this policy (embedded default "opportunity-option-exercise-mvp").
+	PolicyID string `toml:"policy_id" json:"policy_id"`
+	// PolicyVersion is the monotonic policy revision; bump it to make the daemon adopt file edits — an edited file at an unchanged version reports drift instead.
+	PolicyVersion int `toml:"policy_version" json:"policy_version"`
+	// Profile is a human-readable label for the parameter set (embedded default "conservative-exercise-mvp"); falls back to policy_id when empty.
+	Profile string `toml:"profile" json:"profile"`
 
 	Authority opportunityPolicyAuthority `toml:"authority" json:"authority"`
 	Buckets   opportunityPolicyBuckets   `toml:"buckets" json:"buckets"`
@@ -34,7 +39,8 @@ type opportunityPolicyAuthority struct {
 	// ExerciseReduceOnly is retained for schema compatibility. Option exercise
 	// exposure effects are informational; broker writes are centrally gated.
 	ExerciseReduceOnly bool `toml:"exercise_reduce_only" json:"exercise_reduce_only"`
-	AutoSubmit         bool `toml:"auto_submit" json:"auto_submit"`
+	// AutoSubmit would let exercise opportunities submit themselves; must be false — opportunities are advisory and every broker write stays behind the gated order path.
+	AutoSubmit bool `toml:"auto_submit" json:"auto_submit"`
 }
 
 type opportunityPolicyBuckets struct {
@@ -42,14 +48,20 @@ type opportunityPolicyBuckets struct {
 }
 
 type opportunityOptionExercisePolicy struct {
-	Enabled             bool    `toml:"enabled" json:"enabled"`
-	MinTotalGain        float64 `toml:"min_total_gain" json:"min_total_gain"`
+	// Enabled turns the early-exercise opportunity detector on (default true).
+	Enabled bool `toml:"enabled" json:"enabled"`
+	// MinTotalGain is the minimum total dollar gain required to flag an exercise opportunity (default 25).
+	MinTotalGain float64 `toml:"min_total_gain" json:"min_total_gain"`
+	// MinGainPctIntrinsic is the minimum gain as a percent of intrinsic value (default 0.5).
 	MinGainPctIntrinsic float64 `toml:"min_gain_pct_intrinsic" json:"min_gain_pct_intrinsic"`
-	RequireRTH          bool    `toml:"require_rth" json:"require_rth"`
-	MaxQuoteAge         string  `toml:"max_quote_age" json:"max_quote_age"`
+	// RequireRTH only flags opportunities during regular trading hours (default true).
+	RequireRTH bool `toml:"require_rth" json:"require_rth"`
+	// MaxQuoteAge is the oldest quote still considered fresh, as a Go duration string (default "30s").
+	MaxQuoteAge string `toml:"max_quote_age" json:"max_quote_age"`
 	// AllowNoOptionBid is retained for schema compatibility. Exercise
 	// opportunities require an executable option bid in the MVP detector.
-	AllowNoOptionBid     bool `toml:"allow_no_option_bid" json:"allow_no_option_bid"`
+	AllowNoOptionBid bool `toml:"allow_no_option_bid" json:"allow_no_option_bid"`
+	// RequireAmericanStyle limits detection to American-style options, the only style that can be exercised early (default true).
 	RequireAmericanStyle bool `toml:"require_american_style" json:"require_american_style"`
 }
 

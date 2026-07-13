@@ -21,19 +21,26 @@ import (
 const protectionPolicyKind = "ibkr.protection_policy"
 
 type protectionPolicy struct {
-	Kind          string `toml:"kind" json:"kind"`
-	SchemaVersion int    `toml:"schema_version" json:"schema_version"`
-	PolicyID      string `toml:"policy_id" json:"policy_id"`
-	PolicyVersion int    `toml:"policy_version" json:"policy_version"`
-	Profile       string `toml:"profile" json:"profile"`
+	// Kind must be "ibkr.protection_policy"; any other value fails the load.
+	Kind string `toml:"kind" json:"kind"`
+	// SchemaVersion is the policy schema revision; only 1 is supported.
+	SchemaVersion int `toml:"schema_version" json:"schema_version"`
+	// PolicyID is the required identity string for this policy (embedded default "protection-mvp").
+	PolicyID string `toml:"policy_id" json:"policy_id"`
+	// PolicyVersion is the monotonic policy revision; bump it to make the daemon adopt file edits — an edited file at an unchanged version reports drift instead.
+	PolicyVersion int `toml:"policy_version" json:"policy_version"`
+	// Profile is a human-readable label for the parameter set (embedded default "theta-priority-mvp"); falls back to policy_id when empty.
+	Profile string `toml:"profile" json:"profile"`
 
 	Authority protectionPolicyAuthority `toml:"authority" json:"authority"`
 	Buckets   protectionPolicyBuckets   `toml:"buckets" json:"buckets"`
 }
 
 type protectionPolicyAuthority struct {
+	// CloseReduceOnly restricts proposals to reducing or closing existing positions; must be true in the MVP schema.
 	CloseReduceOnly bool `toml:"close_reduce_only" json:"close_reduce_only"`
-	AutoSubmit      bool `toml:"auto_submit" json:"auto_submit"`
+	// AutoSubmit would let proposals submit themselves; must be false — proposals are advisory and every broker write stays behind the gated order path.
+	AutoSubmit bool `toml:"auto_submit" json:"auto_submit"`
 }
 
 type protectionPolicyBuckets struct {
@@ -43,31 +50,36 @@ type protectionPolicyBuckets struct {
 }
 
 type protectionThetaPolicy struct {
+	// Enabled turns the near-dated time-decay hygiene bucket on (default true).
 	Enabled bool `toml:"enabled" json:"enabled"`
-	MaxDTE  int  `toml:"max_dte" json:"max_dte"`
-	// MinAbsThetaPerDay is a dust floor only: it cheaply skips trivially
-	// small positions before the extrinsic decomposition. It is NOT the
+	// MaxDTE only considers options expiring within this many days (default 21).
+	MaxDTE int `toml:"max_dte" json:"max_dte"`
+	// MinAbsThetaPerDay is a dust floor that cheaply skips trivially small positions before the extrinsic decomposition (default 5.0 per day). It is NOT the
 	// materiality gate — absolute dollar theta scales with position size and
 	// price, so on its own it flags every large near-dated option regardless
 	// of whether time decay is a meaningful fraction of the position.
 	MinAbsThetaPerDay float64 `toml:"min_abs_theta_per_day" json:"min_abs_theta_per_day"`
-	// MinExtrinsicPctOfMark is the materiality gate. Theta only erodes
+	// MinExtrinsicPctOfMark is the materiality gate: below this percent of mark the option is intrinsic-dominated and a theta-saving close is suppressed (default 40). Theta only erodes
 	// extrinsic (time) value; intrinsic value is directional and theta-immune
-	// while the option stays in the money. Below this floor the option is
-	// intrinsic-dominated, so closing it to "save" theta would forfeit
-	// intrinsic value and delta exposure for a decay that mostly is not at
-	// risk — the bucket suppresses instead of recommending a close.
+	// while the option stays in the money, so closing an intrinsic-dominated
+	// option to "save" theta would forfeit intrinsic value and delta exposure
+	// for a decay that mostly is not at risk.
 	MinExtrinsicPctOfMark float64 `toml:"min_extrinsic_pct_of_mark" json:"min_extrinsic_pct_of_mark"`
-	MaxSpreadPctOfMid     float64 `toml:"max_spread_pct_of_mid" json:"max_spread_pct_of_mid"`
+	// MaxSpreadPctOfMid skips quotes whose bid/ask spread exceeds this percent of mid — too wide to act on (default 25).
+	MaxSpreadPctOfMid float64 `toml:"max_spread_pct_of_mid" json:"max_spread_pct_of_mid"`
 }
 
 type protectionRiskPolicy struct {
-	Enabled                bool    `toml:"enabled" json:"enabled"`
+	// Enabled turns the single-name concentration-reduction bucket on (default true).
+	Enabled bool `toml:"enabled" json:"enabled"`
+	// SingleNameTargetPctNLV is the target ceiling for one name's exposure as a percent of net liquidation value (default 25).
 	SingleNameTargetPctNLV float64 `toml:"single_name_target_pct_nlv" json:"single_name_target_pct_nlv"`
-	MaxOrderNotional       float64 `toml:"max_order_notional" json:"max_order_notional"`
+	// MaxOrderNotional caps the notional of a single generated reduction order (default 10000).
+	MaxOrderNotional float64 `toml:"max_order_notional" json:"max_order_notional"`
 }
 
 type protectionTrailPolicy struct {
+	// Enabled turns the trailing-stop bucket on (default true).
 	Enabled bool `toml:"enabled" json:"enabled"`
 	// TIF applies to every trailing-stop proposal in this bucket: DAY or
 	// GTC, empty means DAY. omitempty keeps the unset value out of the
@@ -79,27 +91,45 @@ type protectionTrailPolicy struct {
 }
 
 type protectionTrailAssetPolicy struct {
-	Enabled           bool    `toml:"enabled" json:"enabled"`
-	OrderType         string  `toml:"order_type" json:"order_type"`
-	DefaultPct        float64 `toml:"default_pct" json:"default_pct"`
-	FallbackPct       float64 `toml:"fallback_pct" json:"fallback_pct,omitempty"`
-	MinPct            float64 `toml:"min_pct" json:"min_pct"`
-	MaxPct            float64 `toml:"max_pct" json:"max_pct"`
+	// Enabled turns trailing-stop proposals for stock/ETF positions on (default true).
+	Enabled bool `toml:"enabled" json:"enabled"`
+	// OrderType is TRAIL or TRAIL LIMIT (default TRAIL).
+	OrderType string `toml:"order_type" json:"order_type"`
+	// DefaultPct is the standard trailing distance in percent (default 8).
+	DefaultPct float64 `toml:"default_pct" json:"default_pct"`
+	// FallbackPct is the trailing distance used when the default cannot be applied; must lie within [min_pct, max_pct] (default 10).
+	FallbackPct float64 `toml:"fallback_pct" json:"fallback_pct,omitempty"`
+	// MinPct is the lower bound on the trailing distance (default 2).
+	MinPct float64 `toml:"min_pct" json:"min_pct"`
+	// MaxPct is the upper bound on the trailing distance (default 15).
+	MaxPct float64 `toml:"max_pct" json:"max_pct"`
+	// MaxSpreadPctOfMid skips stock/ETF quotes wider than this percent of mid (default 2).
 	MaxSpreadPctOfMid float64 `toml:"max_spread_pct_of_mid" json:"max_spread_pct_of_mid"`
-	LimitOffsetAbs    float64 `toml:"limit_offset_abs" json:"limit_offset_abs,omitempty"`
+	// LimitOffsetAbs is the absolute limit offset for the stop; required positive when order_type is TRAIL LIMIT.
+	LimitOffsetAbs float64 `toml:"limit_offset_abs" json:"limit_offset_abs,omitempty"`
 }
 
 type protectionTrailOptionPolicy struct {
-	Enabled               bool    `toml:"enabled" json:"enabled"`
-	OrderType             string  `toml:"order_type" json:"order_type"`
-	DefaultPct            float64 `toml:"default_pct" json:"default_pct"`
-	MinPct                float64 `toml:"min_pct" json:"min_pct"`
-	MaxPct                float64 `toml:"max_pct" json:"max_pct"`
-	MaxSpreadPctOfMid     float64 `toml:"max_spread_pct_of_mid" json:"max_spread_pct_of_mid"`
-	MinTrailAbs           float64 `toml:"min_trail_abs" json:"min_trail_abs"`
-	SpreadMultiple        float64 `toml:"spread_multiple" json:"spread_multiple"`
-	LimitOffsetAbs        float64 `toml:"limit_offset_abs" json:"limit_offset_abs,omitempty"`
-	AllowShortProfitTrail bool    `toml:"allow_short_profit_trail" json:"allow_short_profit_trail"`
+	// Enabled turns trailing-stop proposals for option positions on (default false).
+	Enabled bool `toml:"enabled" json:"enabled"`
+	// OrderType is TRAIL or TRAIL LIMIT (default TRAIL LIMIT).
+	OrderType string `toml:"order_type" json:"order_type"`
+	// DefaultPct is the standard trailing distance in percent (default 30).
+	DefaultPct float64 `toml:"default_pct" json:"default_pct"`
+	// MinPct is the lower bound on the trailing distance (default 20).
+	MinPct float64 `toml:"min_pct" json:"min_pct"`
+	// MaxPct is the upper bound on the trailing distance (default 50).
+	MaxPct float64 `toml:"max_pct" json:"max_pct"`
+	// MaxSpreadPctOfMid skips option quotes wider than this percent of mid (default 25).
+	MaxSpreadPctOfMid float64 `toml:"max_spread_pct_of_mid" json:"max_spread_pct_of_mid"`
+	// MinTrailAbs is the minimum absolute trailing amount in dollars (default 0.10).
+	MinTrailAbs float64 `toml:"min_trail_abs" json:"min_trail_abs"`
+	// SpreadMultiple sizes the trailing amount as a multiple of the observed spread (default 2).
+	SpreadMultiple float64 `toml:"spread_multiple" json:"spread_multiple"`
+	// LimitOffsetAbs is the absolute limit offset for the stop; required positive when order_type is TRAIL LIMIT (default 0.05).
+	LimitOffsetAbs float64 `toml:"limit_offset_abs" json:"limit_offset_abs,omitempty"`
+	// AllowShortProfitTrail permits trailing profit stops on short option positions (default false).
+	AllowShortProfitTrail bool `toml:"allow_short_profit_trail" json:"allow_short_profit_trail"`
 }
 
 type protectionPolicyManager struct {

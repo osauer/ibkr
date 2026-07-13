@@ -475,3 +475,29 @@ func TestSPXMembersAutoRefreshFromEnv(t *testing.T) {
 		})
 	}
 }
+
+// TestLoad_ShippedTemplatesLoad gates template drift: every example config
+// template in examples/ must pass the strict loader, because the documented
+// activation path (docs/guides/trading-preview.md) is "rename it to
+// config.toml" — a template with an unknown key kills the daemon and every
+// CLI command on first use.
+func TestLoad_ShippedTemplatesLoad(t *testing.T) {
+	templates, err := filepath.Glob(filepath.Join("..", "..", "examples", "config.toml*"))
+	if err != nil {
+		t.Fatalf("glob examples: %v", err)
+	}
+	if len(templates) == 0 {
+		t.Fatal("no config.toml* templates found under examples/ — glob path is stale")
+	}
+	for _, path := range templates {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("shipped template must pass the strict loader: %v", err)
+			}
+			if _, err := cfg.Resolve(); err != nil {
+				t.Fatalf("shipped template must resolve: %v", err)
+			}
+		})
+	}
+}

@@ -95,7 +95,7 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 			}
 		}
 		if len(unknowns) > 0 {
-			fmt.Fprintf(env.Stdout, "No earnings date for: %s — set one with `ibkr settings set features.rulebook.earnings_overrides` (rules 6-8 stay unknown, never pass).\n",
+			fmt.Fprintf(env.Stdout, "No earnings date for: %s — set one with `ibkr settings set features.rulebook.earnings_overrides.<SYM>=YYYY-MM-DD` (rules 6-8 stay unknown, never pass).\n",
 				strings.Join(unknowns, ", "))
 		}
 	}

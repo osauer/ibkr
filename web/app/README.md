@@ -33,6 +33,11 @@ the app for bootstrap data and live SSE updates. Restarting the app should not
 require pairing again: the old session cookie is in-memory, but the browser can
 mint a new session from its saved device key/secret.
 
+The app host keeps one push-alert setting, `alert_settings.mode` — `none`,
+`act_only`, or `watch_and_act` — changed from the PWA's Alerts tab (`PUT
+/api/alerts/settings`) and stored with the paired-device state under
+`IBKR_APP_STATE_DIR`.
+
 Useful while developing or testing:
 
 ```sh

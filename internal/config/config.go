@@ -133,7 +133,7 @@ type Trading struct {
 }
 
 type AutoTrade struct {
-	// ProposalsEnabled controls whether the daemon may produce advisory protection proposals; default true, and proposals are not broker orders unless separately submitted by an explicitly enabled trading path.
+	// ProposalsEnabled controls whether the daemon may produce advisory protection proposals; default true, and proposals are not broker orders unless separately submitted by an explicitly enabled trading path — the `[auto_trade]` section name is historical: nothing auto-trades, and the policy's auto_submit stays false.
 	ProposalsEnabled *bool `toml:"proposals_enabled"`
 	// PolicyFile points to the local protection-policy TOML; default ~/.config/ibkr/policies/protection-policy.toml.
 	PolicyFile string `toml:"policy_file"`
@@ -341,12 +341,16 @@ func (s SPX) MembersAutoRefreshEnabled() bool {
 // Scan holds a single scanner preset. Timeout is per-preset and optional;
 // <=0 falls back to the daemon's default (20s).
 type Scan struct {
-	Type     string `toml:"type"`
+	// Type is the IBKR scanner code, such as TOP_PERC_GAIN; dump your gateway's catalog with `ibkr scan params`.
+	Type string `toml:"type"`
+	// Exchange is the IBKR scanner locationCode, such as STK.US.MAJOR or STK.NASDAQ.
 	Exchange string `toml:"exchange"`
 	// Instrument is the IBKR scanner instrument token, such as STK for US stocks or STOCK.EU for European stocks; empty defaults to STK.
-	Instrument string   `toml:"instrument"`
-	Limit      int      `toml:"limit"`
-	Timeout    duration `toml:"timeout"`
+	Instrument string `toml:"instrument"`
+	// Limit caps returned rows for this preset.
+	Limit int `toml:"limit"`
+	// Timeout is the per-preset scan timeout; <=0 falls back to the daemon default (20s).
+	Timeout duration `toml:"timeout"`
 }
 
 // Config is the on-disk shape of ~/.config/ibkr/config.toml.

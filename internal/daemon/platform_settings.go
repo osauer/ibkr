@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -179,150 +180,151 @@ func (s *Server) handleSettingsUpdate(_ context.Context, req *rpc.Request) (*rpc
 }
 
 func (s *Server) applyPlatformSettingsPatch(patch map[string]json.RawMessage, origin string) error {
-	for key := range patch {
-		switch key {
-		case "features", "trading", "regime":
-		default:
-			return errBadRequest("unknown settings field " + key)
-		}
+	flat, err := flattenSettingsPatch(patch)
+	if err != nil {
+		return err
 	}
-	if _, ok := patch["trading"]; ok {
-		// Trading safety limits are part of the broker-write surface: when
-		// the configured route is live, agent-origin sessions may not loosen
+	specs := settingsSpecsByKey()
+	for key := range flat {
+		// Trading safety settings are part of the broker-write surface: when
+		// the configured route is live, agent-origin sessions may not touch
 		// them. Paper keeps the full path open for testing.
-		if s.cfg.Trading.Mode == config.TradingModeLive && !originIsHuman(origin) {
+		if strings.HasPrefix(key, "trading.") && s.cfg.Trading.Mode == config.TradingModeLive && !originIsHuman(origin) {
 			return errBadRequest("live trading settings are blocked for agent-origin requests; a human must change trading limits from an interactive terminal")
 		}
 	}
 	limitsWritable, reason := s.tradingLimitWritability()
 	return s.platformSettings.update(func(next *platformSettingsData) error {
-		for key, raw := range patch {
-			switch key {
-			case "features":
-				if err := applyFeatureSettingsPatch(next, raw); err != nil {
-					return err
-				}
-			case "trading":
-				if err := applyTradingSettingsPatch(next, raw, limitsWritable, reason); err != nil {
-					return err
-				}
-			case "regime":
-				if err := applyRegimeSettingsPatch(next, raw); err != nil {
-					return err
-				}
+		for key, raw := range flat {
+			if specs[key].Class == rpc.SettingsClassTradingLimit && !limitsWritable {
+				return errBadRequest("trading.limits is read-only: " + reason)
+			}
+			if err := applySettingsKey(next, key, raw); err != nil {
+				return err
 			}
 		}
 		return nil
 	})
 }
 
-func applyRegimeSettingsPatch(next *platformSettingsData, raw json.RawMessage) error {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return errBadRequest("regime must be an object")
+func settingsSpecsByKey() map[string]rpc.SettingsKeySpec {
+	out := map[string]rpc.SettingsKeySpec{}
+	for _, spec := range rpc.SettingsKeys() {
+		out[spec.Key] = spec
 	}
-	for key, raw := range obj {
-		switch key {
-		case "journal":
-			var journal map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &journal); err != nil {
-				return errBadRequest("regime.journal must be an object")
-			}
-			for jkey, jraw := range journal {
-				switch jkey {
-				case "enabled":
-					v, err := nullableBool(jraw)
-					if err != nil {
-						return errBadRequest("regime.journal.enabled must be true, false, or null")
-					}
-					next.Regime.Journal.Enabled = v
-				default:
-					return errBadRequest("unknown settings field regime.journal." + jkey)
-				}
-			}
-		default:
-			return errBadRequest("unknown settings field regime." + key)
-		}
-	}
-	return nil
+	return out
 }
 
-func applyFeatureSettingsPatch(next *platformSettingsData, raw json.RawMessage) error {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return errBadRequest("features must be an object")
-	}
-	for key, raw := range obj {
-		switch key {
-		case "purge_restore":
-			var purge map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &purge); err != nil {
-				return errBadRequest("features.purge_restore must be an object")
-			}
-			for pkey, praw := range purge {
-				switch pkey {
-				case "enabled":
-					v, err := nullableBool(praw)
-					if err != nil {
-						return errBadRequest("features.purge_restore.enabled must be true, false, or null")
-					}
-					next.Features.PurgeRestore.Enabled = v
-				default:
-					return errBadRequest("unknown settings field features.purge_restore." + pkey)
-				}
-			}
-		case "stock_protection":
-			var stock map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &stock); err != nil {
-				return errBadRequest("features.stock_protection must be an object")
-			}
-			for skey, sraw := range stock {
-				switch skey {
-				case "enabled":
-					v, err := nullableBool(sraw)
-					if err != nil {
-						return errBadRequest("features.stock_protection.enabled must be true, false, or null")
-					}
-					next.Features.StockProtection.Enabled = v
-				default:
-					return errBadRequest("unknown settings field features.stock_protection." + skey)
-				}
-			}
-		case "rulebook":
-			var rb map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &rb); err != nil {
-				return errBadRequest("features.rulebook must be an object")
-			}
-			for rkey, rraw := range rb {
-				switch rkey {
-				case "enabled":
-					v, err := nullableBool(rraw)
-					if err != nil {
-						return errBadRequest("features.rulebook.enabled must be true, false, or null")
-					}
-					next.Features.Rulebook.Enabled = v
-				case "earnings_overrides":
-					v, err := nullableEarningsOverrides(rraw)
-					if err != nil {
-						return err
-					}
-					next.Features.Rulebook.EarningsOverrides = v
-				default:
-					return errBadRequest("unknown settings field features.rulebook." + rkey)
-				}
-			}
-		default:
-			return errBadRequest("unknown settings field features." + key)
+// flattenSettingsPatch walks the nested patch object and returns raw values
+// keyed by dotted registry key. Descent stops at registry keys (the
+// earnings-overrides map value is a terminal object), so registry keys are
+// the only writable paths and everything else fails with a targeted error.
+func flattenSettingsPatch(patch map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	specs := settingsSpecsByKey()
+	prefixes := map[string]bool{}
+	for key := range specs {
+		parts := strings.Split(key, ".")
+		for i := 1; i < len(parts); i++ {
+			prefixes[strings.Join(parts[:i], ".")] = true
 		}
 	}
-	return nil
+	flat := map[string]json.RawMessage{}
+	var walk func(prefix string, obj map[string]json.RawMessage) error
+	walk = func(prefix string, obj map[string]json.RawMessage) error {
+		for key, raw := range obj {
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
+			if _, ok := specs[path]; ok {
+				flat[path] = raw
+				continue
+			}
+			if !prefixes[path] {
+				if prefix == "trading" {
+					// [trading] carries real read-only observed fields
+					// (mode, account, ...); name the distinction.
+					return errBadRequest("settings field " + path + " is read-only")
+				}
+				return errBadRequest("unknown settings field " + path)
+			}
+			var child map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &child); err != nil {
+				return errBadRequest(path + " must be an object")
+			}
+			if err := walk(path, child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk("", patch); err != nil {
+		return nil, err
+	}
+	return flat, nil
 }
 
-// nullableEarningsOverrides validates a SYMBOL → date map; null clears all
-// overrides, a null value clears one symbol. Dates must be "YYYY-MM-DD"
-// optionally suffixed with "Tamc"/"Tbmo" — a bad override must fail loudly
-// here, not silently skew rules 6-8 later.
-func nullableEarningsOverrides(raw json.RawMessage) (map[string]string, error) {
+// applySettingsKey writes one flattened registry key into the store data.
+// Every key in the rpc settings registry must have a case here; the
+// registry parity test enforces that, so registry and store cannot drift.
+func applySettingsKey(next *platformSettingsData, key string, raw json.RawMessage) error {
+	boolField := func(dst **bool) error {
+		v, err := nullableBool(raw)
+		if err != nil {
+			return errBadRequest(key + " must be true, false, or null")
+		}
+		*dst = v
+		return nil
+	}
+	switch key {
+	case "features.purge_restore.enabled":
+		return boolField(&next.Features.PurgeRestore.Enabled)
+	case "features.stock_protection.enabled":
+		return boolField(&next.Features.StockProtection.Enabled)
+	case "features.rulebook.enabled":
+		return boolField(&next.Features.Rulebook.Enabled)
+	case "features.rulebook.earnings_overrides":
+		v, err := mergeEarningsOverrides(next.Features.Rulebook.EarningsOverrides, raw)
+		if err != nil {
+			return err
+		}
+		next.Features.Rulebook.EarningsOverrides = v
+		return nil
+	case "trading.freeze":
+		return boolField(&next.Trading.Freeze)
+	case "trading.limits.max_notional":
+		v, err := nullableFloat(raw)
+		if err != nil || (v != nil && *v <= 0) {
+			return errBadRequest("trading.limits.max_notional must be a positive number or null")
+		}
+		next.Trading.MaxNotional = v
+		return nil
+	case "trading.limits.max_option_contracts":
+		v, err := nullableInt(raw)
+		if err != nil || (v != nil && *v <= 0) {
+			return errBadRequest("trading.limits.max_option_contracts must be a positive integer or null")
+		}
+		next.Trading.MaxOptionContracts = v
+		return nil
+	case "trading.limits.allow_stock_short":
+		return boolField(&next.Trading.AllowStockShort)
+	case "trading.limits.allow_option_sell_to_open":
+		return boolField(&next.Trading.AllowOptionSellToOpen)
+	case "regime.journal.enabled":
+		return boolField(&next.Regime.Journal.Enabled)
+	default:
+		return errBadRequest("unknown settings field " + key)
+	}
+}
+
+// mergeEarningsOverrides applies a SYMBOL → date patch onto the current
+// overrides: null clears all overrides, a null value clears that one symbol,
+// and mentioned symbols upsert — unmentioned symbols survive, so a per-symbol
+// `settings set` cannot silently drop the rest of the map. Dates must be
+// "YYYY-MM-DD" optionally suffixed with "Tamc"/"Tbmo" — a bad override must
+// fail loudly here, not silently skew rules 6-8 later. cur is cloned, never
+// mutated, so a failed patch leaves the store snapshot intact.
+func mergeEarningsOverrides(cur map[string]string, raw json.RawMessage) (map[string]string, error) {
 	if string(raw) == "null" {
 		return nil, nil
 	}
@@ -330,13 +332,17 @@ func nullableEarningsOverrides(raw json.RawMessage) (map[string]string, error) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, errBadRequest("features.rulebook.earnings_overrides must be an object of SYMBOL to date strings or null")
 	}
-	out := map[string]string{}
+	out := maps.Clone(cur)
+	if out == nil {
+		out = map[string]string{}
+	}
 	for sym, v := range m {
 		sym = strings.ToUpper(strings.TrimSpace(sym))
 		if sym == "" {
 			return nil, errBadRequest("features.rulebook.earnings_overrides keys must be symbols")
 		}
 		if v == nil {
+			delete(out, sym)
 			continue
 		}
 		date, half, hasHalf := strings.Cut(*v, "T")
@@ -355,64 +361,6 @@ func nullableEarningsOverrides(raw json.RawMessage) (map[string]string, error) {
 		return nil, nil
 	}
 	return out, nil
-}
-
-func applyTradingSettingsPatch(next *platformSettingsData, raw json.RawMessage, writable bool, reason string) error {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return errBadRequest("trading must be an object")
-	}
-	for key, raw := range obj {
-		switch key {
-		case "freeze":
-			v, err := nullableBool(raw)
-			if err != nil {
-				return errBadRequest("trading.freeze must be true, false, or null")
-			}
-			next.Trading.Freeze = v
-		case "limits":
-			if !writable {
-				return errBadRequest("trading.limits is read-only: " + reason)
-			}
-			var limits map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &limits); err != nil {
-				return errBadRequest("trading.limits must be an object")
-			}
-			for lkey, lraw := range limits {
-				switch lkey {
-				case "max_notional":
-					v, err := nullableFloat(lraw)
-					if err != nil || (v != nil && *v <= 0) {
-						return errBadRequest("trading.limits.max_notional must be a positive number or null")
-					}
-					next.Trading.MaxNotional = v
-				case "max_option_contracts":
-					v, err := nullableInt(lraw)
-					if err != nil || (v != nil && *v <= 0) {
-						return errBadRequest("trading.limits.max_option_contracts must be a positive integer or null")
-					}
-					next.Trading.MaxOptionContracts = v
-				case "allow_stock_short":
-					v, err := nullableBool(lraw)
-					if err != nil {
-						return errBadRequest("trading.limits.allow_stock_short must be true, false, or null")
-					}
-					next.Trading.AllowStockShort = v
-				case "allow_option_sell_to_open":
-					v, err := nullableBool(lraw)
-					if err != nil {
-						return errBadRequest("trading.limits.allow_option_sell_to_open must be true, false, or null")
-					}
-					next.Trading.AllowOptionSellToOpen = v
-				default:
-					return errBadRequest("unknown settings field trading.limits." + lkey)
-				}
-			}
-		default:
-			return errBadRequest("settings field trading." + key + " is read-only")
-		}
-	}
-	return nil
 }
 
 func nullableBool(raw json.RawMessage) (*bool, error) {

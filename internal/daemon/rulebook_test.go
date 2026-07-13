@@ -371,6 +371,19 @@ func warningCodes(warns []rpc.DataWarning) map[string]bool {
 }
 
 func TestRulebookSettingsPatch(t *testing.T) {
+	applyFeatureSettingsPatch := func(next *platformSettingsData, featurePatch json.RawMessage) error {
+		patch := map[string]json.RawMessage{"features": featurePatch}
+		flat, err := flattenSettingsPatch(patch)
+		if err != nil {
+			return err
+		}
+		for key, raw := range flat {
+			if err := applySettingsKey(next, key, raw); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	next := &platformSettingsData{Version: 1}
 	patch := json.RawMessage(`{"rulebook":{"enabled":false,"earnings_overrides":{"now":"2026-07-22Tamc","BB":null}}}`)
 	if err := applyFeatureSettingsPatch(next, patch); err != nil {
@@ -388,5 +401,38 @@ func TestRulebookSettingsPatch(t *testing.T) {
 	bad := json.RawMessage(`{"rulebook":{"earnings_overrides":{"NOW":"soon"}}}`)
 	if err := applyFeatureSettingsPatch(next, bad); err == nil || !strings.Contains(err.Error(), "YYYY-MM-DD") {
 		t.Fatalf("bad override date must fail loudly, got %v", err)
+	}
+	if got := next.Features.Rulebook.EarningsOverrides["NOW"]; got != "2026-07-22Tamc" {
+		t.Fatalf("failed patch must leave prior overrides intact, got %q", got)
+	}
+
+	// Patches merge per symbol: touching AMD must not drop NOW, a null AMD
+	// clears only AMD, and a null map clears everything.
+	upsert := json.RawMessage(`{"rulebook":{"earnings_overrides":{"amd":"2026-08-04Tbmo"}}}`)
+	if err := applyFeatureSettingsPatch(next, upsert); err != nil {
+		t.Fatalf("upsert patch: %v", err)
+	}
+	if got := next.Features.Rulebook.EarningsOverrides["NOW"]; got != "2026-07-22Tamc" {
+		t.Fatalf("unmentioned symbol must survive a per-symbol patch, got %q", got)
+	}
+	if got := next.Features.Rulebook.EarningsOverrides["AMD"]; got != "2026-08-04Tbmo" {
+		t.Fatalf("AMD override = %q, want normalized upsert", got)
+	}
+	clearOne := json.RawMessage(`{"rulebook":{"earnings_overrides":{"AMD":null}}}`)
+	if err := applyFeatureSettingsPatch(next, clearOne); err != nil {
+		t.Fatalf("clear-one patch: %v", err)
+	}
+	if _, exists := next.Features.Rulebook.EarningsOverrides["AMD"]; exists {
+		t.Fatal("per-symbol null must clear only that symbol")
+	}
+	if got := next.Features.Rulebook.EarningsOverrides["NOW"]; got != "2026-07-22Tamc" {
+		t.Fatalf("clearing one symbol must not touch the others, got %q", got)
+	}
+	clearAll := json.RawMessage(`{"rulebook":{"earnings_overrides":null}}`)
+	if err := applyFeatureSettingsPatch(next, clearAll); err != nil {
+		t.Fatalf("clear-all patch: %v", err)
+	}
+	if next.Features.Rulebook.EarningsOverrides != nil {
+		t.Fatal("null map must clear all overrides")
 	}
 }

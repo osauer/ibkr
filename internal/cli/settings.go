@@ -124,12 +124,9 @@ func settingsPatchFromAssignment(raw string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("expected key=value")
 	}
 	key = strings.TrimSpace(key)
-	if key == "" || strings.TrimSpace(valueRaw) == "" {
+	valueRaw = strings.TrimSpace(valueRaw)
+	if key == "" || valueRaw == "" {
 		return nil, fmt.Errorf("expected non-empty key and value")
-	}
-	value, err := parseSettingsValue(strings.TrimSpace(valueRaw))
-	if err != nil {
-		return nil, err
 	}
 	marshalPatch := func(path []string, value any) (json.RawMessage, error) {
 		root := map[string]any{}
@@ -143,66 +140,82 @@ func settingsPatchFromAssignment(raw string) (json.RawMessage, error) {
 		raw, err := json.Marshal(root)
 		return json.RawMessage(raw), err
 	}
-	switch key {
-	case "features.purge_restore.enabled":
-		if value != nil {
-			if _, ok := value.(bool); !ok {
-				return nil, fmt.Errorf("%s must be true, false, or null", key)
-			}
-		}
-		return marshalPatch([]string{"features", "purge_restore", "enabled"}, value)
-	case "features.stock_protection.enabled":
-		if value != nil {
-			if _, ok := value.(bool); !ok {
-				return nil, fmt.Errorf("%s must be true, false, or null", key)
-			}
-		}
-		return marshalPatch([]string{"features", "stock_protection", "enabled"}, value)
-	case "trading.freeze":
-		if value != nil {
-			if _, ok := value.(bool); !ok {
-				return nil, fmt.Errorf("%s must be true, false, or null", key)
-			}
-		}
-		return marshalPatch([]string{"trading", "freeze"}, value)
-	case "trading.limits.max_notional":
-		return marshalPatch([]string{"trading", "limits", "max_notional"}, value)
-	case "trading.limits.max_option_contracts":
-		return marshalPatch([]string{"trading", "limits", "max_option_contracts"}, value)
-	case "trading.limits.allow_stock_short":
-		return marshalPatch([]string{"trading", "limits", "allow_stock_short"}, value)
-	case "trading.limits.allow_option_sell_to_open":
-		return marshalPatch([]string{"trading", "limits", "allow_option_sell_to_open"}, value)
-	case "regime.journal.enabled":
-		if value != nil {
-			if _, ok := value.(bool); !ok {
-				return nil, fmt.Errorf("%s must be true, false, or null", key)
-			}
-		}
-		return marshalPatch([]string{"regime", "journal", "enabled"}, value)
-	default:
+	spec, mapSymbol, ok := resolveSettingsKey(key)
+	if !ok {
 		return nil, fmt.Errorf("unsupported setting key %q (supported: %s)", key, strings.Join(supportedSettingsKeys(), ", "))
 	}
+	path := strings.Split(spec.Key, ".")
+	if spec.Kind == rpc.SettingsKindDateMap {
+		// Date-map keys take date strings, not the bool/number grammar:
+		// <key>.SYMBOL=YYYY-MM-DD[Tamc|Tbmo] upserts one symbol, =null clears
+		// it, and =null on the bare key clears all. The daemon owns date
+		// validation and merges per symbol.
+		if mapSymbol == "" {
+			if !strings.EqualFold(valueRaw, "null") {
+				return nil, fmt.Errorf("%s takes only null (clear all overrides); set one symbol with %s.SYMBOL=YYYY-MM-DD, optional Tamc/Tbmo suffix", key, spec.Key)
+			}
+			return marshalPatch(path, nil)
+		}
+		var value any
+		if !strings.EqualFold(valueRaw, "null") {
+			value = valueRaw
+		}
+		return marshalPatch(append(path, mapSymbol), value)
+	}
+	value, err := parseSettingsValue(valueRaw)
+	if err != nil {
+		return nil, err
+	}
+	if spec.Kind == rpc.SettingsKindBool && value != nil {
+		if _, isBool := value.(bool); !isBool {
+			return nil, fmt.Errorf("%s must be true, false, or null", key)
+		}
+	}
+	// Numeric kinds pass through as parsed; the daemon owns range checks.
+	return marshalPatch(path, value)
 }
 
-func supportedSettingsKeys() []string {
-	return []string{
-		"features.purge_restore.enabled",
-		"features.stock_protection.enabled",
-		"trading.freeze",
-		"trading.limits.max_notional",
-		"trading.limits.max_option_contracts",
-		"trading.limits.allow_stock_short",
-		"trading.limits.allow_option_sell_to_open",
-		"regime.journal.enabled",
+// resolveSettingsKey matches a CLI key against the shared settings registry.
+// Date-map keys additionally accept a `.SYMBOL` suffix, returned upper-cased.
+func resolveSettingsKey(key string) (rpc.SettingsKeySpec, string, bool) {
+	for _, spec := range rpc.SettingsKeys() {
+		if spec.Key == key {
+			return spec, "", true
+		}
+		if spec.Kind != rpc.SettingsKindDateMap {
+			continue
+		}
+		if sym, isSub := strings.CutPrefix(key, spec.Key+"."); isSub {
+			sym = strings.ToUpper(strings.TrimSpace(sym))
+			if sym == "" {
+				return rpc.SettingsKeySpec{}, "", false
+			}
+			return spec, sym, true
+		}
 	}
+	return rpc.SettingsKeySpec{}, "", false
+}
+
+// supportedSettingsKeys renders the registry as CLI key spellings; date-map
+// keys advertise the per-symbol form.
+func supportedSettingsKeys() []string {
+	specs := rpc.SettingsKeys()
+	out := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		if spec.Kind == rpc.SettingsKindDateMap {
+			out = append(out, spec.Key+".<SYMBOL>")
+			continue
+		}
+		out = append(out, spec.Key)
+	}
+	return out
 }
 
 func printSettingsUsage(env *Env) {
 	fmt.Fprintln(env.Stdout, "ibkr settings — Runtime platform preferences and observed read-only state")
 	fmt.Fprintln(env.Stdout)
 	fmt.Fprintln(env.Stdout, "Usage: ibkr settings show [--json]")
-	fmt.Fprintln(env.Stdout, "       ibkr settings set <supported-key>=true|false|null|number [--json]")
+	fmt.Fprintln(env.Stdout, "       ibkr settings set <supported-key>=<value> [--json]")
 	fmt.Fprintln(env.Stdout)
 	fmt.Fprintln(env.Stdout, "Run `ibkr settings set --help` for supported keys.")
 }
@@ -210,12 +223,20 @@ func printSettingsUsage(env *Env) {
 func printSettingsSetUsage(env *Env) {
 	fmt.Fprintln(env.Stdout, "ibkr settings set — update a daemon-owned runtime setting")
 	fmt.Fprintln(env.Stdout)
-	fmt.Fprintln(env.Stdout, "Usage: ibkr settings set <supported-key>=true|false|null|number [--json]")
+	fmt.Fprintln(env.Stdout, "Usage: ibkr settings set <supported-key>=<value> [--json]")
 	fmt.Fprintln(env.Stdout)
 	fmt.Fprintln(env.Stdout, "Supported keys:")
-	for _, key := range supportedSettingsKeys() {
-		fmt.Fprintf(env.Stdout, "  - %s\n", key)
+	for _, spec := range rpc.SettingsKeys() {
+		display := spec.Key
+		if spec.Kind == rpc.SettingsKindDateMap {
+			display += ".<SYMBOL>"
+		}
+		fmt.Fprintf(env.Stdout, "  - %s\n      %s\n", display, spec.Doc)
 	}
+	fmt.Fprintln(env.Stdout)
+	fmt.Fprintln(env.Stdout, "Values are true, false, null, or a number. Earnings overrides take")
+	fmt.Fprintln(env.Stdout, "YYYY-MM-DD (optional Tamc/Tbmo suffix), null to clear one symbol, or")
+	fmt.Fprintln(env.Stdout, "null on the bare earnings_overrides key to clear all of them.")
 	fmt.Fprintln(env.Stdout)
 	fmt.Fprintln(env.Stdout, "The daemon still decides writability from each field's access/source metadata.")
 }
@@ -245,6 +266,10 @@ func renderSettingsText(env *Env, st *rpc.PlatformSettings) {
 	fmt.Fprintln(out)
 	statusRow(env, out, "Purge/restore", formatSettingsBool(env, st.Features.PurgeRestore.Enabled))
 	statusRow(env, out, "Stock protection", formatSettingsBool(env, st.Features.StockProtection.Enabled))
+	statusRow(env, out, "Rulebook", formatSettingsBool(env, st.Features.Rulebook.Enabled))
+	if n := len(st.Features.Rulebook.EarningsOverrides.Value); n > 0 {
+		statusRow(env, out, "Earnings overrides", fmt.Sprintf("%d symbol(s)", n))
+	}
 	statusRow(env, out, "Trading freeze", formatSettingsBool(env, st.Trading.Freeze))
 	statusRow(env, out, "Trading", nonEmpty(st.Trading.Mode.Value, "disabled"))
 	statusRow(env, out, "Endpoint", nonEmpty(st.Trading.Endpoint.Value, "unknown"))

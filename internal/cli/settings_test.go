@@ -3,6 +3,8 @@ package cli
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func TestSettingsPatchFromAssignmentBuildsNestedPatch(t *testing.T) {
@@ -64,5 +66,70 @@ func TestSettingsPatchFromAssignmentTradingFreeze(t *testing.T) {
 	}
 	if _, err := settingsPatchFromAssignment("trading.freeze=2"); err == nil {
 		t.Fatal("non-boolean trading.freeze accepted")
+	}
+}
+
+func TestSettingsPatchFromAssignmentRulebook(t *testing.T) {
+	t.Parallel()
+	rulebookPatch := func(t *testing.T, assignment string) map[string]any {
+		t.Helper()
+		raw, err := settingsPatchFromAssignment(assignment)
+		if err != nil {
+			t.Fatalf("settingsPatchFromAssignment(%q): %v", assignment, err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("unmarshal patch: %v", err)
+		}
+		return got["features"].(map[string]any)["rulebook"].(map[string]any)
+	}
+
+	if rb := rulebookPatch(t, "features.rulebook.enabled=false"); rb["enabled"] != false {
+		t.Fatalf("rulebook.enabled = %#v, want false", rb["enabled"])
+	}
+	if _, err := settingsPatchFromAssignment("features.rulebook.enabled=2"); err == nil {
+		t.Fatal("non-boolean rulebook.enabled accepted")
+	}
+
+	// Per-symbol upsert: date strings pass through verbatim (the daemon owns
+	// format validation) and the symbol segment is upper-cased.
+	rb := rulebookPatch(t, "features.rulebook.earnings_overrides.now=2026-07-22Tamc")
+	if got := rb["earnings_overrides"].(map[string]any)["NOW"]; got != "2026-07-22Tamc" {
+		t.Fatalf("override NOW = %#v, want date string under normalized key", got)
+	}
+	rb = rulebookPatch(t, "features.rulebook.earnings_overrides.NOW=null")
+	if got, exists := rb["earnings_overrides"].(map[string]any)["NOW"]; !exists || got != nil {
+		t.Fatalf("per-symbol null must serialize as explicit null, got %#v (exists=%v)", got, exists)
+	}
+	rb = rulebookPatch(t, "features.rulebook.earnings_overrides=null")
+	if got, exists := rb["earnings_overrides"]; !exists || got != nil {
+		t.Fatalf("bare-key null must clear all overrides, got %#v (exists=%v)", got, exists)
+	}
+	if _, err := settingsPatchFromAssignment("features.rulebook.earnings_overrides=2026-07-22"); err == nil {
+		t.Fatal("bare earnings_overrides key must reject non-null values")
+	}
+}
+
+// TestSettingsPatchCoversRegistry: every key in the shared settings registry
+// must be settable through the CLI grammar (with a kind-appropriate value and
+// with null) — the daemon-accepts-but-CLI-rejects drift class.
+func TestSettingsPatchCoversRegistry(t *testing.T) {
+	t.Parallel()
+	for _, spec := range rpc.SettingsKeys() {
+		key, value := spec.Key, "true"
+		switch spec.Kind {
+		case rpc.SettingsKindFloat:
+			value = "1500.5"
+		case rpc.SettingsKindInt:
+			value = "3"
+		case rpc.SettingsKindDateMap:
+			key, value = spec.Key+".AAPL", "2026-08-04Tamc"
+		}
+		if _, err := settingsPatchFromAssignment(key + "=" + value); err != nil {
+			t.Errorf("registry key %s rejected by CLI grammar: %v", key, err)
+		}
+		if _, err := settingsPatchFromAssignment(key + "=null"); err != nil {
+			t.Errorf("registry key %s must accept null: %v", key, err)
+		}
 	}
 }
