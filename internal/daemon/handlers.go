@@ -18,6 +18,7 @@ import (
 
 	"github.com/osauer/ibkr/v2/internal/breadth/spx"
 	"github.com/osauer/ibkr/v2/internal/marketcal"
+	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -138,6 +139,21 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 					res.PnLRealizedTotal = fresh.RealizedTotalPnL
 				}
 			}
+		}
+	}
+	// Feed the risk-constitution capital state: observation cadence is
+	// usage cadence — every successful account read updates the cash-flow-
+	// adjusted peak and drawdown tier; there is deliberately no scheduler
+	// in v1. Skipped on a base-currency mismatch: capital math in the
+	// wrong currency is worse than none.
+	if s.riskCapital != nil && res.NetLiquidation > 0 {
+		var pol *risk.Constitution
+		if s.riskPolicies != nil {
+			pol = s.riskPolicies.snapshot().policy
+		}
+		if pol == nil || pol.Capital.BaseCurrency == "" || res.BaseCurrency == "" ||
+			strings.EqualFold(pol.Capital.BaseCurrency, res.BaseCurrency) {
+			s.riskCapital.Observe(res.NetLiquidation, res.AsOf, pol)
 		}
 	}
 	return res, nil

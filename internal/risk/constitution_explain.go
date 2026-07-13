@@ -1,0 +1,126 @@
+package risk
+
+import (
+	"fmt"
+	"strconv"
+)
+
+// ConstitutionLimit is one row of the generated human view (`ibkr policy
+// show --explain`): a limit key, its effective value, what it means in
+// plain English, where the value came from, and its enforcement class.
+// Observation and override columns are overlaid by the daemon; this layer
+// is pure policy so every surface renders identical meanings.
+type ConstitutionLimit struct {
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+	Meaning     string `json:"meaning"`
+	Source      string `json:"source"`      // file | default | unapproved
+	Enforcement string `json:"enforcement"` // advisory | shadow | structural
+}
+
+// ConstitutionLimits renders every material limit and governance field of
+// the constitution. A nil policy (no file) yields the same rows with every
+// value unapproved, so the view never hides what is missing.
+func ConstitutionLimits(c *Constitution) []ConstitutionLimit {
+	get := func(key, value, source, meaning, enforcement string) ConstitutionLimit {
+		return ConstitutionLimit{Key: key, Value: value, Meaning: meaning, Source: source, Enforcement: enforcement}
+	}
+	str := func(present bool, render func() string) (string, string) {
+		if !present {
+			return "unapproved", "unapproved"
+		}
+		return render(), "file"
+	}
+
+	var (
+		cur      = ""
+		floor    *float64
+		declared *float64
+		eqAge    *int
+		recAge   *int
+		warn     *float64
+		block    *float64
+		enfc     = EnforcementShadow
+		enfSrc   = "unapproved"
+		ovh      *int
+	)
+	if c != nil {
+		cur = c.Capital.BaseCurrency
+		floor = c.Capital.ProtectedFloor
+		declared = c.Capital.DeclaredRiskCapital
+		eqAge = c.Capital.MaxEquityAgeMinutes
+		recAge = c.Capital.MaxUnreconciledDays
+		warn = c.Drawdown.WarnConsumedPct
+		block = c.Drawdown.BlockConsumedPct
+		enfc = c.EffectiveBlockEnforcement()
+		if c.Drawdown.BlockEnforcement == "" {
+			enfSrc = "default"
+		} else {
+			enfSrc = "file"
+		}
+		ovh = c.Override.MaxDurationHours
+	}
+
+	money := func(v *float64) (string, string) {
+		return str(v != nil, func() string { return fmt.Sprintf("%.2f %s", *v, nonEmpty(cur, "base")) })
+	}
+	pct := func(v *float64) (string, string) {
+		return str(v != nil, func() string { return strconv.FormatFloat(*v, 'f', -1, 64) + "%" })
+	}
+	num := func(v *int, unit string) (string, string) {
+		return str(v != nil, func() string { return strconv.Itoa(*v) + " " + unit })
+	}
+
+	curVal, curSrc := str(cur != "", func() string { return cur })
+	floorVal, floorSrc := money(floor)
+	declVal, declSrc := money(declared)
+	eqVal, eqSrc := num(eqAge, "minutes")
+	recVal, recSrc := num(recAge, "days")
+	warnVal, warnSrc := pct(warn)
+	blockVal, blockSrc := pct(block)
+	ovhVal, ovhSrc := num(ovh, "hours")
+
+	rows := []ConstitutionLimit{
+		get("capital.base_currency", curVal, curSrc,
+			"Currency every capital number in this policy is stated in; must match the account base currency.", "structural"),
+		get("capital.protected_floor", floorVal, floorSrc,
+			"Account equity that is never risk capital. A policy boundary inside the account, not a broker segregation: it bounds authorized risk, it cannot stop a gap.", "advisory"),
+		get("capital.declared_risk_capital", declVal, declSrc,
+			"The money you have deliberately authorized to be at risk. Effective risk capital = min(this, equity − protected floor). Deposits and profits never raise it; only a fingerprinted policy revision does.", "advisory"),
+		get("capital.max_equity_age_minutes", eqVal, eqSrc,
+			"How old the last equity observation may be before the capital state counts as stale. Stale never passes; once the block control is promoted to hard, stale fails closed for risk increases.", "advisory"),
+		get("capital.max_unreconciled_days", recVal, recSrc,
+			"How long the declared capital-event ledger may go without a human reconcile attestation before the state counts as unreconciled. Same posture as equity staleness.", "advisory"),
+		get("drawdown.warn_consumed_pct", warnVal, warnSrc,
+			"Advisory tier: when losses from the cash-flow-adjusted peak consume this share of declared risk capital, surfaces warn and risk-increasing previews carry an advisory cause. Self-clearing on recovery.", "advisory"),
+		get("drawdown.block_consumed_pct", blockVal, blockSrc,
+			"Block tier: at this consumed share the breach latches in daemon state. Risk-increasing orders are the target; reductions, closes, cancels, and policy-classified hedges stay exempt. Clears only by journaled human reset that re-bases the peak.", enfc),
+		get("drawdown.block_enforcement", enfc, enfSrc,
+			"Enforcement class of the block tier. v1 accepts shadow (journal what would block) or advisory (warn loudly); promotion to hard is a later human policy revision after the shadow period.", "structural"),
+		get("override.max_duration_hours", ovhVal, ovhSrc,
+			"Longest lifetime of a one-shot override. Overrides are human-only, name one control, require a reason, are journaled with the policy fingerprint, and expire on their own.", "advisory"),
+	}
+	for _, a := range []struct {
+		key   string
+		class string
+	}{
+		{"cadence.morning", artefactClass(c, func(cc *Constitution) string { return cc.Cadence.Morning.Class })},
+		{"cadence.eod", artefactClass(c, func(cc *Constitution) string { return cc.Cadence.EOD.Class })},
+		{"cadence.weekly", artefactClass(c, func(cc *Constitution) string { return cc.Cadence.Weekly.Class })},
+	} {
+		val, src := "undeclared", "unapproved"
+		if a.class != "" {
+			val, src = a.class, "file"
+		}
+		rows = append(rows, get(a.key+".class", val, src,
+			"Operating-cadence artefact. Completions are journaled for adherence measurement; missing one is recorded, never blocking, in v1.", "advisory"))
+	}
+	return rows
+}
+
+func artefactClass(c *Constitution, pick func(*Constitution) string) string {
+	if c == nil {
+		return ""
+	}
+	return pick(c)
+}

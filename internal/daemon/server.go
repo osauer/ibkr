@@ -342,6 +342,13 @@ type Server struct {
 	opportunityPolicies *opportunityPolicyManager
 	opportunities       *opportunityEngine
 	marketEvents        *marketEventCache
+	// riskPolicies loads the operator's risk constitution
+	// (risk-policy.toml); riskCapital owns the cash-flow-adjusted peak,
+	// drawdown latch, capital events, overrides, and cadence records.
+	// Advisory/shadow end to end in v1: neither may reach broker-write
+	// authorization.
+	riskPolicies *riskPolicyManager
+	riskCapital  *riskCapitalStore
 	// earnings backs the trading rulebook's catalyst rules (6-8); LKG cache,
 	// async refresh only — never fetched on a snapshot or preview path.
 	earnings *earningsCache
@@ -480,6 +487,8 @@ func New(opts Options) *Server {
 	s.installProposalOutcomeStore()
 	s.installPlatformSettingsStore()
 	s.installProtectionPolicyManager()
+	s.installRiskPolicyManager()
+	s.installRiskCapitalStore()
 	s.installProposalEngine()
 	s.installOpportunityPolicyManager()
 	s.installOpportunityEngine()
@@ -1155,6 +1164,9 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	if s.opportunityPolicies != nil {
 		go s.opportunityPolicies.Run(serverCtx, s.logger.Infof)
+	}
+	if s.riskPolicies != nil {
+		go s.riskPolicies.Run(serverCtx, s.logger.Infof)
 	}
 	if s.tradeProposals != nil {
 		s.proposalsStarted.Do(func() {
@@ -2363,6 +2375,16 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleAutoTradeStatus(), nil })
 	case rpc.MethodRulesSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleRulesSnapshot(ctx, req) })
+	case rpc.MethodRiskPolicySnapshot:
+		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicySnapshot(ctx, req) })
+	case rpc.MethodRiskPolicyCapitalEvent:
+		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyCapitalEvent(ctx, req) })
+	case rpc.MethodRiskPolicyOverride:
+		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyOverride(ctx, req) })
+	case rpc.MethodRiskPolicyResetDrawdown:
+		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyResetDrawdown(ctx, req) })
+	case rpc.MethodRiskPolicyArtefact:
+		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyArtefact(ctx, req) })
 	case rpc.MethodTradeProposalsSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsSnapshot(req), nil })
 	case rpc.MethodTradeProposalsRefresh:

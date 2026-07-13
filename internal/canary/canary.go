@@ -53,7 +53,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 		Policy:             canaryPolicy.PolicyProfile(),
 		PolicyProfile:      canaryPolicy.PolicyProfile(),
 		PolicyVersion:      canaryPolicy.PolicyVersion(),
-		PolicyFingerprint:  rpc.Fingerprint{Version: risk.PolicyFingerprintVersion, Key: canaryPolicy.FingerprintKey()},
+		PolicyFingerprint:  rpc.Fingerprint{Version: risk.CanaryPolicyFingerprintVersion, Key: canaryPolicy.FingerprintKey()},
 		Portfolio:          summarizeCanaryPortfolio(in.Account, in.Positions, in.MarketEvents, now),
 		Market:             summarizeCanaryMarket(in.Regime, now),
 		MarketIndicators:   canaryMarketIndicators(in.Regime, now),

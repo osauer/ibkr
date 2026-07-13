@@ -12,7 +12,7 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
-  Bash(ibkr canary*) Bash(ibkr rules*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr opportunities status*) Bash(ibkr opportunities list*) Bash(ibkr opportunities refresh*) Bash(ibkr backtest research-opportunity*) Bash(ibkr settings show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr orders history*) Bash(ibkr order status*) Bash(ibkr order preview*)
+  Bash(ibkr canary*) Bash(ibkr rules*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr opportunities status*) Bash(ibkr opportunities list*) Bash(ibkr opportunities refresh*) Bash(ibkr backtest research-opportunity*) Bash(ibkr settings show*) Bash(ibkr policy show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr orders history*) Bash(ibkr order status*) Bash(ibkr order preview*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
@@ -158,6 +158,7 @@ simulate trade execution.
 | `ibkr proposals status\|list\|refresh` | Daemon-owned protection proposals, read paths only (`preview`/`submit`/`ignore` are gated verbs outside this skill allowlist) | [schemas.md#proposals-status](schemas.md#proposals-status), [schemas.md#proposals-list](schemas.md#proposals-list) |
 | `ibkr backtest research-opportunity` | Offline scored opportunity research diagnostics; not a daemon opportunity feed or broker-action surface | — |
 | `ibkr settings show` | Runtime platform preferences and observed read-only state, incl. `trading.freeze` | [schemas.md#settings-show](schemas.md#settings-show) |
+| `ibkr policy show` | Risk-constitution view: effective limits with plain-English meanings (`--explain`), capital/drawdown state, overrides, cadence, sibling-policy pins. The write verbs (`capital-event`, `override`, `reset-drawdown`, `artefact`) are human-only governance acts the daemon rejects from agent origins — read `show` only from this skill | — |
 | `ibkr trading status` | Local order-entry readiness: mode, pinned session evidence, `can_preview`/`can_write`, concrete blockers | [schemas.md#trading-status](schemas.md#trading-status) |
 | `ibkr orders open` | Open-order lifecycle rows for the connected account/mode (read-only journal view) | [schemas.md#orders-open](schemas.md#orders-open) |
 | `ibkr orders history` | Recent local order-journal history for the connected account/mode; not an IBKR Activity Statement/Flex/commission ledger | [schemas.md#orders-history](schemas.md#orders-history) |

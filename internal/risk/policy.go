@@ -6,7 +6,11 @@ import (
 	"encoding/json"
 )
 
-const PolicyFingerprintVersion = "risk-policy-fp-v1"
+// CanaryPolicyFingerprintVersion labels the canary threshold policy's
+// fingerprint. Renamed from "risk-policy-fp-v1" (2026-07-12) when the risk
+// constitution claimed the risk-policy name for the operator-authored
+// risk-policy.toml; the two identities must never be conflatable.
+const CanaryPolicyFingerprintVersion = "canary-policy-fp-v1"
 
 // Policy holds the shared risk thresholds used by live monitors and protection
 // proposal policy. The first version is intentionally small: it captures the

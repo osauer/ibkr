@@ -426,6 +426,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		})
 	}
 	warnings = append(warnings, rulebookPreviewWarnings(s.rulesForPreview(ctx), draft, position)...)
+	warnings = append(warnings, s.riskPolicyPreviewWarnings(draft, position)...)
 	tokenMinted := token != "" && tokenID != ""
 	submitEligible := tokenMinted && whatIf.Status == rpc.OrderWhatIfStatusAccepted && !whatIf.RequiredForSubmit
 
