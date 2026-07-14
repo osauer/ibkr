@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -92,37 +93,37 @@ func runPolicyShow(ctx context.Context, env *Env, args []string) int {
 	}
 
 	c := res.Capital
-	fmt.Fprintf(env.Stdout, "\nCapital tier: %s (block enforcement: %s)\n", strings.ToUpper(c.Tier), c.Enforcement)
+	fmt.Fprintf(env.Stdout, "\nCapital: %s\n", capitalHeadline(c, res.Limits))
 	cur := c.BaseCurrency
 	if cur == "" {
 		cur = "base"
 	}
 	if c.EquityBase != nil {
-		fmt.Fprintf(env.Stdout, "  equity            %14.2f %s  as of %s%s\n", *c.EquityBase, cur, c.EquityAsOf.Local().Format("2006-01-02 15:04"), staleTag(c.EquityStale))
+		fmt.Fprintf(env.Stdout, "  account equity      %14.2f %s  last seen %s%s\n", *c.EquityBase, cur, c.EquityAsOf.Local().Format("2006-01-02 15:04"), staleTag(c.EquityStale))
 	}
 	if c.EffectiveRiskCapitalBase != nil {
-		fmt.Fprintf(env.Stdout, "  effective risk    %14.2f %s  = min(declared, equity − floor)\n", *c.EffectiveRiskCapitalBase, cur)
+		fmt.Fprintf(env.Stdout, "  money at risk (max) %14.2f %s  the lower of your declared risk capital and what sits above the protected floor\n", *c.EffectiveRiskCapitalBase, cur)
 	}
 	if c.AdjustedPeakBase != nil {
-		fmt.Fprintf(env.Stdout, "  adjusted peak     %14.2f %s  (external flows %+.2f)\n", *c.AdjustedPeakBase, cur, deref(c.CumExternalFlowsBase))
+		fmt.Fprintf(env.Stdout, "  high-water mark     %14.2f %s  best equity so far, corrected for deposits and withdrawals\n", *c.AdjustedPeakBase, cur)
 	}
 	if c.ConsumedPct != nil {
-		fmt.Fprintf(env.Stdout, "  drawdown          %14.2f %s  = %.1f%% of declared risk capital consumed\n", deref(c.DrawdownBase), cur, *c.ConsumedPct)
+		fmt.Fprintf(env.Stdout, "  loss from the mark  %14.2f %s  = %.1f%% of your declared risk capital%s\n", deref(c.DrawdownBase), cur, *c.ConsumedPct, drawdownLadderHint(res.Limits))
 	}
 	if c.BlockLatched {
-		fmt.Fprintf(env.Stdout, "  LATCHED since %s — clearing requires `ibkr policy reset-drawdown --reason ...` (human, journaled)\n", c.LatchedAt.Local().Format("2006-01-02 15:04"))
+		fmt.Fprintf(env.Stdout, "  RISK BRAKE ENGAGED since %s — it stays on until you release it: `ibkr policy reset-drawdown --reason \"...\"`\n", c.LatchedAt.Local().Format("2006-01-02 15:04"))
 	}
 	if c.LastReconciledAt.IsZero() {
-		fmt.Fprintln(env.Stdout, "  reconciled        never — review `ibkr recon`, resolve exceptions, then sign off with `ibkr policy capital-event reconcile --report <id>`")
+		fmt.Fprintln(env.Stdout, "  ledger check        never verified against broker statements — run `ibkr recon`, then sign off the report it prints")
 	} else {
-		fmt.Fprintf(env.Stdout, "  reconciled        %s%s\n", c.LastReconciledAt.Local().Format("2006-01-02 15:04"), staleTag(c.ReconcileStale))
+		fmt.Fprintf(env.Stdout, "  ledger check        verified against broker statements %s%s\n", c.LastReconciledAt.Local().Format("2006-01-02 15:04"), staleTag(c.ReconcileStale))
 	}
 	for _, r := range c.Reasons {
 		fmt.Fprintf(env.Stdout, "  (%s)\n", r)
 	}
 
 	if len(res.Unapproved) > 0 {
-		fmt.Fprintf(env.Stdout, "\nUnapproved (no number exists until you write it in the policy file):\n")
+		fmt.Fprintf(env.Stdout, "\nWaiting on your decisions — these keys are absent from the policy file, so the controls that need them stay off:\n")
 		for _, k := range res.Unapproved {
 			fmt.Fprintf(env.Stdout, "  • %s\n", k)
 		}
@@ -147,7 +148,7 @@ func runPolicyShow(ctx context.Context, env *Env, args []string) int {
 	}
 
 	if len(res.Overrides) > 0 {
-		fmt.Fprintln(env.Stdout, "\nOverrides:")
+		fmt.Fprintln(env.Stdout, "\nTemporary exceptions you granted:")
 		for _, o := range res.Overrides {
 			state := "expired"
 			if o.Active {
@@ -157,27 +158,79 @@ func runPolicyShow(ctx context.Context, env *Env, args []string) int {
 		}
 	}
 	if len(res.Cadence) > 0 {
-		fmt.Fprintln(env.Stdout, "\nCadence:")
+		fmt.Fprintln(env.Stdout, "\nRoutine reviews (recorded, never blocking):")
 		for _, a := range res.Cadence {
 			fmt.Fprintf(env.Stdout, "  %-8s last completed %s %s\n", a.Artefact, a.CompletedAt.Local().Format("2006-01-02 15:04"), a.Note)
 		}
 	}
 	if len(res.Inventory) > 0 {
-		fmt.Fprintln(env.Stdout, "\nSibling policy pins:")
+		fmt.Fprintln(env.Stdout, "\nOther policies on this system, compared with the versions you approved this constitution against:")
 		for _, p := range res.Inventory {
 			switch p.Status {
 			case "match":
-				fmt.Fprintf(env.Stdout, "  %-10s match (%s v%s)\n", p.Policy, p.LiveID, p.LiveVersion)
+				fmt.Fprintf(env.Stdout, "  %-10s unchanged since approval (%s)\n", p.Policy, policyIdentity(p.LiveID, p.LiveVersion))
 			case "drift":
-				fmt.Fprintf(env.Stdout, "  %-10s DRIFT pinned %s v%s, live %s v%s — re-approve the pin or investigate\n", p.Policy, p.PinnedID, p.PinnedVersion, p.LiveID, p.LiveVersion)
+				fmt.Fprintf(env.Stdout, "  %-10s CHANGED since approval: was %s, now %s — review it, then update [inventory] in the policy file\n", p.Policy, policyIdentity(p.PinnedID, p.PinnedVersion), policyIdentity(p.LiveID, p.LiveVersion))
 			case "unpinned":
-				fmt.Fprintf(env.Stdout, "  %-10s unpinned (live %s v%s)\n", p.Policy, p.LiveID, p.LiveVersion)
+				fmt.Fprintf(env.Stdout, "  %-10s not recorded at approval time (currently %s) — add it under [inventory] to be told when it changes\n", p.Policy, policyIdentity(p.LiveID, p.LiveVersion))
 			default:
 				fmt.Fprintf(env.Stdout, "  %-10s %s\n", p.Policy, p.Status)
 			}
 		}
 	}
 	return 0
+}
+
+// capitalHeadline renders the tier as a sentence a human can act on, with
+// the ladder thresholds pulled from the explain rows so the numbers always
+// come from the same source every other surface uses.
+func capitalHeadline(c rpc.CapitalStateReport, limits []risk.ConstitutionLimit) string {
+	switch c.Tier {
+	case risk.CapitalTierOK:
+		return "OK — losses from the high-water mark are within your limits"
+	case risk.CapitalTierWarn:
+		return "WARNING — losses have crossed your early-warning line" + drawdownLadderHint(limits)
+	case risk.CapitalTierBlock:
+		if c.Enforcement == risk.EnforcementShadow {
+			return "BLOCK LINE CROSSED — recorded only for now (shadow mode): nothing is stopped yet"
+		}
+		return "BLOCK LINE CROSSED — risk-increasing orders are flagged; reducing and closing stay available"
+	case risk.CapitalTierUnapproved:
+		return "NOT ARMED — the policy file is missing decisions (listed below)"
+	default:
+		return "UNKNOWN — a required input is missing or stale (details below); this never counts as OK"
+	}
+}
+
+// policyIdentity joins a policy id with its version without mangling
+// string versions ("rulebook-v2 v2" but "active-v1 risk-policy-v1").
+func policyIdentity(id, version string) string {
+	if version == "" {
+		return id
+	}
+	for _, r := range version {
+		if r < '0' || r > '9' {
+			return id + " " + version
+		}
+	}
+	return id + " v" + version
+}
+
+// drawdownLadderHint appends the warn/block thresholds when both exist.
+func drawdownLadderHint(limits []risk.ConstitutionLimit) string {
+	var warn, block string
+	for _, l := range limits {
+		switch l.Key {
+		case "drawdown.warn_consumed_pct":
+			warn = l.Value
+		case "drawdown.block_consumed_pct":
+			block = l.Value
+		}
+	}
+	if warn == "" || warn == "unapproved" || block == "" || block == "unapproved" {
+		return ""
+	}
+	return fmt.Sprintf("  (warn at %s, block at %s)", warn, block)
 }
 
 func runPolicyCapitalEvent(ctx context.Context, env *Env, args []string) int {
