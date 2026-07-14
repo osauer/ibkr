@@ -59,11 +59,30 @@ test("headerMap removes hop by hop headers", () => {
   assert.deepEqual(__test.headerMap(headers), { cookie: ["a=b"] });
 });
 
-test("connect returns 410 once the route expired", async () => {
+test("connect rejects a route with no registered token", async () => {
   const state = fakeState({ expires_at: new Date(Date.now() - 1000).toISOString() });
   const session = new RelaySession(state, {});
   const res = await session.fetch(new Request("https://relay.example/api/connect"));
-  assert.equal(res.status, 410);
+  assert.equal(res.status, 401);
+});
+
+test("connect with the connector token revives an expired route", async () => {
+  const state = fakeState({
+    connector_token: "tok",
+    expires_at: new Date(Date.now() - 1000).toISOString(),
+  });
+  const session = new RelaySession(state, {});
+  const before = Date.now();
+  // No websocket upgrade so the test stays inside Node: the token check and
+  // TTL slide run before the upgrade requirement.
+  const res = await session.fetch(
+    new Request("https://relay.example/api/connect", {
+      headers: { Authorization: "Bearer tok" },
+    }),
+  );
+  assert.equal(res.status, 426);
+  const next = Date.parse(state.data.get("expires_at"));
+  assert.ok(next >= before + 7 * DAY_MS - 1000, `expired route was not revived: ${next}`);
 });
 
 test("connect does not slide the TTL for a bad connector token", async () => {
@@ -104,7 +123,7 @@ test("cookie-addressed requests refresh the route cookie", async () => {
   assert.equal(res.status, 200);
   const setCookie = res.headers.get("Set-Cookie") || "";
   assert.match(setCookie, /ibkr_remote_route=r_abc/);
-  assert.match(setCookie, /Max-Age=604800/);
+  assert.match(setCookie, /Max-Age=34560000/);
 });
 
 test("register can resume an existing route with the connector token", async () => {
@@ -140,11 +159,23 @@ test("register rejects resume with the wrong connector token", async () => {
   assert.equal(resumed.status, 401);
 });
 
-test("internal register keeps expired route expired during resume", async () => {
+test("internal register revives an expired route on token-matched resume", async () => {
+  const renewed = new Date(Date.now() + 7 * DAY_MS).toISOString();
   const state = fakeState({
     connector_token: "tok",
     expires_at: new Date(Date.now() - 1000).toISOString(),
   });
+  const session = new RelaySession(state, {});
+  const res = await session.fetch(new Request("https://relay.example/internal/register", {
+    method: "POST",
+    body: JSON.stringify({ token: "tok", expires_at: renewed, resume: true }),
+  }));
+  assert.equal(res.status, 200);
+  assert.equal(state.data.get("expires_at"), renewed);
+});
+
+test("resume against empty storage adopts the presented token", async () => {
+  const state = fakeState({});
   const session = new RelaySession(state, {});
   const res = await session.fetch(new Request("https://relay.example/internal/register", {
     method: "POST",
@@ -154,5 +185,44 @@ test("internal register keeps expired route expired during resume", async () => 
       resume: true,
     }),
   }));
-  assert.equal(res.status, 410);
+  assert.equal(res.status, 200);
+  assert.equal(state.data.get("connector_token"), "tok");
+});
+
+test("navigation without a route serves the localStorage recovery page", async () => {
+  const { env } = fakeEnv();
+  const res = await worker.fetch(new Request("https://relay.example/", {
+    headers: { Accept: "text/html,application/xhtml+xml" },
+  }), env);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("Content-Type") || "", /text\/html/);
+  assert.match(await res.text(), /ibkrRemoteRoute/);
+});
+
+test("API request without a route still gets JSON 400", async () => {
+  const { env } = fakeEnv();
+  const res = await worker.fetch(new Request("https://relay.example/api/bootstrap"), env);
+  assert.equal(res.status, 400);
+  assert.match(res.headers.get("Content-Type") || "", /application\/json/);
+});
+
+test("navigation to an offline route serves the auto-retry page with cookie refresh", async () => {
+  const env = {
+    RELAY_SESSION: {
+      idFromName: (name) => name,
+      get: () => ({
+        fetch: async () => new Response(JSON.stringify({ error: "Mac relay connector offline" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        }),
+      }),
+    },
+  };
+  const res = await worker.fetch(new Request("https://relay.example/", {
+    headers: { Accept: "text/html", Cookie: "ibkr_remote_route=r_abc" },
+  }), env);
+  assert.equal(res.status, 503);
+  assert.match(res.headers.get("Content-Type") || "", /text\/html/);
+  assert.match(await res.text(), /Retrying automatically/);
+  assert.match(res.headers.get("Set-Cookie") || "", /ibkr_remote_route=r_abc/);
 });

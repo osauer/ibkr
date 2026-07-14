@@ -184,16 +184,15 @@ func setupAppLaunchAgent(args []string) int {
 	opts := appLaunchAgentOptions{}
 	fs := flag.NewFlagSet("ibkr setup app", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.Usage = func() {
-		fmt.Println("ibkr setup app - install the ibkr app macOS LaunchAgent.")
-		fmt.Println()
-		fmt.Println("Usage: ibkr setup app [--remote] [--remote-url URL]")
-		fmt.Println()
-		fmt.Println("Flags:")
-		fs.VisitAll(func(f *flag.Flag) {
-			fmt.Fprintf(os.Stdout, "  --%-12s  %s (default %q)\n", f.Name, f.Usage, f.DefValue)
-		})
+	usage := func(w io.Writer) {
+		fmt.Fprintln(w, "ibkr setup app - install the ibkr app macOS LaunchAgent.")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Usage: ibkr setup app [--remote] [--remote-url URL]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Flags:")
+		printFlagDefaults(w, fs)
 	}
+	fs.Usage = func() { usage(os.Stdout) }
 	fs.BoolVar(&opts.Remote, "remote", false, "enable the outbound Cloudflare Worker relay")
 	fs.StringVar(&opts.RemoteURL, "remote-url", "", "Cloudflare Worker relay base URL")
 	if err := fs.Parse(args); err != nil {
@@ -204,8 +203,7 @@ func setupAppLaunchAgent(args []string) int {
 		return 2
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintf(os.Stderr, "ibkr setup app: unexpected argument %q\n", fs.Arg(0))
-		return 2
+		return rejectUnexpectedArgument(os.Stderr, "ibkr setup app", fs, usage)
 	}
 	opts.RemoteURL = strings.TrimRight(strings.TrimSpace(opts.RemoteURL), "/")
 	if runtime.GOOS != "darwin" {

@@ -580,6 +580,10 @@
         </button>
       </nav>
     </main>
-    <script src="/app.js?v=live-gate-simplification-20260611" type="module"></script>
+    <!-- No cache-busting query here: modules import "./app.js" bare, and a
+         differing URL makes the browser evaluate app.js twice (double event
+         listeners, double main and pairing attempts). Freshness comes from
+         serveStatic's no-cache revalidation. -->
+    <script src="/app.js" type="module"></script>
   </body>
 </html>

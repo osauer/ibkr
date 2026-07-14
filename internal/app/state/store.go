@@ -35,13 +35,22 @@ type Data struct {
 }
 
 type DeviceGrant struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name,omitempty"`
-	PublicKeyJWK     string    `json:"public_key_jwk,omitempty"`
-	DeviceSecretHash string    `json:"device_secret_hash,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	LastSeenAt       time.Time `json:"last_seen_at,omitzero"`
-	RevokedAt        time.Time `json:"revoked_at,omitzero"`
+	ID               string `json:"id"`
+	Name             string `json:"name,omitempty"`
+	PublicKeyJWK     string `json:"public_key_jwk,omitempty"`
+	DeviceSecretHash string `json:"device_secret_hash,omitempty"`
+	// DeviceCookieHashes authenticate the long-lived HttpOnly device
+	// cookie. Cookies are the only client storage that provably survives
+	// the iOS home-screen web-app container split (localStorage/IndexedDB
+	// written by Safari never reach the installed app), so session
+	// continuity must not depend on script-visible storage. A capped list,
+	// not a single value: Safari and the installed app hold twin copies of
+	// the cookie jar, so issuing a fresh cookie to one twin must never
+	// invalidate the other.
+	DeviceCookieHashes []string  `json:"device_cookie_hashes,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	LastSeenAt         time.Time `json:"last_seen_at,omitzero"`
+	RevokedAt          time.Time `json:"revoked_at,omitzero"`
 }
 
 type RelayRoute struct {
@@ -172,6 +181,32 @@ func (s *Store) Device(id string) (DeviceGrant, bool) {
 	return DeviceGrant{}, false
 }
 
+// maxDeviceCookieHashes bounds the valid cookie generations per device:
+// enough for a few Safari/home-screen twins plus re-provisioned logins,
+// small enough that a leaked state file exposes a bounded credential set.
+const maxDeviceCookieHashes = 5
+
+func (s *Store) AddDeviceCookieHash(id, hash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.data.Devices {
+		if s.data.Devices[i].ID != id {
+			continue
+		}
+		hashes := s.data.Devices[i].DeviceCookieHashes
+		if slices.Contains(hashes, hash) {
+			return nil
+		}
+		hashes = append(hashes, hash)
+		if len(hashes) > maxDeviceCookieHashes {
+			hashes = hashes[len(hashes)-maxDeviceCookieHashes:]
+		}
+		s.data.Devices[i].DeviceCookieHashes = hashes
+		return s.save()
+	}
+	return fmt.Errorf("device %s not found", id)
+}
+
 func (s *Store) SetDeviceSeen(id string, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -299,7 +334,7 @@ func (s *Store) VAPID() (VAPIDKeys, bool) {
 	return *s.data.VAPID, true
 }
 
-func (s *Store) RelayRoute(remoteURL string, now time.Time) (RelayRoute, bool) {
+func (s *Store) RelayRoute(remoteURL string) (RelayRoute, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.data.RelayRoute == nil {
@@ -309,9 +344,9 @@ func (s *Store) RelayRoute(remoteURL string, now time.Time) (RelayRoute, bool) {
 	if route.RemoteURL != remoteURL || route.RouteID == "" || route.ConnectorToken == "" {
 		return RelayRoute{}, false
 	}
-	if !route.ExpiresAt.IsZero() && now.After(route.ExpiresAt) {
-		return RelayRoute{}, false
-	}
+	// An expired route is still returned: the relay revives a token-matched
+	// resume, and abandoning the route id here would orphan every paired
+	// phone. ExpiresAt is informational.
 	return route, true
 }
 
@@ -326,12 +361,19 @@ func (s *Store) SetRelayRoute(route RelayRoute) error {
 		return errors.New("relay connector token required")
 	}
 	now := time.Now().UTC()
-	if route.CreatedAt.IsZero() {
-		route.CreatedAt = now
-	}
 	route.UpdatedAt = now
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if route.CreatedAt.IsZero() {
+		// Route extensions re-persist the same route id; keep its birth
+		// time so route age stays observable.
+		if prev := s.data.RelayRoute; prev != nil && prev.RouteID == route.RouteID {
+			route.CreatedAt = prev.CreatedAt
+		}
+		if route.CreatedAt.IsZero() {
+			route.CreatedAt = now
+		}
+	}
 	s.data.RelayRoute = &route
 	return s.save()
 }

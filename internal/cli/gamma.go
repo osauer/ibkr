@@ -23,7 +23,7 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	if fs.NArg() > 0 {
-		return fail(env, "gamma: takes no positional args (got %v)", fs.Args())
+		return failUnexpectedArgs(env, fs)
 	}
 	if *diagnostics && !*explain {
 		return fail(env, "gamma: --diagnostics requires --explain")

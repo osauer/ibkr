@@ -2,7 +2,7 @@ import { clearAlerts, enablePush, renderAlertMode, renderAlerts, renderSelectedA
 import { completePairing } from "./auth.js";
 import { canaryStageLabel, canarySummaryText, firstClause, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderMarketContext, renderRegimePanel, renderRulesCard } from "./canary.js";
 import { ensureRegimeCanaryExpansion, handleAccountPanelTap, handleExpandablePanelTap, handleOpportunitiesPanelTap, handlePortfolioPanelTap, handleProtectionPanelTap, handleUnderlyingPanelTap, renderTabs, resetViewportScroll, setAccountOverviewExpansion, setAccountValueVisible, setOpportunitiesExpansion, setProtectionExpansion, setRegimeCanaryExpansion, setupBottomTabs, syncAccountPrivacyState } from "./chrome.js";
-import { bootstrap, refreshBootstrapIfSSEUnavailable, showPairing } from "./lifecycle.js";
+import { bootstrap, bootstrapWithRetry, refreshBootstrapIfSSEUnavailable, showPairing } from "./lifecycle.js";
 import { refreshOpportunities, renderOpportunitiesPanel } from "./opportunities.js";
 import { renderOpenOrders } from "./orders.js";
 import { renderPortfolioRisk, setPortfolioExpansion } from "./portfolio.js";
@@ -49,8 +49,16 @@ async function main() {
   resetViewportScroll();
   setupBottomTabs();
   await navigator.serviceWorker?.register("/service-worker.js");
-  const pair = new URLSearchParams(location.search).get("pair");
-  const nonce = new URLSearchParams(location.search).get("nonce");
+  const params = new URLSearchParams(location.search);
+  const pair = params.get("pair");
+  const nonce = params.get("nonce");
+  const remote = params.get("remote");
+  if (remote) {
+    // The relay addresses this phone's route by an HttpOnly cookie; mirror
+    // the route id so the relay's recovery page can rebuild the cookie
+    // after eviction instead of forcing a re-pair.
+    localStorage.setItem("ibkrRemoteRoute", remote);
+  }
   let bootstrapped = false;
   if (pair && nonce) {
     try {
@@ -59,15 +67,13 @@ async function main() {
     } catch (err) {
       history.replaceState({}, "", "/");
       showPairing("Pairing link expired; opening paired app.");
-      bootstrapped = await bootstrap({ quiet: true });
-      if (!bootstrapped) {
-        showPairing("Pairing link expired. Scan a fresh QR code from `ibkr app pair` on the Mac.");
-        return;
-      }
     }
   }
   if (!bootstrapped) {
-    await bootstrap();
+    bootstrapped = await bootstrapWithRetry();
+  }
+  if (!bootstrapped) {
+    return;
   }
   resetViewportScroll();
   setupMarketSelect();

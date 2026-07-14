@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -321,6 +324,239 @@ func TestRunRestartAllCoreSkipsAppWhenSocketOverridden(t *testing.T) {
 	}
 	if res.App.Action != "skipped" || res.App.Reason != "socket_overridden" || res.App.Target != "app" {
 		t.Fatalf("app result = %+v", *res.App)
+	}
+}
+
+func TestRunRestartAppCoreKickstartsLaunchdJob(t *testing.T) {
+	t.Parallel()
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{app: true, jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
+	kicked := ""
+	supCalls := 0
+	startCalled := false
+	exit := runRestartAppCore(context.Background(), opts, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			return appProcess{PID: 90, Command: "/tmp/ibkr app --remote", Args: []string{"app", "--remote"}}, nil
+		},
+		stop: func(int, time.Duration) error {
+			t.Fatal("supervised restart must not SIGTERM the supervised process by hand")
+			return nil
+		},
+		start: func(context.Context, []string) (int, error) {
+			startCalled = true
+			return 0, nil
+		},
+		supervisor: func(context.Context) (appSupervisor, bool) {
+			supCalls++
+			pid := 90
+			if kicked != "" {
+				pid = 91
+			}
+			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: pid, Args: []string{"app", "--remote"}}, true
+		},
+		kickstart: func(_ context.Context, target string) error {
+			kicked = target
+			return nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if kicked != "gui/501/com.osauer.ibkr-app" {
+		t.Fatalf("kickstart target = %q", kicked)
+	}
+	if startCalled {
+		t.Fatal("supervised restart must not spawn an unsupervised app process")
+	}
+	if supCalls < 2 {
+		t.Fatalf("supervisor calls = %d, want detection plus respawn wait", supCalls)
+	}
+	var res appRestartResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, out.String())
+	}
+	if res.Action != "restarted" || res.Supervisor != "gui/501/com.osauer.ibkr-app" || !res.WasRunning || res.OldPID != 90 || res.NewPID != 91 || !res.Started {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
+func TestRunRestartAppCoreStopsOrphanBeforeKickstart(t *testing.T) {
+	t.Parallel()
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{app: true, timeout: time.Second, out: &out, err: &errBuf}
+	stoppedPID := 0
+	kicked := false
+	exit := runRestartAppCore(context.Background(), opts, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			// The orphan (pid 4098-style) is NOT the supervised process:
+			// launchd shows no live pid while it crash-loops on the lock.
+			return appProcess{PID: 70, Command: "/tmp/ibkr app --remote", Args: []string{"app", "--remote"}}, nil
+		},
+		stop: func(pid int, _ time.Duration) error {
+			stoppedPID = pid
+			return nil
+		},
+		start: func(context.Context, []string) (int, error) {
+			t.Fatal("must not spawn a fresh orphan")
+			return 0, nil
+		},
+		supervisor: func(context.Context) (appSupervisor, bool) {
+			pid := 0
+			if kicked {
+				pid = 71
+			}
+			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: pid, Args: []string{"app", "--remote"}}, true
+		},
+		kickstart: func(context.Context, string) error {
+			if stoppedPID == 0 {
+				t.Fatal("kickstart before the orphan was stopped")
+			}
+			kicked = true
+			return nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if stoppedPID != 70 {
+		t.Fatalf("stoppedPID = %d, want the orphan 70", stoppedPID)
+	}
+	if !strings.Contains(out.String(), "restarted supervised app pid 71") {
+		t.Fatalf("output missing supervised restart confirmation:\n%s", out.String())
+	}
+}
+
+func TestRunRestartAppCoreLeavesIsolatedInstanceToUnsupervisedPath(t *testing.T) {
+	t.Parallel()
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{app: true, timeout: time.Second, out: &out, err: &errBuf}
+	isolatedArgs := []string{"app", "--addr", "127.0.0.1:18765", "--state-dir", "/tmp/ibkr-smoke"}
+	stoppedPID := 0
+	startedArgs := []string{}
+	exit := runRestartAppCore(context.Background(), opts, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			if stoppedPID != 0 {
+				return appProcess{}, errAppNotRunning
+			}
+			return appProcess{PID: 60, Command: "/tmp/ibkr " + strings.Join(isolatedArgs, " "), Args: isolatedArgs}, nil
+		},
+		stop: func(pid int, _ time.Duration) error {
+			stoppedPID = pid
+			return nil
+		},
+		start: func(_ context.Context, args []string) (int, error) {
+			startedArgs = append([]string(nil), args...)
+			return 61, nil
+		},
+		supervisor: func(context.Context) (appSupervisor, bool) {
+			// The shared host's LaunchAgent is loaded, but the running app
+			// is an isolated smoke/preview instance with its own state dir.
+			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: 0, Args: []string{"app", "--remote"}}, true
+		},
+		kickstart: func(context.Context, string) error {
+			t.Fatal("must not kickstart the shared host for an isolated app instance")
+			return nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if stoppedPID != 60 {
+		t.Fatalf("stoppedPID = %d, want the isolated instance 60", stoppedPID)
+	}
+	if !slices.Equal(startedArgs, isolatedArgs) {
+		t.Fatalf("restarted args = %q, want the isolated instance's own args", strings.Join(startedArgs, " "))
+	}
+}
+
+func TestSupervisedRestartAppliesComparesStateLocks(t *testing.T) {
+	// The orphan test is state-lock identity, not pid or argv equality —
+	// pin the default state dir so the cases stay hermetic.
+	t.Setenv("IBKR_APP_STATE_DIR", "")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	shared := appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: 4098, Args: []string{"app", "--remote"}}
+	cases := []struct {
+		name    string
+		proc    appProcess
+		findErr error
+		sup     appSupervisor
+		want    bool
+	}{
+		{"supervised pid itself", appProcess{PID: 4098, Args: []string{"app", "--remote"}}, nil, shared, true},
+		{"ambiguous find defers to the job", appProcess{}, errAppUnverified, shared, true},
+		{"default-dir orphan with different argv", appProcess{PID: 70, Args: []string{"app", "--addr", "0.0.0.0:8765"}}, nil, shared, true},
+		{"isolated instance with its own state dir", appProcess{PID: 60, Args: []string{"app", "--state-dir", "/tmp/ibkr-smoke"}}, nil, shared, false},
+		{"same explicit state dir is the job's orphan", appProcess{PID: 61, Args: []string{"app", "--state-dir", "/var/lib/ibkr-app"}}, nil, appSupervisor{Target: shared.Target, Args: []string{"app", "--state-dir", "/var/lib/ibkr-app"}}, true},
+		{"unparsed plist args resolve to the default dir", appProcess{PID: 62, Args: []string{"app", "--state-dir", "/tmp/ibkr-smoke"}}, nil, appSupervisor{Target: shared.Target}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := supervisedRestartApplies(tc.proc, tc.findErr, tc.sup); got != tc.want {
+				t.Fatalf("supervisedRestartApplies = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAppArgsStateDirResolvesSymlinkedSpellings(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "state-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	a := appArgsStateDir([]string{"app", "--state-dir", real})
+	b := appArgsStateDir([]string{"app", "--state-dir", link})
+	if a != b {
+		t.Fatalf("state dir identity should survive symlinked spellings: %q vs %q", a, b)
+	}
+}
+
+func TestRunRestartAppCoreRejectsOverridesForSupervisedApp(t *testing.T) {
+	t.Parallel()
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{app: true, timeout: time.Second, out: &out, err: &errBuf, appRemote: true, appRemoteSet: true}
+	exit := runRestartAppCore(context.Background(), opts, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			return appProcess{}, errAppNotRunning
+		},
+		supervisor: func(context.Context) (appSupervisor, bool) {
+			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app"}, true
+		},
+		kickstart: func(context.Context, string) error {
+			t.Fatal("must not kickstart when overrides were rejected")
+			return nil
+		},
+	})
+	if exit != 1 {
+		t.Fatalf("exit = %d, want 1", exit)
+	}
+	if !strings.Contains(errBuf.String(), "ibkr setup app") {
+		t.Fatalf("stderr should point at `ibkr setup app`:\n%s", errBuf.String())
+	}
+}
+
+func TestLaunchdProgramArgumentsParsesPrintOutput(t *testing.T) {
+	t.Parallel()
+
+	out := "gui/501/com.osauer.ibkr-app = {\n" +
+		"\tactive count = 1\n" +
+		"\tpid = 4098\n" +
+		"\targuments = {\n" +
+		"\t\t/Users/osauer/.local/bin/ibkr\n" +
+		"\t\tapp\n" +
+		"\t\t--remote\n" +
+		"\t}\n" +
+		"}\n"
+	args := launchdProgramArguments(out)
+	if strings.Join(args, " ") != "app --remote" {
+		t.Fatalf("args = %q", strings.Join(args, " "))
+	}
+	if m := launchdPIDRe.FindStringSubmatch(out); m == nil || m[1] != "4098" {
+		t.Fatalf("pid parse = %v", m)
 	}
 }
 

@@ -333,6 +333,22 @@ func isGatewayUnavailable(msg string) bool {
 	return strings.Contains(msg, "gateway_unavailable")
 }
 
+// failUnexpectedArgs rejects a stray positional argument with the command's
+// usage on top of the error line, suggesting the "--" spelling when the
+// argument names a defined flag — `ibkr restart app` should teach `--app`,
+// not dead-end. Returns 2, the usage-error exit shared with parseExit.
+func failUnexpectedArgs(env *Env, fs *flag.FlagSet) int {
+	arg := fs.Arg(0)
+	fmt.Fprintf(env.Stderr, "%s: unexpected argument %q", fs.Name(), arg)
+	if name := strings.TrimLeft(arg, "-"); name != "" && fs.Lookup(name) != nil {
+		fmt.Fprintf(env.Stderr, " (did you mean --%s?)", name)
+	}
+	fmt.Fprintln(env.Stderr)
+	fmt.Fprintln(env.Stderr)
+	fs.Usage()
+	return 2
+}
+
 // formatMoney renders a USD-style amount with grouping; "$ 248,310.42".
 // Used by renderers that work with intrinsically USD-only data (chain
 // strikes, history, scan rows); position renderers thread the actual

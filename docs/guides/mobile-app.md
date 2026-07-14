@@ -1,6 +1,6 @@
 # Mobile App
 
-Updated: 2026-06-07 22:09 CEST
+Updated: 2026-07-14 06:09 CEST
 
 The mobile app layer is served by `ibkr app`. It is a HyperServe process that
 serves the PWA, owns pairing, streams `/api/events`, and sends opt-in canary
@@ -53,10 +53,37 @@ ibkr app pair
 ```
 
 The printed pairing URL uses the relay origin and includes a `remote=` route id.
-The route id and connector token are persisted locally and reused across app
-restarts until the relay route TTL expires. This keeps installed iPhone Home
-Screen launches on the stable relay origin instead of forcing a new pair after
-ordinary restarts.
+The route id and connector token are persisted locally and resumed across app
+restarts, new builds, and relay-side route expiry: a token-matched resume
+revives the route at the relay, so the route id — and with it every paired
+phone — survives arbitrary Mac downtime as long as the app state directory
+keeps `state.json`. Registration happens inside the connector loop with
+backoff, so a relay or DNS outage at startup degrades the relay instead of
+killing `ibkr app --remote`. A new route id is minted only when the relay
+definitively rejects the held credentials, and the app logs that paired
+devices must re-pair.
+
+Phone-side addressing is double-tracked: the relay sets the
+`ibkr_remote_route` cookie with a 400-day Max-Age and refreshes it on every
+visit, and the SPA mirrors the route id in `localStorage`. A navigation that
+arrives without the cookie gets a recovery page that rebuilds it from the
+mirror; a navigation while the Mac connector is down gets an auto-retrying
+wait page instead of raw JSON. The paired device credential itself re-mints
+sessions silently after every app restart, retries transient failures at
+page load, and only shows the "scan a fresh QR code" instruction when the
+app definitively rejected the device.
+
+Session continuity does not depend on script-visible storage: pairing also
+sets a long-lived HttpOnly `ibkr_app_device` cookie whose hash is stored on
+the device grant, and the app mints fresh sessions from it. This is what
+keeps an iOS Home Screen install alive — its container inherits Safari's
+cookies but not Safari's localStorage/IndexedDB, so a key-based re-login can
+never run there. Key/secret logins re-provision the cookie, and grants keep
+a capped list of valid cookie hashes so Safari and the installed app (twin
+copies of the same cookie jar) never invalidate each other. Pair in Safari
+first, then Add to Home Screen, so the install snapshot carries the cookie.
+Every auth outcome is logged as `ibkr app auth:` lines in
+`~/Library/Logs/ibkr/app.err.log`.
 
 Restart the supervised/shared app in remote mode:
 
@@ -81,12 +108,17 @@ Worker route to stay up. The app exposes relay connection state in
 ibkr restart
 ```
 
-This restarts the shared daemon and, when an `ibkr app` process is already
-running, sends SIGTERM to that app process so HyperServe can shut down gently.
-It preserves the old app flags such as `--addr`, `--public-url`, `--remote`,
-and `--state-dir`. If launchd respawns the app, the command reports the
-supervised PID and does not start a duplicate. If no app is running, plain
-`ibkr restart` leaves the app stopped.
+This restarts the shared daemon and manages the app. When the
+`com.osauer.ibkr-app` LaunchAgent is loaded, the app is restarted through
+`launchctl kickstart -k`: any unsupervised (orphaned) app process is stopped
+first so launchd can own the app again, and app flag overrides are rejected
+with a pointer to `ibkr setup app` because the plist arguments win. launchd
+may throttle the respawn for about ten seconds; the command waits for a
+stable supervised PID. Without a loaded LaunchAgent, the old behavior
+applies: SIGTERM the running app, preserve its flags such as `--addr`,
+`--public-url`, `--remote`, and `--state-dir`, and start a detached
+replacement. If no app is running, plain `ibkr restart` leaves the app
+stopped.
 
 Use `ibkr restart --app` for app-only restart/start workflows, including cases
 where no app is running yet.

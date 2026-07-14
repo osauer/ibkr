@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -52,9 +53,7 @@ func runAppServe(args []string) int {
 		printAppUsage(os.Stdout)
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, "Serve flags:")
-		fs.VisitAll(func(f *flag.Flag) {
-			fmt.Fprintf(os.Stdout, "  --%-12s  %s (default %q)\n", f.Name, f.Usage, f.DefValue)
-		})
+		printFlagDefaults(os.Stdout, fs)
 	}
 	addr := fs.String("addr", opts.Addr, "HTTP listen address")
 	publicURL := fs.String("public-url", opts.PublicURL, "trusted browser-visible base URL")
@@ -68,8 +67,12 @@ func runAppServe(args []string) int {
 		return 2
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintf(os.Stderr, "ibkr app: unexpected argument %q\n", fs.Arg(0))
-		return 2
+		return rejectUnexpectedArgument(os.Stderr, "ibkr app", fs, func(w io.Writer) {
+			printAppUsage(w)
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "Serve flags:")
+			printFlagDefaults(w, fs)
+		})
 	}
 	opts.Addr = strings.TrimSpace(*addr)
 	opts.Remote = *remote
@@ -102,16 +105,15 @@ func runAppPair(args []string) int {
 	opts := mobileapp.DefaultOptions(effectiveVersion())
 	fs := flag.NewFlagSet("ibkr app pair", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stdout, "ibkr app pair - print a short-lived QR pairing URL from the local app host.")
-		fmt.Fprintln(os.Stdout)
-		fmt.Fprintln(os.Stdout, "Usage: ibkr app pair [--addr HOST:PORT] [--public-url URL] [--json]")
-		fmt.Fprintln(os.Stdout)
-		fmt.Fprintln(os.Stdout, "Flags:")
-		fs.VisitAll(func(f *flag.Flag) {
-			fmt.Fprintf(os.Stdout, "  --%-12s  %s (default %q)\n", f.Name, f.Usage, f.DefValue)
-		})
+	pairUsage := func(w io.Writer) {
+		fmt.Fprintln(w, "ibkr app pair - print a short-lived QR pairing URL from the local app host.")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Usage: ibkr app pair [--addr HOST:PORT] [--public-url URL] [--json]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Flags:")
+		printFlagDefaults(w, fs)
 	}
+	fs.Usage = func() { pairUsage(os.Stdout) }
 	addr := fs.String("addr", opts.Addr, "local app host listen address")
 	publicURLDefault := ""
 	if opts.PublicURLFromEnv {
@@ -126,8 +128,7 @@ func runAppPair(args []string) int {
 		return 2
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintf(os.Stderr, "ibkr app pair: unexpected argument %q\n", fs.Arg(0))
-		return 2
+		return rejectUnexpectedArgument(os.Stderr, "ibkr app pair", fs, pairUsage)
 	}
 	pairAddr := strings.TrimSpace(*addr)
 	pairPublicURL := appPairPublicURLOverride(fs, *publicURL, opts.PublicURLFromEnv)
@@ -214,7 +215,7 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 	return seen
 }
 
-func printAppUsage(w *os.File) {
+func printAppUsage(w io.Writer) {
 	fmt.Fprintln(w, "ibkr app - run the paired mobile PWA application layer.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
@@ -224,4 +225,25 @@ func printAppUsage(w *os.File) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The app serves a mobile-first PWA, live SSE snapshots,")
 	fmt.Fprintln(w, "and opt-in canary Web Push subscriptions. Pairing URLs are short-lived.")
+}
+
+func printFlagDefaults(w io.Writer, fs *flag.FlagSet) {
+	fs.VisitAll(func(f *flag.Flag) {
+		fmt.Fprintf(w, "  --%-12s  %s (default %q)\n", f.Name, f.Usage, f.DefValue)
+	})
+}
+
+// rejectUnexpectedArgument reports a stray positional argument and prints
+// the command usage, suggesting the "--" spelling when the argument names a
+// defined flag — `ibkr app remote` should teach `--remote`, not dead-end.
+func rejectUnexpectedArgument(w io.Writer, prefix string, fs *flag.FlagSet, usage func(io.Writer)) int {
+	arg := fs.Arg(0)
+	fmt.Fprintf(w, "%s: unexpected argument %q", prefix, arg)
+	if name := strings.TrimLeft(arg, "-"); name != "" && fs.Lookup(name) != nil {
+		fmt.Fprintf(w, " (did you mean --%s?)", name)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w)
+	usage(w)
+	return 2
 }

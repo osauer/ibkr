@@ -94,17 +94,15 @@ func newRelayClient(opts Options, store *state.Store) (relay.Client, error) {
 	if !opts.Remote {
 		return relay.Noop{PublicURL: opts.PublicURL}, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	originURL := "http://" + LoopbackAddrForLocalConnect(opts.Addr)
 	var routeID, connectorToken string
 	if store != nil {
-		if route, ok := store.RelayRoute(opts.RemoteURL, time.Now().UTC()); ok {
+		if route, ok := store.RelayRoute(opts.RemoteURL); ok {
 			routeID = route.RouteID
 			connectorToken = route.ConnectorToken
 		}
 	}
-	client, err := relay.NewWorker(ctx, relay.WorkerOptions{
+	client, err := relay.NewWorker(relay.WorkerOptions{
 		BaseURL:              opts.RemoteURL,
 		OriginURL:            originURL,
 		Version:              opts.Version,

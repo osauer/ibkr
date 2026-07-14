@@ -20,7 +20,7 @@ func runCalendar(ctx context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	if fs.NArg() > 0 {
-		return fail(env, "calendar: takes no positional args (got %v)", fs.Args())
+		return failUnexpectedArgs(env, fs)
 	}
 	if *next <= 0 {
 		return fail(env, "calendar: --next must be positive")

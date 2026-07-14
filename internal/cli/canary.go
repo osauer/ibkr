@@ -75,7 +75,7 @@ func runCanary(ctx context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	if fs.NArg() > 0 {
-		return fail(env, "canary: takes no positional args (got %v)", fs.Args())
+		return failUnexpectedArgs(env, fs)
 	}
 	if *view != rpc.ViewFull && *view != rpc.ViewAlert {
 		return fail(env, "canary: --view must be %q or %q (got %q)", rpc.ViewFull, rpc.ViewAlert, *view)

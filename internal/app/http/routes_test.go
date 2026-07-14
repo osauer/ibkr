@@ -147,6 +147,133 @@ func TestPairingBootstrap(t *testing.T) {
 	}
 }
 
+// The iOS home-screen web app inherits Safari's cookies but not its
+// localStorage/IndexedDB, and sessions die with every app restart. The
+// long-lived device cookie must therefore mint a fresh session on its own,
+// with no script-storage credential and no prior session.
+func TestDeviceCookieMintsSessionAfterRestart(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t).Handler()
+	pairReq := httptest.NewRequest(http.MethodPost, "/api/pairing/sessions", bytes.NewReader([]byte("{}")))
+	pairReq.RemoteAddr = "127.0.0.1:12345"
+	pairRes := httptest.NewRecorder()
+	handler.ServeHTTP(pairRes, pairReq)
+	var pairing auth.PairingSession
+	if err := json.NewDecoder(pairRes.Body).Decode(&pairing); err != nil {
+		t.Fatalf("decode pairing: %v", err)
+	}
+	key := newRouteTestKey(t)
+	completeBody, err := json.Marshal(auth.CompletePairingRequest{
+		PairingID:    pairing.ID,
+		Nonce:        pairing.Nonce,
+		DeviceName:   "iPhone",
+		PublicKeyJWK: routeTestJWK(t, key),
+		Signature:    routeTestSignature(t, key, pairing.Nonce),
+	})
+	if err != nil {
+		t.Fatalf("marshal complete body: %v", err)
+	}
+	completeReq := httptest.NewRequest(http.MethodPost, "/api/pairing/complete", bytes.NewReader(completeBody))
+	completeRes := httptest.NewRecorder()
+	handler.ServeHTTP(completeRes, completeReq)
+	if completeRes.Code != http.StatusOK {
+		t.Fatalf("complete status=%d: %s", completeRes.Code, completeRes.Body.String())
+	}
+	var deviceCookie *http.Cookie
+	for _, c := range completeRes.Result().Cookies() {
+		if c.Name == deviceCookieName {
+			deviceCookie = c
+		}
+	}
+	if deviceCookie == nil {
+		t.Fatalf("pairing did not set the device cookie; cookies=%v", completeRes.Result().Cookies())
+	}
+	if deviceCookie.MaxAge < 300*24*60*60 {
+		t.Fatalf("device cookie Max-Age=%d, want long-lived", deviceCookie.MaxAge)
+	}
+	if !deviceCookie.HttpOnly {
+		t.Fatalf("device cookie must be HttpOnly")
+	}
+
+	// Simulate the restarted app + home-screen container: no session
+	// cookie, no bearer token — only the device cookie survives.
+	bootReq := httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil)
+	bootReq.AddCookie(deviceCookie)
+	bootRes := httptest.NewRecorder()
+	handler.ServeHTTP(bootRes, bootReq)
+	if bootRes.Code != http.StatusOK {
+		t.Fatalf("bootstrap via device cookie status=%d: %s", bootRes.Code, bootRes.Body.String())
+	}
+	gotSession, gotDevice := false, false
+	for _, c := range bootRes.Result().Cookies() {
+		switch c.Name {
+		case "ibkr_app_session":
+			gotSession = c.Value != ""
+		case deviceCookieName:
+			// The value must not rotate: Safari and the installed app hold
+			// twin copies of the same cookie jar snapshot.
+			gotDevice = c.Value == deviceCookie.Value
+		}
+	}
+	if !gotSession || !gotDevice {
+		t.Fatalf("device-cookie login must set a fresh session and re-set the same device cookie (session=%v device=%v)", gotSession, gotDevice)
+	}
+
+	// A tampered device cookie must stay locked out.
+	badReq := httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil)
+	badReq.AddCookie(&http.Cookie{Name: deviceCookieName, Value: deviceCookie.Value + "x"})
+	badRes := httptest.NewRecorder()
+	handler.ServeHTTP(badRes, badReq)
+	if badRes.Code != http.StatusUnauthorized {
+		t.Fatalf("tampered device cookie status=%d, want 401", badRes.Code)
+	}
+
+	// A key login re-provisions a fresh device cookie for the twin that
+	// lost its jar — and the OTHER twin's older cookie must stay valid.
+	var paired auth.CompletePairingResult
+	if err := json.NewDecoder(bytes.NewReader(completeRes.Body.Bytes())).Decode(&paired); err != nil {
+		t.Fatalf("decode pairing result: %v", err)
+	}
+	chBody, _ := json.Marshal(map[string]string{"device_id": paired.DeviceID})
+	chReq := httptest.NewRequest(http.MethodPost, "/api/auth/challenge", bytes.NewReader(chBody))
+	chRes := httptest.NewRecorder()
+	handler.ServeHTTP(chRes, chReq)
+	if chRes.Code != http.StatusOK {
+		t.Fatalf("challenge status=%d: %s", chRes.Code, chRes.Body.String())
+	}
+	var ch auth.Challenge
+	if err := json.NewDecoder(chRes.Body).Decode(&ch); err != nil {
+		t.Fatalf("decode challenge: %v", err)
+	}
+	sessBody, _ := json.Marshal(map[string]string{
+		"device_id": paired.DeviceID,
+		"challenge": ch.Challenge,
+		"signature": routeTestSignature(t, key, ch.Challenge),
+	})
+	sessReq := httptest.NewRequest(http.MethodPost, "/api/auth/session", bytes.NewReader(sessBody))
+	sessRes := httptest.NewRecorder()
+	handler.ServeHTTP(sessRes, sessReq)
+	if sessRes.Code != http.StatusOK {
+		t.Fatalf("session status=%d: %s", sessRes.Code, sessRes.Body.String())
+	}
+	var reissued *http.Cookie
+	for _, c := range sessRes.Result().Cookies() {
+		if c.Name == deviceCookieName {
+			reissued = c
+		}
+	}
+	if reissued == nil || reissued.Value == deviceCookie.Value {
+		t.Fatalf("key login must re-provision a fresh device cookie (got %v)", reissued)
+	}
+	twinReq := httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil)
+	twinReq.AddCookie(deviceCookie)
+	twinRes := httptest.NewRecorder()
+	handler.ServeHTTP(twinRes, twinReq)
+	if twinRes.Code != http.StatusOK {
+		t.Fatalf("older twin cookie rejected after re-provisioning: status=%d", twinRes.Code)
+	}
+}
+
 func TestPairingSessionUsesRelayURLWithoutExplicitOverride(t *testing.T) {
 	t.Parallel()
 	handler := newTestHandlerWithClientAndRelay(t, routeFakeClient{}, routeTestRelay{route: "r_route"}).Handler()

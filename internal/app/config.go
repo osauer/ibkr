@@ -36,11 +36,7 @@ func DefaultOptions(version string) Options {
 	if addr == "" {
 		addr = DefaultAddr
 	}
-	// docgen:env IBKR_APP_STATE_DIR | Directory for `ibkr app` paired devices, alert settings, VAPID keys, and alert history. Defaults to `$XDG_STATE_HOME/ibkr/app` or `$HOME/.local/state/ibkr/app`.
-	stateDir := strings.TrimSpace(os.Getenv("IBKR_APP_STATE_DIR"))
-	if stateDir == "" {
-		stateDir = defaultStateDir()
-	}
+	stateDir := DefaultStateDir()
 	// docgen:env IBKR_APP_PUBLIC_URL | Public trusted HTTPS base URL for the `ibkr app` PWA/relay origin. Defaults to a LAN URL for wildcard listen addresses, falling back to loopback when no LAN address is available.
 	publicURL := strings.TrimRight(strings.TrimSpace(os.Getenv("IBKR_APP_PUBLIC_URL")), "/")
 	publicURLFromEnv := publicURL != ""
@@ -82,7 +78,15 @@ func relayDefaultURL() string {
 	return "https://remote.osauer.dev"
 }
 
-func defaultStateDir() string {
+// DefaultStateDir returns the state directory an `ibkr app` process uses
+// when no --state-dir flag is given. The app lock lives in this directory,
+// so `ibkr restart --app` resolves argv state dirs through it to decide
+// whether two app processes contend for the same lock.
+func DefaultStateDir() string {
+	// docgen:env IBKR_APP_STATE_DIR | Directory for `ibkr app` paired devices, alert settings, VAPID keys, and alert history. Defaults to `$XDG_STATE_HOME/ibkr/app` or `$HOME/.local/state/ibkr/app`.
+	if v := strings.TrimSpace(os.Getenv("IBKR_APP_STATE_DIR")); v != "" {
+		return v
+	}
 	if v := os.Getenv("XDG_STATE_HOME"); v != "" {
 		return filepath.Join(v, "ibkr", "app")
 	}

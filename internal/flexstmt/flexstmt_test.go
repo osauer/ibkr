@@ -8,7 +8,7 @@ import (
 
 const fixtureNormal = `<FlexQueryResponse queryName="recon" type="AF">
  <FlexStatements count="1">
-  <FlexStatement accountId="U0000000" fromDate="20260706" toDate="20260712" whenGenerated="20260713;063000">
+  <FlexStatement accountId="U1234567" fromDate="20260706" toDate="20260712" whenGenerated="20260713;063000">
    <CashTransactions>
     <CashTransaction transactionID="111" type="Deposits/Withdrawals" currency="EUR" fxRateToBase="1" amount="20000" dateTime="20260708;120000" settleDate="20260708" description="CASH RECEIPT" />
     <CashTransaction transactionID="112" type="Deposits/Withdrawals" currency="USD" fxRateToBase="0.925" amount="-10000" dateTime="20260709;120000" settleDate="20260710" description="DISBURSEMENT" />
@@ -36,7 +36,7 @@ func TestParseNormalStatement(t *testing.T) {
 		t.Fatalf("statements = %d, want 1", len(sts))
 	}
 	st := sts[0]
-	if st.AccountID != "U0000000" || !st.WhenGenerated.Equal(time.Date(2026, 7, 13, 6, 30, 0, 0, time.UTC)) {
+	if st.AccountID != "U1234567" || !st.WhenGenerated.Equal(time.Date(2026, 7, 13, 6, 30, 0, 0, time.UTC)) {
 		t.Fatalf("header = %+v", st)
 	}
 	if len(st.Cash) != 4 || len(st.Transfers) != 2 || len(st.Equity) != 2 {

@@ -33,10 +33,14 @@ const defaultRouteTTL = 7 * 24 * time.Hour
 // (tiny or clock-skewed expires_at) cannot make the connector hot-cycle.
 const minCycleEvery = time.Minute
 
-// errRouteExpired marks a connect attempt rejected with HTTP 410: the relay
-// reaped the route (e.g. the Mac was offline past the TTL) and only a fresh
-// registration — with a NEW route_id — can restore remote access.
+// errRouteExpired marks a connect or resume attempt rejected with HTTP 410:
+// the relay reaped the route (e.g. the Mac was offline past the TTL).
 var errRouteExpired = errors.New("remote relay route expired")
+
+// errRouteRejected marks a connect or resume attempt the relay refused as
+// unauthorized (401/403/404): the relay-side connector token no longer
+// matches what this Mac holds, and only a re-registration can reconcile it.
+var errRouteRejected = errors.New("remote relay route rejected")
 
 type WorkerOptions struct {
 	BaseURL              string
@@ -103,7 +107,7 @@ type frame struct {
 
 type frameSender func(context.Context, frame) error
 
-func NewWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
+func NewWorker(opts WorkerOptions) (*Worker, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(opts.BaseURL), "/")
 	if baseURL == "" {
 		baseURL = DefaultWorkerURL
@@ -111,6 +115,11 @@ func NewWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 	originURL := strings.TrimRight(strings.TrimSpace(opts.OriginURL), "/")
 	if originURL == "" {
 		return nil, errors.New("relay origin URL required")
+	}
+	resumeRouteID := strings.TrimSpace(opts.ResumeRouteID)
+	resumeToken := strings.TrimSpace(opts.ResumeConnectorToken)
+	if (resumeRouteID == "") != (resumeToken == "") {
+		return nil, errors.New("relay resume route requires both route id and connector token")
 	}
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
@@ -122,31 +131,64 @@ func NewWorker(ctx context.Context, opts WorkerOptions) (*Worker, error) {
 		version:    strings.TrimSpace(opts.Version),
 		httpClient: httpClient,
 		onRoute:    opts.OnRoute,
+		// The worker serves phones from its own origin, so the public URL
+		// is known before the first registration succeeds.
+		publicURL:  baseURL,
+		routeTTL:   defaultRouteTTL,
+		cycleEvery: defaultRouteTTL / 2,
+		message:    "relay registration pending",
 	}
-	resumeRouteID := strings.TrimSpace(opts.ResumeRouteID)
-	resumeToken := strings.TrimSpace(opts.ResumeConnectorToken)
-	switch {
-	case resumeRouteID != "" && resumeToken != "":
-		if err := w.register(ctx, registerRequest{
-			Version:        w.version,
-			RouteID:        resumeRouteID,
-			ConnectorToken: resumeToken,
-		}); err != nil {
-			if !errors.Is(err, errRouteExpired) {
-				return nil, err
-			}
-			if err := w.register(ctx, registerRequest{Version: w.version}); err != nil {
-				return nil, err
-			}
-		}
-	case resumeRouteID != "" || resumeToken != "":
-		return nil, errors.New("relay resume route requires both route id and connector token")
-	default:
-		if err := w.register(ctx, registerRequest{Version: w.version}); err != nil {
-			return nil, err
-		}
+	if resumeRouteID != "" {
+		w.routeID = resumeRouteID
+		w.token = resumeToken
+		w.connectorURL = connectorURLFor(baseURL, resumeRouteID, resumeToken)
 	}
+	// Registration happens inside Run: a relay or DNS outage at startup
+	// must not kill the app (boot races here used to be fatal), and the
+	// held route already lets pairing URLs carry the stable route id.
 	return w, nil
+}
+
+func connectorURLFor(baseURL, routeID, token string) string {
+	origin := strings.Replace(baseURL, "https://", "wss://", 1)
+	origin = strings.Replace(origin, "http://", "ws://", 1)
+	return origin + "/api/connect?route_id=" + url.QueryEscape(routeID) + "&token=" + url.QueryEscape(token)
+}
+
+// registerCurrent (re)registers at the relay, resuming the held route when
+// one exists. Only a definitive relay rejection (401/403/404/410) abandons
+// the held route for a fresh registration; transient failures keep the
+// route so paired phones survive relay or network outages.
+func (w *Worker) registerCurrent(ctx context.Context) error {
+	w.mu.RLock()
+	routeID, token := w.routeID, w.token
+	w.mu.RUnlock()
+	if routeID != "" && token != "" {
+		err := w.register(ctx, registerRequest{Version: w.version, RouteID: routeID, ConnectorToken: token})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errRouteExpired) && !errors.Is(err, errRouteRejected) {
+			return err
+		}
+		log.Printf("ibkr app relay: relay refused resume of route %s (%v); registering a fresh route", routeID, err)
+	}
+	if err := w.register(ctx, registerRequest{Version: w.version}); err != nil {
+		return err
+	}
+	w.mu.RLock()
+	newRouteID := w.routeID
+	w.mu.RUnlock()
+	if routeID != "" && newRouteID != routeID {
+		log.Printf("ibkr app relay: route re-registered as %s; previously paired devices must re-pair (their old remote route %s is gone)", newRouteID, routeID)
+	}
+	return nil
+}
+
+func (w *Worker) hasRoute() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.routeID != "" && w.token != "" && w.connectorURL != ""
 }
 
 func (w *Worker) register(ctx context.Context, rrq registerRequest) error {
@@ -166,8 +208,11 @@ func (w *Worker) register(ctx context.Context, rrq registerRequest) error {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		if res.StatusCode == http.StatusGone {
+		switch res.StatusCode {
+		case http.StatusGone:
 			return fmt.Errorf("register remote relay: %s: %w", res.Status, errRouteExpired)
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+			return fmt.Errorf("register remote relay: %s: %s: %w", res.Status, strings.TrimSpace(string(msg)), errRouteRejected)
 		}
 		return fmt.Errorf("register remote relay: %s: %s", res.Status, strings.TrimSpace(string(msg)))
 	}
@@ -210,6 +255,23 @@ func (w *Worker) register(ctx context.Context, rrq registerRequest) error {
 func (w *Worker) Run(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
+		// Register lazily and retryably: startup must survive a relay or
+		// DNS outage, and a held route resumes (and revives) at the relay
+		// rather than minting a new route id.
+		if !w.hasRoute() {
+			if err := w.registerCurrent(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				w.setStatus(false, err.Error())
+				if !sleepCtx(ctx, backoff) {
+					return
+				}
+				backoff = min(backoff*2, 30*time.Second)
+				continue
+			}
+			backoff = time.Second
+		}
 		// Force the connection to cycle at half the route TTL: the relay
 		// slides the route's expiry window on every authenticated connector
 		// connection, so a long-lived quiet connection must reconnect
@@ -226,31 +288,35 @@ func (w *Worker) Run(ctx context.Context) {
 			backoff = time.Second
 			continue // reconnect promptly so the relay-side TTL slides
 		}
-		if errors.Is(err, errRouteExpired) {
-			regErr := w.register(ctx, registerRequest{Version: w.version})
+		if errors.Is(err, errRouteExpired) || errors.Is(err, errRouteRejected) {
+			regErr := w.registerCurrent(ctx)
 			if regErr == nil {
-				w.mu.RLock()
-				routeID := w.routeID
-				w.mu.RUnlock()
-				log.Printf("ibkr app relay: route expired at the relay and was re-registered as %s; previously paired devices must re-pair (their old remote route is gone)", routeID)
 				backoff = time.Second
 				continue
 			}
-			err = fmt.Errorf("relay route expired; re-register failed: %w", regErr)
+			err = fmt.Errorf("relay refused the held route; re-register failed: %w", regErr)
 		}
 		if err == nil {
 			backoff = time.Second
 			continue
 		}
 		w.setStatus(false, err.Error())
-		timer := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !sleepCtx(ctx, backoff) {
 			return
-		case <-timer.C:
 		}
 		backoff = min(backoff*2, 30*time.Second)
+	}
+}
+
+// sleepCtx waits d, returning false when ctx was cancelled first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -274,10 +340,13 @@ func (w *Worker) connectOnce(ctx context.Context) error {
 		HTTPHeader: header,
 	})
 	if err != nil {
-		if res != nil && res.StatusCode == http.StatusGone {
-			return fmt.Errorf("connect remote relay: %s: %w", res.Status, errRouteExpired)
-		}
 		if res != nil {
+			switch res.StatusCode {
+			case http.StatusGone:
+				return fmt.Errorf("connect remote relay: %s: %w", res.Status, errRouteExpired)
+			case http.StatusUnauthorized, http.StatusForbidden:
+				return fmt.Errorf("connect remote relay: %s: %w", res.Status, errRouteRejected)
+			}
 			return fmt.Errorf("connect remote relay: %s: %w", res.Status, err)
 		}
 		return fmt.Errorf("connect remote relay: %w", err)

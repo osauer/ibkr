@@ -25,7 +25,7 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	if fs.NArg() > 0 {
-		return fail(env, "regime: takes no positional args (got %v)", fs.Args())
+		return failUnexpectedArgs(env, fs)
 	}
 	if *diagnostics && !*explain {
 		return fail(env, "regime: --diagnostics requires --explain")

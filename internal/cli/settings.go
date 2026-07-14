@@ -60,7 +60,7 @@ func runSettingsShow(ctx context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	if fs.NArg() != 0 {
-		return fail(env, "settings show: takes no positional args")
+		return failUnexpectedArgs(env, fs)
 	}
 	var res rpc.PlatformSettings
 	if err := env.Conn.Call(ctx, rpc.MethodSettingsGet, nil, &res); err != nil {

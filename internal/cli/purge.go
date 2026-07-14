@@ -226,7 +226,7 @@ func runPurgeDryRun(ctx context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	if fs.NArg() > 0 {
-		return fail(env, "purge dry-run: takes no positional args")
+		return failUnexpectedArgs(env, fs)
 	}
 	purgeProgress(env, *jsonOut, "purge dry-run: loading current positions")
 	var pos rpc.PositionsResult

@@ -205,6 +205,59 @@ func (m *Manager) CompleteChallenge(deviceID, challenge, signature, deviceSecret
 	return m.newSession(deviceID, now)
 }
 
+// IssueDeviceCookie mints the long-lived device-cookie value for a paired
+// device and stores its hash on the grant. The cookie is the continuity
+// credential for clients whose script storage does not survive (the iOS
+// home-screen web-app container gets Safari's cookies but not its
+// localStorage/IndexedDB, so a key-based re-login can never run there).
+func (m *Manager) IssueDeviceCookie(deviceID string) (string, error) {
+	if _, ok := m.store.Device(deviceID); !ok {
+		return "", errors.New("unknown device")
+	}
+	secret, err := randomToken(32)
+	if err != nil {
+		return "", err
+	}
+	hash, err := hashDeviceSecret(secret)
+	if err != nil {
+		return "", err
+	}
+	if err := m.store.AddDeviceCookieHash(deviceID, hash); err != nil {
+		return "", err
+	}
+	return deviceID + "." + secret, nil
+}
+
+// AuthenticateDeviceCookie exchanges a valid device-cookie value for a
+// fresh session. It reports why the cookie was rejected so the auth log can
+// name the failure instead of a silent 401.
+func (m *Manager) AuthenticateDeviceCookie(value string) (Session, error) {
+	deviceID, secret, ok := strings.Cut(strings.TrimSpace(value), ".")
+	if !ok || deviceID == "" || secret == "" {
+		return Session{}, errors.New("malformed device cookie")
+	}
+	grant, found := m.store.Device(deviceID)
+	if !found {
+		return Session{}, errors.New("unknown device")
+	}
+	if len(grant.DeviceCookieHashes) == 0 {
+		return Session{}, errors.New("device has no cookie credential")
+	}
+	matched := false
+	for _, hash := range grant.DeviceCookieHashes {
+		if verifyDeviceSecret(secret, hash) == nil {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return Session{}, errors.New("device cookie mismatch")
+	}
+	now := m.now().UTC()
+	_ = m.store.SetDeviceSeen(deviceID, now)
+	return m.newSession(deviceID, now)
+}
+
 func (m *Manager) Authenticate(token string) (Session, bool) {
 	token = strings.TrimSpace(token)
 	if token == "" {

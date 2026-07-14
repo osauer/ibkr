@@ -9,39 +9,57 @@ import { refreshPurgeStatus } from "./underlyings.js";
 
 async function bootstrap(options = {}) {
   try {
-    const data = await fetchBootstrap(options);
+    const data = await fetchBootstrap();
     if (!data) return false;
     applyBootstrap(data);
     return true;
   } catch (err) {
     if (!options.quiet) {
-      showPairing("App bootstrap failed: " + err.message);
+      showPairing("Connecting to the Mac failed: " + err.message + " — retrying.");
     }
     return false;
   }
 }
 
-async function fetchBootstrap(options = {}) {
+// bootstrapWithRetry keeps trying until the app answers or definitively
+// rejects the device. The Mac is often mid-restart (make app-refresh,
+// launchd respawn) exactly when the phone opens; a one-shot bootstrap that
+// dead-ends on "scan a fresh QR code" trains the user to re-pair devices
+// whose credentials are perfectly valid.
+async function bootstrapWithRetry() {
+  let delay = 2000;
+  for (;;) {
+    if (await bootstrap({ quiet: true })) return true;
+    if (state.pairingRequired) return false;
+    showPairing("Connecting to the Mac… retrying automatically.");
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, 15000);
+  }
+}
+
+async function fetchBootstrap() {
   let res = await fetch("/api/bootstrap", { credentials: "include" });
   if (res.status === 401) {
-    const reauthed = await tryDeviceLogin();
-    if (!reauthed) {
-      if (!options.quiet) {
-        showPairing("Scan a fresh QR code from `ibkr app pair` on the Mac.");
-      }
+    const login = await tryDeviceLogin();
+    if (login === "repair") {
+      // Definitive rejection: the device grant or local credential is
+      // gone. Only here is a fresh QR pairing the right advice.
+      state.pairingRequired = true;
+      showPairing("Scan a fresh QR code from `ibkr app pair` on the Mac.");
       return null;
+    }
+    if (login !== "ok") {
+      throw new Error("device login is temporarily unavailable");
     }
     res = await fetch("/api/bootstrap", { credentials: "include" });
     if (res.status === 401) {
-      if (!options.quiet) {
-        showPairing("Scan a fresh QR code from `ibkr app pair` on the Mac.");
-      }
-      return null;
+      throw new Error("fresh session was not accepted yet");
     }
   }
   if (!res.ok) {
     throw new Error(await res.text());
   }
+  state.pairingRequired = false;
   return res.json();
 }
 
@@ -121,7 +139,7 @@ function scheduleEventRecovery() {
   state.reconnectTimer = setTimeout(async () => {
     state.reconnectTimer = null;
     const recovered = await bootstrap({ quiet: true });
-    if (!recovered) {
+    if (!recovered && !state.pairingRequired) {
       scheduleEventRecovery();
     }
   }, 1000);
@@ -148,4 +166,4 @@ function showPairing(text) {
   setConnection("Locked", false);
 }
 
-export { applyBootstrap, bootstrap, connectEvents, fetchBootstrap, refreshBootstrapIfSSEUnavailable, scheduleEventRecovery, setConnection, showPairing, sseUnavailable };
+export { applyBootstrap, bootstrap, bootstrapWithRetry, connectEvents, fetchBootstrap, refreshBootstrapIfSSEUnavailable, scheduleEventRecovery, setConnection, showPairing, sseUnavailable };

@@ -45,7 +45,7 @@ func runTradingPaperSmoke(ctx context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	if fs.NArg() > 0 {
-		return fail(env, "trading paper-smoke: unexpected argument %q", fs.Arg(0))
+		return failUnexpectedArgs(env, fs)
 	}
 	var res rpc.TradingPaperSmokeResult
 	if err := env.Conn.Call(ctx, rpc.MethodTradingPaperSmoke, rpc.TradingPaperSmokeParams{TimeoutMs: int(timeout.Milliseconds()), Origin: env.Origin}, &res); err != nil {

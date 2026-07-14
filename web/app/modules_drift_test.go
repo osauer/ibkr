@@ -42,6 +42,25 @@ func TestJavaScriptAssetsMatchEmbedAndImportGraph(t *testing.T) {
 	}
 }
 
+// A query string on the app.js script tag gives the entry module a different
+// URL than the bare "./app.js" the feature modules import, so the browser
+// evaluates app.js twice: double event listeners, double main(), and a
+// second doomed pairing attempt on every QR scan.
+func TestIndexHTMLLoadsEntryModuleWithoutQuery(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	html := string(data)
+	if !strings.Contains(html, `<script src="/app.js" type="module">`) {
+		t.Fatalf("index.html must load /app.js without a query string")
+	}
+	if strings.Contains(html, "/app.js?") {
+		t.Fatalf("index.html must not reference app.js with a query string (module identity is URL-keyed)")
+	}
+}
+
 func diskJavaScriptFiles(t *testing.T) map[string]bool {
 	t.Helper()
 	entries, err := os.ReadDir(".")

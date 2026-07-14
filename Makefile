@@ -145,6 +145,10 @@ app-contract-check: ## Browser-script ↔ SPA element-id drift gate + static app
 
 app-refresh: install ## Install, restart the shared app host, and print a local pairing URL
 	$(PREFIX)/bin/ibkr restart --app --timeout $(RESTART_TIMEOUT)
+	@for i in $$(seq 1 60); do \
+		if curl -fsS $(APP_SMOKE_URL)/manifest.webmanifest >/dev/null 2>&1; then break; fi; \
+		sleep 0.5; \
+	done
 	$(PREFIX)/bin/ibkr app pair --public-url $(APP_SMOKE_URL) --json
 
 app-refresh-smoke: app-refresh ## Refresh the shared app host, then run the browser app smoke

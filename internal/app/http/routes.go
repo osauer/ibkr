@@ -195,10 +195,17 @@ func (h *handler) handleCompletePairing(w nethttp.ResponseWriter, r *nethttp.Req
 	}
 	res, err := h.deps.Auth.CompletePairing(req)
 	if err != nil {
+		log.Printf("ibkr app auth: pairing rejected: %v", err)
 		writeError(w, nethttp.StatusUnauthorized, err.Error())
 		return
 	}
 	setSessionCookie(w, r, res.Token, res.ExpiresAt)
+	if cookie, err := h.deps.Auth.IssueDeviceCookie(res.DeviceID); err == nil {
+		setDeviceCookie(w, r, cookie)
+	} else {
+		log.Printf("ibkr app auth: issue device cookie for %s: %v", res.DeviceID, err)
+	}
+	log.Printf("ibkr app auth: paired device %s", res.DeviceID)
 	writeJSON(w, res)
 }
 
@@ -212,6 +219,7 @@ func (h *handler) handleAuthChallenge(w nethttp.ResponseWriter, r *nethttp.Reque
 	}
 	ch, err := h.deps.Auth.StartChallenge(req.DeviceID)
 	if err != nil {
+		log.Printf("ibkr app auth: challenge rejected for device %s: %v", req.DeviceID, err)
 		writeError(w, nethttp.StatusUnauthorized, err.Error())
 		return
 	}
@@ -231,10 +239,21 @@ func (h *handler) handleAuthSession(w nethttp.ResponseWriter, r *nethttp.Request
 	}
 	sess, err := h.deps.Auth.CompleteChallenge(req.DeviceID, req.Challenge, req.Signature, req.DeviceSecret)
 	if err != nil {
+		log.Printf("ibkr app auth: session rejected for device %s: %v", req.DeviceID, err)
 		writeError(w, nethttp.StatusUnauthorized, err.Error())
 		return
 	}
 	setSessionCookie(w, r, sess.Token, sess.ExpiresAt)
+	// Re-provision the device cookie on every key/secret login: a client
+	// that lost its cookie gets a fresh one, and because grants keep a
+	// capped list of valid cookie hashes, issuing to this twin never
+	// invalidates the copy Safari or the installed home-screen app holds.
+	if cookie, err := h.deps.Auth.IssueDeviceCookie(sess.DeviceID); err == nil {
+		setDeviceCookie(w, r, cookie)
+	} else {
+		log.Printf("ibkr app auth: issue device cookie for %s: %v", sess.DeviceID, err)
+	}
+	log.Printf("ibkr app auth: device login for %s", sess.DeviceID)
 	writeJSON(w, sess)
 }
 
@@ -429,11 +448,37 @@ func (h *handler) requireAuth(next nethttp.HandlerFunc) nethttp.HandlerFunc {
 		}
 		sess, ok := h.deps.Auth.Authenticate(token)
 		if !ok {
+			sess, ok = h.deviceCookieSession(w, r)
+		}
+		if !ok {
 			writeError(w, nethttp.StatusUnauthorized, "unauthorized")
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), sessionKey, sess)))
 	}
+}
+
+// deviceCookieSession mints a session from the long-lived device cookie.
+// This is the continuity path for clients whose script storage does not
+// survive — the iOS home-screen web app inherits Safari's cookies but not
+// its localStorage/IndexedDB, so the key/secret re-login can never run
+// there. Every outcome is logged: a silent 401 on the phone is otherwise
+// undiagnosable from the Mac.
+func (h *handler) deviceCookieSession(w nethttp.ResponseWriter, r *nethttp.Request) (auth.Session, bool) {
+	c, err := r.Cookie(deviceCookieName)
+	if err != nil || strings.TrimSpace(c.Value) == "" {
+		return auth.Session{}, false
+	}
+	sess, err := h.deps.Auth.AuthenticateDeviceCookie(c.Value)
+	if err != nil {
+		log.Printf("ibkr app auth: device cookie rejected (%s %s): %v", r.Method, r.URL.Path, err)
+		return auth.Session{}, false
+	}
+	log.Printf("ibkr app auth: session minted from device cookie for %s (%s %s)", sess.DeviceID, r.Method, r.URL.Path)
+	setSessionCookie(w, r, sess.Token, sess.ExpiresAt)
+	// Slide the cookie's clock without rotating its value (twin jars).
+	setDeviceCookie(w, r, c.Value)
+	return sess, true
 }
 
 func (h *handler) session(r *nethttp.Request) (auth.Session, bool) {
@@ -486,7 +531,6 @@ func bearerToken(r *nethttp.Request) string {
 }
 
 func setSessionCookie(w nethttp.ResponseWriter, r *nethttp.Request, token string, expires time.Time) {
-	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 	nethttp.SetCookie(w, &nethttp.Cookie{
 		Name:     "ibkr_app_session",
 		Value:    token,
@@ -494,8 +538,34 @@ func setSessionCookie(w nethttp.ResponseWriter, r *nethttp.Request, token string
 		Expires:  expires,
 		HttpOnly: true,
 		SameSite: nethttp.SameSiteStrictMode,
-		Secure:   secure,
+		Secure:   requestIsHTTPS(r),
 	})
+}
+
+const (
+	deviceCookieName = "ibkr_app_device"
+	// 400 days, the browser cookie-lifetime cap; the clock slides on every
+	// device-cookie login.
+	deviceCookieMaxAge = 400 * 24 * 60 * 60
+)
+
+func setDeviceCookie(w nethttp.ResponseWriter, r *nethttp.Request, value string) {
+	nethttp.SetCookie(w, &nethttp.Cookie{
+		Name:     deviceCookieName,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   deviceCookieMaxAge,
+		HttpOnly: true,
+		// Lax, not Strict: the first navigation into the app after a QR
+		// scan is a cross-site top-level navigation and must still carry
+		// the continuity credential.
+		SameSite: nethttp.SameSiteLaxMode,
+		Secure:   requestIsHTTPS(r),
+	})
+}
+
+func requestIsHTTPS(r *nethttp.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 type interfaceAddrsFunc func() ([]net.Addr, error)

@@ -16,7 +16,7 @@ func runBreadth(ctx context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	if fs.NArg() > 0 {
-		return fail(env, "breadth: takes no positional args (got %v)", fs.Args())
+		return failUnexpectedArgs(env, fs)
 	}
 	params := rpc.BreadthSPXParams{HistoryDays: *days}
 	var res rpc.BreadthSPXResult

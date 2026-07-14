@@ -674,31 +674,47 @@ async function exerciseUnderlyingPanelFixture(page) {
 
 async function exerciseCanaryDetail(page) {
   // Quiet-when-fresh blanks and hides the badge while the snapshot is fresh;
-  // that is the healthy state, not a missing timestamp.
-  const quietFresh = await page.locator("#canaryAsOf").evaluate((el) => el.hidden && !el.textContent.trim());
-  let timestamp = (await page.locator("#canaryAsOf").textContent())?.trim() || "";
-  if (!quietFresh && canaryTimestampMissing(timestamp)) {
+  // that is the healthy state, not a missing timestamp. Badge and hero are
+  // sampled in one evaluate so the no-data decision cannot straddle the
+  // re-render when a fresh instance's first canary poll lands mid-exercise.
+  const readCanaryHead = () => page.evaluate(() => {
+    const badge = document.getElementById("canaryAsOf");
+    const text = badge?.textContent?.trim() || "";
+    return {
+      quietFresh: !!badge && badge.hidden && !text,
+      timestamp: text,
+      hero: document.getElementById("canaryHero")?.textContent || "",
+    };
+  });
+  let head = await readCanaryHead();
+  if (!head.quietFresh && canaryTimestampMissing(head.timestamp)) {
     try {
+      // Wait for either rendered outcome of the first canary poll: a visible
+      // real timestamp, or the quiet-when-fresh blank+hidden badge that a
+      // just-landed fresh snapshot renders.
       await page.waitForFunction(() => {
-        const text = document.getElementById("canaryAsOf")?.textContent?.trim() || "";
+        const badge = document.getElementById("canaryAsOf");
+        if (!badge) return false;
+        const text = badge.textContent?.trim() || "";
+        if (badge.hidden && !text) return true;
         return text && text !== "no timestamp" && text !== "updated --" && text !== "--";
       }, { timeout: 30000 });
-      timestamp = (await page.locator("#canaryAsOf").textContent())?.trim() || "";
     } catch {
       // A first canary poll can legitimately outlast this wait (fresh app
       // instance against an off-hours live session); the pending-copy
       // assertion below still pins the rendered no-data contract.
     }
+    head = await readCanaryHead();
   }
-  const timestampMissing = !quietFresh && canaryTimestampMissing(timestamp);
+  const timestamp = head.timestamp;
+  const timestampMissing = !head.quietFresh && canaryTimestampMissing(timestamp);
   const initiallyOpen = await page.locator("#canaryDetailPanel").evaluate((el) => !el.hidden);
   if (initiallyOpen) {
     throw new Error("Portfolio Canary detail should be collapsed by default");
   }
   if (timestampMissing) {
-    const pending = await page.locator("#canaryHero").textContent();
-    if (!/waiting for canary snapshot/i.test(pending || "")) {
-      throw new Error(`canary timestamp is missing without pending copy: ${JSON.stringify({ timestamp, pending })}`);
+    if (!/waiting for canary snapshot/i.test(head.hero)) {
+      throw new Error(`canary timestamp is missing without pending copy: ${JSON.stringify({ timestamp, pending: head.hero })}`);
     }
     return { opens: false, initially_open: initiallyOpen, timestamp, no_value: true };
   }

@@ -25,7 +25,7 @@ func writeFlexFixture(t *testing.T, name, whenGenerated, from, to, body string) 
 	}
 	doc := fmt.Sprintf(`<FlexQueryResponse queryName="recon" type="AF">
  <FlexStatements count="1">
-  <FlexStatement accountId="U0000000" fromDate="%s" toDate="%s" whenGenerated="%s">
+  <FlexStatement accountId="U1234567" fromDate="%s" toDate="%s" whenGenerated="%s">
 %s
   </FlexStatement>
  </FlexStatements>

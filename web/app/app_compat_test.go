@@ -40,16 +40,33 @@ func TestAppJSStalePairingURLFallsBackToDeviceLogin(t *testing.T) {
 	main := jsFunctionBlock(t, js, "main")
 	for _, want := range []string{
 		`history.replaceState({}, "", "/");`,
-		`bootstrapped = await bootstrap({ quiet: true });`,
+		`localStorage.setItem("ibkrRemoteRoute", remote);`,
+		`bootstrapped = await bootstrapWithRetry();`,
 		"Pairing link expired; opening paired app.",
 	} {
 		if !strings.Contains(main, want) {
 			t.Fatalf("main missing stale pairing recovery contract %q", want)
 		}
 	}
+	// A transient bootstrap failure must retry, never dead-end; only a
+	// definitive device rejection may show the re-pair instruction.
+	retry := jsFunctionBlock(t, js, "bootstrapWithRetry")
+	for _, want := range []string{
+		"state.pairingRequired",
+		"retrying automatically",
+	} {
+		if !strings.Contains(retry, want) {
+			t.Fatalf("bootstrapWithRetry missing retry contract %q", want)
+		}
+	}
 	fetchBootstrap := jsFunctionBlock(t, js, "fetchBootstrap")
-	if !strings.Contains(fetchBootstrap, "if (!options.quiet)") {
-		t.Fatalf("fetchBootstrap must honor quiet recovery mode before showing pairing copy")
+	for _, want := range []string{
+		"state.pairingRequired = true",
+		"Scan a fresh QR code",
+	} {
+		if !strings.Contains(fetchBootstrap, want) {
+			t.Fatalf("fetchBootstrap missing definitive-rejection contract %q", want)
+		}
 	}
 }
 

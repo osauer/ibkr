@@ -237,7 +237,7 @@ func runOrderPlace(ctx context.Context, env *Env, args []string) int {
 		return parseExit(err)
 	}
 	if fs.NArg() > 0 {
-		return fail(env, "order place: takes no positional args")
+		return failUnexpectedArgs(env, fs)
 	}
 	if strings.TrimSpace(*token) == "" {
 		return fail(env, "order place: --preview-token is required")

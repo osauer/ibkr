@@ -64,7 +64,7 @@ func parseMCPArgs(args []string, stdout, stderr io.Writer) (mcp.Profile, int) {
 		return mcp.ProfileFull, 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "ibkr mcp: takes no positional args (got %v)\n", fs.Args())
+		rejectUnexpectedArgument(stderr, "ibkr mcp", fs, printMCPUsage)
 		return mcp.ProfileFull, 2
 	}
 	profile, err := mcp.ParseProfile(*profileRaw)

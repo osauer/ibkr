@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/app"
 	"github.com/osauer/ibkr/v2/internal/dial"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	"github.com/osauer/ibkr/v2/internal/update"
@@ -81,6 +82,10 @@ type appRestartDeps struct {
 	stop  func(int, time.Duration) error
 	kill  func(int, time.Duration) error
 	start func(context.Context, []string) (int, error)
+	// supervisor reports a loaded launchd job owning the app; kickstart
+	// restarts it in place. Both nil outside macOS wiring and most tests.
+	supervisor func(context.Context) (appSupervisor, bool)
+	kickstart  func(context.Context, string) error
 }
 
 type appRestartBehavior struct {
@@ -93,6 +98,7 @@ type appRestartResult struct {
 	Action     string   `json:"action"`
 	Reason     string   `json:"reason,omitempty"`
 	Target     string   `json:"target"`
+	Supervisor string   `json:"supervisor,omitempty"`
 	WasRunning bool     `json:"was_running"`
 	Started    bool     `json:"started"`
 	Forced     bool     `json:"forced"`
@@ -139,8 +145,7 @@ func RunRestart(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	opts.appRemoteURLSet = restartFlagWasSet(fs, "remote-url")
 	opts.appStateDirSet = restartFlagWasSet(fs, "state-dir")
 	if fs.NArg() != 0 {
-		fmt.Fprintf(stderr, "ibkr restart: unexpected argument %q\n", fs.Arg(0))
-		return 2
+		return failUnexpectedArgs(env, fs)
 	}
 	if !opts.app && (opts.appAddrSet || opts.appPublicURLSet || opts.appRemoteSet || opts.appRemoteURLSet || opts.appStateDirSet) {
 		fmt.Fprintln(stderr, "ibkr restart: --addr, --public-url, --remote, --remote-url, and --state-dir require --app")
@@ -150,13 +155,16 @@ func RunRestart(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, "ibkr restart: --timeout must be positive")
 		return 2
 	}
+	appDeps := appRestartDeps{
+		find:       findAppProcess,
+		stop:       stopAppProcess,
+		kill:       killAppProcess,
+		start:      startAppProcess,
+		supervisor: findAppLaunchAgent,
+		kickstart:  kickstartLaunchAgent,
+	}
 	if opts.app {
-		return runRestartAppCore(ctx, &opts, appRestartDeps{
-			find:  findAppProcess,
-			stop:  stopAppProcess,
-			kill:  killAppProcess,
-			start: startAppProcess,
-		})
+		return runRestartAppCore(ctx, &opts, appDeps)
 	}
 	return runRestartAllCore(ctx, &opts,
 		restartDeps{
@@ -165,12 +173,7 @@ func RunRestart(ctx context.Context, args []string, stdout, stderr io.Writer) in
 			kill:           update.KillDaemon,
 			startAndHealth: startDaemonAndFetchHealth,
 		},
-		appRestartDeps{
-			find:  findAppProcess,
-			stop:  stopAppProcess,
-			kill:  killAppProcess,
-			start: startAppProcess,
-		},
+		appDeps,
 	)
 }
 
@@ -327,6 +330,11 @@ func restartApp(ctx context.Context, opts *restartOptions, deps appRestartDeps, 
 	}
 
 	proc, err := deps.find(ctx)
+	if deps.supervisor != nil {
+		if sup, ok := deps.supervisor(ctx); ok && supervisedRestartApplies(proc, err, sup) {
+			return restartSupervisedApp(ctx, opts, deps, prefix, startedAt, proc, err, sup)
+		}
+	}
 	switch {
 	case err == nil:
 		res.Action = "restarted"
@@ -337,33 +345,12 @@ func restartApp(ctx context.Context, opts *restartOptions, deps appRestartDeps, 
 			args = append([]string(nil), proc.Args...)
 		}
 		finalizeArgs()
-		stopErr := deps.stop(proc.PID, opts.timeout)
-		if stopErr != nil {
-			if !opts.force || !errors.Is(stopErr, errAppStopTimeout) {
-				fmt.Fprintf(opts.err, "%s: %v\n", prefix, stopErr)
-				if !opts.force && errors.Is(stopErr, errAppStopTimeout) {
-					fmt.Fprintf(opts.err, "%s: re-run with --force to send SIGKILL after the graceful timeout\n", prefix)
-				}
-				return res, true, 1
-			}
-			if !opts.jsonOut {
-				fmt.Fprintf(opts.out, "%s: app pid %d ignored SIGTERM; forcing SIGKILL\n", prefix, proc.PID)
-			}
-			if err := deps.kill(proc.PID, opts.timeout); err != nil {
-				fmt.Fprintf(opts.err, "%s: %v\n", prefix, err)
-				return res, true, 1
-			}
-			res.Forced = true
-		} else {
-			res.Graceful = true
+		forced, exit := stopAppWithPolicy(opts, deps, prefix, proc.PID)
+		if exit != 0 {
+			return res, true, exit
 		}
-		if !opts.jsonOut {
-			mode := "gracefully"
-			if res.Forced {
-				mode = "with SIGKILL"
-			}
-			fmt.Fprintf(opts.out, "%s: stopped app pid %d %s\n", prefix, proc.PID, mode)
-		}
+		res.Forced = forced
+		res.Graceful = !forced
 		if restarted, ok, err := waitForAppRespawn(ctx, deps.find, args, 2*time.Second); err != nil {
 			fmt.Fprintf(opts.err, "%s: %v\n", prefix, err)
 			return res, true, 1
@@ -412,6 +399,139 @@ func restartApp(ctx context.Context, opts *restartOptions, deps appRestartDeps, 
 		if behavior.pairHint {
 			fmt.Fprintf(opts.out, "%s: pair a phone with `ibkr app pair`\n", prefix)
 		}
+	}
+	return res, true, 0
+}
+
+// stopAppWithPolicy SIGTERMs pid with the graceful/force policy shared by
+// the supervised and unsupervised restart paths, reporting forced=true when
+// SIGKILL was needed. A non-zero exit means the stop failed.
+func stopAppWithPolicy(opts *restartOptions, deps appRestartDeps, prefix string, pid int) (forced bool, exit int) {
+	stopErr := deps.stop(pid, opts.timeout)
+	if stopErr != nil {
+		if !opts.force || !errors.Is(stopErr, errAppStopTimeout) {
+			fmt.Fprintf(opts.err, "%s: %v\n", prefix, stopErr)
+			if !opts.force && errors.Is(stopErr, errAppStopTimeout) {
+				fmt.Fprintf(opts.err, "%s: re-run with --force to send SIGKILL after the graceful timeout\n", prefix)
+			}
+			return false, 1
+		}
+		if !opts.jsonOut {
+			fmt.Fprintf(opts.out, "%s: app pid %d ignored SIGTERM; forcing SIGKILL\n", prefix, pid)
+		}
+		if err := deps.kill(pid, opts.timeout); err != nil {
+			fmt.Fprintf(opts.err, "%s: %v\n", prefix, err)
+			return false, 1
+		}
+		forced = true
+	}
+	if !opts.jsonOut {
+		mode := "gracefully"
+		if forced {
+			mode = "with SIGKILL"
+		}
+		fmt.Fprintf(opts.out, "%s: stopped app pid %d %s\n", prefix, pid, mode)
+	}
+	return forced, 0
+}
+
+// supervisedRestartApplies reports whether the launchd job owns this
+// restart. The app lock lives in the state directory, so lock identity —
+// not pid or argv equality — is the orphan test: a found process that
+// resolves to the job's state dir is the supervised app or its orphan,
+// while one resolving elsewhere is an independent instance (an isolated
+// smoke or preview app with its own --state-dir) — kickstarting the
+// shared host in its place would restart the wrong app and strand the
+// instance the caller asked about.
+func supervisedRestartApplies(proc appProcess, findErr error, sup appSupervisor) bool {
+	if findErr != nil || proc.PID == sup.PID {
+		return true
+	}
+	return appArgsStateDir(proc.Args) == appArgsStateDir(sup.Args)
+}
+
+// appArgsStateDir resolves the state directory an `ibkr app` argv locks:
+// the --state-dir value when present, else the shared default (a plist
+// whose arguments could not be parsed resolves to the default too).
+// Symlinked spellings (macOS /tmp vs /private/tmp) resolve to one
+// canonical path so equal locks never read as different.
+func appArgsStateDir(args []string) string {
+	dir := strings.TrimSpace(appValueArg(args, "state-dir"))
+	if dir == "" {
+		dir = app.DefaultStateDir()
+	}
+	dir = filepath.Clean(dir)
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != "" {
+		return resolved
+	}
+	return dir
+}
+
+// restartSupervisedApp restarts the app through its launchd job. Stopping
+// the supervised process by hand races launchd's KeepAlive respawn: whoever
+// loses the race leaves an orphan holding the app state lock while launchd
+// crash-loops against it, and the app then runs without any supervisor.
+func restartSupervisedApp(ctx context.Context, opts *restartOptions, deps appRestartDeps, prefix string, startedAt time.Time, proc appProcess, findErr error, sup appSupervisor) (appRestartResult, bool, int) {
+	res := appRestartResult{Action: "restarted", Target: "app", Supervisor: sup.Target, Args: sup.Args}
+	if opts.appAddrSet || opts.appPublicURLSet || opts.appRemoteSet || opts.appRemoteURLSet || opts.appStateDirSet {
+		fmt.Fprintf(opts.err, "%s: app flag overrides do not apply to the launchd-supervised app (%s); change its flags with `ibkr setup app` and rerun\n", prefix, sup.Target)
+		return res, true, 1
+	}
+	if findErr == nil && proc.PID > 0 {
+		res.WasRunning = true
+		res.OldPID = proc.PID
+		res.OldCommand = proc.Command
+		if proc.PID != sup.PID {
+			// Orphan from an earlier hand-spawned restart: it holds the app
+			// state lock, so launchd's respawns crash-loop until it is gone.
+			if !opts.jsonOut {
+				fmt.Fprintf(opts.out, "%s: stopping unsupervised app pid %d so the launchd job can own the app again\n", prefix, proc.PID)
+			}
+			forced, exit := stopAppWithPolicy(opts, deps, prefix, proc.PID)
+			if exit != 0 {
+				return res, true, exit
+			}
+			res.Forced = forced
+			res.Graceful = !forced
+		}
+	}
+	if err := deps.kickstart(ctx, sup.Target); err != nil {
+		fmt.Fprintf(opts.err, "%s: %v\n", prefix, err)
+		return res, true, 1
+	}
+	// launchd may throttle the respawn (about 10s after a crash-loop), so
+	// the wait budget must comfortably exceed the throttle interval. Accept
+	// the new pid only after two consecutive samples agree: the first spawn
+	// can lose a short lock race against the old process's graceful exit
+	// and be replaced by a throttled second spawn.
+	deadline := time.Now().Add(max(opts.timeout, 25*time.Second))
+	lastPID := 0
+	for {
+		now, ok := deps.supervisor(ctx)
+		if ok && now.PID > 0 && now.PID != sup.PID && now.PID != res.OldPID {
+			if now.PID == lastPID {
+				res.Started = true
+				res.NewPID = now.PID
+				break
+			}
+			lastPID = now.PID
+		} else {
+			lastPID = 0
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(opts.err, "%s: launchd did not respawn %s in time; check `launchctl print %s` and ~/Library/Logs/ibkr/app.err.log\n", prefix, sup.Target, sup.Target)
+			return res, true, 1
+		}
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(opts.err, "%s: %v\n", prefix, ctx.Err())
+			return res, true, 1
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	res.ElapsedMS = time.Since(startedAt).Milliseconds()
+	if !opts.jsonOut {
+		fmt.Fprintf(opts.out, "%s: restarted supervised app pid %d via launchctl kickstart (%s)\n", prefix, res.NewPID, sup.Target)
 	}
 	return res, true, 0
 }
@@ -577,7 +697,10 @@ func waitForAppRespawn(ctx context.Context, find func(context.Context) (appProce
 			}
 			return appProcess{}, false, nil
 		}
-		if !errors.Is(err, errAppNotRunning) {
+		// An ambiguous find (other app instances, e.g. the shared host or
+		// a preview) means "no unambiguous respawn yet", not a failure —
+		// aborting here would leave the just-stopped app stopped.
+		if !errors.Is(err, errAppNotRunning) && !errors.Is(err, errAppUnverified) {
 			return appProcess{}, false, err
 		}
 		select {

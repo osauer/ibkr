@@ -170,8 +170,7 @@ func TestNewWorkerResumesStoredRoute(t *testing.T) {
 	srv.Start()
 	t.Cleanup(srv.Close)
 
-	ctx := t.Context()
-	w, err := NewWorker(ctx, WorkerOptions{
+	w, err := NewWorker(WorkerOptions{
 		BaseURL:              srv.URL,
 		OriginURL:            "http://127.0.0.1:1",
 		HTTPClient:           srv.Client(),
@@ -184,6 +183,14 @@ func TestNewWorkerResumesStoredRoute(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("NewWorker: %v", err)
+	}
+	// The held route already names the stable route id before any network
+	// round trip, so pairing URLs stay correct through a relay outage.
+	if !strings.Contains(w.PairingURL("https://relay.example/pair.html?pair=p"), "remote=r_stable") {
+		t.Fatalf("worker did not seed the held route before registration")
+	}
+	if err := w.registerCurrent(t.Context()); err != nil {
+		t.Fatalf("registerCurrent: %v", err)
 	}
 	if got.RouteID != "r_stable" || got.ConnectorToken != "tok-r_stable" {
 		t.Fatalf("register request = %#v, want stored route credentials", got)
@@ -222,8 +229,7 @@ func TestNewWorkerFallsBackToFreshRouteWhenStoredRouteExpired(t *testing.T) {
 	srv.Start()
 	t.Cleanup(srv.Close)
 
-	ctx := t.Context()
-	w, err := NewWorker(ctx, WorkerOptions{
+	w, err := NewWorker(WorkerOptions{
 		BaseURL:              srv.URL,
 		OriginURL:            "http://127.0.0.1:1",
 		HTTPClient:           srv.Client(),
@@ -237,6 +243,9 @@ func TestNewWorkerFallsBackToFreshRouteWhenStoredRouteExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorker: %v", err)
 	}
+	if err := w.registerCurrent(t.Context()); err != nil {
+		t.Fatalf("registerCurrent: %v", err)
+	}
 	if len(requests) != 2 {
 		t.Fatalf("register requests = %#v, want resume attempt then fresh registration", requests)
 	}
@@ -248,6 +257,140 @@ func TestNewWorkerFallsBackToFreshRouteWhenStoredRouteExpired(t *testing.T) {
 	}
 	if persisted.RouteID != "r_fresh" {
 		t.Fatalf("persisted route = %#v, want fresh route", persisted)
+	}
+}
+
+func TestWorkerRunRetriesFailedInitialRegistration(t *testing.T) {
+	t.Parallel()
+
+	var registerCalls atomic.Int64
+	connected := make(chan struct{}, 1)
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/register", func(wr http.ResponseWriter, _ *http.Request) {
+		if registerCalls.Add(1) == 1 {
+			// Simulate the relay (or DNS) being unreachable at app boot.
+			wr.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		wr.Header().Set("Content-Type", "application/json")
+		_, _ = wr.Write(fakeRegisterJSON(srv.URL, "r_lazy", time.Now().Add(defaultRouteTTL)))
+	})
+	mux.HandleFunc("/api/connect", func(wr http.ResponseWriter, r *http.Request) {
+		acceptAndHold(wr, r, func() {
+			select {
+			case connected <- struct{}{}:
+			default:
+			}
+		})
+	})
+	srv = httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w, err := NewWorker(WorkerOptions{BaseURL: srv.URL, OriginURL: "http://127.0.0.1:1", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatalf("NewWorker must not fail on registration outages: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
+
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("connector never connected after failed initial registration (register calls: %d)", registerCalls.Load())
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Run did not return after parent cancel")
+	}
+}
+
+func TestRegisterCurrentFallsBackOnUnauthorizedResume(t *testing.T) {
+	t.Parallel()
+
+	var requests []registerRequest
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/register", func(wr http.ResponseWriter, r *http.Request) {
+		var got registerRequest
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode register request: %v", err)
+		}
+		requests = append(requests, got)
+		if got.RouteID != "" {
+			// Relay-side token mismatch: e.g. the Durable Object storage
+			// was wiped by a redeploy while the Mac kept the old token.
+			wr.Header().Set("Content-Type", "application/json")
+			wr.WriteHeader(http.StatusUnauthorized)
+			_, _ = wr.Write([]byte(`{"error":"unauthorized route resume"}`))
+			return
+		}
+		wr.Header().Set("Content-Type", "application/json")
+		_, _ = wr.Write(fakeRegisterJSON(srv.URL, "r_fresh", time.Now().Add(defaultRouteTTL)))
+	})
+	srv = httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	w, err := NewWorker(WorkerOptions{
+		BaseURL:              srv.URL,
+		OriginURL:            "http://127.0.0.1:1",
+		HTTPClient:           srv.Client(),
+		ResumeRouteID:        "r_stale",
+		ResumeConnectorToken: "tok-stale",
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+	if err := w.registerCurrent(t.Context()); err != nil {
+		t.Fatalf("registerCurrent: %v", err)
+	}
+	if len(requests) != 2 || requests[0].RouteID != "r_stale" || requests[1].RouteID != "" {
+		t.Fatalf("register requests = %#v, want rejected resume then fresh registration", requests)
+	}
+	if !strings.Contains(w.PairingURL("https://relay.example/pair.html?pair=p"), "remote=r_fresh") {
+		t.Fatalf("worker did not switch to the fresh route after unauthorized resume")
+	}
+}
+
+func TestRegisterCurrentKeepsRouteOnTransientFailure(t *testing.T) {
+	t.Parallel()
+
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/register", func(wr http.ResponseWriter, _ *http.Request) {
+		wr.WriteHeader(http.StatusServiceUnavailable)
+	})
+	srv = httptest.NewUnstartedServer(mux)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	w, err := NewWorker(WorkerOptions{
+		BaseURL:              srv.URL,
+		OriginURL:            "http://127.0.0.1:1",
+		HTTPClient:           srv.Client(),
+		ResumeRouteID:        "r_keep",
+		ResumeConnectorToken: "tok-keep",
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+	if err := w.registerCurrent(t.Context()); err == nil {
+		t.Fatalf("registerCurrent should surface the transient failure")
+	}
+	// The held route survives so a later retry resumes it instead of
+	// minting a new route id (which would orphan paired phones).
+	if !strings.Contains(w.PairingURL("https://relay.example/pair.html?pair=p"), "remote=r_keep") {
+		t.Fatalf("transient registration failure must not drop the held route")
 	}
 }
 
@@ -284,9 +427,14 @@ func TestWorkerRunCyclesConnectionToSlideRouteTTL(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w, err := NewWorker(ctx, WorkerOptions{BaseURL: srv.URL, OriginURL: "http://127.0.0.1:1", HTTPClient: srv.Client()})
+	w, err := NewWorker(WorkerOptions{BaseURL: srv.URL, OriginURL: "http://127.0.0.1:1", HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatalf("NewWorker: %v", err)
+	}
+	// Register before Run so the response-derived cycle interval can be
+	// overridden; Run skips registration for a held route.
+	if err := w.registerCurrent(ctx); err != nil {
+		t.Fatalf("registerCurrent: %v", err)
 	}
 	w.mu.Lock()
 	w.cycleEvery = 50 * time.Millisecond // bypass the prod minCycleEvery floor
@@ -354,9 +502,12 @@ func TestWorkerRunReRegistersOnGoneRoute(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w, err := NewWorker(ctx, WorkerOptions{BaseURL: srv.URL, OriginURL: "http://127.0.0.1:1", HTTPClient: srv.Client()})
+	w, err := NewWorker(WorkerOptions{BaseURL: srv.URL, OriginURL: "http://127.0.0.1:1", HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatalf("NewWorker: %v", err)
+	}
+	if err := w.registerCurrent(ctx); err != nil {
+		t.Fatalf("registerCurrent: %v", err)
 	}
 	if got := w.PairingURL("https://relay.example/pair.html?pair=p"); !strings.Contains(got, "remote=r_1") {
 		t.Fatalf("initial PairingURL = %q, want remote=r_1", got)
@@ -377,7 +528,7 @@ func TestWorkerRunReRegistersOnGoneRoute(t *testing.T) {
 	gotRegisters := registers
 	mu.Unlock()
 	if gotRegisters != 2 {
-		t.Fatalf("registers = %d, want 2 (one at construction, one after 410)", gotRegisters)
+		t.Fatalf("registers = %d, want 2 (initial registration, resume after 410)", gotRegisters)
 	}
 	if got := w.PairingURL("https://relay.example/pair.html?pair=p"); !strings.Contains(got, "remote=r_2") {
 		t.Fatalf("PairingURL after re-register = %q, want remote=r_2 (new pairings must use the fresh route)", got)
@@ -408,7 +559,7 @@ func TestWorkerRunReturnsOnParentCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w, err := NewWorker(ctx, WorkerOptions{BaseURL: srv.URL, OriginURL: "http://127.0.0.1:1", HTTPClient: srv.Client()})
+	w, err := NewWorker(WorkerOptions{BaseURL: srv.URL, OriginURL: "http://127.0.0.1:1", HTTPClient: srv.Client()})
 	if err != nil {
 		t.Fatalf("NewWorker: %v", err)
 	}
