@@ -16,6 +16,9 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 | `[auto_trade]` | `reload_interval` | `duration` | ReloadInterval controls how often the daemon checks policy-file changes; default 30s. |
 | `[daemon]` | `idle_timeout` | `duration` | IdleTimeout is how long the auto-spawned daemon stays alive between CLI calls (default 15m, accepts any Go duration string like "1h" or "0s"); set "0s" to disable idle-shutdown when running long cold-start jobs such as the first breadth fan-out under `ibkr daemon --foreground`. |
 | `[daemon]` | `log_level` | `string` | LogLevel is the daemon's log verbosity — one of "debug", "info" (default), "warn", or "error". |
+| `[flex]` | `enabled` | `bool` | Enabled turns the daily Flex statement fetch on; default false. |
+| `[flex]` | `query_id` | `string` | QueryID is the IBKR Flex query id to fetch (create the query in Account Management with cash transactions, transfers, and equity summary sections); required when enabled. |
+| `[flex]` | `token_path` | `string` | TokenPath points to a file holding only the Flex Web Service token; default ~/.config/ibkr/flex-token (mode 0600). |
 | `[gateway]` | `account` | `string` | Account pins the IBKR account ID like "U1234567"; empty (default) defers to the gateway's managedAccounts list — fine for single-account logins, required disambiguator when the login carries multiple accounts. |
 | `[gateway]` | `breadth_client_id` | `*int` | BreadthClientID is the IBKR clientID used by the dedicated historical-bar connector that backs the SPX breadth refresh. |
 | `[gateway]` | `client_id` | `*int` | ClientID pins the IBKR API clientID for the primary connection (default 15); collisions are treated as a stale-client/operator issue and are not auto-walked to neighboring reserved IDs. |

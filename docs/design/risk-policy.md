@@ -62,8 +62,10 @@ operator-declared journal facts. Adjusted equity = equity − cumulative
 declared flows; the peak tracks adjusted equity, so a deposit is not a fake
 peak and a withdrawal is not a fake drawdown. A deposit whose effective
 time precedes the recorded peak corrects the peak downward (never-inflate).
-Broker-statement reconciliation is phase 3; the reconcile event is a human
-attestation restarting the unreconciled clock.
+Since phase 3a (risk-policy v2, docs/design/post-trade-truth.md) the
+reconcile event is a human sign-off against a specific, fully resolved
+`ibkr recon` report — bare attestation is retired, and the `[recon]`
+policy keys define what counts as a matching exception.
 
 ## Safety invariants
 

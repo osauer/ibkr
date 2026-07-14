@@ -349,6 +349,10 @@ type Server struct {
 	// authorization.
 	riskPolicies *riskPolicyManager
 	riskCapital  *riskCapitalStore
+	// flexFetch tracks the daily Flex statement ingestion for post-trade
+	// reconciliation (docs/design/post-trade-truth.md). Read-only toward
+	// the broker; sanitized status only, never the token.
+	flexFetch flexFetchState
 	// earnings backs the trading rulebook's catalyst rules (6-8); LKG cache,
 	// async refresh only — never fetched on a snapshot or preview path.
 	earnings *earningsCache
@@ -1168,6 +1172,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.riskPolicies != nil {
 		go s.riskPolicies.Run(serverCtx, s.logger.Infof)
 	}
+	go s.runFlexFetchLoop(serverCtx)
 	if s.tradeProposals != nil {
 		s.proposalsStarted.Do(func() {
 			go s.tradeProposals.Run(serverCtx)
@@ -2385,6 +2390,10 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyResetDrawdown(ctx, req) })
 	case rpc.MethodRiskPolicyArtefact:
 		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyArtefact(ctx, req) })
+	case rpc.MethodReconSnapshot:
+		s.unary(req, enc, func() (any, error) { return s.handleReconSnapshot(ctx, req) })
+	case rpc.MethodReconDismiss:
+		s.unary(req, enc, func() (any, error) { return s.handleReconDismiss(ctx, req) })
 	case rpc.MethodTradeProposalsSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleTradeProposalsSnapshot(req), nil })
 	case rpc.MethodTradeProposalsRefresh:

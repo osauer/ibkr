@@ -29,6 +29,12 @@ func testConstitution() *risk.Constitution {
 			BlockConsumedPct: new(30.0),
 		},
 		Override: risk.ConstitutionOverride{MaxDurationHours: new(24)},
+		Recon: risk.ConstitutionRecon{
+			AmountTolerancePct:     new(0.5),
+			AmountToleranceMin:     new(5.0),
+			DateWindowBusinessDays: new(3),
+			MaxReportAgeDays:       new(4),
+		},
 		Cadence: risk.ConstitutionCadence{
 			Morning: risk.ConstitutionArtefact{Class: risk.EnforcementAdvisory},
 		},

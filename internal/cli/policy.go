@@ -17,8 +17,9 @@ import (
 // here touches broker writes, freeze, or trading limits.
 func runPolicy(ctx context.Context, env *Env, args []string) int {
 	sub := "show"
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		sub, args = args[0], args[1:]
+	if idx := firstPositionalIndex(args); idx >= 0 {
+		sub = args[idx]
+		args = append(append([]string{}, args[:idx]...), args[idx+1:]...)
 	}
 	switch sub {
 	case "show":
@@ -36,6 +37,24 @@ func runPolicy(ctx context.Context, env *Env, args []string) int {
 	default:
 		return fail(env, "policy: unknown subcommand %q (try `ibkr policy show --explain`)", sub)
 	}
+}
+
+// firstPositionalIndex finds the first non-flag token, skipping the values
+// of catalog-known value flags. Needed because Run() hoists flags before
+// positionals, so a subcommand can arrive after its own flags
+// (settingsSubcommandIndex precedent).
+func firstPositionalIndex(args []string) int {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			if isValueFlag(arg) && !strings.Contains(arg, "=") {
+				i++
+			}
+			continue
+		}
+		return i
+	}
+	return -1
 }
 
 func runPolicyShow(ctx context.Context, env *Env, args []string) int {
@@ -94,7 +113,7 @@ func runPolicyShow(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintf(env.Stdout, "  LATCHED since %s — clearing requires `ibkr policy reset-drawdown --reason ...` (human, journaled)\n", c.LatchedAt.Local().Format("2006-01-02 15:04"))
 	}
 	if c.LastReconciledAt.IsZero() {
-		fmt.Fprintln(env.Stdout, "  reconciled        never — declare `ibkr policy capital-event reconcile` after checking broker statements")
+		fmt.Fprintln(env.Stdout, "  reconciled        never — review `ibkr recon`, resolve exceptions, then sign off with `ibkr policy capital-event reconcile --report <id>`")
 	} else {
 		fmt.Fprintf(env.Stdout, "  reconciled        %s%s\n", c.LastReconciledAt.Local().Format("2006-01-02 15:04"), staleTag(c.ReconcileStale))
 	}
@@ -166,6 +185,7 @@ func runPolicyCapitalEvent(ctx context.Context, env *Env, args []string) int {
 	amount := fs.Float64("amount", 0, "amount in the policy base currency (deposit/withdrawal)")
 	effectiveAt := fs.String("effective-at", "", "when the flow hit the account (YYYY-MM-DD or RFC3339; default now)")
 	note := fs.String("note", "", "free-text note for the journal")
+	report := fs.String("report", "", "recon report id being signed off (required for reconcile; from `ibkr recon`)")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
@@ -173,7 +193,7 @@ func runPolicyCapitalEvent(ctx context.Context, env *Env, args []string) int {
 	if fs.NArg() != 1 {
 		return fail(env, "policy capital-event: exactly one of deposit|withdrawal|reconcile is required")
 	}
-	params := rpc.CapitalEventParams{Type: fs.Arg(0), AmountBase: *amount, Note: *note, Origin: env.Origin}
+	params := rpc.CapitalEventParams{Type: fs.Arg(0), AmountBase: *amount, Note: *note, Report: *report, Origin: env.Origin}
 	if *effectiveAt != "" {
 		t, err := parseFlexibleTime(*effectiveAt)
 		if err != nil {

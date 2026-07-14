@@ -58,6 +58,7 @@ type Constitution struct {
 	Capital   ConstitutionCapital   `toml:"capital" json:"capital"`
 	Drawdown  ConstitutionDrawdown  `toml:"drawdown" json:"drawdown"`
 	Override  ConstitutionOverride  `toml:"override" json:"override"`
+	Recon     ConstitutionRecon     `toml:"recon" json:"recon"`
 	Cadence   ConstitutionCadence   `toml:"cadence" json:"cadence"`
 	Inventory ConstitutionInventory `toml:"inventory" json:"inventory"`
 }
@@ -99,6 +100,24 @@ type ConstitutionDrawdown struct {
 // policy.
 type ConstitutionOverride struct {
 	MaxDurationHours *int `toml:"max_duration_hours" json:"max_duration_hours"`
+}
+
+// ConstitutionRecon sets what counts as a reconciliation exception when
+// broker statement flows are matched against the declared capital-event
+// ledger (docs/design/post-trade-truth.md). These are policy, not
+// plumbing: they decide which differences the operator must look at.
+type ConstitutionRecon struct {
+	// A statement flow and a declared event match on amount when they
+	// differ by at most max(amount_tolerance_pct% of the statement
+	// amount, amount_tolerance_min in base currency).
+	AmountTolerancePct *float64 `toml:"amount_tolerance_pct" json:"amount_tolerance_pct"`
+	AmountToleranceMin *float64 `toml:"amount_tolerance_min" json:"amount_tolerance_min"`
+	// DateWindowBusinessDays bounds how far apart the statement value
+	// date and the declared effective date may sit (weekday count).
+	DateWindowBusinessDays *int `toml:"date_window_business_days" json:"date_window_business_days"`
+	// MaxReportAgeDays bounds how old the newest ingested statement may
+	// be for a recon report to back a reconcile sign-off.
+	MaxReportAgeDays *int `toml:"max_report_age_days" json:"max_report_age_days"`
 }
 
 // ConstitutionCadence declares the operating-cadence artefacts so their
@@ -186,6 +205,18 @@ func (c Constitution) Validate() error {
 	if v := c.Override.MaxDurationHours; v != nil && *v <= 0 {
 		return fmt.Errorf("override.max_duration_hours must be positive")
 	}
+	if v := c.Recon.AmountTolerancePct; v != nil && (*v < 0 || *v > 100) {
+		return fmt.Errorf("recon.amount_tolerance_pct must be in [0, 100]")
+	}
+	if v := c.Recon.AmountToleranceMin; v != nil && *v < 0 {
+		return fmt.Errorf("recon.amount_tolerance_min must not be negative")
+	}
+	if v := c.Recon.DateWindowBusinessDays; v != nil && *v <= 0 {
+		return fmt.Errorf("recon.date_window_business_days must be positive")
+	}
+	if v := c.Recon.MaxReportAgeDays; v != nil && *v <= 0 {
+		return fmt.Errorf("recon.max_report_age_days must be positive")
+	}
 	for _, a := range []struct {
 		key   string
 		class string
@@ -251,6 +282,18 @@ func (c Constitution) UnapprovedKeys() []string {
 	if c.Override.MaxDurationHours == nil {
 		out = append(out, "override.max_duration_hours")
 	}
+	if c.Recon.AmountTolerancePct == nil {
+		out = append(out, "recon.amount_tolerance_pct")
+	}
+	if c.Recon.AmountToleranceMin == nil {
+		out = append(out, "recon.amount_tolerance_min")
+	}
+	if c.Recon.DateWindowBusinessDays == nil {
+		out = append(out, "recon.date_window_business_days")
+	}
+	if c.Recon.MaxReportAgeDays == nil {
+		out = append(out, "recon.max_report_age_days")
+	}
 	return out
 }
 
@@ -267,6 +310,7 @@ func (c Constitution) FingerprintKey() string {
 		Capital       ConstitutionCapital   `json:"capital"`
 		Drawdown      ConstitutionDrawdown  `json:"drawdown"`
 		Override      ConstitutionOverride  `json:"override"`
+		Recon         ConstitutionRecon     `json:"recon"`
 		Cadence       ConstitutionCadence   `json:"cadence"`
 		Inventory     ConstitutionInventory `json:"inventory"`
 	}{
@@ -277,6 +321,7 @@ func (c Constitution) FingerprintKey() string {
 		Capital:       c.Capital,
 		Drawdown:      c.Drawdown,
 		Override:      c.Override,
+		Recon:         c.Recon,
 		Cadence:       c.Cadence,
 		Inventory:     c.Inventory,
 	}

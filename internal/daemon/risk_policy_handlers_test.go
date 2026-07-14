@@ -40,7 +40,7 @@ func TestRiskPolicyWritesRejectAgentOrigin(t *testing.T) {
 		call func(origin string) error
 	}{
 		{"capital_event", func(origin string) error {
-			_, err := s.handleRiskPolicyCapitalEvent(ctx, rawParams(t, rpc.CapitalEventParams{Type: "reconcile", Origin: origin}))
+			_, err := s.handleRiskPolicyCapitalEvent(ctx, rawParams(t, rpc.CapitalEventParams{Type: "deposit", AmountBase: 100, Origin: origin}))
 			return err
 		}},
 		{"override", func(origin string) error {

@@ -31,6 +31,12 @@ block_enforcement = "shadow"
 [override]
 max_duration_hours = 24
 
+[recon]
+amount_tolerance_pct = 0.5
+amount_tolerance_min = 5.0
+date_window_business_days = 3
+max_report_age_days = 4
+
 [cadence.morning]
 class = "advisory"
 `

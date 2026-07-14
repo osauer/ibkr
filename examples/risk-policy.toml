@@ -46,6 +46,15 @@ block_enforcement = "shadow"
 # Overrides are human-only, single-control, reasoned, journaled, expiring.
 #max_duration_hours = 0
 
+[recon]
+# What counts as a reconciliation exception when broker statement flows
+# are matched against declared capital events (docs/design/post-trade-truth.md).
+# Reconcile sign-off requires a fresh, fully resolved `ibkr recon` report.
+#amount_tolerance_pct = 0.0
+#amount_tolerance_min = 0.0
+#date_window_business_days = 0
+#max_report_age_days = 0
+
 # Operating-cadence artefacts (phase 2). Declaring one enables
 # `ibkr policy artefact <name>` completion journaling. All advisory in v1.
 [cadence.morning]

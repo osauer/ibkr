@@ -43,6 +43,10 @@ func ConstitutionLimits(c *Constitution) []ConstitutionLimit {
 		enfc     = EnforcementShadow
 		enfSrc   = "unapproved"
 		ovh      *int
+		rTolP    *float64
+		rTolM    *float64
+		rDateW   *int
+		rAge     *int
 	)
 	if c != nil {
 		cur = c.Capital.BaseCurrency
@@ -59,6 +63,10 @@ func ConstitutionLimits(c *Constitution) []ConstitutionLimit {
 			enfSrc = "file"
 		}
 		ovh = c.Override.MaxDurationHours
+		rTolP = c.Recon.AmountTolerancePct
+		rTolM = c.Recon.AmountToleranceMin
+		rDateW = c.Recon.DateWindowBusinessDays
+		rAge = c.Recon.MaxReportAgeDays
 	}
 
 	money := func(v *float64) (string, string) {
@@ -100,6 +108,20 @@ func ConstitutionLimits(c *Constitution) []ConstitutionLimit {
 		get("override.max_duration_hours", ovhVal, ovhSrc,
 			"Longest lifetime of a one-shot override. Overrides are human-only, name one control, require a reason, are journaled with the policy fingerprint, and expire on their own.", "advisory"),
 	}
+	rTolPVal, rTolPSrc := pct(rTolP)
+	rTolMVal, rTolMSrc := money(rTolM)
+	rDateWVal, rDateWSrc := num(rDateW, "business days")
+	rAgeVal, rAgeSrc := num(rAge, "days")
+	rows = append(rows,
+		get("recon.amount_tolerance_pct", rTolPVal, rTolPSrc,
+			"How far a statement flow and a declared event may differ in amount and still match, as a share of the statement amount. Differences beyond max(this, the minimum below) become exceptions.", "advisory"),
+		get("recon.amount_tolerance_min", rTolMVal, rTolMSrc,
+			"Absolute floor of the amount tolerance, so small flows are not held to sub-cent precision while FX conversion noise stays inside the match.", "advisory"),
+		get("recon.date_window_business_days", rDateWVal, rDateWSrc,
+			"How many weekdays the statement value date and the declared effective date may sit apart before the pair is a date exception. Guards the late-deposit peak correction against wrong dates.", "advisory"),
+		get("recon.max_report_age_days", rAgeVal, rAgeSrc,
+			"How old the newest ingested statement may be for a recon report to back a reconcile sign-off. Older data means the sign-off would attest to a week nobody has seen.", "advisory"),
+	)
 	for _, a := range []struct {
 		key   string
 		class string

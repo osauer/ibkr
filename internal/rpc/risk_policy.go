@@ -59,6 +59,11 @@ type CapitalEventParams struct {
 	// peak downward (never-inflate discipline).
 	EffectiveAt time.Time `json:"effective_at,omitzero"`
 	Note        string    `json:"note,omitempty"`
+	// Report is required for type reconcile since phase 3a: the recon
+	// report id being signed off. The daemon refuses a reconcile whose
+	// report is missing, stale, superseded, or carries unresolved
+	// exceptions (docs/design/post-trade-truth.md).
+	Report string `json:"report,omitempty"`
 	// Origin is the write-origin claim; the daemon rejects non-human
 	// origins for every risk-policy write.
 	Origin string `json:"origin,omitempty"`

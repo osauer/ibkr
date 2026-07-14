@@ -25,6 +25,12 @@ func approvedConstitution() Constitution {
 			BlockEnforcement: EnforcementShadow,
 		},
 		Override: ConstitutionOverride{MaxDurationHours: new(24)},
+		Recon: ConstitutionRecon{
+			AmountTolerancePct:     new(0.5),
+			AmountToleranceMin:     new(5.0),
+			DateWindowBusinessDays: new(3),
+			MaxReportAgeDays:       new(4),
+		},
 		Cadence: ConstitutionCadence{
 			Morning: ConstitutionArtefact{Class: EnforcementAdvisory},
 			EOD:     ConstitutionArtefact{Class: EnforcementAdvisory},
@@ -56,6 +62,9 @@ func TestConstitutionValidate(t *testing.T) {
 		{"unknown enforcement", func(c *Constitution) { c.Drawdown.BlockEnforcement = "block-everything" }, "invalid"},
 		{"bad cadence class", func(c *Constitution) { c.Cadence.Morning.Class = "mandatory" }, "only advisory"},
 		{"pin missing version", func(c *Constitution) { c.Inventory.Rulebook = &ConstitutionPolicyPin{ID: "x"} }, "id and version"},
+		{"negative recon tolerance", func(c *Constitution) { c.Recon.AmountToleranceMin = new(-1.0) }, "amount_tolerance_min"},
+		{"zero recon window", func(c *Constitution) { c.Recon.DateWindowBusinessDays = new(0) }, "date_window_business_days"},
+		{"zero report age", func(c *Constitution) { c.Recon.MaxReportAgeDays = new(0) }, "max_report_age_days"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,6 +96,8 @@ func TestConstitutionUnapprovedKeys(t *testing.T) {
 		"capital.base_currency", "capital.protected_floor", "capital.declared_risk_capital",
 		"capital.max_equity_age_minutes", "capital.max_unreconciled_days",
 		"drawdown.warn_consumed_pct", "drawdown.block_consumed_pct", "override.max_duration_hours",
+		"recon.amount_tolerance_pct", "recon.amount_tolerance_min",
+		"recon.date_window_business_days", "recon.max_report_age_days",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("UnapprovedKeys() = %v, want %v", got, want)
@@ -118,6 +129,10 @@ func TestConstitutionFingerprintCoversEveryField(t *testing.T) {
 		"drawdown.block_consumed_pct":        func(c *Constitution) { c.Drawdown.BlockConsumedPct = new(25.0) },
 		"drawdown.block_enforcement":         func(c *Constitution) { c.Drawdown.BlockEnforcement = EnforcementAdvisory },
 		"override.max_duration_hours":        func(c *Constitution) { c.Override.MaxDurationHours = new(8) },
+		"recon.amount_tolerance_pct":         func(c *Constitution) { c.Recon.AmountTolerancePct = new(1.0) },
+		"recon.amount_tolerance_min":         func(c *Constitution) { c.Recon.AmountToleranceMin = new(10.0) },
+		"recon.date_window_business_days":    func(c *Constitution) { c.Recon.DateWindowBusinessDays = new(5) },
+		"recon.max_report_age_days":          func(c *Constitution) { c.Recon.MaxReportAgeDays = new(7) },
 		"cadence.morning.class":              func(c *Constitution) { c.Cadence.Morning.Class = "" },
 		"inventory.rulebook":                 func(c *Constitution) { c.Inventory.Rulebook.Version = "3" },
 		"inventory.protection added":         func(c *Constitution) { c.Inventory.Protection = &ConstitutionPolicyPin{ID: "p", Version: "1"} },

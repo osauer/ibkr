@@ -129,15 +129,104 @@ func (s *Server) handleRiskPolicyCapitalEvent(_ context.Context, req *rpc.Reques
 	if err := requireHumanRiskPolicyOrigin(p.Origin); err != nil {
 		return nil, err
 	}
+	if strings.EqualFold(strings.TrimSpace(p.Type), "reconcile") {
+		if err := s.reconcileReportGate(p.Report); err != nil {
+			return nil, err
+		}
+	}
 	ev, err := s.riskCapital.ApplyCapitalEvent(p, normalizedWriteOrigin(p.Origin))
 	if err != nil {
 		return nil, errBadRequest(err.Error())
 	}
 	msg := fmt.Sprintf("recorded %s capital event", ev.Type)
 	if ev.Type == "reconcile" {
-		msg = "recorded reconcile attestation; the unreconciled clock restarts now"
+		msg = fmt.Sprintf("recorded reconcile sign-off against report %s; the unreconciled clock restarts now", strings.TrimSpace(p.Report))
 	}
 	return &rpc.RiskPolicyWriteResult{OK: true, At: ev.At, Message: msg}, nil
+}
+
+// reconcileReportGate enforces the phase-3a contract: a reconcile is a
+// sign-off against a specific, fresh, fully resolved recon report — never
+// a bare attestation (docs/design/post-trade-truth.md; operator decision
+// 2026-07-13, no shadow period). The sanctioned escape during statement
+// outages is a one-shot override on capital.max_unreconciled_days, not a
+// soft mode here.
+func (s *Server) reconcileReportGate(reportID string) error {
+	reportID = strings.TrimSpace(reportID)
+	if reportID == "" {
+		return errBadRequest("reconcile requires --report <id> from `ibkr recon` (bare attestation retired in phase 3a)")
+	}
+	rep := s.buildReconReport()
+	switch rep.Status {
+	case rpc.ReconStatusActive, rpc.ReconStatusDegraded:
+	case rpc.ReconStatusUnapproved:
+		return errBadRequest("recon.* policy keys are unapproved; reconcile is unavailable until they exist in the risk policy")
+	default:
+		return errBadRequest("no recon report can be built: " + nonEmptyString(rep.Message, rep.Status))
+	}
+	if rep.ReportID != reportID {
+		return errBadRequest(fmt.Sprintf("report %s is superseded; review the current report %s (`ibkr recon`) and sign that off", reportID, rep.ReportID))
+	}
+	pol := s.riskPolicies.snapshot().policy
+	rc := reconPolicyOf(pol)
+	if rc == nil {
+		return errBadRequest("recon.* policy keys are unapproved; reconcile is unavailable until they exist in the risk policy")
+	}
+	if age := time.Since(rep.StatementAsOf); age > time.Duration(*rc.MaxReportAgeDays)*24*time.Hour {
+		return errBadRequest(fmt.Sprintf("newest ingested statement is %.0f days old, past recon.max_report_age_days=%d; fetch fresher statements first (or, during an outage, grant a one-shot override on capital.max_unreconciled_days)", age.Hours()/24, *rc.MaxReportAgeDays))
+	}
+	if rep.Unresolved > 0 {
+		return errBadRequest(fmt.Sprintf("report %s carries %d unresolved exception(s); declare the missing events or dismiss each with a reason, then reconcile", reportID, rep.Unresolved))
+	}
+	return nil
+}
+
+func (s *Server) handleReconSnapshot(ctx context.Context, req *rpc.Request) (*rpc.ReconResult, error) {
+	var p rpc.ReconSnapshotParams
+	if len(req.Params) > 0 {
+		if err := decodeParams(req.Params, &p); err != nil {
+			return nil, err
+		}
+	}
+	if p.Refresh {
+		s.kickFlexFetch(ctx)
+	}
+	return s.buildReconReport(), nil
+}
+
+func (s *Server) handleReconDismiss(_ context.Context, req *rpc.Request) (*rpc.RiskPolicyWriteResult, error) {
+	var p rpc.ReconDismissParams
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	if err := requireHumanRiskPolicyOrigin(p.Origin); err != nil {
+		return nil, err
+	}
+	lineID, reason := strings.TrimSpace(p.LineID), strings.TrimSpace(p.Reason)
+	if lineID == "" || reason == "" {
+		return nil, errBadRequest("recon dismiss needs both --line and --reason")
+	}
+	rep := s.buildReconReport()
+	found := false
+	for _, ex := range rep.Exceptions {
+		if ex.LineID == lineID {
+			if ex.Dismissed {
+				return nil, errBadRequest("line " + lineID + " is already dismissed")
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, errBadRequest("line " + lineID + " is not an exception on the current report; run `ibkr recon` for the live list")
+	}
+	now := time.Now().UTC()
+	appendRiskPolicyJournal(map[string]any{
+		"version": 1, "at": now, "kind": "recon_dismiss", "line_id": lineID, "reason": reason,
+		"report": rep.ReportID, "policy_fingerprint": constitutionFingerprint(s.riskPolicies.snapshot().policy),
+	})
+	return &rpc.RiskPolicyWriteResult{OK: true, At: now,
+		Message: "exception dismissed and journaled; the report id changes to reflect it — rerun `ibkr recon` before reconciling"}, nil
 }
 
 func (s *Server) handleRiskPolicyOverride(_ context.Context, req *rpc.Request) (*rpc.RiskPolicyWriteResult, error) {

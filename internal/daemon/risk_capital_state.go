@@ -461,6 +461,15 @@ func (st *riskCapitalStore) Artefacts() []rpc.ArtefactRecord {
 	return out
 }
 
+// LastEquity returns the persisted last equity observation for the recon
+// equity-divergence check; zero when never observed.
+func (st *riskCapitalStore) LastEquity() (float64, time.Time) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	return st.state.LastEquityBase, st.state.LastEquityAsOf
+}
+
 // PreviewVerdict is the cheap in-memory evaluation for advisory preview
 // causes: persisted last equity only, never an account fetch (a preview
 // must stay a preview-priced call; rulebook precedent).

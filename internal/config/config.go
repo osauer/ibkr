@@ -199,6 +199,30 @@ func (a AutoTrade) ProposalsEnabledResolved() bool {
 	return *a.ProposalsEnabled
 }
 
+// Flex configures daily IBKR Flex statement ingestion for post-trade
+// reconciliation (docs/design/post-trade-truth.md). Read-only toward the
+// broker: statements feed the recon report; nothing here can touch order
+// entry.
+type Flex struct {
+	// Enabled turns the daily Flex statement fetch on; default false.
+	Enabled bool `toml:"enabled"`
+	// QueryID is the IBKR Flex query id to fetch (create the query in
+	// Account Management with cash transactions, transfers, and equity
+	// summary sections); required when enabled.
+	QueryID string `toml:"query_id"`
+	// TokenPath points to a file holding only the Flex Web Service token;
+	// default ~/.config/ibkr/flex-token (mode 0600). The token itself never
+	// belongs in config.toml, and no surface ever echoes it.
+	TokenPath string `toml:"token_path"`
+}
+
+func (f Flex) WithDefaults() Flex {
+	if f.TokenPath == "" {
+		f.TokenPath = "~/.config/ibkr/flex-token"
+	}
+	return f
+}
+
 func (a AutoTrade) FastPathEnabledResolved() bool {
 	if a.FastPathEnabled == nil {
 		return true
@@ -360,6 +384,7 @@ type Config struct {
 	Trading       Trading         `toml:"trading"`
 	AutoTrade     AutoTrade       `toml:"auto_trade"`
 	Opportunities Opportunities   `toml:"opportunities"`
+	Flex          Flex            `toml:"flex"`
 	SPX           SPX             `toml:"spx"`
 	Scans         map[string]Scan `toml:"scans"`
 }
@@ -373,6 +398,7 @@ type Resolved struct {
 	Trading       Trading
 	AutoTrade     AutoTrade
 	Opportunities Opportunities
+	Flex          Flex
 	SPX           SPX
 	Scans         map[string]Scan
 }
@@ -444,7 +470,7 @@ func Load(path string) (*Config, error) {
 				return nil, fmt.Errorf("config %s: key %s was removed: %s", path, keys[i], msg)
 			}
 		}
-		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [auto_trade], [opportunities], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
+		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [auto_trade], [opportunities], [flex], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
 	}
 	return cfg, nil
 }
@@ -493,6 +519,7 @@ func (c *Config) Resolve() (*Resolved, error) {
 		Trading:       c.Trading.WithDefaults(),
 		AutoTrade:     c.AutoTrade.WithDefaults(),
 		Opportunities: c.Opportunities.WithDefaults(),
+		Flex:          c.Flex.WithDefaults(),
 		SPX:           c.SPX,
 		Scans:         scans,
 	}, nil

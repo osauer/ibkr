@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: config.md sha256:a4702ae5a53a3009b5ebf655b0727c38bca05d9e3ea96b01ad8c0314159570f7 -->
+<!-- md-source: config.md sha256:9fd86e3cec59bb937a8d98d559ed00102836517a4adeaa937d22400e0882d2a8 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -172,6 +172,9 @@
 <tr><td><code>[auto_trade]</code></td><td><code>reload_interval</code></td><td><code>duration</code></td><td>ReloadInterval controls how often the daemon checks policy-file changes; default 30s.</td></tr>
 <tr><td><code>[daemon]</code></td><td><code>idle_timeout</code></td><td><code>duration</code></td><td>IdleTimeout is how long the auto-spawned daemon stays alive between CLI calls (default 15m, accepts any Go duration string like &#34;1h&#34; or &#34;0s&#34;); set &#34;0s&#34; to disable idle-shutdown when running long cold-start jobs such as the first breadth fan-out under <code>ibkr daemon --foreground</code>.</td></tr>
 <tr><td><code>[daemon]</code></td><td><code>log_level</code></td><td><code>string</code></td><td>LogLevel is the daemon&#39;s log verbosity — one of &#34;debug&#34;, &#34;info&#34; (default), &#34;warn&#34;, or &#34;error&#34;.</td></tr>
+<tr><td><code>[flex]</code></td><td><code>enabled</code></td><td><code>bool</code></td><td>Enabled turns the daily Flex statement fetch on; default false.</td></tr>
+<tr><td><code>[flex]</code></td><td><code>query_id</code></td><td><code>string</code></td><td>QueryID is the IBKR Flex query id to fetch (create the query in Account Management with cash transactions, transfers, and equity summary sections); required when enabled.</td></tr>
+<tr><td><code>[flex]</code></td><td><code>token_path</code></td><td><code>string</code></td><td>TokenPath points to a file holding only the Flex Web Service token; default ~/.config/ibkr/flex-token (mode 0600).</td></tr>
 <tr><td><code>[gateway]</code></td><td><code>account</code></td><td><code>string</code></td><td>Account pins the IBKR account ID like &#34;U1234567&#34;; empty (default) defers to the gateway&#39;s managedAccounts list — fine for single-account logins, required disambiguator when the login carries multiple accounts.</td></tr>
 <tr><td><code>[gateway]</code></td><td><code>breadth_client_id</code></td><td><code>*int</code></td><td>BreadthClientID is the IBKR clientID used by the dedicated historical-bar connector that backs the SPX breadth refresh.</td></tr>
 <tr><td><code>[gateway]</code></td><td><code>client_id</code></td><td><code>*int</code></td><td>ClientID pins the IBKR API clientID for the primary connection (default 15); collisions are treated as a stale-client/operator issue and are not auto-walked to neighboring reserved IDs.</td></tr>
