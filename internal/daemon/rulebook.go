@@ -103,7 +103,7 @@ func (s *Server) rulesForPreview(ctx context.Context) *rpc.RulesResult {
 func (s *Server) evaluateRules(ctx context.Context, includeTape bool) *rpc.RulesResult {
 	now := time.Now()
 	pol := risk.DefaultRulebookPolicy()
-	fp := rpc.Fingerprint{Version: "rulebook-fp-v2", Key: pol.FingerprintKey()}
+	fp := rpc.Fingerprint{Version: rpc.RulebookPolicyFingerprintVersion, Key: pol.FingerprintKey()}
 	res := &rpc.RulesResult{
 		AsOf:              now,
 		Enabled:           s.rulebookEnabled(),
@@ -539,6 +539,10 @@ func (s *Server) journalRuleTransitions(res *rpc.RulesResult) {
 	if res == nil || len(res.Rules) == 0 {
 		return
 	}
+	policyFingerprint := ""
+	if res.PolicyFingerprint != nil {
+		policyFingerprint = res.PolicyFingerprint.Key
+	}
 	prevStatus := map[string]string{}
 	if prev != nil {
 		for _, r := range prev.Rules {
@@ -566,6 +570,7 @@ func (s *Server) journalRuleTransitions(res *rpc.RulesResult) {
 			"version": 1, "at": res.AsOf, "rule": r.ID, "status": r.Status,
 			"was": prevStatus[r.ID], "evidence": r.Evidence,
 			"policy_id": res.PolicyID, "policy_version": res.PolicyVersion,
+			"policy_fingerprint": policyFingerprint,
 		})
 	}
 }

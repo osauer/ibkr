@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -359,6 +360,55 @@ func TestRulebookPreviewWarnings(t *testing.T) {
 		Symbol: "NOW", SecType: "OPT", Expiry: "20260821", Right: "C", Strike: 120}}
 	if codes := warningCodes(rulebookPreviewWarnings(res, otherStrike, rpc.OrderPositionImpact{Effect: "increase"})); codes["rule_exit_discipline"] {
 		t.Error("rolling to a different strike must not inherit the exit-discipline warning")
+	}
+}
+
+func TestJournalRuleTransitionsCarriesPolicyFingerprint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	pol := risk.DefaultRulebookPolicy()
+	key := pol.FingerprintKey()
+	server := &Server{}
+	server.journalRuleTransitions(&rpc.RulesResult{
+		AsOf:          time.Now(),
+		PolicyID:      pol.ID,
+		PolicyVersion: pol.Version,
+		PolicyFingerprint: &rpc.Fingerprint{
+			Version: rpc.RulebookPolicyFingerprintVersion,
+			Key:     key,
+		},
+		Rules: []risk.RuleRow{{ID: risk.RuleSingleNameExposure, Status: risk.RuleStatusWatch}},
+	})
+	(&Server{}).journalRuleTransitions(&rpc.RulesResult{
+		AsOf:          time.Now(),
+		PolicyID:      pol.ID,
+		PolicyVersion: pol.Version,
+		Rules:         []risk.RuleRow{{ID: risk.RuleCashSellOnly, Status: risk.RuleStatusAct}},
+	})
+
+	path, err := defaultTradingStatePath("rules-decisions.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("journal entries = %d, want 2", len(lines))
+	}
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
+		t.Fatalf("journal entry is not JSON: %v", err)
+	}
+	if got, _ := entry["policy_fingerprint"].(string); got == "" || got != key {
+		t.Fatalf("policy_fingerprint = %q, want %q", got, key)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &entry); err != nil {
+		t.Fatalf("nil-fingerprint journal entry is not JSON: %v", err)
+	}
+	if got, ok := entry["policy_fingerprint"].(string); !ok || got != "" {
+		t.Fatalf("nil policy_fingerprint = %#v, want empty string", entry["policy_fingerprint"])
 	}
 }
 

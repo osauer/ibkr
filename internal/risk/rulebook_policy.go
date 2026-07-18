@@ -3,7 +3,7 @@ package risk
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+	"encoding/json"
 	"slices"
 	"sort"
 	"strings"
@@ -190,32 +190,70 @@ func (p *RulebookPolicy) Normalize() {
 // policy change.
 func (p RulebookPolicy) FingerprintKey() string {
 	q := p
+	q.HedgeSymbols = slices.Clone(p.HedgeSymbols)
 	q.Normalize()
-	h := sha256.New()
-	fmt.Fprintf(h, "%s|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%d|%d|%.4f|%.4f|%.4f|%d|%.4f|%.4f|%.4f|%.4f",
-		q.ID, q.Version,
-		q.SingleNameWatchPct, q.SingleNameActPct,
-		q.OptionLineWatchPct, q.OptionLineActPct,
-		q.HedgeLineWatchPct, q.HedgeLineActPct,
-		q.RunwayWatchDTE, q.RunwayActDTE, q.RunwayITMDeltaFloor,
-		q.ShortPutActLinePctNLV, q.ShortPutActNamePctNLV,
-		q.EarningsFreezeSessions,
-		q.RedOnGreenNameDropPct, q.RedOnGreenSPYUpPct,
-		q.WinnerTrimDayUpPct, q.WinnerTrimMinExpoPct,
-	)
-	for _, rt := range []RegimeThresholds{q.RegimeCalm, q.RegimeEarlyWarning, q.RegimeConfirmed} {
-		fmt.Fprintf(h, "|%.4f|%.4f|%.4f|%.4f|%.4f",
-			rt.CashSellOnlyPct, rt.ExtrinsicWatchPct, rt.ExtrinsicActPct,
-			rt.HedgeBandMinPct, rt.HedgeBandMaxPct)
+	projection := struct {
+		ID                       string           `json:"id"`
+		Version                  int              `json:"version"`
+		SingleNameWatchPct       float64          `json:"single_name_watch_pct"`
+		SingleNameActPct         float64          `json:"single_name_act_pct"`
+		OptionLineWatchPct       float64          `json:"option_line_watch_pct"`
+		OptionLineActPct         float64          `json:"option_line_act_pct"`
+		HedgeLineWatchPct        float64          `json:"hedge_line_watch_pct"`
+		HedgeLineActPct          float64          `json:"hedge_line_act_pct"`
+		RunwayWatchDTE           int              `json:"runway_watch_dte"`
+		RunwayActDTE             int              `json:"runway_act_dte"`
+		RunwayITMDeltaFloor      float64          `json:"runway_itm_delta_floor"`
+		ShortPutActLinePctNLV    float64          `json:"short_put_act_line_pct_nlv"`
+		ShortPutActNamePctNLV    float64          `json:"short_put_act_name_pct_nlv"`
+		EarningsFreezeSessions   int              `json:"earnings_freeze_sessions"`
+		RedOnGreenNameDropPct    float64          `json:"red_on_green_name_drop_pct"`
+		RedOnGreenSPYUpPct       float64          `json:"red_on_green_spy_up_pct"`
+		WinnerTrimDayUpPct       float64          `json:"winner_trim_day_up_pct"`
+		WinnerTrimMinExpoPct     float64          `json:"winner_trim_min_exposure_pct"`
+		RegimeCalm               RegimeThresholds `json:"regime_calm"`
+		RegimeEarlyWarning       RegimeThresholds `json:"regime_early_warning"`
+		RegimeConfirmed          RegimeThresholds `json:"regime_confirmed"`
+		RegimeStageMaxAgeMinutes int              `json:"regime_stage_max_age_minutes"`
+		ExitWatchLossPct         float64          `json:"exit_watch_loss_pct"`
+		ExitActLossPct           float64          `json:"exit_act_loss_pct"`
+		FXExposureWatchPct       float64          `json:"fx_exposure_watch_pct"`
+		HedgeSymbols             []string         `json:"hedge_symbols"`
+		GreeksGapFloorPctNLV     float64          `json:"greeks_gap_floor_pct_nlv"`
+		EarningsStaleDays        int              `json:"earnings_stale_days"`
+	}{
+		ID:                       q.ID,
+		Version:                  q.Version,
+		SingleNameWatchPct:       q.SingleNameWatchPct,
+		SingleNameActPct:         q.SingleNameActPct,
+		OptionLineWatchPct:       q.OptionLineWatchPct,
+		OptionLineActPct:         q.OptionLineActPct,
+		HedgeLineWatchPct:        q.HedgeLineWatchPct,
+		HedgeLineActPct:          q.HedgeLineActPct,
+		RunwayWatchDTE:           q.RunwayWatchDTE,
+		RunwayActDTE:             q.RunwayActDTE,
+		RunwayITMDeltaFloor:      q.RunwayITMDeltaFloor,
+		ShortPutActLinePctNLV:    q.ShortPutActLinePctNLV,
+		ShortPutActNamePctNLV:    q.ShortPutActNamePctNLV,
+		EarningsFreezeSessions:   q.EarningsFreezeSessions,
+		RedOnGreenNameDropPct:    q.RedOnGreenNameDropPct,
+		RedOnGreenSPYUpPct:       q.RedOnGreenSPYUpPct,
+		WinnerTrimDayUpPct:       q.WinnerTrimDayUpPct,
+		WinnerTrimMinExpoPct:     q.WinnerTrimMinExpoPct,
+		RegimeCalm:               q.RegimeCalm,
+		RegimeEarlyWarning:       q.RegimeEarlyWarning,
+		RegimeConfirmed:          q.RegimeConfirmed,
+		RegimeStageMaxAgeMinutes: q.RegimeStageMaxAgeMinutes,
+		ExitWatchLossPct:         q.ExitWatchLossPct,
+		ExitActLossPct:           q.ExitActLossPct,
+		FXExposureWatchPct:       q.FXExposureWatchPct,
+		HedgeSymbols:             q.HedgeSymbols,
+		GreeksGapFloorPctNLV:     q.GreeksGapFloorPctNLV,
+		EarningsStaleDays:        q.EarningsStaleDays,
 	}
-	fmt.Fprintf(h, "|%d|%.4f|%.4f|%.4f|%s|%.4f|%d",
-		q.RegimeStageMaxAgeMinutes,
-		q.ExitWatchLossPct, q.ExitActLossPct,
-		q.FXExposureWatchPct,
-		strings.Join(q.HedgeSymbols, ","),
-		q.GreeksGapFloorPctNLV, q.EarningsStaleDays,
-	)
-	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+	raw, _ := json.Marshal(projection)
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // IsHedgeSymbol reports whether sym is on the policy hedge list.

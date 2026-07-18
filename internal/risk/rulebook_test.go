@@ -2,6 +2,7 @@ package risk
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -777,6 +778,38 @@ func TestPolicyFingerprintCoversNewFields(t *testing.T) {
 		if p.FingerprintKey() == base {
 			t.Errorf("mutation %d did not change the policy fingerprint", i)
 		}
+	}
+}
+
+func TestPolicyFingerprintIdentity(t *testing.T) {
+	basePolicy := DefaultRulebookPolicy()
+	base := basePolicy.FingerprintKey()
+	if !strings.HasPrefix(base, "sha256:") {
+		t.Fatalf("fingerprint = %q, want sha256 prefix", base)
+	}
+	if got := basePolicy.FingerprintKey(); got != base {
+		t.Fatalf("second fingerprint = %q, want deterministic %q", got, base)
+	}
+
+	mutations := map[string]func(*RulebookPolicy){
+		"scalar threshold": func(p *RulebookPolicy) { p.SingleNameWatchPct += 0.00001 },
+		"regime threshold": func(p *RulebookPolicy) { p.RegimeConfirmed.ExtrinsicActPct += 0.00001 },
+		"hedge list":       func(p *RulebookPolicy) { p.HedgeSymbols = append(p.HedgeSymbols, "DIA") },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			p := DefaultRulebookPolicy()
+			mutate(&p)
+			if got := p.FingerprintKey(); got == base {
+				t.Fatalf("mutated fingerprint = %q, want a changed key", got)
+			}
+		})
+	}
+
+	reordered := DefaultRulebookPolicy()
+	slices.Reverse(reordered.HedgeSymbols)
+	if got := reordered.FingerprintKey(); got != base {
+		t.Fatalf("reordered hedge list fingerprint = %q, want %q", got, base)
 	}
 }
 
