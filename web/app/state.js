@@ -10,7 +10,6 @@ const state = {
   connectionText: "Connecting",
   connectionOK: false,
   pairingRequired: false,
-  authenticated: false,
   accountValueVisible: localStorage.getItem("ibkrAccountValueVisible") === "true",
   canaryDetailOpen: false,
   rulesDetailOpen: false,

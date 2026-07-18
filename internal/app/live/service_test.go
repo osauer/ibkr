@@ -3,7 +3,6 @@ package live
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -29,7 +28,6 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 		},
 		regime:       &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-1"}, Composite: rpc.RegimeComposite{Verdict: "Stress signal present", ClusterRedCount: 1, ClusterRankedCount: 6}},
 		canary:       &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "fp-1"}, Severity: risk.SeverityWatch, Action: "watch"},
-		brief:        &rpc.BriefResult{BriefFingerprint: "brief-1"},
 		marketEvents: &rpc.MarketEventsResult{Kind: rpc.MarketEventsKind, SchemaVersion: rpc.MarketEventsSchemaVersion, Fingerprint: rpc.Fingerprint{Key: "market-events-1"}},
 		trading:      &rpc.TradingStatus{CanPreview: true},
 	}
@@ -77,7 +75,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
-	for range 16 {
+	for range 14 {
 		select {
 		case ev := <-ch:
 			seen[ev.Type] = true
@@ -85,7 +83,7 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 			t.Fatalf("timed out waiting for live events; seen=%v", seen)
 		}
 	}
-	for _, want := range []string{"status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules", "brief", "snapshot"} {
+	for _, want := range []string{"status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "snapshot"} {
 		if !seen[want] {
 			t.Fatalf("missing event %q; seen=%v", want, seen)
 		}
@@ -104,134 +102,6 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	}
 	if diag.LastEventAt["snapshot"].IsZero() {
 		t.Fatalf("snapshot event timestamp missing: %#v", diag.LastEventAt)
-	}
-}
-
-func TestBriefPollsOnCanaryCadenceWithoutAcknowledging(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 7, 18, 8, 0, 0, 0, time.UTC)
-	client := &fakeClient{brief: &rpc.BriefResult{BriefFingerprint: "brief-1"}}
-	svc := New(client, 5*time.Second, time.Minute)
-	svc.now = func() time.Time { return now }
-
-	svc.PollOnce(context.Background())
-	briefCalls, ackCalls := client.BriefCounts()
-	if briefCalls != 1 || ackCalls != 0 {
-		t.Fatalf("after first poll: brief=%d ack=%d, want 1/0", briefCalls, ackCalls)
-	}
-
-	now = now.Add(30 * time.Second)
-	svc.PollOnce(context.Background())
-	briefCalls, ackCalls = client.BriefCounts()
-	if briefCalls != 1 || ackCalls != 0 {
-		t.Fatalf("before cadence: brief=%d ack=%d, want 1/0", briefCalls, ackCalls)
-	}
-
-	now = now.Add(31 * time.Second)
-	svc.PollOnce(context.Background())
-	briefCalls, ackCalls = client.BriefCounts()
-	if briefCalls != 2 || ackCalls != 0 {
-		t.Fatalf("after cadence: brief=%d ack=%d, want 2/0", briefCalls, ackCalls)
-	}
-}
-
-func TestBriefPollErrorKeepsLastGoodSnapshotAndSetsSourceMeta(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 7, 18, 8, 0, 0, 0, time.UTC)
-	client := &fakeClient{
-		status: &rpc.HealthResult{Connected: true},
-		brief:  &rpc.BriefResult{BriefFingerprint: "brief-last-good"},
-	}
-	svc := New(client, 5*time.Second, time.Minute)
-	svc.now = func() time.Time { return now }
-	first := svc.PollOnce(context.Background())
-	if first.Brief == nil || first.Brief.BriefFingerprint != "brief-last-good" {
-		t.Fatalf("first brief=%#v", first.Brief)
-	}
-
-	client.briefErr = errors.New("brief composition unavailable")
-	now = now.Add(time.Minute)
-	got := svc.PollOnce(context.Background())
-	if got.Brief == nil || got.Brief.BriefFingerprint != "brief-last-good" {
-		t.Fatalf("last good brief was not retained: %#v", got.Brief)
-	}
-	if got.Status == nil || !got.Status.Connected {
-		t.Fatalf("rest of snapshot was not retained: %#v", got.Status)
-	}
-	if got.Sources["brief"].Error != "brief composition unavailable" {
-		t.Fatalf("brief source meta=%#v", got.Sources["brief"])
-	}
-	found := false
-	for _, sourceErr := range got.Errors {
-		if sourceErr.Source == "brief" && sourceErr.Message == "brief composition unavailable" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("brief source error missing: %#v", got.Errors)
-	}
-}
-
-func TestSnapshotBriefCloneIsIndependent(t *testing.T) {
-	t.Parallel()
-	brief := &rpc.BriefResult{
-		Market: rpc.BriefMarketSection{
-			Breadth: rpc.BriefBreadthRow{PctAbove50DMA: new(51.0)},
-			Gamma:   rpc.BriefGammaRow{Spot: new(6000.0)},
-		},
-		Calendar: rpc.BriefCalendarSection{MarketEvents: []rpc.BriefMarketEventRow{{Symbols: []string{"AAA"}}}},
-		Portfolio: rpc.BriefPortfolioSection{
-			Account:       rpc.BriefAccountRow{EquityBase: new(100.0)},
-			Movers:        rpc.BriefMoversRow{Rows: []rpc.BriefMover{{Symbol: "AAA"}}},
-			PremiumAtRisk: rpc.BriefMoneyCoverageRow{AmountBase: new(10.0)},
-			WorkingOrders: rpc.BriefCountRow{Count: new(1)},
-		},
-		RiskLimits: rpc.BriefRiskSection{
-			Capital:     rpc.BriefCapitalRow{ConsumedPct: new(20.0)},
-			Latch:       rpc.BriefLatchRow{AgeDays: new(2)},
-			Overrides:   rpc.BriefOverridesRow{Rows: []rpc.BriefOverride{{Control: "limit"}}},
-			PolicyDrift: rpc.BriefPolicyDriftRow{Rows: []rpc.PolicyPinStatus{{Policy: "rules"}}},
-		},
-		Process: rpc.BriefProcessSection{
-			Reconcile:  rpc.BriefReconcileRow{DaysRemaining: new(3)},
-			OneTap:     rpc.BriefOneTapRow{Blockers: []string{"blocked"}},
-			RulesDelta: rpc.BriefRulesDeltaRow{Transitions: []rpc.BriefRuleTransition{{RuleID: "r1"}}, Added: []string{"r2"}, Removed: []string{"r3"}},
-			Artefacts:  rpc.BriefArtefactsRow{Rows: []rpc.BriefArtefact{{Kind: "morning"}}},
-		},
-	}
-	svc := New(&fakeClient{}, time.Minute, time.Minute)
-	svc.snapshot = Snapshot{Brief: brief}
-	got := svc.Snapshot()
-
-	*got.Brief.Market.Breadth.PctAbove50DMA = 0
-	*got.Brief.Market.Gamma.Spot = 0
-	got.Brief.Calendar.MarketEvents[0].Symbols[0] = "MUTATED"
-	*got.Brief.Portfolio.Account.EquityBase = 0
-	got.Brief.Portfolio.Movers.Rows[0].Symbol = "MUTATED"
-	*got.Brief.Portfolio.PremiumAtRisk.AmountBase = 0
-	*got.Brief.Portfolio.WorkingOrders.Count = 0
-	*got.Brief.RiskLimits.Capital.ConsumedPct = 0
-	*got.Brief.RiskLimits.Latch.AgeDays = 0
-	got.Brief.RiskLimits.Overrides.Rows[0].Control = "MUTATED"
-	got.Brief.RiskLimits.PolicyDrift.Rows[0].Policy = "MUTATED"
-	*got.Brief.Process.Reconcile.DaysRemaining = 0
-	got.Brief.Process.OneTap.Blockers[0] = "MUTATED"
-	got.Brief.Process.RulesDelta.Transitions[0].RuleID = "MUTATED"
-	got.Brief.Process.RulesDelta.Added[0] = "MUTATED"
-	got.Brief.Process.RulesDelta.Removed[0] = "MUTATED"
-	got.Brief.Process.Artefacts.Rows[0].Kind = "MUTATED"
-
-	current := svc.Snapshot().Brief
-	if *current.Market.Breadth.PctAbove50DMA != 51 || *current.Market.Gamma.Spot != 6000 ||
-		current.Calendar.MarketEvents[0].Symbols[0] != "AAA" || *current.Portfolio.Account.EquityBase != 100 ||
-		current.Portfolio.Movers.Rows[0].Symbol != "AAA" || *current.Portfolio.PremiumAtRisk.AmountBase != 10 ||
-		*current.Portfolio.WorkingOrders.Count != 1 || *current.RiskLimits.Capital.ConsumedPct != 20 ||
-		*current.RiskLimits.Latch.AgeDays != 2 || current.RiskLimits.Overrides.Rows[0].Control != "limit" ||
-		current.RiskLimits.PolicyDrift.Rows[0].Policy != "rules" || *current.Process.Reconcile.DaysRemaining != 3 ||
-		current.Process.OneTap.Blockers[0] != "blocked" || current.Process.RulesDelta.Transitions[0].RuleID != "r1" ||
-		current.Process.RulesDelta.Added[0] != "r2" || current.Process.RulesDelta.Removed[0] != "r3" ||
-		current.Process.Artefacts.Rows[0].Kind != "morning" {
-		t.Fatalf("mutating returned brief changed service snapshot: %#v", current)
 	}
 }
 
@@ -471,8 +341,6 @@ type fakeClient struct {
 	quoteErrs    map[string]error
 	regime       *rpc.RegimeMonitorResult
 	canary       *rpc.CanaryResult
-	brief        *rpc.BriefResult
-	briefErr     error
 	marketEvents *rpc.MarketEventsResult
 	trading      *rpc.TradingStatus
 
@@ -480,8 +348,6 @@ type fakeClient struct {
 	quoteBlock  <-chan struct{}
 	quoteMu     sync.Mutex
 	quoteCalls  []rpc.ContractParams
-	briefCalls  int
-	briefAcks   int
 }
 
 func (c *fakeClient) Status(context.Context) (*rpc.HealthResult, error) {
@@ -548,30 +414,6 @@ func (c *fakeClient) CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.
 
 func (c *fakeClient) Rules(context.Context) (*rpc.RulesResult, error) {
 	return &rpc.RulesResult{Enabled: true, Status: "ok"}, nil
-}
-
-func (c *fakeClient) Brief(context.Context) (*rpc.BriefResult, error) {
-	c.quoteMu.Lock()
-	defer c.quoteMu.Unlock()
-	c.briefCalls++
-	return c.brief, c.briefErr
-}
-
-func (c *fakeClient) BriefAck(context.Context, rpc.BriefAckParams) (*rpc.BriefAckResult, error) {
-	c.quoteMu.Lock()
-	defer c.quoteMu.Unlock()
-	c.briefAcks++
-	return &rpc.BriefAckResult{OK: true}, nil
-}
-
-func (c *fakeClient) BriefCounts() (brief, ack int) {
-	c.quoteMu.Lock()
-	defer c.quoteMu.Unlock()
-	return c.briefCalls, c.briefAcks
-}
-
-func (c *fakeClient) ReconcileSignoff(context.Context, rpc.CapitalEventParams) (*rpc.RiskPolicyWriteResult, error) {
-	return &rpc.RiskPolicyWriteResult{OK: true}, nil
 }
 
 func (c *fakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {

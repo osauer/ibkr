@@ -7,7 +7,7 @@ import (
 
 // Files contains the static PWA assets served by `ibkr app`.
 //
-//go:embed index.html app.js alerts.js auth.js brief.js canary.js chrome.js lifecycle.js market-events.js opportunities.js orders.js portfolio.js protection-coverage.js protection.js settings.js shared.js shell.js state.js underlyings.js styles.css service-worker.js manifest.webmanifest icon-192.png icon-512.png favicon-16.png favicon-32.png favicon-64.png
+//go:embed index.html app.js alerts.js auth.js canary.js chrome.js lifecycle.js market-events.js opportunities.js orders.js portfolio.js protection-coverage.js protection.js settings.js shared.js shell.js state.js underlyings.js styles.css service-worker.js manifest.webmanifest icon-192.png icon-512.png favicon-16.png favicon-32.png favicon-64.png
 var Files embed.FS
 
 // EmbeddedJavaScriptFileNames returns the root-level JavaScript assets in the

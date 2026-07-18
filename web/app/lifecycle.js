@@ -65,7 +65,6 @@ async function fetchBootstrap() {
 
 function applyBootstrap(data) {
   state.snapshot = data.snapshot;
-  state.authenticated = Boolean(data.auth?.authenticated);
   state.settings = data.settings || data.snapshot?.settings || state.settings;
   if (state.snapshot && state.settings) state.snapshot.settings = state.settings;
   state.alertSettings = data.alert_settings || state.alertSettings;
@@ -100,7 +99,7 @@ function connectEvents() {
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules", "brief"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules"]) {
     es.addEventListener(type, (event) => {
       const data = JSON.parse(event.data);
       if (type === "snapshot") state.snapshot = data;
@@ -157,7 +156,6 @@ function setConnection(text, ok) {
 }
 
 function showPairing(text) {
-  state.authenticated = false;
   $("pairingPanel").hidden = false;
   $("tabPanels").hidden = true;
   $("bottomTabs").hidden = true;
