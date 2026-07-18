@@ -1,13 +1,14 @@
 # Operator Ergonomics and Exception-Driven Governance (Phase 2.1)
 
-Updated: 2026-07-18 17:31 CEST
+Updated: 2026-07-18 19:35 CEST
 Status: design approved by the operator (interviews 2026-07-16, consolidated
 greenlight 2026-07-18). Implemented same day: the backfill backtest (decision
-4/5 mechanics) and risk-policy v3 (auto-extend, R3/R4, divergence gate — see
-the implementation record at the end). Still open: brief surface (L1), push
-nudges (L2), cadence re-declaration and nudge times (deferred to a later
-revision by operator decision 2026-07-18 because they depend on L1), monthly
-pulse, R5 cleanup. This document is the approval record and the
+4/5 mechanics), risk-policy v3 (auto-extend, R3/R4, divergence gate), and the
+L1 brief surface (decisions 1+3 — daemon brief, `ibkr brief`, PWA card,
+render-stamps, one-tap sign-off; see the implementation records at the end).
+Still open: push nudges (L2), cadence re-declaration and nudge times
+(deferred to a later revision by operator decision 2026-07-18 because they
+depended on L1, which now exists), monthly pulse, R5 cleanup. This document is the approval record and the
 implementation authority for the ergonomics build, the accelerated R3/R4
 cutover, and the risk-policy v3 revision scope. It amends
 docs/design/risk-policy.md (deferred list) and docs/design/post-trade-truth.md
@@ -285,3 +286,90 @@ Shipped and active 2026-07-18 evening, Codex-only lane, all gates green
 - **Expected first automatic extension:** the first fetch that brings a
   same-day equity pair (statement day paired with a runtime daily sample —
   ~2026-07-19), comfortably before the 2026-07-25 clock expiry.
+
+## Implementation record — L1 brief surface (2026-07-18)
+
+Both slices shipped 2026-07-18 evening through the Codex-only lane.
+Daemon/RPC/CLI: commit 73bc12d — worktree `make check` + race tests, primary
+`make test`, `make restart-daemon`, full `make smoke` PASS with zero skips.
+PWA card: integrated the same evening — worktree `make app-check` +
+`make check` + unfiltered app/relay tests, primary `make test`, rendered QA
+against a fully isolated throwaway stack (own socket/state/HOME/policy
+fixture), then `make app-refresh` on the real host.
+
+- **Content scope grew by operator decision (interview, same day, two
+  rounds):** the approved six-row list became a five-section desk-style
+  brief — A Market (regime, breadth, dealer gamma, canary), B Calendar
+  (session, held-name event flags), C Portfolio (equity + daily P&L, top-3
+  movers, premium-at-risk, best-effort hedge cost, working orders), D Risk &
+  limits (tier, latch + latch age, active overrides, sibling-pin drift),
+  E Process (reconcile clock, auto-extend, one-tap, rules deltas, artefacts
+  due) — realizing the machine-compiled part of the 2026-07-09 morning-page
+  template as one combined morning+EOD brief. Pattern tags, process grade,
+  and pair correlations stay out (human inputs / deferred P3).
+- **Phase-2 day counter retired before it existed (operator decision,
+  clean-slate):** no phase metadata is stored anywhere — no TOML key, no
+  journal event. The observation orientation is the derived latch-age line
+  from `latched_at`, shown while latched. Decision 1's row list is amended
+  accordingly.
+- **Attestation-by-render mechanics:** `brief.snapshot` is side-effect-free
+  for every origin (regression-tested by walking the XDG state tree across
+  repeated compositions — this forced read-only seams: account summary
+  without the capital observation, breadth without the refresh trigger,
+  rules evaluation without earnings kicks or transition journaling, regime
+  from a snapshot cache, overrides without expiry maintenance). `brief.ack`
+  is the stamp: human-origin-only through the same gate as all policy
+  writes (agent/empty origin refused with nothing journaled), idempotent
+  per artefact kind per daemon-local day, recording `origin` and
+  `brief_fingerprint` as new omitempty fields on `ArtefactRecord` and the
+  `artefact_completed` journal entry (legacy entries and the manual
+  `ibkr policy artefact` verb unchanged).
+- **Stamp kind = first-incomplete rule (operator choice):** morning, then
+  eod, then nothing (disclosed); `--kind` overrides; weekly is never
+  render-stamped until the v4 cadence re-declaration. Accepted quirk: two
+  early-day renders can stamp both kinds before close, honestly visible in
+  journal timestamps.
+- **One-tap reconcile (decision 3):** `policy.capital_event` type
+  `reconcile` with an empty report id resolves the current report
+  daemon-side and passes the *unchanged* gate. Signability lives once in
+  `reconcileReportAssessment`: the write gate returns its first blocker,
+  the brief's one-tap row exposes the ordered list. Explicit `--report`
+  behavior is untouched.
+- **Rules deltas** diff the current rulebook snapshot against the row set
+  persisted at the last *stamped* brief (`brief-state.json`, runtime-owned,
+  written only by `brief.ack`); first run discloses "no delta baseline
+  yet". The shared unreconciled-clock arithmetic moved to
+  `risk.EvaluateUnreconciledClock` (override can only extend; zero
+  last-reconcile fabricates no deadline) and feeds both evaluation and the
+  brief's typed `deadline`/`days_remaining`.
+- **PWA card (rendered surface):** first card on the monitor tab (operator
+  placement choice), rendered verbatim from the snapshot's typed brief —
+  the SPA computes no signability, deltas, or risk numbers. The
+  render-stamp fires via `POST /api/brief/seen` only when authenticated, on
+  the monitor tab, card rendered, and `document.visibilityState` visible —
+  once per brief fingerprint per page session; the app server-assigns
+  origin `human-paired-device` and the poller never acks. One-tap is
+  `POST /api/recon/signoff` carrying the pinned report id the operator saw
+  (no dialog — the labeled tap is the confirm; daemon refusals surface
+  verbatim). Both routes are `requireAuth`-gated, relay-forwardable, and
+  deliberately outside the broker-write confirmation wrapper (governance
+  write, not a broker write). A static contract test pins the card
+  placement, the section renderers, and forbids `confirm_account`/
+  `window.confirm` in the module.
+- **Live verification (2026-07-18, Saturday):** agent-origin CLI render
+  left the real artefact journal byte-identical; gateway-down rows
+  disclosed per-row while risk/process rows rendered (latch age `3
+  day(s)`, reconcile `due 2026-07-25 (7 day(s))`, one-tap signable with
+  the pinned report id). Rendered QA ran in the isolated stack: the SPA
+  correctly refused to stamp while the page reported itself hidden (the
+  preview pane never becomes visible — agent browsing structurally cannot
+  stamp), and with visibility simulated in isolation the full chain
+  produced `artefact_completed · morning · origin human-paired-device ·
+  brief fingerprint` in the throwaway journal plus the on-card receipt.
+  The real journal gained no entries at any point; the operator's first
+  real phone render will be the first honest stamp.
+- **Known cosmetic debt (deferred deliberately):** empty regime
+  stage/verdict renders a stray `·` in the CLI; the one-tap blocker for an
+  unbuildable daemon-resolved report still reads as the bare-attestation
+  refusal; the card's artefact rows print raw `declared true/completed
+  false` booleans. Queued for the next tidy round, none behavioral.
