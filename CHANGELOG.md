@@ -2,7 +2,12 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-## Unreleased
+## v2.1.2 — 2026-07-18 22:14 CEST
+
+### What's new
+
+- **The regime dashboard's gamma indicator measures the market again.** A gateway quirk was silently zeroing every call leg's open interest, which forced the dealer-gamma reading permanently negative — a data artifact, not a market signal. Open-interest capture is now right-aware, and per-leg call OI in `ibkr chain` is correct again.
+- The HYG/SPY credit row now degrades gracefully to the latest official close when a live tick is missing, instead of erroring out and destabilizing regime stage transitions.
 
 ### Fixed
 
