@@ -1,0 +1,111 @@
+# Publish the MCP Registry entry for a GitHub release via Actions OIDC —
+# no device code, no human. Runs on every release publication and is
+# idempotent: if the local release pipeline's registry leg already published
+# this version (operator was present), the job no-ops green. If the local
+# leg stranded (operator away), this job is the automatic heal.
+#
+# Manual heal for an older tag: Actions → registry-publish → Run workflow.
+name: registry-publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v2.1.2)"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  MCP_PUBLISHER_VERSION: v1.7.9
+  SERVER_NAME: io.github.osauer/ibkr
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "unexpected tag '$tag'" >&2; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if registry already has this version
+        id: guard
+        run: |
+          latest="$(curl -fsS "https://registry.modelcontextprotocol.io/v0/servers?search=${SERVER_NAME}&version=latest" \
+            | jq -r '.servers[0].server.version // empty')"
+          echo "registry latest: '${latest:-none}'"
+          if [ "$latest" = "${{ steps.tag.outputs.version }}" ]; then
+            echo "already published — nothing to do"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout tag
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Set up Go
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Download release mcpb asset
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          gh release download "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "ibkr-${{ steps.tag.outputs.tag }}.mcpb" \
+            --dir dist
+
+      - name: Install mcp-publisher
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p bin
+          gh release download "$MCP_PUBLISHER_VERSION" \
+            --repo modelcontextprotocol/registry \
+            --pattern 'mcp-publisher_linux_amd64.tar.gz' \
+            --dir /tmp
+          tar -xzf /tmp/mcp-publisher_linux_amd64.tar.gz -C bin mcp-publisher
+          bin/mcp-publisher --version
+
+      - name: Generate and validate dist/server.json
+        if: steps.guard.outputs.skip != 'true'
+        run: make release-registry-server RELEASE_VERSION=${{ steps.tag.outputs.tag }}
+
+      - name: Publish via OIDC
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          bin/mcp-publisher login github-oidc
+          bin/mcp-publisher publish dist/server.json
+
+      - name: Verify registry
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          for i in 1 2 3; do
+            latest="$(curl -fsS "https://registry.modelcontextprotocol.io/v0/servers?search=${SERVER_NAME}&version=latest" \
+              | jq -r '.servers[0].server.version // empty')"
+            [ "$latest" = "${{ steps.tag.outputs.version }}" ] && { echo "registry serves ${latest}"; exit 0; }
+            sleep 10
+          done
+          echo "registry still serves '${latest:-none}', expected ${{ steps.tag.outputs.version }}" >&2
+          exit 1
