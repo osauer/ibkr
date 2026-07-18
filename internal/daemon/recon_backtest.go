@@ -76,7 +76,17 @@ func (s *Server) buildReconBacktest() *rpc.ReconBacktestResult {
 		baselineByLine[row.LineID] = true
 	}
 	events := replayCapitalFlowEvents()
+	if pol.PolicyVersion >= 3 {
+		events, _, _ = splitV3ReconEvents(events, ctx, res.CoverageTo)
+	}
 	matchedExceptions, matched := matchReconFlows(matchableFlows, events, rc)
+	if pol.PolicyVersion >= 3 {
+		for i := range matchedExceptions {
+			if matchedExceptions[i].Category == rpc.ReconMissingFromLedger {
+				matchedExceptions[i].Category = rpc.ReconConfirmed
+			}
+		}
+	}
 	exceptions := append(merged.exceptions, matchedExceptions...)
 	applyReconDismissals(exceptions)
 	exceptionByLine := make(map[string]rpc.ReconException, len(exceptions))
@@ -106,7 +116,9 @@ func (s *Server) buildReconBacktest() *rpc.ReconBacktestResult {
 			row.Status = "matched"
 		} else if ex, ok := exceptionByLine[flow.id]; ok {
 			row.Status = ex.Category
-			row.Dismissed = ex.Dismissed
+			if ex.Category != rpc.ReconConfirmed {
+				row.Dismissed = ex.Dismissed
+			}
 		}
 		row.PreGenesis = baselineByLine[flow.id]
 		res.Flows = append(res.Flows, row)

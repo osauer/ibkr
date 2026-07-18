@@ -129,6 +129,8 @@ func (s *Server) handleRiskPolicyCapitalEvent(_ context.Context, req *rpc.Reques
 	if err := requireHumanRiskPolicyOrigin(p.Origin); err != nil {
 		return nil, err
 	}
+	s.reconMu.Lock()
+	defer s.reconMu.Unlock()
 	var recon *capitalReconRef
 	if strings.EqualFold(strings.TrimSpace(p.Type), "reconcile") {
 		rep, err := s.reconcileReportGate(p.Report)
@@ -137,7 +139,8 @@ func (s *Server) handleRiskPolicyCapitalEvent(_ context.Context, req *rpc.Reques
 		}
 		recon = &capitalReconRef{ReportID: rep.ReportID, CoverageTo: rep.CoverageTo}
 	}
-	ev, err := s.riskCapital.ApplyCapitalEvent(p, normalizedWriteOrigin(p.Origin), recon)
+	pol := s.riskPolicies.snapshot().policy
+	ev, err := s.riskCapital.ApplyCapitalEventForPolicy(p, normalizedWriteOrigin(p.Origin), pol, recon)
 	if err != nil {
 		return nil, errBadRequest(err.Error())
 	}
@@ -218,6 +221,8 @@ func (s *Server) handleReconDismiss(_ context.Context, req *rpc.Request) (*rpc.R
 	if err := requireHumanRiskPolicyOrigin(p.Origin); err != nil {
 		return nil, err
 	}
+	s.reconMu.Lock()
+	defer s.reconMu.Unlock()
 	lineID, reason := strings.TrimSpace(p.LineID), strings.TrimSpace(p.Reason)
 	if lineID == "" || reason == "" {
 		return nil, errBadRequest("recon dismiss needs both --line and --reason")

@@ -45,8 +45,19 @@ type retainedStatementMerge struct {
 // buildReconReport regenerates the report. It is cheap (local files only)
 // and side-effect free apart from reading journals.
 func (s *Server) buildReconReport() *rpc.ReconResult {
+	res, _ := s.buildReconReportWithSnapshot()
+	return res
+}
+
+func (s *Server) buildReconReportWithSnapshot() (*rpc.ReconResult, *statementCapitalSnapshot) {
 	now := time.Now()
+	if s.now != nil {
+		now = s.now()
+	}
 	res := &rpc.ReconResult{AsOf: now, Counts: map[string]int{}}
+	if s.riskCapital != nil {
+		res.LastAutoExtendReportID, res.LastAutoExtendedAt = s.riskCapital.LastAutoExtend()
+	}
 	configured, lastSuccess, lastAttempt, lastErr := s.flexFetchStatus()
 	res.Fetch = rpc.ReconFetchStatus{Configured: configured, LastSuccess: lastSuccess, LastAttempt: lastAttempt, LastError: lastErr}
 
@@ -58,7 +69,7 @@ func (s *Server) buildReconReport() *rpc.ReconResult {
 		res.Message = "recon.* policy keys are unapproved; write them in the risk policy before reconciliation can classify anything"
 		health = append(health, rpc.SourceHealth{Source: "risk_policy", Status: "unapproved"})
 		res.InputHealth = health
-		return res
+		return res, nil
 	}
 
 	statements, problems, err := loadRetainedFlexStatements()
@@ -67,12 +78,12 @@ func (s *Server) buildReconReport() *rpc.ReconResult {
 		res.Status = rpc.ReconStatusUnavailable
 		res.Message = "cannot read retained statements: " + err.Error()
 		res.InputHealth = append(health, rpc.SourceHealth{Source: "statements", Status: "unavailable", Notes: []string{err.Error()}})
-		return res
+		return res, nil
 	case len(statements) == 0:
 		res.Status = rpc.ReconStatusUnavailable
 		res.Message = "no retained Flex statements yet; enable [flex] and wait for the daily fetch, or check fetch.last_error"
 		res.InputHealth = append(health, rpc.SourceHealth{Source: "statements", Status: "unavailable"})
-		return res
+		return res, nil
 	}
 	res.Status = rpc.ReconStatusActive
 	if len(problems) > 0 {
@@ -91,12 +102,32 @@ func (s *Server) buildReconReport() *rpc.ReconResult {
 	res.GenesisAt = ctx.GenesisAt
 	matchableFlows, baseline := partitionReconBaselineFlows(merged.flows, ctx)
 	events := replayCapitalFlowEvents()
+	bridgeFlows := 0.0
+	var bridgeEvents []capitalEventV1
+	if pol.PolicyVersion >= 3 {
+		events, bridgeEvents, bridgeFlows = splitV3ReconEvents(events, ctx, res.CoverageTo)
+	}
 	matchedExceptions, matched := matchReconFlows(matchableFlows, events, rc)
+	var confirmed []rpc.ReconException
+	if pol.PolicyVersion >= 3 {
+		kept := matchedExceptions[:0]
+		for _, ex := range matchedExceptions {
+			if ex.Category == rpc.ReconMissingFromLedger {
+				ex.Category = rpc.ReconConfirmed
+				ex.Note = "broker-confirmed external flow; no declaration required under policy v3"
+				confirmed = append(confirmed, ex)
+				continue
+			}
+			kept = append(kept, ex)
+		}
+		matchedExceptions = kept
+	}
 	exceptions := append(merged.exceptions, matchedExceptions...)
 	applyReconDismissals(exceptions)
 
 	sort.Slice(exceptions, func(i, j int) bool { return exceptions[i].LineID < exceptions[j].LineID })
 	sort.Slice(baseline, func(i, j int) bool { return baseline[i].LineID < baseline[j].LineID })
+	sort.Slice(confirmed, func(i, j int) bool { return confirmed[i].LineID < confirmed[j].LineID })
 	for _, ex := range exceptions {
 		res.Counts[ex.Category]++
 		if !ex.Dismissed {
@@ -105,12 +136,47 @@ func (s *Server) buildReconReport() *rpc.ReconResult {
 	}
 	res.Counts["matched"] = len(matched)
 	res.Counts[rpc.ReconBaseline] = len(baseline)
+	res.Counts[rpc.ReconConfirmed] = len(confirmed)
 	res.Exceptions = exceptions
 	res.Baseline = baseline
+	res.Confirmed = confirmed
+	statementFlows := bridgeFlows
+	for _, flow := range matchableFlows {
+		statementFlows += flow.amountBase
+	}
+	if pol.PolicyVersion >= 3 {
+		res.StatementCumFlowsBase = &statementFlows
+	}
 	res.Equity = s.reconEquityCheck(merged.equityByDay)
-	res.ReportID = reconReportID(exceptions, baseline, res.CoverageFrom, res.CoverageTo, res.StatementAsOf, pol)
+	res.ReportID = reconReportID(exceptions, baseline, confirmed, matchableFlows, bridgeEvents, res.CoverageFrom, res.CoverageTo, res.StatementAsOf, pol)
 	res.InputHealth = health
-	return res
+	snapshot := &statementCapitalSnapshot{CoverageTo: res.CoverageTo, Flows: matchableFlows}
+	for _, flow := range matchableFlows {
+		snapshot.FlowsBase += flow.amountBase
+	}
+	return res, snapshot
+}
+
+func splitV3ReconEvents(events []capitalEventV1, ctx capitalReplayContext, coverageTo time.Time) (within, bridges []capitalEventV1, bridgeFlows float64) {
+	within = make([]capitalEventV1, 0, len(events))
+	for _, ev := range events {
+		effectiveAt := ev.EffectiveAt
+		if effectiveAt.IsZero() {
+			effectiveAt = ev.At
+		}
+		preGenesis := ctx.Seeded && !ctx.GenesisAt.IsZero() && utcDateBefore(effectiveAt, ctx.GenesisAt)
+		if preGenesis || (!coverageTo.IsZero() && !utcDateAfter(effectiveAt, coverageTo)) {
+			within = append(within, ev)
+			continue
+		}
+		bridges = append(bridges, ev)
+		if ev.Type == "deposit" {
+			bridgeFlows += ev.AmountBase
+		} else if ev.Type == "withdrawal" {
+			bridgeFlows -= ev.AmountBase
+		}
+	}
+	return within, bridges, bridgeFlows
 }
 
 // mergeRetainedStatements folds all retained Flex statements into the
@@ -340,6 +406,10 @@ func utcDateBefore(a, b time.Time) bool {
 	return ad.Before(bd)
 }
 
+func utcDateAfter(a, b time.Time) bool {
+	return utcDateBefore(b, a)
+}
+
 // businessDaysApart counts weekdays strictly between the earlier and later
 // timestamp's calendar days (same day = 0). Exchange holidays deliberately
 // not modeled: a one-holiday slack belongs in the policy window.
@@ -432,12 +502,23 @@ func (s *Server) reconEquityCheck(equityByDay map[string]flexstmt.EquityRow) *rp
 	}
 	check := &rpc.ReconEquityCheck{StatementDate: newest.ReportDate, StatementTotalBase: newest.TotalBase}
 	if s.riskCapital != nil {
-		day := newest.ReportDate.UTC().Format("2006-01-02")
-		if equity, ok := s.riskCapital.DailySample(day); ok {
+		paired := newest
+		var pairedEquity float64
+		var pairedOK bool
+		for _, row := range equityByDay {
+			day := row.ReportDate.UTC().Format("2006-01-02")
+			if equity, ok := s.riskCapital.DailySample(day); ok && (!pairedOK || row.ReportDate.After(paired.ReportDate)) {
+				paired, pairedEquity, pairedOK = row, equity, true
+			}
+		}
+		if pairedOK {
+			check.StatementDate = paired.ReportDate
+			check.StatementTotalBase = paired.TotalBase
+			equity := pairedEquity
 			check.RuntimeEquityBase = &equity
 			check.SameDay = true
-			if newest.TotalBase != 0 {
-				div := (equity - newest.TotalBase) / math.Abs(newest.TotalBase) * 100
+			if paired.TotalBase != 0 {
+				div := (equity - paired.TotalBase) / math.Abs(paired.TotalBase) * 100
 				check.DivergencePct = &div
 			}
 		} else if equity, asOf := s.riskCapital.LastEquity(); equity > 0 {
@@ -448,19 +529,39 @@ func (s *Server) reconEquityCheck(equityByDay map[string]flexstmt.EquityRow) *rp
 	return check
 }
 
-// reconReportID pins the exception and baseline sets, coverage, statement
-// freshness, and the policy identity that classified them.
-func reconReportID(exceptions, baseline []rpc.ReconException, from, to, stmtAsOf time.Time, pol *risk.Constitution) string {
+// reconReportID pins the classified content, coverage, statement freshness,
+// and policy identity. The v2 projection stays byte-identical; v3 additionally
+// pins full row content so a confirmed restatement cannot reuse an id.
+func reconReportID(exceptions, baseline, confirmed []rpc.ReconException, statementFlows []reconFlow, bridgeEvents []capitalEventV1, from, to, stmtAsOf time.Time, pol *risk.Constitution) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s|%s|%s|", from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), stmtAsOf.UTC().Format(time.RFC3339))
 	if pol != nil {
 		fmt.Fprintf(h, "%s|", pol.FingerprintKey())
 	}
-	for _, ex := range exceptions {
-		fmt.Fprintf(h, "%s|%s|%t\n", ex.LineID, ex.Category, ex.Dismissed)
-	}
-	for _, row := range baseline {
-		fmt.Fprintf(h, "%s|%s|%t\n", row.LineID, rpc.ReconBaseline, false)
+	if pol == nil || pol.PolicyVersion < 3 {
+		for _, ex := range exceptions {
+			fmt.Fprintf(h, "%s|%s|%t\n", ex.LineID, ex.Category, ex.Dismissed)
+		}
+		for _, row := range baseline {
+			fmt.Fprintf(h, "%s|%s|%t\n", row.LineID, rpc.ReconBaseline, false)
+		}
+	} else {
+		flows := append([]reconFlow(nil), statementFlows...)
+		sort.Slice(flows, func(i, j int) bool { return flows[i].id < flows[j].id })
+		for _, flow := range flows {
+			fmt.Fprintf(h, "flow|%s|%s|%s|%s|%.17g\n", flow.id, flow.typ, flow.desc, flow.valueDate.UTC().Format(time.RFC3339Nano), flow.amountBase)
+		}
+		for _, ev := range bridgeEvents {
+			fmt.Fprintf(h, "bridge|%s|%s|%.17g|%s|%s\n", ev.At.UTC().Format(time.RFC3339Nano), ev.Type, ev.AmountBase,
+				ev.EffectiveAt.UTC().Format(time.RFC3339Nano), ev.Note)
+		}
+		for _, rows := range [][]rpc.ReconException{exceptions, baseline, confirmed} {
+			for _, row := range rows {
+				raw, _ := json.Marshal(row)
+				h.Write(raw)
+				h.Write([]byte{'\n'})
+			}
+		}
 	}
 	return "recon-" + hex.EncodeToString(h.Sum(nil))[:16]
 }

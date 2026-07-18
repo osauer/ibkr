@@ -41,6 +41,11 @@ max_report_age_days = 4
 class = "advisory"
 `
 
+func validRiskPolicyV3TOML() string {
+	v3 := strings.Replace(validRiskPolicyTOML, "policy_version = 1", "policy_version = 3", 1)
+	return strings.Replace(v3, "max_report_age_days = 4", "max_report_age_days = 4\nmax_equity_divergence_pct = 1.0", 1)
+}
+
 func newTestRiskPolicyManager(t *testing.T, contents string) (*riskPolicyManager, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "risk-policy.toml")
@@ -78,6 +83,20 @@ func TestRiskPolicyManagerLoadsValidFile(t *testing.T) {
 	}
 	if got := snap.policy.UnapprovedKeys(); len(got) != 0 {
 		t.Fatalf("fully specified file reports unapproved keys: %v", got)
+	}
+}
+
+func TestRiskPolicyManagerLoadsV3AndRejectsV3KeyUnderV2(t *testing.T) {
+	m, _ := newTestRiskPolicyManager(t, validRiskPolicyV3TOML())
+	snap := m.snapshot()
+	if snap.status != rpc.RiskPolicyStatusActive || snap.policy == nil || snap.policy.PolicyVersion != 3 || snap.policy.Recon.MaxEquityDivergencePct == nil {
+		t.Fatalf("v3 snapshot = %+v", snap)
+	}
+	v2WithKey := strings.Replace(validRiskPolicyTOML, "max_report_age_days = 4", "max_report_age_days = 4\nmax_equity_divergence_pct = 1.0", 1)
+	m, _ = newTestRiskPolicyManager(t, v2WithKey)
+	snap = m.snapshot()
+	if snap.status != rpc.RiskPolicyStatusError || !strings.Contains(snap.message, "requires policy_version >= 3") {
+		t.Fatalf("v2 key snapshot status=%s message=%q", snap.status, snap.message)
 	}
 }
 

@@ -1,9 +1,12 @@
 # Risk Constitution (risk-policy.toml)
 
-Updated: 2026-07-12 21:55 CEST
-Status: phase 1 implemented (advisory/shadow only). Interview decisions
-approved by the operator on 2026-07-12; every numerical threshold remains
-unapproved until the operator writes it into the policy file.
+Updated: 2026-07-18 17:31 CEST
+Status: phase 1 implemented 2026-07-12 (advisory/shadow only); v2 adds
+[recon] 2026-07-13 (docs/design/post-trade-truth.md); v3 2026-07-18 adds
+statement-authoritative flows and the clean-report auto-extend
+(docs/design/operator-ergonomics.md, implementation record). Interview
+decisions approved by the operator on 2026-07-12; every numerical threshold
+remains unapproved until the operator writes it into the policy file.
 
 The machine-readable policy is the constitution. `~/.config/ibkr/policies/
 risk-policy.toml` is the single authority over personal capital numbers;
@@ -67,6 +70,18 @@ reconcile event is a human sign-off against a specific, fully resolved
 `ibkr recon` report — bare attestation is retired, and the `[recon]`
 policy keys define what counts as a matching exception.
 
+Since risk-policy v3 (2026-07-18, docs/design/operator-ergonomics.md):
+statement-confirmed post-genesis flows are the authoritative cumFlows
+input; declarations are optional provisional bridge entries covering only
+the fetch lag (matched ones are superseded by the statement value); peak
+corrections key off statement value dates, exactly once per line id; and
+reconcile evidence is either a human sign-off or an automatic clean-report
+extension — a report with zero unresolved exceptions, statements and a
+same-day equity pair fresh within `recon.max_report_age_days`, and
+divergence within `recon.max_equity_divergence_pct`, journaled as origin
+`daemon-auto` with the report id. Declared vs statement cumFlows are
+displayed side by side until R5.
+
 ## Safety invariants
 
 - Account/route/client pins, WhatIf, preview tokens, journal integrity,
@@ -91,6 +106,7 @@ internal/rpc/risk_policy.go            methods, params, result types
 internal/daemon/risk_policy_manager.go TOML manager (absent/active/drift/error)
 internal/daemon/risk_capital_state.go  peak/latch/events/overrides/artefacts + journals
 internal/daemon/risk_policy_handlers.go RPC handlers + preview cause
+internal/daemon/recon_auto_extend.go   v3 clean-report auto-extend (startup + post-ingest only)
 internal/cli/policy.go                 ibkr policy show/capital-event/override/reset-drawdown/artefact
 examples/risk-policy.toml              operator template (all material keys commented out)
 ```

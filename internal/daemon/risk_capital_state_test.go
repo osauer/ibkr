@@ -41,6 +41,13 @@ func testConstitution() *risk.Constitution {
 	}
 }
 
+func testV3Constitution() *risk.Constitution {
+	c := testConstitution()
+	c.PolicyVersion = 3
+	c.Recon.MaxEquityDivergencePct = new(1.0)
+	return c
+}
+
 func newTestRiskCapitalStore(t *testing.T) *riskCapitalStore {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -177,6 +184,169 @@ func TestRiskCapitalLateDepositCorrectsPeak(t *testing.T) {
 	}
 }
 
+func TestRiskCapitalV3NoStatementsTreatsDeclarationsAsBridge(t *testing.T) {
+	st := newTestRiskCapitalStore(t)
+	c := testV3Constitution()
+	now := time.Now()
+	st.now = func() time.Time { return now }
+	reconcileNow(t, st)
+	if _, err := st.ApplyCapitalEventForPolicy(rpc.CapitalEventParams{Type: "deposit", AmountBase: 20000, EffectiveAt: now}, rpc.OrderOriginHumanTTY, c); err != nil {
+		t.Fatal(err)
+	}
+	st.Observe(280000, now, c)
+	rep := st.Report(c, nil)
+	if rep.FlowSource != rpc.CapitalFlowSourceStatement || rep.DeclaredCumFlowsBase == nil || *rep.DeclaredCumFlowsBase != 20000 ||
+		rep.StatementCumFlowsBase == nil || *rep.StatementCumFlowsBase != 20000 || rep.CumExternalFlowsBase == nil || *rep.CumExternalFlowsBase != 20000 {
+		t.Fatalf("v3 no-statement bridge report = %+v", rep)
+	}
+}
+
+func TestRiskCapitalDualComputeFieldsAreVersionGated(t *testing.T) {
+	st := newTestRiskCapitalStore(t)
+	now := time.Now()
+	st.mu.Lock()
+	st.loadLocked()
+	st.state.Seeded = true
+	st.state.AdjustedPeakBase = 260000
+	st.state.LastEquityBase = 260000
+	st.state.LastEquityAsOf = now
+	st.cumFlowsBase = 500
+	st.declaredEvents = []capitalEventV1{{Version: 1, Type: "deposit", AmountBase: 500, At: now, EffectiveAt: now}}
+	st.state.StatementAuthorityActive = true
+	st.state.StatementFlowsBase = 700
+	st.state.StatementCoverageTo = now
+	st.lastReconciledAt = now
+	st.mu.Unlock()
+	v2 := st.Report(testConstitution(), nil)
+	if v2.FlowSource != rpc.CapitalFlowSourceDeclared || v2.DeclaredCumFlowsBase == nil || *v2.DeclaredCumFlowsBase != 500 || v2.StatementCumFlowsBase != nil {
+		t.Fatalf("v2 dual fields = %+v", v2)
+	}
+	v3 := st.Report(testV3Constitution(), nil)
+	if v3.FlowSource != rpc.CapitalFlowSourceStatement || v3.DeclaredCumFlowsBase == nil || *v3.DeclaredCumFlowsBase != 500 ||
+		v3.StatementCumFlowsBase == nil || *v3.StatementCumFlowsBase != 700 ||
+		v3.CumExternalFlowsBase == nil || *v3.CumExternalFlowsBase != 500 {
+		t.Fatalf("v3 dual fields = %+v", v3)
+	}
+}
+
+func TestRiskCapitalV3StatementValueDateCorrectsPeakExactlyOnce(t *testing.T) {
+	st := newTestRiskCapitalStore(t)
+	peakAt := time.Date(2026, 7, 10, 15, 0, 0, 0, time.UTC)
+	st.mu.Lock()
+	st.loadLocked()
+	st.state.Seeded = true
+	st.state.GenesisAt = time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	st.state.AdjustedPeakBase = 280000
+	st.state.PeakAsOf = peakAt
+	st.mu.Unlock()
+
+	old := reconFlow{id: "old", valueDate: time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC), amountBase: 20000}
+	st.IncorporateStatementSnapshot(statementCapitalSnapshot{FlowsBase: 20000, CoverageTo: peakAt, Flows: []reconFlow{old}})
+	if got := st.ReplayContext().AdjustedPeakBase; got != 280000 {
+		t.Fatalf("activation changed peak to %.0f", got)
+	}
+	newDeposit := reconFlow{id: "new", valueDate: time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC), amountBase: 10000}
+	snap := statementCapitalSnapshot{FlowsBase: 30000, CoverageTo: peakAt, Flows: []reconFlow{old, newDeposit}}
+	st.IncorporateStatementSnapshot(snap)
+	if got := st.ReplayContext().AdjustedPeakBase; got != 270000 {
+		t.Fatalf("first incorporation peak = %.0f, want 270000", got)
+	}
+	st.IncorporateStatementSnapshot(snap)
+	if got := st.ReplayContext().AdjustedPeakBase; got != 270000 {
+		t.Fatalf("rebuild corrected twice: %.0f", got)
+	}
+	reloaded := &riskCapitalStore{now: st.now}
+	reloaded.IncorporateStatementSnapshot(snap)
+	if got := reloaded.ReplayContext().AdjustedPeakBase; got != 270000 {
+		t.Fatalf("restart corrected twice: %.0f", got)
+	}
+	reloaded.mu.Lock()
+	if len(reloaded.state.AppliedStatementPeakCorrectionIDs) != 1 || reloaded.state.AppliedStatementPeakCorrectionIDs[0] != "new" {
+		t.Fatalf("applied correction ids = %v", reloaded.state.AppliedStatementPeakCorrectionIDs)
+	}
+	reloaded.mu.Unlock()
+}
+
+func TestRiskCapitalV3PostPeakStatementAndBridgeDoNotCorrectPeak(t *testing.T) {
+	st := newTestRiskCapitalStore(t)
+	c := testV3Constitution()
+	peakAt := time.Date(2026, 7, 10, 15, 0, 0, 0, time.UTC)
+	st.mu.Lock()
+	st.loadLocked()
+	st.state.Seeded = true
+	st.state.AdjustedPeakBase = 280000
+	st.state.PeakAsOf = peakAt
+	st.state.StatementAuthorityActive = true
+	st.mu.Unlock()
+	postPeak := reconFlow{id: "later", valueDate: time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC), amountBase: 10000}
+	st.IncorporateStatementSnapshot(statementCapitalSnapshot{FlowsBase: 10000, CoverageTo: peakAt, Flows: []reconFlow{postPeak}})
+	if got := st.ReplayContext().AdjustedPeakBase; got != 280000 {
+		t.Fatalf("post-peak statement changed peak to %.0f", got)
+	}
+	if _, err := st.ApplyCapitalEventForPolicy(rpc.CapitalEventParams{Type: "deposit", AmountBase: 5000, EffectiveAt: peakAt.Add(-time.Hour)}, rpc.OrderOriginHumanTTY, c); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.ReplayContext().AdjustedPeakBase; got != 280000 {
+		t.Fatalf("v3 bridge declaration changed peak to %.0f", got)
+	}
+}
+
+func TestRiskCapitalV3ActivationSafetyWhenFlowSumsEqual(t *testing.T) {
+	st := newTestRiskCapitalStore(t)
+	v2, v3 := testConstitution(), testV3Constitution()
+	now := time.Now()
+	st.now = func() time.Time { return now }
+	st.mu.Lock()
+	st.loadLocked()
+	st.state.Seeded = true
+	st.state.AdjustedPeakBase = 260000
+	st.state.PeakAsOf = now.Add(-time.Hour)
+	st.state.LastEquityBase = 255000
+	st.state.LastEquityAsOf = now
+	st.state.BlockLatched = false
+	st.cumFlowsBase = 1000
+	st.declaredEvents = []capitalEventV1{{Version: 1, Type: "deposit", AmountBase: 1000, At: now.Add(-24 * time.Hour), EffectiveAt: now.Add(-24 * time.Hour)}}
+	st.lastReconciledAt = now
+	st.mu.Unlock()
+	before := st.Report(v2, nil)
+	flow := reconFlow{id: "existing", valueDate: now.Add(-24 * time.Hour), amountBase: 1000}
+	st.IncorporateStatementSnapshot(statementCapitalSnapshot{FlowsBase: 1000, CoverageTo: now, Flows: []reconFlow{flow}})
+	after := st.Report(v3, nil)
+	if derefFloat(before.AdjustedPeakBase) != derefFloat(after.AdjustedPeakBase) || before.BlockLatched != after.BlockLatched ||
+		before.Tier != after.Tier || derefFloat(before.ConsumedPct) != derefFloat(after.ConsumedPct) {
+		t.Fatalf("activation mutated capital state: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestRiskCapitalV3ActivationSafetyWithZeroFlows(t *testing.T) {
+	st := newTestRiskCapitalStore(t)
+	v2, v3 := testConstitution(), testV3Constitution()
+	now := time.Now()
+	st.mu.Lock()
+	st.loadLocked()
+	st.state.Seeded = true
+	st.state.AdjustedPeakBase = 260000
+	st.state.PeakAsOf = now.Add(-time.Hour)
+	st.state.LastEquityBase = 255000
+	st.state.LastEquityAsOf = now
+	st.lastReconciledAt = now
+	st.mu.Unlock()
+	before := st.Report(v2, nil)
+	st.IncorporateStatementSnapshot(statementCapitalSnapshot{CoverageTo: now})
+	after := st.Report(v3, nil)
+	if derefFloat(before.AdjustedPeakBase) != derefFloat(after.AdjustedPeakBase) || before.BlockLatched != after.BlockLatched ||
+		before.Tier != after.Tier || derefFloat(before.ConsumedPct) != derefFloat(after.ConsumedPct) {
+		t.Fatalf("zero-flow activation mutated capital state: before=%+v after=%+v", before, after)
+	}
+}
+
+func derefFloat(v *float64) float64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
 func TestRiskCapitalBlockLatchPersistsAndResets(t *testing.T) {
 	st := newTestRiskCapitalStore(t)
 	c := testConstitution()
@@ -287,6 +457,70 @@ func TestRiskCapitalOverrides(t *testing.T) {
 	list := st.ActiveOverrides()
 	if len(list) != 1 || list[0].Active {
 		t.Fatalf("overrides = %+v, want one expired record", list)
+	}
+}
+
+func TestRiskCapitalUnreconciledOverrideConsumptionIsControlSpecific(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		control string
+		expired bool
+		stale   bool
+	}{
+		{"active outage valve", "capital.max_unreconciled_days", false, false},
+		{"expired outage valve", "capital.max_unreconciled_days", true, true},
+		{"different control", "drawdown.warn_consumed_pct", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestRiskCapitalStore(t)
+			c := testConstitution()
+			base := time.Now().UTC()
+			st.now = func() time.Time { return base.Add(-8 * 24 * time.Hour) }
+			reconcileNow(t, st)
+			st.now = func() time.Time { return base }
+			rec, err := st.GrantOverride(rpc.OverrideParams{Control: tc.control, Reason: "statement outage", Hours: 4}, c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.expired {
+				st.now = func() time.Time { return rec.ExpiresAt.Add(time.Minute) }
+			}
+			st.mu.Lock()
+			st.loadLocked()
+			st.state.Seeded = true
+			st.state.AdjustedPeakBase = 260000
+			st.state.LastEquityBase = 260000
+			st.state.LastEquityAsOf = st.now()
+			st.mu.Unlock()
+			rep := st.Report(c, nil)
+			if rep.ReconcileStale != tc.stale {
+				t.Fatalf("reconcile stale = %v, want %v (override %+v)", rep.ReconcileStale, tc.stale, rec)
+			}
+		})
+	}
+}
+
+func TestRiskCapitalReplayReconcileCompatibilityAndProvenance(t *testing.T) {
+	st := newTestRiskCapitalStore(t)
+	base := time.Now().UTC().Add(-time.Hour)
+	for _, ev := range []capitalEventV1{
+		{Version: 1, At: base, Type: "reconcile"},
+		{Version: 1, At: base.Add(time.Minute), Type: "reconcile", Origin: rpc.OrderOriginHumanTTY, ReportID: "recon-human"},
+		{Version: 1, At: base.Add(2 * time.Minute), Type: "reconcile", Origin: riskCapitalAutoOrigin, ReportID: "recon-auto"},
+	} {
+		if err := appendCapitalEvent(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st.EnsureLoaded()
+	if st.lastReconcileReportID != "recon-auto" || st.lastReconcileSource != rpc.ReconcileSourceAutomatic ||
+		st.lastAutoExtendReportID != "recon-auto" || !st.lastAutoExtendedAt.Equal(base.Add(2*time.Minute)) {
+		t.Fatalf("replayed provenance: last=%s/%s auto=%s/%s", st.lastReconcileReportID, st.lastReconcileSource, st.lastAutoExtendReportID, st.lastAutoExtendedAt)
+	}
+	for _, id := range []string{"recon-human", "recon-auto"} {
+		if _, ok := st.reconciledReportIDs[id]; !ok {
+			t.Fatalf("replayed report id %s missing", id)
+		}
 	}
 }
 

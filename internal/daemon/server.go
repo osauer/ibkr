@@ -349,6 +349,10 @@ type Server struct {
 	// authorization.
 	riskPolicies *riskPolicyManager
 	riskCapital  *riskCapitalStore
+	// reconMu serializes report-content mutations with report-backed human
+	// and automatic reconcile appends so a report id cannot race a new
+	// declaration or dismissal.
+	reconMu sync.Mutex
 	// flexFetch tracks the daily Flex statement ingestion for post-trade
 	// reconciliation (docs/design/post-trade-truth.md). Read-only toward
 	// the broker; sanitized status only, never the token.
@@ -1151,6 +1155,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.startedAt = time.Now()
 	s.logger.Infof("ibkr daemon %s listening on %s (gateway=%s:%d, clientID=%d)",
 		s.version, s.socketPath, ep.Host, ep.Port, ep.ClientID)
+	s.evaluateRiskPolicyV3Reconciliation()
 
 	// Skip the connect goroutine when discovery already failed — there's
 	// nothing to connect to. The socket is still up so `ibkr status`

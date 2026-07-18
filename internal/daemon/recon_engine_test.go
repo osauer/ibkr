@@ -52,6 +52,11 @@ func newReconTestServer(t *testing.T) *Server {
 	return newRiskPolicyTestServer(t, validRiskPolicyTOML)
 }
 
+func newReconV3TestServer(t *testing.T) *Server {
+	t.Helper()
+	return newRiskPolicyTestServer(t, validRiskPolicyV3TOML())
+}
+
 func declare(t *testing.T, s *Server, typ string, amount float64, effectiveAt string) {
 	t.Helper()
 	var eff time.Time
@@ -61,7 +66,8 @@ func declare(t *testing.T, s *Server, typ string, amount float64, effectiveAt st
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.riskCapital.ApplyCapitalEvent(rpc.CapitalEventParams{Type: typ, AmountBase: amount, EffectiveAt: eff}, rpc.OrderOriginHumanTTY, nil); err != nil {
+	if _, err := s.riskCapital.ApplyCapitalEventForPolicy(rpc.CapitalEventParams{Type: typ, AmountBase: amount, EffectiveAt: eff}, rpc.OrderOriginHumanTTY,
+		s.riskPolicies.snapshot().policy); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -172,6 +178,75 @@ func TestReconRestatementSupersedesByLineID(t *testing.T) {
 	}
 }
 
+func TestReconV3ConfirmedReplacesMissingFromLedger(t *testing.T) {
+	build := func(t *testing.T, v3 bool) *rpc.ReconResult {
+		t.Helper()
+		var s *Server
+		if v3 {
+			s = newReconV3TestServer(t)
+		} else {
+			s = newReconTestServer(t)
+		}
+		writeFlexFixture(t, "flex-confirmed.xml", recentGenerated(), "20260706", "20260712",
+			cashLine("confirmed-one", "Deposits/Withdrawals", 1000, "20260708"))
+		seedReconRuntime(s, time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC))
+		return s.buildReconReport()
+	}
+	v2 := build(t, false)
+	if v2.Counts[rpc.ReconMissingFromLedger] != 1 || v2.Unresolved != 1 || len(v2.Confirmed) != 0 || v2.StatementCumFlowsBase != nil {
+		t.Fatalf("v2 report = %+v", v2)
+	}
+	v3 := build(t, true)
+	if v3.Counts[rpc.ReconConfirmed] != 1 || v3.Unresolved != 0 || len(v3.Exceptions) != 0 || len(v3.Confirmed) != 1 {
+		t.Fatalf("v3 report counts=%v unresolved=%d exceptions=%+v confirmed=%+v", v3.Counts, v3.Unresolved, v3.Exceptions, v3.Confirmed)
+	}
+	if v3.Confirmed[0].Category != rpc.ReconConfirmed || v3.Confirmed[0].AmountBase == nil || *v3.Confirmed[0].AmountBase != 1000 || v3.StatementCumFlowsBase == nil || *v3.StatementCumFlowsBase != 1000 {
+		t.Fatalf("v3 confirmed/report sum = %+v / %v", v3.Confirmed[0], v3.StatementCumFlowsBase)
+	}
+}
+
+func TestReconV3StatementAuthorityAndBridgeBoundary(t *testing.T) {
+	s := newReconV3TestServer(t)
+	seedReconRuntime(s, time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC))
+	writeFlexFixture(t, "flex-bridge.xml", recentGenerated(), "20260701", "20260710",
+		cashLine("matched", "Deposits/Withdrawals", 1000, "20260705"))
+	declare(t, s, "deposit", 1005, "2026-07-05")   // statement value wins within tolerance
+	declare(t, s, "withdrawal", 200, "2026-07-10") // coverage boundary: ledger_only, excluded
+	declare(t, s, "deposit", 300, "2026-07-11")    // after coverage: bridge, counted
+	declare(t, s, "deposit", 400, "2026-06-30")    // pre-genesis ledger event stays loud
+
+	rep := s.buildReconReport()
+	if rep.StatementCumFlowsBase == nil || *rep.StatementCumFlowsBase != 1300 {
+		t.Fatalf("statement-authoritative flows = %v, want 1300", rep.StatementCumFlowsBase)
+	}
+	if rep.Counts["matched"] != 1 || rep.Counts[rpc.ReconLedgerOnly] != 2 || rep.Unresolved != 2 {
+		t.Fatalf("counts=%v unresolved=%d", rep.Counts, rep.Unresolved)
+	}
+	for _, ex := range rep.Exceptions {
+		if ex.EventAt.Format("2006-01-02") == "2026-07-11" {
+			t.Fatalf("bridge declaration became an exception: %+v", ex)
+		}
+	}
+}
+
+func TestReconV3ConfirmedRestatementChangesReportID(t *testing.T) {
+	s := newReconV3TestServer(t)
+	seedReconRuntime(s, time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC))
+	generated := recentGenerated()
+	writeFlexFixture(t, "flex-confirmed-restatement.xml", generated, "20260701", "20260710",
+		cashLine("same-line", "Deposits/Withdrawals", 1000, "20260705"))
+	before := s.buildReconReport()
+	writeFlexFixture(t, "flex-confirmed-restatement.xml", generated, "20260701", "20260710",
+		cashLine("same-line", "Deposits/Withdrawals", 1200, "20260705"))
+	after := s.buildReconReport()
+	if before.ReportID == after.ReportID {
+		t.Fatalf("confirmed restatement reused report id %s", before.ReportID)
+	}
+	if after.StatementCumFlowsBase == nil || *after.StatementCumFlowsBase != 1200 {
+		t.Fatalf("restated statement flows = %v", after.StatementCumFlowsBase)
+	}
+}
+
 func TestReconEquityCheckSameDayOnly(t *testing.T) {
 	s := newReconTestServer(t)
 	writeFlexFixture(t, "flex-equity.xml", recentGenerated(), "20260710", "20260710", equityRow("20260710", 100))
@@ -205,6 +280,23 @@ func TestReconEquityCheckSameDayOnly(t *testing.T) {
 	}
 	if !rep.Equity.RuntimeAsOf.IsZero() {
 		t.Fatalf("same-day runtime as-of = %s, want zero (day-key sample)", rep.Equity.RuntimeAsOf)
+	}
+}
+
+func TestReconEquityCheckUsesNewestAvailableSameDayPair(t *testing.T) {
+	s := newReconTestServer(t)
+	writeFlexFixture(t, "flex-equity-pairs.xml", recentGenerated(), "20260710", "20260711",
+		equityRow("20260710", 100)+"\n"+equityRow("20260711", 200))
+	s.riskCapital.mu.Lock()
+	s.riskCapital.loadLocked()
+	s.riskCapital.state.LastEquityBase = 250
+	s.riskCapital.state.LastEquityAsOf = time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	s.riskCapital.state.DailyEquity = map[string]float64{"2026-07-10": 101}
+	s.riskCapital.mu.Unlock()
+	rep := s.buildReconReport()
+	if rep.Equity == nil || !rep.Equity.SameDay || rep.Equity.StatementDate.Format("2006-01-02") != "2026-07-10" ||
+		rep.Equity.DivergencePct == nil || math.Abs(*rep.Equity.DivergencePct-1) > 1e-9 {
+		t.Fatalf("equity pair = %+v", rep.Equity)
 	}
 }
 

@@ -47,6 +47,7 @@ func ConstitutionLimits(c *Constitution) []ConstitutionLimit {
 		rTolM    *float64
 		rDateW   *int
 		rAge     *int
+		rEqDiv   *float64
 	)
 	if c != nil {
 		cur = c.Capital.BaseCurrency
@@ -67,6 +68,7 @@ func ConstitutionLimits(c *Constitution) []ConstitutionLimit {
 		rTolM = c.Recon.AmountToleranceMin
 		rDateW = c.Recon.DateWindowBusinessDays
 		rAge = c.Recon.MaxReportAgeDays
+		rEqDiv = c.Recon.MaxEquityDivergencePct
 	}
 
 	money := func(v *float64) (string, string) {
@@ -88,6 +90,10 @@ func ConstitutionLimits(c *Constitution) []ConstitutionLimit {
 	blockVal, blockSrc := pct(block)
 	ovhVal, ovhSrc := num(ovh, "hours")
 
+	reconcileMeaning := "How long the declared capital-event ledger may go without a human reconcile attestation before the state counts as unreconciled. Same posture as equity staleness."
+	if c != nil && c.PolicyVersion >= 3 {
+		reconcileMeaning = "How many days may pass without reconcile evidence — either an automatic clean-report extension or a human sign-off — before the state counts as unreconciled. Same posture as equity staleness."
+	}
 	rows := []ConstitutionLimit{
 		get("capital.base_currency", curVal, curSrc,
 			"Currency every capital number in this policy is stated in; must match the account base currency.", "structural"),
@@ -98,7 +104,7 @@ func ConstitutionLimits(c *Constitution) []ConstitutionLimit {
 		get("capital.max_equity_age_minutes", eqVal, eqSrc,
 			"How old the last equity observation may be before the capital state counts as stale. Stale never passes; once the block control is promoted to hard, stale fails closed for risk increases.", "advisory"),
 		get("capital.max_unreconciled_days", recVal, recSrc,
-			"How long the declared capital-event ledger may go without a human reconcile attestation before the state counts as unreconciled. Same posture as equity staleness.", "advisory"),
+			reconcileMeaning, "advisory"),
 		get("drawdown.warn_consumed_pct", warnVal, warnSrc,
 			"Advisory tier: when losses from the cash-flow-adjusted peak consume this share of declared risk capital, surfaces warn and risk-increasing previews carry an advisory cause. Self-clearing on recovery.", "advisory"),
 		get("drawdown.block_consumed_pct", blockVal, blockSrc,
@@ -122,6 +128,11 @@ func ConstitutionLimits(c *Constitution) []ConstitutionLimit {
 		get("recon.max_report_age_days", rAgeVal, rAgeSrc,
 			"How old the newest ingested statement may be for a recon report to back a reconcile sign-off. Older data means the sign-off would attest to a week nobody has seen.", "advisory"),
 	)
+	if c == nil || c.PolicyVersion >= 3 {
+		rEqDivVal, rEqDivSrc := pct(rEqDiv)
+		rows = append(rows, get("recon.max_equity_divergence_pct", rEqDivVal, rEqDivSrc,
+			"Largest absolute same-day difference allowed between broker statement equity and the runtime observation before a clean report may extend the reconcile clock automatically.", "advisory"))
+	}
 	for _, a := range []struct {
 		key   string
 		class string

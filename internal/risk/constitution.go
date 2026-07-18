@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -118,6 +119,10 @@ type ConstitutionRecon struct {
 	// MaxReportAgeDays bounds how old the newest ingested statement may
 	// be for a recon report to back a reconcile sign-off.
 	MaxReportAgeDays *int `toml:"max_report_age_days" json:"max_report_age_days"`
+	// MaxEquityDivergencePct bounds the absolute same-day difference between
+	// broker statement equity and the runtime observation before v3 may
+	// automatically accept a clean report as reconcile evidence.
+	MaxEquityDivergencePct *float64 `toml:"max_equity_divergence_pct" json:"max_equity_divergence_pct"`
 }
 
 // ConstitutionCadence declares the operating-cadence artefacts so their
@@ -217,6 +222,14 @@ func (c Constitution) Validate() error {
 	if v := c.Recon.MaxReportAgeDays; v != nil && *v <= 0 {
 		return fmt.Errorf("recon.max_report_age_days must be positive")
 	}
+	if v := c.Recon.MaxEquityDivergencePct; v != nil {
+		if c.PolicyVersion < 3 {
+			return fmt.Errorf("recon.max_equity_divergence_pct requires policy_version >= 3")
+		}
+		if math.IsNaN(*v) || math.IsInf(*v, 0) || *v <= 0 {
+			return fmt.Errorf("recon.max_equity_divergence_pct must be positive and finite")
+		}
+	}
 	for _, a := range []struct {
 		key   string
 		class string
@@ -294,6 +307,9 @@ func (c Constitution) UnapprovedKeys() []string {
 	if c.Recon.MaxReportAgeDays == nil {
 		out = append(out, "recon.max_report_age_days")
 	}
+	if (c.PolicyVersion == 0 || c.PolicyVersion >= 3) && c.Recon.MaxEquityDivergencePct == nil {
+		out = append(out, "recon.max_equity_divergence_pct")
+	}
 	return out
 }
 
@@ -302,7 +318,7 @@ func (c Constitution) UnapprovedKeys() []string {
 // variant is the outlier, not the model). Absent material keys marshal as
 // null and are part of the identity: an unapproved gap is policy state.
 func (c Constitution) FingerprintKey() string {
-	normalized := struct {
+	type fingerprintBase struct {
 		Kind          string                `json:"kind"`
 		SchemaVersion int                   `json:"schema_version"`
 		PolicyID      string                `json:"policy_id"`
@@ -310,22 +326,68 @@ func (c Constitution) FingerprintKey() string {
 		Capital       ConstitutionCapital   `json:"capital"`
 		Drawdown      ConstitutionDrawdown  `json:"drawdown"`
 		Override      ConstitutionOverride  `json:"override"`
-		Recon         ConstitutionRecon     `json:"recon"`
 		Cadence       ConstitutionCadence   `json:"cadence"`
 		Inventory     ConstitutionInventory `json:"inventory"`
-	}{
-		Kind:          strings.TrimSpace(c.Kind),
-		SchemaVersion: c.SchemaVersion,
-		PolicyID:      strings.TrimSpace(c.PolicyID),
-		PolicyVersion: c.PolicyVersion,
-		Capital:       c.Capital,
-		Drawdown:      c.Drawdown,
-		Override:      c.Override,
-		Recon:         c.Recon,
-		Cadence:       c.Cadence,
-		Inventory:     c.Inventory,
 	}
-	raw, _ := json.Marshal(normalized)
+	base := fingerprintBase{
+		Kind: strings.TrimSpace(c.Kind), SchemaVersion: c.SchemaVersion,
+		PolicyID: strings.TrimSpace(c.PolicyID), PolicyVersion: c.PolicyVersion,
+		Capital: c.Capital, Drawdown: c.Drawdown, Override: c.Override,
+		Cadence: c.Cadence, Inventory: c.Inventory,
+	}
+	var raw []byte
+	if c.PolicyVersion < 3 {
+		// Preserve the pre-v3 projection byte-for-byte: adding a nil v3-only
+		// field must not change an existing policy fingerprint.
+		recon := struct {
+			AmountTolerancePct     *float64 `json:"amount_tolerance_pct"`
+			AmountToleranceMin     *float64 `json:"amount_tolerance_min"`
+			DateWindowBusinessDays *int     `json:"date_window_business_days"`
+			MaxReportAgeDays       *int     `json:"max_report_age_days"`
+		}{c.Recon.AmountTolerancePct, c.Recon.AmountToleranceMin, c.Recon.DateWindowBusinessDays, c.Recon.MaxReportAgeDays}
+		normalized := struct {
+			Kind          string                `json:"kind"`
+			SchemaVersion int                   `json:"schema_version"`
+			PolicyID      string                `json:"policy_id"`
+			PolicyVersion int                   `json:"policy_version"`
+			Capital       ConstitutionCapital   `json:"capital"`
+			Drawdown      ConstitutionDrawdown  `json:"drawdown"`
+			Override      ConstitutionOverride  `json:"override"`
+			Recon         any                   `json:"recon"`
+			Cadence       ConstitutionCadence   `json:"cadence"`
+			Inventory     ConstitutionInventory `json:"inventory"`
+		}{
+			Kind: base.Kind, SchemaVersion: base.SchemaVersion, PolicyID: base.PolicyID, PolicyVersion: base.PolicyVersion,
+			Capital: base.Capital, Drawdown: base.Drawdown, Override: base.Override, Recon: recon,
+			Cadence: base.Cadence, Inventory: base.Inventory,
+		}
+		raw, _ = json.Marshal(normalized)
+	} else {
+		normalized := struct {
+			Kind          string                `json:"kind"`
+			SchemaVersion int                   `json:"schema_version"`
+			PolicyID      string                `json:"policy_id"`
+			PolicyVersion int                   `json:"policy_version"`
+			Capital       ConstitutionCapital   `json:"capital"`
+			Drawdown      ConstitutionDrawdown  `json:"drawdown"`
+			Override      ConstitutionOverride  `json:"override"`
+			Recon         ConstitutionRecon     `json:"recon"`
+			Cadence       ConstitutionCadence   `json:"cadence"`
+			Inventory     ConstitutionInventory `json:"inventory"`
+		}{
+			Kind:          strings.TrimSpace(c.Kind),
+			SchemaVersion: c.SchemaVersion,
+			PolicyID:      strings.TrimSpace(c.PolicyID),
+			PolicyVersion: c.PolicyVersion,
+			Capital:       c.Capital,
+			Drawdown:      c.Drawdown,
+			Override:      c.Override,
+			Recon:         c.Recon,
+			Cadence:       c.Cadence,
+			Inventory:     c.Inventory,
+		}
+		raw, _ = json.Marshal(normalized)
+	}
 	sum := sha256.Sum256(raw)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
@@ -337,15 +399,15 @@ type CapitalObservation struct {
 }
 
 // CapitalRuntime is the daemon-owned runtime state the evaluator consumes:
-// the cash-flow-adjusted peak, cumulative declared external flows, the
+// the cash-flow-adjusted peak, effective cumulative external flows, the
 // drawdown latch, and reconciliation recency. The daemon owns mutation; the
 // evaluator only reads.
 type CapitalRuntime struct {
 	// AdjustedPeakBase is the peak of (equity − cumulative external flows).
 	AdjustedPeakBase float64
 	PeakAsOf         time.Time
-	// CumExternalFlowsBase is Σ deposits − Σ withdrawals declared since
-	// state genesis (replayed from capital-events.jsonl).
+	// CumExternalFlowsBase is the policy-version-selected cumulative flow
+	// input: declared events through v2, statement truth plus bridges in v3.
 	CumExternalFlowsBase float64
 	// Seeded is false until the first equity observation establishes the
 	// peak; an unseeded state evaluates unknown, never ok.
@@ -353,9 +415,13 @@ type CapitalRuntime struct {
 	// BlockLatched persists across restarts and mark recovery; only a
 	// journaled human reset clears it.
 	BlockLatched bool
-	// LastReconciledAt is the last human reconcile attestation; zero means
-	// never reconciled.
+	// LastReconciledAt is the last human or automatic reconcile evidence;
+	// zero means never reconciled.
 	LastReconciledAt time.Time
+	// UnreconciledOverrideUntil is populated only from an active, unexpired
+	// one-shot override on capital.max_unreconciled_days. No other override
+	// control reaches evaluation.
+	UnreconciledOverrideUntil time.Time
 }
 
 // CapitalVerdict is the pure evaluation result.
@@ -393,9 +459,17 @@ func EvaluateCapital(c *Constitution, rt CapitalRuntime, obs *CapitalObservation
 	// Reconciliation recency is reportable whenever its horizon exists.
 	if c.Capital.MaxUnreconciledDays != nil {
 		maxAge := time.Duration(*c.Capital.MaxUnreconciledDays) * 24 * time.Hour
-		if rt.LastReconciledAt.IsZero() || now.Sub(rt.LastReconciledAt) > maxAge {
+		deadline := rt.LastReconciledAt.Add(maxAge)
+		if rt.UnreconciledOverrideUntil.After(deadline) {
+			deadline = rt.UnreconciledOverrideUntil
+		}
+		if deadline.IsZero() || now.After(deadline) {
 			v.ReconcileStale = true
-			v.Reasons = append(v.Reasons, "capital ledger is past its reconcile horizon; declared events are unattested")
+			reason := "capital ledger is past its reconcile horizon; declared events are unattested"
+			if c.PolicyVersion >= 3 {
+				reason = "reconcile evidence is past capital.max_unreconciled_days; no current automatic clean-report extension or human sign-off"
+			}
+			v.Reasons = append(v.Reasons, reason)
 		}
 	}
 

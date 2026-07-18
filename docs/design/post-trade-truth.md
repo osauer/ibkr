@@ -1,9 +1,11 @@
 # Post-Trade Truth (Phase 3a): Flex Ingestion and Reconciliation
 
-Updated: 2026-07-13 21:30 CEST
-Status: implemented (phase 3a, 2026-07-13) — live with risk-policy v2; the
-remaining human step is creating the Flex query/token and enabling [flex]
-in config. This document is also the post-trade authority contract the
+Updated: 2026-07-18 17:31 CEST
+Status: implemented (phase 3a, 2026-07-13) — live since risk-policy v2 with
+the Flex pull configured. R3/R4 flipped 2026-07-18 with risk-policy v3
+(statement-authoritative flows, clean-report auto-extend of the reconcile
+clock); docs/design/operator-ergonomics.md carries that approval record and
+implementation detail. This document is also the post-trade authority contract the
 harness guide names as the second First Harness Milestone artifact
 (docs/guides/trading-harness-development.md), alongside the risk
 constitution (docs/design/risk-policy.md).
@@ -127,7 +129,14 @@ Every ingest regenerates the recon report over the coverage window:
 
 **The reconcile verb after 3a:** `ibkr policy capital-event reconcile
 --report <id>` requires a report that exists, covers through the approved
-max age, and has zero unresolved exceptions. Human-only, as today. During
+max age, and has zero unresolved exceptions. Human-only, as today. Since
+risk-policy v3 (2026-07-18) a clean, fresh report with a same-day equity
+check inside `recon.max_equity_divergence_pct` extends the clock
+automatically (journaled as origin `daemon-auto` with the report id); the
+verb remains for exception-bearing reports and deliberate sign-offs, and a
+statement flow with no declaration is the non-exception category
+`confirmed` under v3 (under v2 it stays the `missing_from_ledger`
+exception). During
 a statement-source outage the sanctioned path is a one-shot override on
 `capital.max_unreconciled_days` — journaled, reasoned, expiring — which
 keeps outages visible instead of adding a quiet soft mode.
@@ -145,8 +154,8 @@ regenerates the config reference (`make docs-regen`).
 |---|---|---|---|
 | R1 | Bare reconcile attestation | Report-backed reconcile | At 3a cutover (operator chose no shadow period); `policy_version` bump carries the semantic change |
 | R2 | "Not an Activity Statement — ask for an export" disclaimers (MCP orders-history description, skills) | Pointer to the statement/recon surface | 3a shipped |
-| R3 | Declared flows as the only `cumFlows` source | Statement-confirmed flows authoritative; declarations provisional | Two fetch cycles with all declarations auto-matched |
-| R4 | Late-deposit peak-correction heuristic (`effective_at` vs. peak time) | Statement value-date correction | With R3 |
+| R3 | Declared flows as the only `cumFlows` source | Statement-confirmed flows authoritative; declarations provisional bridge | Done 2026-07-18 (risk-policy v3). The two-cycle gate was replaced by the backfill-backtest review (operator-ergonomics decision 4); dual-compute display stays until R5 |
+| R4 | Late-deposit peak-correction heuristic (`effective_at` vs. peak time) | Statement value-date correction, once per line id | Done 2026-07-18, with R3 (risk-policy v3) |
 | R5 | Attestation-era reconcile prose in risk-policy.md and explain strings | This contract | With R1 |
 
 ## Safety invariants

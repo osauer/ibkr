@@ -1,10 +1,15 @@
 # Operator Ergonomics and Exception-Driven Governance (Phase 2.1)
 
-Updated: 2026-07-18 14:30 CEST
+Updated: 2026-07-18 17:31 CEST
 Status: design approved by the operator (interviews 2026-07-16, consolidated
-greenlight 2026-07-18); nothing implemented yet. This document is the approval
-record and the implementation authority for the ergonomics build, the
-accelerated R3/R4 cutover, and the risk-policy v3 revision scope. It amends
+greenlight 2026-07-18). Implemented same day: the backfill backtest (decision
+4/5 mechanics) and risk-policy v3 (auto-extend, R3/R4, divergence gate — see
+the implementation record at the end). Still open: brief surface (L1), push
+nudges (L2), cadence re-declaration and nudge times (deferred to a later
+revision by operator decision 2026-07-18 because they depend on L1), monthly
+pulse, R5 cleanup. This document is the approval record and the
+implementation authority for the ergonomics build, the accelerated R3/R4
+cutover, and the risk-policy v3 revision scope. It amends
 docs/design/risk-policy.md (deferred list) and docs/design/post-trade-truth.md
 (Rückbau table) on implementation; it does not duplicate their numbers.
 
@@ -212,3 +217,68 @@ and stamps remove without any trading-path change.
 to hard, MCP exposure of `policy`/`recon` (queued for after Phase 2), relay
 deployment changes (separate go/no-go), and every threshold value — numbers
 exist only in the operator's TOML.
+
+## Implementation record — risk-policy v3 (2026-07-18)
+
+Shipped and active 2026-07-18 evening, Codex-only lane, all gates green
+(worktree race tests, primary `make test`, daemon restart, full `make smoke`).
+
+- **Scope chosen by the operator (interview, same day):** v3 = clean-report
+  auto-extend + R3/R4 only. Cadence re-declaration and nudge-time keys are
+  deferred to a later revision — they depend on the L1 brief surface, and
+  dead keys violate the no-speculative-knobs precedent.
+- **Auto-extend (strict form, operator choice):** requires policy status
+  active at v3+, a report with status active and statement health ok, zero
+  unresolved exceptions, statement freshness within
+  `recon.max_report_age_days`, and a same-day equity pair no older than the
+  same window with |divergence| ≤ `recon.max_equity_divergence_pct`.
+  Unmeasurable divergence refuses (positive-evidence rule). At most one
+  automatic event per report id; events are ordinary `reconcile` journal
+  entries with origin `daemon-auto` carrying the report id. Evaluation runs
+  only at daemon startup and after a successful Flex ingest — never from any
+  RPC read.
+- **R3/R4:** statement-confirmed post-genesis flows plus not-yet-covered
+  declared bridge entries are the authoritative cumFlows input under v3;
+  matched declarations are superseded (statement value wins), within-coverage
+  unmatched declarations stay `ledger_only` exceptions, and a statement flow
+  with no declaration is the new non-exception category `confirmed` (listed,
+  amount-disclosed, report-id-pinned, never signature-gated; under v2 it
+  remains the `missing_from_ledger` exception). Peak correction keys off
+  statement value dates, exactly once per line id, persisted across
+  restarts; v3 declarations never correct the peak. Activation is a baseline:
+  flipping versions recomputes nothing retroactively (verified live:
+  fingerprint changed, peak/tier/latch byte-stable).
+- **Dual-compute disclosure** (declared vs statement cumFlows plus
+  `flow_source`) is live in `policy show`/`recon` and on the wire; removal is
+  R5, not before a few clean weeks.
+- **Defect fixed in passing:** the documented outage valve — a one-shot
+  override on `capital.max_unreconciled_days` — was recorded, journaled, and
+  displayed but never consumed by evaluation. It now extends the
+  unreconciled clock; only that one control reaches evaluation.
+- **Fingerprint stability:** the pre-v3 fingerprint projection is preserved
+  byte-for-byte (regression-tested), so existing v2 files do not drift under
+  the new binary. The v2 report-id projection is likewise unchanged; v3
+  report ids pin full row content (a restated confirmed flow cannot reuse an
+  id).
+- **Process note (one-shot, dated):** the v3 numbers are the operator's
+  (divergence bound 1.0% chosen in-session 2026-07-18); the mechanical file
+  save was delegated to the agent by explicit one-shot operator instruction
+  the same day, recorded in the session transcript and the file header. The
+  standing operator-authored rule is unchanged for all future revisions, and
+  all daemon-side human-origin gates on policy write verbs remain binding.
+- **Known edge (accepted, documented):** if a system with v2-era declared
+  deposits flipped to v3 *before ever ingesting a statement*, statements
+  arriving later could re-apply a peak correction the v2 heuristic already
+  made (conservative direction: peak too low). Unreachable on this
+  installation — statements predate the flip, so activation baselined the
+  full history.
+- **Candidate L2 push trigger (recorded for the ergonomics build):** "new
+  `confirmed` statement flow." Post-flip flows are deliberately not
+  exceptions; a push should still announce money movement so an unexpected
+  disbursement is seen before the monthly pulse.
+- **Still pending at IBKR (operator):** reverting the Flex query period from
+  the 365-day backfill window to the daily rolling window; the next fetch
+  after the change confirms it. Correctness is unaffected meanwhile.
+- **Expected first automatic extension:** the first fetch that brings a
+  same-day equity pair (statement day paired with a runtime daily sample —
+  ~2026-07-19), comfortably before the 2026-07-25 clock expiry.

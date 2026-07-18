@@ -143,6 +143,7 @@ func (s *Server) kickFlexFetch(ctx context.Context) {
 			s.logger.Infof("flex fetch failed: %v", err)
 		} else {
 			s.logger.Infof("flex statement ingested: %s", filepath.Base(path))
+			go s.evaluateRiskPolicyV3Reconciliation()
 		}
 	}()
 }

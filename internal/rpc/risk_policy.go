@@ -37,6 +37,13 @@ const (
 // so the two identities can never be conflated in journals.
 const RiskConstitutionFingerprintVersion = "risk-constitution-fp-v1"
 
+const (
+	CapitalFlowSourceDeclared  = "declared"
+	CapitalFlowSourceStatement = "statement"
+	ReconcileSourceHuman       = "human"
+	ReconcileSourceAutomatic   = "automatic"
+)
+
 // Risk policy manager statuses (protection-policy manager vocabulary, plus
 // absent: the constitution has no embedded default, so a missing file is a
 // first-class disclosed state, not a silent fallback).
@@ -121,11 +128,16 @@ type CapitalStateReport struct {
 	AdjustedPeakBase         *float64  `json:"adjusted_peak_base,omitempty"`
 	PeakAsOf                 time.Time `json:"peak_as_of,omitzero"`
 	CumExternalFlowsBase     *float64  `json:"cum_external_flows_base,omitempty"`
+	DeclaredCumFlowsBase     *float64  `json:"declared_cum_flows_base,omitempty"`
+	StatementCumFlowsBase    *float64  `json:"statement_cum_flows_base,omitempty"`
+	FlowSource               string    `json:"flow_source,omitempty"` // declared | statement
 	DrawdownBase             *float64  `json:"drawdown_base,omitempty"`
 	ConsumedPct              *float64  `json:"consumed_pct,omitempty"`
 	BlockLatched             bool      `json:"block_latched"`
 	LatchedAt                time.Time `json:"latched_at,omitzero"`
 	LastReconciledAt         time.Time `json:"last_reconciled_at,omitzero"`
+	LastReconcileReportID    string    `json:"last_reconcile_report_id,omitempty"`
+	LastReconcileSource      string    `json:"last_reconcile_source,omitempty"` // human | automatic
 	ReconcileStale           bool      `json:"reconcile_stale,omitempty"`
 	Reasons                  []string  `json:"reasons,omitempty"`
 	BaseCurrency             string    `json:"base_currency,omitempty"`

@@ -46,6 +46,11 @@ const (
 // baseline (operator decision 2026-07-18).
 const ReconBaseline = "baseline"
 
+// ReconConfirmed is a normal v3 statement-authoritative flow. It is
+// disclosed and report-id-pinned, but is not an exception or a signature
+// target because declarations are optional after the authority flip.
+const ReconConfirmed = "confirmed"
+
 // ReconSnapshotParams tunes one snapshot call.
 type ReconSnapshotParams struct {
 	// Refresh kicks one background statement fetch (single-flight); the
@@ -53,8 +58,8 @@ type ReconSnapshotParams struct {
 	Refresh bool `json:"refresh,omitempty"`
 }
 
-// ReconException is the shared row shape for an exception or disclosed
-// baseline flow. Amounts are base-currency and stay on this local surface.
+// ReconException is the shared row shape for an exception or disclosed flow.
+// Amounts are base-currency and stay on this local surface.
 type ReconException struct {
 	LineID      string    `json:"line_id"`
 	Category    string    `json:"category"`
@@ -169,18 +174,22 @@ type ReconResult struct {
 	ReportID string `json:"report_id,omitempty"`
 	// StatementAsOf is when the newest ingested statement was generated
 	// by IBKR — the freshness the max_report_age_days policy key bounds.
-	StatementAsOf time.Time         `json:"statement_as_of,omitzero"`
-	CoverageFrom  time.Time         `json:"coverage_from,omitzero"`
-	CoverageTo    time.Time         `json:"coverage_to,omitzero"`
-	GenesisAt     time.Time         `json:"genesis_at,omitzero"`
-	Counts        map[string]int    `json:"counts,omitempty"`
-	Exceptions    []ReconException  `json:"exceptions,omitempty"`
-	Baseline      []ReconException  `json:"baseline,omitempty"`
-	Unresolved    int               `json:"unresolved"`
-	Equity        *ReconEquityCheck `json:"equity,omitempty"`
-	Fetch         ReconFetchStatus  `json:"fetch"`
-	Message       string            `json:"message,omitempty"`
-	InputHealth   []SourceHealth    `json:"input_health,omitempty"`
+	StatementAsOf          time.Time         `json:"statement_as_of,omitzero"`
+	CoverageFrom           time.Time         `json:"coverage_from,omitzero"`
+	CoverageTo             time.Time         `json:"coverage_to,omitzero"`
+	GenesisAt              time.Time         `json:"genesis_at,omitzero"`
+	Counts                 map[string]int    `json:"counts,omitempty"`
+	Exceptions             []ReconException  `json:"exceptions,omitempty"`
+	Baseline               []ReconException  `json:"baseline,omitempty"`
+	Confirmed              []ReconException  `json:"confirmed,omitempty"`
+	Unresolved             int               `json:"unresolved"`
+	StatementCumFlowsBase  *float64          `json:"statement_cum_flows_base,omitempty"`
+	LastAutoExtendReportID string            `json:"last_auto_extend_report_id,omitempty"`
+	LastAutoExtendedAt     time.Time         `json:"last_auto_extended_at,omitzero"`
+	Equity                 *ReconEquityCheck `json:"equity,omitempty"`
+	Fetch                  ReconFetchStatus  `json:"fetch"`
+	Message                string            `json:"message,omitempty"`
+	InputHealth            []SourceHealth    `json:"input_health,omitempty"`
 }
 
 // ReconDismissParams records one human resolution.

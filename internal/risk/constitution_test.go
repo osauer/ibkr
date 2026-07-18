@@ -1,6 +1,10 @@
 package risk
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +44,13 @@ func approvedConstitution() Constitution {
 			Rulebook: &ConstitutionPolicyPin{ID: "rulebook-v2", Version: "2"},
 		},
 	}
+}
+
+func approvedV3Constitution() Constitution {
+	c := approvedConstitution()
+	c.PolicyVersion = 3
+	c.Recon.MaxEquityDivergencePct = new(1.25)
+	return c
 }
 
 func TestConstitutionValidate(t *testing.T) {
@@ -84,6 +95,38 @@ func TestConstitutionValidate(t *testing.T) {
 	}
 }
 
+func TestConstitutionV3EquityDivergenceValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   float64
+		wantErr bool
+	}{
+		{"positive", 0.5, false},
+		{"zero", 0, true},
+		{"negative", -1, true},
+		{"nan", math.NaN(), true},
+		{"positive infinity", math.Inf(1), true},
+		{"negative infinity", math.Inf(-1), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := approvedV3Constitution()
+			c.Recon.MaxEquityDivergencePct = &tc.value
+			err := c.Validate()
+			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "positive and finite")) {
+				t.Fatalf("Validate() = %v, want positive-and-finite error", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+	c := approvedConstitution()
+	c.Recon.MaxEquityDivergencePct = new(0.5)
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "requires policy_version >= 3") {
+		t.Fatalf("v2 key error = %v, want targeted version error", err)
+	}
+}
+
 // Material keys never backfill: an empty file section validates but stays
 // unapproved, and a partially approved policy names exactly the gaps.
 func TestConstitutionUnapprovedKeys(t *testing.T) {
@@ -110,12 +153,20 @@ func TestConstitutionUnapprovedKeys(t *testing.T) {
 	if keys := approvedConstitution().UnapprovedKeys(); len(keys) != 0 {
 		t.Fatalf("fully approved constitution reports unapproved keys: %v", keys)
 	}
+	v3 := approvedV3Constitution()
+	v3.Recon.MaxEquityDivergencePct = nil
+	if got := v3.UnapprovedKeys(); len(got) == 0 || got[len(got)-1] != "recon.max_equity_divergence_pct" {
+		t.Fatalf("v3 missing divergence key = %v, want unapproved", got)
+	}
 }
 
 // Every material and governance field must move the fingerprint: a
 // threshold outside the fingerprint would be a silent policy change.
 func TestConstitutionFingerprintCoversEveryField(t *testing.T) {
 	base := approvedConstitution().FingerprintKey()
+	if legacy := legacyConstitutionFingerprint(approvedConstitution()); base != legacy {
+		t.Fatalf("pre-v3 fingerprint changed: got %s, legacy %s", base, legacy)
+	}
 	mutations := map[string]func(*Constitution){
 		"policy_version":                     func(c *Constitution) { c.PolicyVersion = 2 },
 		"policy_id":                          func(c *Constitution) { c.PolicyID = "other" },
@@ -147,6 +198,46 @@ func TestConstitutionFingerprintCoversEveryField(t *testing.T) {
 	if approvedConstitution().FingerprintKey() != base {
 		t.Fatal("fingerprint is not deterministic")
 	}
+	v3 := approvedV3Constitution()
+	v3Base := v3.FingerprintKey()
+	v3.Recon.MaxEquityDivergencePct = new(2.0)
+	if v3.FingerprintKey() == v3Base {
+		t.Fatal("recon.max_equity_divergence_pct did not change the v3 fingerprint")
+	}
+}
+
+func legacyConstitutionFingerprint(c Constitution) string {
+	normalized := struct {
+		Kind          string               `json:"kind"`
+		SchemaVersion int                  `json:"schema_version"`
+		PolicyID      string               `json:"policy_id"`
+		PolicyVersion int                  `json:"policy_version"`
+		Capital       ConstitutionCapital  `json:"capital"`
+		Drawdown      ConstitutionDrawdown `json:"drawdown"`
+		Override      ConstitutionOverride `json:"override"`
+		Recon         struct {
+			AmountTolerancePct     *float64 `json:"amount_tolerance_pct"`
+			AmountToleranceMin     *float64 `json:"amount_tolerance_min"`
+			DateWindowBusinessDays *int     `json:"date_window_business_days"`
+			MaxReportAgeDays       *int     `json:"max_report_age_days"`
+		} `json:"recon"`
+		Cadence   ConstitutionCadence   `json:"cadence"`
+		Inventory ConstitutionInventory `json:"inventory"`
+	}{
+		Kind: strings.TrimSpace(c.Kind), SchemaVersion: c.SchemaVersion,
+		PolicyID: strings.TrimSpace(c.PolicyID), PolicyVersion: c.PolicyVersion,
+		Capital: c.Capital, Drawdown: c.Drawdown, Override: c.Override,
+		Recon: struct {
+			AmountTolerancePct     *float64 `json:"amount_tolerance_pct"`
+			AmountToleranceMin     *float64 `json:"amount_tolerance_min"`
+			DateWindowBusinessDays *int     `json:"date_window_business_days"`
+			MaxReportAgeDays       *int     `json:"max_report_age_days"`
+		}{c.Recon.AmountTolerancePct, c.Recon.AmountToleranceMin, c.Recon.DateWindowBusinessDays, c.Recon.MaxReportAgeDays},
+		Cadence: c.Cadence, Inventory: c.Inventory,
+	}
+	raw, _ := json.Marshal(normalized)
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func TestEvaluateCapitalTiers(t *testing.T) {
@@ -196,6 +287,20 @@ func TestEvaluateCapitalTiers(t *testing.T) {
 		v := EvaluateCapital(&c, rt, fresh(260000), now)
 		if v.Tier != CapitalTierUnknown || !v.ReconcileStale {
 			t.Fatalf("tier = %s reconcileStale = %v, want unknown/true", v.Tier, v.ReconcileStale)
+		}
+	})
+	t.Run("only the active unreconciled-days override extends the horizon", func(t *testing.T) {
+		rt := seeded
+		rt.LastReconciledAt = now.Add(-8 * 24 * time.Hour)
+		rt.UnreconciledOverrideUntil = now.Add(time.Hour)
+		v := EvaluateCapital(&c, rt, fresh(260000), now)
+		if v.ReconcileStale || v.Tier != CapitalTierOK {
+			t.Fatalf("active override: tier=%s stale=%v, want ok/false", v.Tier, v.ReconcileStale)
+		}
+		rt.UnreconciledOverrideUntil = now.Add(-time.Minute)
+		v = EvaluateCapital(&c, rt, fresh(260000), now)
+		if !v.ReconcileStale || v.Tier != CapitalTierUnknown {
+			t.Fatalf("expired override: tier=%s stale=%v, want unknown/true", v.Tier, v.ReconcileStale)
 		}
 	})
 	t.Run("ok warn block ladder in declared-risk units", func(t *testing.T) {
@@ -285,5 +390,38 @@ func TestConstitutionLimitsCoverAllMaterialKeys(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestConstitutionLimitsAreVersionAware(t *testing.T) {
+	v2 := approvedConstitution()
+	var v2Meaning string
+	for _, row := range ConstitutionLimits(&v2) {
+		if row.Key == "recon.max_equity_divergence_pct" {
+			t.Fatal("v2 explain unexpectedly renders the v3-only divergence key")
+		}
+		if row.Key == "capital.max_unreconciled_days" {
+			v2Meaning = row.Meaning
+		}
+	}
+	if !strings.Contains(v2Meaning, "human reconcile attestation") || strings.Contains(v2Meaning, "automatic") {
+		t.Fatalf("v2 meaning changed: %q", v2Meaning)
+	}
+	v3 := approvedV3Constitution()
+	var v3Meaning string
+	var divergence ConstitutionLimit
+	for _, row := range ConstitutionLimits(&v3) {
+		switch row.Key {
+		case "capital.max_unreconciled_days":
+			v3Meaning = row.Meaning
+		case "recon.max_equity_divergence_pct":
+			divergence = row
+		}
+	}
+	if !strings.Contains(v3Meaning, "automatic clean-report extension") || !strings.Contains(v3Meaning, "human sign-off") {
+		t.Fatalf("v3 meaning = %q", v3Meaning)
+	}
+	if divergence.Source != "file" || divergence.Value != "1.25%" {
+		t.Fatalf("v3 divergence explain = %+v", divergence)
 	}
 }

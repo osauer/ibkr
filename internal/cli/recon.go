@@ -73,12 +73,21 @@ func runReconShow(ctx context.Context, env *Env, args []string) int {
 
 	if len(res.Counts) > 0 {
 		fmt.Fprintf(env.Stdout, "\n  matched %d", res.Counts["matched"])
+		if n := res.Counts[rpc.ReconConfirmed]; n > 0 {
+			fmt.Fprintf(env.Stdout, "  %s %d", rpc.ReconConfirmed, n)
+		}
 		for _, cat := range []string{rpc.ReconMissingFromLedger, rpc.ReconLedgerOnly, rpc.ReconAmountMismatch, rpc.ReconDateMismatch, rpc.ReconAmbiguous, rpc.ReconUncategorized} {
 			if n := res.Counts[cat]; n > 0 {
 				fmt.Fprintf(env.Stdout, "  %s %d", cat, n)
 			}
 		}
 		fmt.Fprintf(env.Stdout, "  — %d unresolved\n", res.Unresolved)
+	}
+	if len(res.Confirmed) > 0 {
+		fmt.Fprintf(env.Stdout, "\n  confirmed by broker: %d flow(s) — no declaration needed\n", len(res.Confirmed))
+		for _, row := range res.Confirmed {
+			fmt.Fprintln(env.Stdout, formatReconDisclosedFlow(row))
+		}
 	}
 	for _, ex := range res.Exceptions {
 		mark := "•"
@@ -131,10 +140,45 @@ func runReconShow(ctx context.Context, env *Env, args []string) int {
 		}
 		fmt.Fprintln(env.Stdout)
 	}
+	if res.StatementCumFlowsBase != nil && !res.LastAutoExtendedAt.IsZero() {
+		fmt.Fprintln(env.Stdout, formatReconAutoExtend(res))
+	}
 	if res.Status == rpc.ReconStatusActive && res.Unresolved == 0 && res.ReportID != "" {
-		fmt.Fprintf(env.Stdout, "\nClean. Sign off with: ibkr policy capital-event reconcile --report %s\n", res.ReportID)
+		if res.StatementCumFlowsBase != nil {
+			fmt.Fprintln(env.Stdout, reconCleanEvidenceMessage(res))
+		} else {
+			fmt.Fprintf(env.Stdout, "\nClean. Sign off with: ibkr policy capital-event reconcile --report %s\n", res.ReportID)
+		}
 	}
 	return 0
+}
+
+func formatReconDisclosedFlow(row rpc.ReconException) string {
+	amount := "—"
+	if row.AmountBase != nil {
+		amount = fmt.Sprintf("%.2f", *row.AmountBase)
+	}
+	line := fmt.Sprintf("    %s  %s  %s", row.ValueDate.UTC().Format("2006-01-02"), row.Type, amount)
+	if row.Description != "" {
+		line += "  " + row.Description
+	}
+	return line
+}
+
+func formatReconAutoExtend(res rpc.ReconResult) string {
+	current := ""
+	if res.LastAutoExtendReportID == res.ReportID {
+		current = " (current report)"
+	}
+	return fmt.Sprintf("  automatic evidence: report %s extended the clock %s%s",
+		res.LastAutoExtendReportID, res.LastAutoExtendedAt.Local().Format("2006-01-02 15:04"), current)
+}
+
+func reconCleanEvidenceMessage(res rpc.ReconResult) string {
+	if res.LastAutoExtendReportID == res.ReportID && !res.LastAutoExtendedAt.IsZero() {
+		return "\nClean. This report has extended the reconcile clock automatically; human sign-off remains available for exceptional operation."
+	}
+	return "\nClean report. Automatic extension has not been recorded; the policy or evidence gate may be refusing it. Human sign-off remains available for exceptional operation."
 }
 
 func runReconBacktest(ctx context.Context, env *Env, args []string) int {

@@ -125,6 +125,43 @@ func TestRiskPolicySnapshotWireContract(t *testing.T) {
 		// no equity observation exists in this test server; unknown, never ok
 		t.Fatalf("tier = %v, want unknown without an observation", capital["tier"])
 	}
+	if capital["flow_source"] != rpc.CapitalFlowSourceDeclared {
+		t.Fatalf("v2 flow source = %v", capital["flow_source"])
+	}
+	if _, ok := capital["declared_cum_flows_base"]; !ok {
+		t.Fatal("v2 capital missing declared_cum_flows_base")
+	}
+	if _, ok := capital["statement_cum_flows_base"]; ok {
+		t.Fatal("v2 capital unexpectedly includes statement_cum_flows_base")
+	}
+}
+
+func TestCapitalStateReportV3DualComputeWire(t *testing.T) {
+	s := newRiskPolicyTestServer(t, validRiskPolicyV3TOML())
+	now := time.Now()
+	s.riskCapital.mu.Lock()
+	s.riskCapital.loadLocked()
+	s.riskCapital.state.Seeded = true
+	s.riskCapital.state.AdjustedPeakBase = 250000
+	s.riskCapital.state.LastEquityBase = 250000
+	s.riskCapital.state.LastEquityAsOf = now
+	s.riskCapital.state.StatementFlowsBase = 900
+	s.riskCapital.state.StatementCoverageTo = now
+	s.riskCapital.cumFlowsBase = 1000
+	s.riskCapital.lastReconciledAt = now
+	s.riskCapital.mu.Unlock()
+	rep := s.riskCapital.Report(s.riskPolicies.snapshot().policy, nil)
+	raw, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["flow_source"] != rpc.CapitalFlowSourceStatement || decoded["declared_cum_flows_base"] != 1000.0 || decoded["statement_cum_flows_base"] != 900.0 {
+		t.Fatalf("v3 wire = %v", decoded)
+	}
 }
 
 func TestRiskPolicyPreviewWarnings(t *testing.T) {

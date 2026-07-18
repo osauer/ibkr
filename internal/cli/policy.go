@@ -107,6 +107,9 @@ func runPolicyShow(ctx context.Context, env *Env, args []string) int {
 	if c.AdjustedPeakBase != nil {
 		fmt.Fprintf(env.Stdout, "  high-water mark     %14.2f %s  best equity so far, corrected for deposits and withdrawals\n", *c.AdjustedPeakBase, cur)
 	}
+	if c.StatementCumFlowsBase != nil && c.DeclaredCumFlowsBase != nil {
+		fmt.Fprintln(env.Stdout, capitalFlowComparison(c, cur))
+	}
 	if c.ConsumedPct != nil {
 		fmt.Fprintf(env.Stdout, "  loss from the mark  %14.2f %s  = %.1f%% of your declared risk capital%s\n", deref(c.DrawdownBase), cur, *c.ConsumedPct, drawdownLadderHint(res.Limits))
 	}
@@ -114,9 +117,10 @@ func runPolicyShow(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintf(env.Stdout, "  RISK BRAKE ENGAGED since %s — it stays on until you release it: `ibkr policy reset-drawdown --reason \"...\"`\n", c.LatchedAt.Local().Format("2006-01-02 15:04"))
 	}
 	if c.LastReconciledAt.IsZero() {
-		fmt.Fprintln(env.Stdout, "  ledger check        never verified against broker statements — run `ibkr recon`, then sign off the report it prints")
+		fmt.Fprintln(env.Stdout, ledgerNeverVerifiedMessage(c))
 	} else {
-		fmt.Fprintf(env.Stdout, "  ledger check        verified against broker statements %s%s\n", c.LastReconciledAt.Local().Format("2006-01-02 15:04"), staleTag(c.ReconcileStale))
+		evidence := reconcileEvidenceDetail(c)
+		fmt.Fprintf(env.Stdout, "  ledger check        verified against broker statements %s%s%s\n", c.LastReconciledAt.Local().Format("2006-01-02 15:04"), evidence, staleTag(c.ReconcileStale))
 	}
 	for _, r := range c.Reasons {
 		fmt.Fprintf(env.Stdout, "  (%s)\n", r)
@@ -179,6 +183,32 @@ func runPolicyShow(ctx context.Context, env *Env, args []string) int {
 		}
 	}
 	return 0
+}
+
+func capitalFlowComparison(c rpc.CapitalStateReport, currency string) string {
+	if c.StatementCumFlowsBase == nil || c.DeclaredCumFlowsBase == nil {
+		return ""
+	}
+	return fmt.Sprintf("  cumulative flows    declared %14.2f %s  statement-authoritative %14.2f %s  (using %s)",
+		*c.DeclaredCumFlowsBase, currency, *c.StatementCumFlowsBase, currency, c.FlowSource)
+}
+
+func reconcileEvidenceDetail(c rpc.CapitalStateReport) string {
+	if c.StatementCumFlowsBase == nil || (c.LastReconcileReportID == "" && c.LastReconcileSource == "") {
+		return ""
+	}
+	source := "human sign-off"
+	if c.LastReconcileSource == rpc.ReconcileSourceAutomatic {
+		source = "automatic"
+	}
+	return fmt.Sprintf(" (report %s, %s)", nonEmpty(c.LastReconcileReportID, "legacy"), source)
+}
+
+func ledgerNeverVerifiedMessage(c rpc.CapitalStateReport) string {
+	if c.StatementCumFlowsBase != nil {
+		return "  ledger check        never verified against broker statements — run `ibkr recon`; a qualifying clean report extends automatically, otherwise use human sign-off"
+	}
+	return "  ledger check        never verified against broker statements — run `ibkr recon`, then sign off the report it prints"
 }
 
 // capitalHeadline renders the tier as a sentence a human can act on, with

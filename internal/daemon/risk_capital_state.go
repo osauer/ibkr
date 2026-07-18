@@ -15,14 +15,16 @@ import (
 
 // Runtime capital state for the risk constitution (docs/design/risk-policy.md):
 // the cash-flow-adjusted equity peak, the drawdown latch, declared capital
-// events, one-shot overrides, and cadence artefact completions.
+// events, statement-authoritative v3 facts, one-shot overrides, and cadence
+// artefact completions.
 //
 // Authority split: risk-policy.toml owns the numbers, internal/risk owns the
 // evaluation, this store owns observed/derived runtime facts. Aggregates that
-// can be re-derived from the capital-events journal (cumulative flows, last
-// reconcile attestation) are re-derived on every load — the journal is the
-// source of truth, the state file is a cache of what journals cannot rebuild
-// (peak, latch, daily equity samples, overrides; regime-latch
+// can be re-derived from the capital-events journal (declared flows, reconcile
+// evidence) are re-derived on every load — the journal is the source of truth,
+// while statement facts are rebuilt from retained statements. The state file
+// caches what those sources cannot rebuild (peak, latch, applied statement
+// correction ids, daily equity samples, overrides; regime-latch
 // never-trust-stored-bytes precedent).
 //
 // Nothing in this file may influence submit eligibility, blockers, freeze,
@@ -39,23 +41,29 @@ const (
 	// riskCapitalPersistEvery throttles equity-cache persistence; latch,
 	// peak, and event writes always persist immediately.
 	riskCapitalPersistEvery = time.Minute
+	riskCapitalAutoOrigin   = "daemon-auto"
 )
 
 type riskCapitalStateFileV1 struct {
-	Version          int                  `json:"version"`
-	GenesisAt        time.Time            `json:"genesis_at,omitzero"`
-	Seeded           bool                 `json:"seeded"`
-	AdjustedPeakBase float64              `json:"adjusted_peak_base"`
-	PeakAsOf         time.Time            `json:"peak_as_of,omitzero"`
-	LastEquityBase   float64              `json:"last_equity_base"`
-	LastEquityAsOf   time.Time            `json:"last_equity_as_of,omitzero"`
-	DailyEquity      map[string]float64   `json:"daily_equity,omitempty"`
-	LastTier         string               `json:"last_tier,omitempty"`
-	BlockLatched     bool                 `json:"block_latched"`
-	LatchedAt        time.Time            `json:"latched_at,omitzero"`
-	LatchConsumedPct float64              `json:"latch_consumed_pct,omitempty"`
-	Overrides        []rpc.OverrideRecord `json:"overrides,omitempty"`
-	Artefacts        []rpc.ArtefactRecord `json:"artefacts,omitempty"`
+	Version                           int                  `json:"version"`
+	GenesisAt                         time.Time            `json:"genesis_at,omitzero"`
+	Seeded                            bool                 `json:"seeded"`
+	AdjustedPeakBase                  float64              `json:"adjusted_peak_base"`
+	PeakAsOf                          time.Time            `json:"peak_as_of,omitzero"`
+	LastEquityBase                    float64              `json:"last_equity_base"`
+	LastEquityAsOf                    time.Time            `json:"last_equity_as_of,omitzero"`
+	DailyEquity                       map[string]float64   `json:"daily_equity,omitempty"`
+	LastTier                          string               `json:"last_tier,omitempty"`
+	BlockLatched                      bool                 `json:"block_latched"`
+	LatchedAt                         time.Time            `json:"latched_at,omitzero"`
+	LatchConsumedPct                  float64              `json:"latch_consumed_pct,omitempty"`
+	Overrides                         []rpc.OverrideRecord `json:"overrides,omitempty"`
+	Artefacts                         []rpc.ArtefactRecord `json:"artefacts,omitempty"`
+	StatementFlowsBase                float64              `json:"statement_flows_base,omitempty"`
+	StatementCoverageTo               time.Time            `json:"statement_coverage_to,omitzero"`
+	StatementAuthorityActive          bool                 `json:"statement_authority_active,omitempty"`
+	IncorporatedStatementLineIDs      []string             `json:"incorporated_statement_line_ids,omitempty"`
+	AppliedStatementPeakCorrectionIDs []string             `json:"applied_statement_peak_correction_ids,omitempty"`
 }
 
 type capitalEventV1 struct {
@@ -77,6 +85,17 @@ type capitalReconRef struct {
 	CoverageTo time.Time
 }
 
+type capitalEventReplay struct {
+	declaredFlowsBase      float64
+	declaredEvents         []capitalEventV1
+	lastReconciledAt       time.Time
+	lastReconcileReportID  string
+	lastReconcileSource    string
+	lastAutoExtendedAt     time.Time
+	lastAutoExtendReportID string
+	reconciledReportIDs    map[string]struct{}
+}
+
 type riskCapitalStore struct {
 	mu     sync.Mutex
 	now    func() time.Time
@@ -84,10 +103,16 @@ type riskCapitalStore struct {
 	state  riskCapitalStateFileV1
 	// Re-derived from capital-events.jsonl on load, maintained incrementally
 	// afterwards; never trusted from the state file.
-	cumFlowsBase     float64
-	lastReconciledAt time.Time
-	lastPersistAt    time.Time
-	overrideSeq      int
+	cumFlowsBase           float64
+	declaredEvents         []capitalEventV1
+	lastReconciledAt       time.Time
+	lastReconcileReportID  string
+	lastReconcileSource    string
+	lastAutoExtendedAt     time.Time
+	lastAutoExtendReportID string
+	reconciledReportIDs    map[string]struct{}
+	lastPersistAt          time.Time
+	overrideSeq            int
 }
 
 func (s *Server) installRiskCapitalStore() {
@@ -112,17 +137,26 @@ func (st *riskCapitalStore) loadLocked() {
 	}
 	st.state.Version = riskCapitalStateVer
 	// Journal replay owns flows and reconciliation recency.
-	st.cumFlowsBase, st.lastReconciledAt = replayCapitalEvents()
+	replayed := replayCapitalEvents()
+	st.cumFlowsBase = replayed.declaredFlowsBase
+	st.declaredEvents = replayed.declaredEvents
+	st.lastReconciledAt = replayed.lastReconciledAt
+	st.lastReconcileReportID = replayed.lastReconcileReportID
+	st.lastReconcileSource = replayed.lastReconcileSource
+	st.lastAutoExtendedAt = replayed.lastAutoExtendedAt
+	st.lastAutoExtendReportID = replayed.lastAutoExtendReportID
+	st.reconciledReportIDs = replayed.reconciledReportIDs
 }
 
-func replayCapitalEvents() (cumFlows float64, lastReconciled time.Time) {
+func replayCapitalEvents() capitalEventReplay {
+	out := capitalEventReplay{reconciledReportIDs: make(map[string]struct{})}
 	path, err := defaultTradingStatePath(capitalEventsJournalFile)
 	if err != nil {
-		return 0, time.Time{}
+		return out
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, time.Time{}
+		return out
 	}
 	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -135,16 +169,30 @@ func replayCapitalEvents() (cumFlows float64, lastReconciled time.Time) {
 		}
 		switch ev.Type {
 		case "deposit":
-			cumFlows += ev.AmountBase
+			out.declaredFlowsBase += ev.AmountBase
+			out.declaredEvents = append(out.declaredEvents, ev)
 		case "withdrawal":
-			cumFlows -= ev.AmountBase
+			out.declaredFlowsBase -= ev.AmountBase
+			out.declaredEvents = append(out.declaredEvents, ev)
 		case "reconcile":
-			if ev.At.After(lastReconciled) {
-				lastReconciled = ev.At
+			if ev.ReportID != "" {
+				out.reconciledReportIDs[ev.ReportID] = struct{}{}
+			}
+			if ev.At.After(out.lastReconciledAt) {
+				out.lastReconciledAt = ev.At
+				out.lastReconcileReportID = ev.ReportID
+				out.lastReconcileSource = rpc.ReconcileSourceHuman
+				if ev.Origin == riskCapitalAutoOrigin {
+					out.lastReconcileSource = rpc.ReconcileSourceAutomatic
+				}
+			}
+			if ev.Origin == riskCapitalAutoOrigin && ev.At.After(out.lastAutoExtendedAt) {
+				out.lastAutoExtendedAt = ev.At
+				out.lastAutoExtendReportID = ev.ReportID
 			}
 		}
 	}
-	return cumFlows, lastReconciled
+	return out
 }
 
 func (st *riskCapitalStore) persistLocked(force bool) {
@@ -161,15 +209,48 @@ func (st *riskCapitalStore) persistLocked(force bool) {
 }
 
 // runtimeLocked builds the evaluator's view of the state.
-func (st *riskCapitalStore) runtimeLocked() risk.CapitalRuntime {
-	return risk.CapitalRuntime{
-		AdjustedPeakBase:     st.state.AdjustedPeakBase,
-		PeakAsOf:             st.state.PeakAsOf,
-		CumExternalFlowsBase: st.cumFlowsBase,
-		Seeded:               st.state.Seeded,
-		BlockLatched:         st.state.BlockLatched,
-		LastReconciledAt:     st.lastReconciledAt,
+func (st *riskCapitalStore) runtimeLocked(c *risk.Constitution, now time.Time) risk.CapitalRuntime {
+	flows, _, _ := st.effectiveFlowsLocked(c)
+	var overrideUntil time.Time
+	for _, o := range st.state.Overrides {
+		if o.Active && o.Control == "capital.max_unreconciled_days" && !now.After(o.ExpiresAt) && o.ExpiresAt.After(overrideUntil) {
+			overrideUntil = o.ExpiresAt
+		}
 	}
+	return risk.CapitalRuntime{
+		AdjustedPeakBase:          st.state.AdjustedPeakBase,
+		PeakAsOf:                  st.state.PeakAsOf,
+		CumExternalFlowsBase:      flows,
+		Seeded:                    st.state.Seeded,
+		BlockLatched:              st.state.BlockLatched,
+		LastReconciledAt:          st.lastReconciledAt,
+		UnreconciledOverrideUntil: overrideUntil,
+	}
+}
+
+func (st *riskCapitalStore) effectiveFlowsLocked(c *risk.Constitution) (effective, statement float64, source string) {
+	if c == nil || c.PolicyVersion < 3 {
+		return st.cumFlowsBase, 0, rpc.CapitalFlowSourceDeclared
+	}
+	statement = st.state.StatementFlowsBase
+	for _, ev := range st.declaredEvents {
+		effectiveAt := ev.EffectiveAt
+		if effectiveAt.IsZero() {
+			effectiveAt = ev.At
+		}
+		if st.state.Seeded && !st.state.GenesisAt.IsZero() && utcDateBefore(effectiveAt, st.state.GenesisAt) {
+			continue
+		}
+		if !st.state.StatementCoverageTo.IsZero() && !utcDateAfter(effectiveAt, st.state.StatementCoverageTo) {
+			continue
+		}
+		if ev.Type == "deposit" {
+			statement += ev.AmountBase
+		} else if ev.Type == "withdrawal" {
+			statement -= ev.AmountBase
+		}
+	}
+	return statement, statement, rpc.CapitalFlowSourceStatement
 }
 
 // Observe folds one equity reading into the state: seeds or raises the
@@ -206,7 +287,8 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 		}
 	}
 
-	adjusted := equityBase - st.cumFlowsBase
+	flows, _, _ := st.effectiveFlowsLocked(c)
+	adjusted := equityBase - flows
 	if !st.state.Seeded || adjusted > st.state.AdjustedPeakBase {
 		st.state.Seeded = true
 		st.state.AdjustedPeakBase = adjusted
@@ -215,7 +297,7 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 	}
 
 	obs := risk.CapitalObservation{EquityBase: equityBase, AsOf: asOf}
-	v := risk.EvaluateCapital(c, st.runtimeLocked(), &obs, now)
+	v := risk.EvaluateCapital(c, st.runtimeLocked(c, now), &obs, now)
 	if v.Tier == risk.CapitalTierBlock && !st.state.BlockLatched && v.ConsumedPct != nil {
 		st.state.BlockLatched = true
 		st.state.LatchedAt = now.UTC()
@@ -245,6 +327,10 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 // money that was never earned (never-inflate discipline; the symmetric
 // withdrawal case cannot inflate the peak, so no correction is needed).
 func (st *riskCapitalStore) ApplyCapitalEvent(p rpc.CapitalEventParams, origin string, refs ...*capitalReconRef) (capitalEventV1, error) {
+	return st.ApplyCapitalEventForPolicy(p, origin, nil, refs...)
+}
+
+func (st *riskCapitalStore) ApplyCapitalEventForPolicy(p rpc.CapitalEventParams, origin string, c *risk.Constitution, refs ...*capitalReconRef) (capitalEventV1, error) {
 	typ := strings.ToLower(strings.TrimSpace(p.Type))
 	switch typ {
 	case "deposit", "withdrawal":
@@ -280,18 +366,127 @@ func (st *riskCapitalStore) ApplyCapitalEvent(p rpc.CapitalEventParams, origin s
 	switch ev.Type {
 	case "deposit":
 		st.cumFlowsBase += ev.AmountBase
-		if st.state.Seeded && !st.state.PeakAsOf.IsZero() && !st.state.PeakAsOf.Before(ev.EffectiveAt) {
+		st.declaredEvents = append(st.declaredEvents, ev)
+		if (c == nil || c.PolicyVersion < 3) && st.state.Seeded && !st.state.PeakAsOf.IsZero() && !st.state.PeakAsOf.Before(ev.EffectiveAt) {
 			st.state.AdjustedPeakBase -= ev.AmountBase
 		}
 	case "withdrawal":
 		st.cumFlowsBase -= ev.AmountBase
+		st.declaredEvents = append(st.declaredEvents, ev)
 	case "reconcile":
+		if ev.ReportID != "" {
+			if st.reconciledReportIDs == nil {
+				st.reconciledReportIDs = make(map[string]struct{})
+			}
+			st.reconciledReportIDs[ev.ReportID] = struct{}{}
+		}
 		if ev.At.After(st.lastReconciledAt) {
 			st.lastReconciledAt = ev.At
+			st.lastReconcileReportID = ev.ReportID
+			st.lastReconcileSource = rpc.ReconcileSourceHuman
+			if ev.Origin == riskCapitalAutoOrigin {
+				st.lastReconcileSource = rpc.ReconcileSourceAutomatic
+			}
+		}
+		if ev.Origin == riskCapitalAutoOrigin && ev.At.After(st.lastAutoExtendedAt) {
+			st.lastAutoExtendedAt = ev.At
+			st.lastAutoExtendReportID = ev.ReportID
 		}
 	}
 	st.persistLocked(true)
 	return ev, nil
+}
+
+// ApplyAutomaticReconcile appends daemon-owned evidence while holding the
+// same serialization lock as human capital events. The report id is checked
+// and recorded atomically, so concurrent startup/fetch evaluations cannot
+// append the same pinned report twice.
+func (st *riskCapitalStore) ApplyAutomaticReconcile(reportID string, coverageTo time.Time) (capitalEventV1, bool, error) {
+	reportID = strings.TrimSpace(reportID)
+	if reportID == "" {
+		return capitalEventV1{}, false, fmt.Errorf("automatic reconcile requires a report id")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	if _, exists := st.reconciledReportIDs[reportID]; exists {
+		return capitalEventV1{}, false, nil
+	}
+	now := st.now().UTC()
+	ev := capitalEventV1{
+		Version: 1, At: now, Type: "reconcile", Origin: riskCapitalAutoOrigin,
+		ReportID: reportID, CoverageTo: coverageTo,
+	}
+	if err := appendCapitalEvent(ev); err != nil {
+		return capitalEventV1{}, false, err
+	}
+	if st.reconciledReportIDs == nil {
+		st.reconciledReportIDs = make(map[string]struct{})
+	}
+	st.reconciledReportIDs[reportID] = struct{}{}
+	st.lastReconciledAt = ev.At
+	st.lastReconcileReportID = reportID
+	st.lastReconcileSource = rpc.ReconcileSourceAutomatic
+	st.lastAutoExtendedAt = ev.At
+	st.lastAutoExtendReportID = reportID
+	st.persistLocked(true)
+	return ev, true, nil
+}
+
+type statementCapitalSnapshot struct {
+	FlowsBase  float64
+	CoverageTo time.Time
+	Flows      []reconFlow
+}
+
+// IncorporateStatementSnapshot installs one fully healthy reconstruction.
+// The first v3 incorporation is an activation baseline: existing lines are
+// marked seen without changing peak/latch state. Later new deposits use their
+// broker value dates for the one-time R4 peak correction.
+func (st *riskCapitalStore) IncorporateStatementSnapshot(snap statementCapitalSnapshot) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	incorporated := make(map[string]struct{}, len(st.state.IncorporatedStatementLineIDs))
+	for _, id := range st.state.IncorporatedStatementLineIDs {
+		incorporated[id] = struct{}{}
+	}
+	applied := make(map[string]struct{}, len(st.state.AppliedStatementPeakCorrectionIDs))
+	for _, id := range st.state.AppliedStatementPeakCorrectionIDs {
+		applied[id] = struct{}{}
+	}
+	activation := !st.state.StatementAuthorityActive
+	for _, flow := range snap.Flows {
+		if _, seen := incorporated[flow.id]; seen {
+			continue
+		}
+		incorporated[flow.id] = struct{}{}
+		st.state.IncorporatedStatementLineIDs = append(st.state.IncorporatedStatementLineIDs, flow.id)
+		if activation || flow.amountBase <= 0 || !st.state.Seeded || st.state.PeakAsOf.IsZero() || utcDateAfter(flow.valueDate, st.state.PeakAsOf) {
+			continue
+		}
+		if _, corrected := applied[flow.id]; corrected {
+			continue
+		}
+		st.state.AdjustedPeakBase -= flow.amountBase
+		applied[flow.id] = struct{}{}
+		st.state.AppliedStatementPeakCorrectionIDs = append(st.state.AppliedStatementPeakCorrectionIDs, flow.id)
+	}
+	st.state.StatementAuthorityActive = true
+	st.state.StatementFlowsBase = snap.FlowsBase
+	st.state.StatementCoverageTo = snap.CoverageTo
+	st.persistLocked(true)
+}
+
+func (st *riskCapitalStore) ActivateStatementAuthorityWithoutStatements() {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	if st.state.StatementAuthorityActive {
+		return
+	}
+	st.state.StatementAuthorityActive = true
+	st.persistLocked(true)
 }
 
 // GrantOverride records a one-shot, expiring exception against one named
@@ -363,7 +558,8 @@ func (st *riskCapitalStore) ResetDrawdown(reason string, c *risk.Constitution) e
 	st.state.LatchedAt = time.Time{}
 	st.state.LatchConsumedPct = 0
 	if st.state.LastEquityBase > 0 {
-		st.state.AdjustedPeakBase = st.state.LastEquityBase - st.cumFlowsBase
+		flows, _, _ := st.effectiveFlowsLocked(c)
+		st.state.AdjustedPeakBase = st.state.LastEquityBase - flows
 		st.state.PeakAsOf = st.state.LastEquityAsOf
 		st.state.Seeded = true
 	}
@@ -424,7 +620,8 @@ func (st *riskCapitalStore) Report(c *risk.Constitution, obs *risk.CapitalObserv
 	if obs == nil && st.state.LastEquityBase > 0 {
 		obs = &risk.CapitalObservation{EquityBase: st.state.LastEquityBase, AsOf: st.state.LastEquityAsOf}
 	}
-	v := risk.EvaluateCapital(c, st.runtimeLocked(), obs, now)
+	_, statementFlows, flowSource := st.effectiveFlowsLocked(c)
+	v := risk.EvaluateCapital(c, st.runtimeLocked(c, now), obs, now)
 
 	rep := rpc.CapitalStateReport{
 		Tier:                     v.Tier,
@@ -436,8 +633,16 @@ func (st *riskCapitalStore) Report(c *risk.Constitution, obs *risk.CapitalObserv
 		BlockLatched:             st.state.BlockLatched,
 		LatchedAt:                st.state.LatchedAt,
 		LastReconciledAt:         st.lastReconciledAt,
+		LastReconcileReportID:    st.lastReconcileReportID,
+		LastReconcileSource:      st.lastReconcileSource,
 		ReconcileStale:           v.ReconcileStale,
 		Reasons:                  v.Reasons,
+	}
+	declared := st.cumFlowsBase
+	rep.DeclaredCumFlowsBase = &declared
+	rep.FlowSource = flowSource
+	if c != nil && c.PolicyVersion >= 3 {
+		rep.StatementCumFlowsBase = &statementFlows
 	}
 	if c != nil {
 		rep.BaseCurrency = c.Capital.BaseCurrency
@@ -448,7 +653,10 @@ func (st *riskCapitalStore) Report(c *risk.Constitution, obs *risk.CapitalObserv
 	}
 	if st.state.Seeded {
 		peak := st.state.AdjustedPeakBase
-		flows := st.cumFlowsBase
+		// Preserve the existing wire field's declared-ledger meaning. The
+		// evaluator receives effectiveFlows; the additive dual-compute fields
+		// disclose both inputs and FlowSource identifies the selected one.
+		flows := declared
 		rep.AdjustedPeakBase = &peak
 		rep.PeakAsOf = st.state.PeakAsOf
 		rep.CumExternalFlowsBase = &flows
@@ -549,6 +757,25 @@ func (st *riskCapitalStore) ReplayContext() capitalReplayContext {
 	return ctx
 }
 
+func (st *riskCapitalStore) LastAutoExtend() (string, time.Time) {
+	if st == nil {
+		return "", time.Time{}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	return st.lastAutoExtendReportID, st.lastAutoExtendedAt
+}
+
+func (st *riskCapitalStore) EnsureLoaded() {
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+}
+
 // PreviewVerdict is the cheap in-memory evaluation for advisory preview
 // causes: persisted last equity only, never an account fetch (a preview
 // must stay a preview-priced call; rulebook precedent).
@@ -560,7 +787,8 @@ func (st *riskCapitalStore) PreviewVerdict(c *risk.Constitution) risk.CapitalVer
 	if st.state.LastEquityBase > 0 {
 		obs = &risk.CapitalObservation{EquityBase: st.state.LastEquityBase, AsOf: st.state.LastEquityAsOf}
 	}
-	return risk.EvaluateCapital(c, st.runtimeLocked(), obs, st.now())
+	now := st.now()
+	return risk.EvaluateCapital(c, st.runtimeLocked(c, now), obs, now)
 }
 
 func artefactDeclaredClass(c *risk.Constitution, pick func(*risk.Constitution) string) string {
