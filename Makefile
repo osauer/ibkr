@@ -56,7 +56,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check agent-config-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check agent-config-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -723,6 +723,9 @@ release-registry-server: ## Generate and validate dist/server.json for MCP Regis
 registry-login: ## Refresh MCP Registry auth token (default: GitHub device flow)
 	$(MCP_PUBLISHER) login $(MCP_REGISTRY_LOGIN_METHOD)
 
+release-auth-preflight: ## Fail-fast gh + MCP Registry auth check; refreshes an expired registry JWT interactively
+	./scripts/release-auth-preflight.sh "$(MCP_PUBLISHER)" "$(MCP_REGISTRY_LOGIN_METHOD)"
+
 registry-publish: release-registry-server ## Publish dist/server.json, refreshing expired Registry auth when needed
 	MCP_REGISTRY_AUTO_LOGIN=$(MCP_REGISTRY_AUTO_LOGIN) MCP_REGISTRY_LOGIN_METHOD=$(MCP_REGISTRY_LOGIN_METHOD) \
 		./scripts/registry-publish-with-login.sh "$(MCP_PUBLISHER)" "$(DIST_DIR)/server.json"
@@ -849,6 +852,12 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 		echo "release: tag $(RELEASE_VERSION) already exists on origin" >&2; \
 		exit 1; \
 	fi
+	@# Auth goes stale between releases: the MCP Registry JWT lives only
+	@# hours and gh auth less often, and both used to surface only at the
+	@# LAST pipeline legs (v2.0.0 stranded twice on registry-publish).
+	@# Check both before any expensive step so the interactive device-code
+	@# refresh happens at minute 0 with the operator present.
+	$(MAKE) release-auth-preflight
 	@# Validate the CHANGELOG entry shape before any expensive step. A
 	@# malformed entry (wrong version heading, missing ### What's new, or
 	@# no Keep-a-Changelog subsection) fails here, not after refresh-spx /
