@@ -15,8 +15,15 @@ brief.
 
 1. From the repo root, run:
    `scripts/codex-implement.sh --task <name> --brief <file>`
-   Codex runs can take many minutes: run it in the background and wait for
-   completion rather than letting a foreground timeout kill it.
+   Codex runs can take many minutes: run it as ONE backgrounded Bash call
+   and wait for that call's own completion notification. Do NOT spawn
+   polling/watcher loops on artifact files (`diff.patch`,
+   `last-message.md`, sentinel files) — the runner writes artifacts only
+   at exit, watchers outlive their purpose once the orchestrator prunes
+   the run directory, and stale sleep-loops pile up in the user's
+   background-task panel. One process, one notification. Judge completion
+   ONLY by the runner process having exited — never by intermediate
+   artifact-directory contents.
 2. On completion, find the newest stamp directory under
    `.claude/codex-runs/<name>/`.
 3. Read `last-message.md`, and summarize the change surface with

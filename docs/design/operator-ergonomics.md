@@ -373,3 +373,27 @@ fixture), then `make app-refresh` on the real host.
   unbuildable daemon-resolved report still reads as the bare-attestation
   refusal; the card's artefact rows print raw `declared true/completed
   false` booleans. Queued for the next tidy round, none behavioral.
+
+*Amended same evening — pre-release polish (operator interview after live
+use):* the first real phone render at 19:33 stamped morning and, on the
+next poll's fingerprint, eod 39 seconds later — the accepted first-
+incomplete quirk observed in practice. Operator decision: **the stamp rule
+is tightened to one stamp per look** — a successful render-stamp disarms
+further stamping until the app has been backgrounded and foregrounded
+again (client-side look counter with race protection; daemon `brief.ack`
+unchanged). Shipped in the same polish batch: one-decimal percentages and
+local ISO date/short-time formatting on the card (no locale-dependent
+timestamps), human artefact labels, the artefact group header loses its
+placeholder value, held-name event rows collapse to one disclosed row when
+the positions source is down, the rules-delta fingerprint note renders
+only on change, the CLI renders `—` for empty joined values, the
+unbuildable-resolved-report blocker is reworded ("current reconcile report
+is unavailable to sign off"), quote tiles show `Closed` instead of `Feed
+issue` when the calendar affirms the session is closed, and the snapshot
+banner claims "showing last good snapshot" only when retained data is
+actually displayed (cold portfolio failure reads "Account and positions
+unavailable."). The cosmetic-debt list above is thereby cleared. Gates:
+worktree `make app-check`+`make check`+race tests, primary `make test`,
+`make app-refresh`, full `make smoke` PASS zero skips; rendered
+verification on both an isolated paper-connected stack and the
+real-daemon preview.
