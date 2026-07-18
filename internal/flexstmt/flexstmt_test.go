@@ -73,6 +73,49 @@ func TestParseNormalStatement(t *testing.T) {
 	}
 }
 
+func TestParseDistinguishesMissingAndExplicitZeroAmounts(t *testing.T) {
+	fixture := `<FlexQueryResponse queryName="recon" type="AF">
+ <FlexStatements count="1">
+  <FlexStatement accountId="U1234567" fromDate="20260706" toDate="20260712" whenGenerated="20260713;063000">
+   <CashTransactions>
+    <CashTransaction transactionID="missing-cash" type="Deposits/Withdrawals" currency="EUR" fxRateToBase="1" dateTime="20260708;120000" settleDate="20260708" description="AMOUNT OMITTED" />
+    <CashTransaction transactionID="zero-cash" type="Deposits/Withdrawals" currency="EUR" fxRateToBase="1" amount="0" dateTime="20260709;120000" settleDate="20260709" description="ZERO AMOUNT" />
+   </CashTransactions>
+   <Transfers>
+    <Transfer transactionID="missing-transfer" date="20260710" direction="IN" fxRateToBase="1" description="AMOUNT OMITTED" />
+    <Transfer transactionID="zero-transfer" date="20260711" direction="IN" cashTransfer="0" fxRateToBase="1" description="ZERO AMOUNT" />
+   </Transfers>
+  </FlexStatement>
+ </FlexStatements>
+</FlexQueryResponse>`
+
+	sts, err := Parse([]byte(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sts) != 1 || len(sts[0].Cash) != 2 || len(sts[0].Transfers) != 2 {
+		t.Fatalf("unexpected parsed counts: %+v", sts)
+	}
+
+	missingCash := sts[0].Cash[0]
+	if missingCash.Category != CategoryFlow || missingCash.Amount != nil || missingCash.AmountBase != nil {
+		t.Fatalf("cash without amount = %+v, want flow with unavailable raw/base amount", missingCash)
+	}
+	zeroCash := sts[0].Cash[1]
+	if zeroCash.Category != CategoryFlow || zeroCash.Amount == nil || *zeroCash.Amount != 0 || zeroCash.AmountBase == nil || *zeroCash.AmountBase != 0 {
+		t.Fatalf("cash with explicit zero = %+v, want present raw/base zero", zeroCash)
+	}
+
+	missingTransfer := sts[0].Transfers[0]
+	if missingTransfer.CashTransfer != nil || missingTransfer.AmountBase != nil {
+		t.Fatalf("transfer without amount = %+v, want unavailable raw/base amount", missingTransfer)
+	}
+	zeroTransfer := sts[0].Transfers[1]
+	if zeroTransfer.CashTransfer == nil || *zeroTransfer.CashTransfer != 0 || zeroTransfer.AmountBase == nil || *zeroTransfer.AmountBase != 0 {
+		t.Fatalf("transfer with explicit zero = %+v, want present raw/base zero", zeroTransfer)
+	}
+}
+
 func TestParseRejectsServiceEnvelope(t *testing.T) {
 	envelope := `<FlexStatementResponse timestamp="13 July, 2026 06:30 AM EDT"><Status>Warn</Status><ErrorCode>1019</ErrorCode><ErrorMessage>Statement generation in progress.</ErrorMessage></FlexStatementResponse>`
 	if _, err := Parse([]byte(envelope)); err == nil || !strings.Contains(err.Error(), "envelope") {

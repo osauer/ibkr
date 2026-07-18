@@ -53,9 +53,12 @@ type CashLine struct {
 	Category string // flow | classified | uncategorized
 	Type     string // raw Flex type attribute
 	Currency string
-	Amount   float64
+	// Amount is nil when the statement omitted the amount attribute. An
+	// explicit zero remains a present value.
+	Amount *float64
 	// AmountBase is Amount converted at the statement's fxRateToBase;
-	// nil when the statement carried no usable rate (never fabricated).
+	// nil when the statement carried no amount or no usable rate (never
+	// fabricated).
 	AmountBase  *float64
 	ValueDate   time.Time // settleDate when present, else dateTime's day
 	Description string
@@ -65,11 +68,14 @@ type CashLine struct {
 // flow candidate downstream; a transfer with no computable base amount is
 // an uncategorized exception, not a guess.
 type Transfer struct {
-	ID          string
-	Direction   string // IN | OUT
-	Date        time.Time
-	AmountBase  *float64
-	Description string
+	ID        string
+	Direction string // IN | OUT
+	Date      time.Time
+	// CashTransfer is nil when the statement omitted the cashTransfer
+	// attribute. An explicit zero remains a present value.
+	CashTransfer *float64
+	AmountBase   *float64
+	Description  string
 }
 
 // EquityRow is one day of the base-currency equity series.
@@ -97,23 +103,23 @@ type xmlFlexQueryResponse struct {
 		ToDate        string `xml:"toDate,attr"`
 		WhenGenerated string `xml:"whenGenerated,attr"`
 		Cash          []struct {
-			TransactionID string  `xml:"transactionID,attr"`
-			Type          string  `xml:"type,attr"`
-			Currency      string  `xml:"currency,attr"`
-			FXRateToBase  float64 `xml:"fxRateToBase,attr"`
-			Amount        float64 `xml:"amount,attr"`
-			DateTime      string  `xml:"dateTime,attr"`
-			SettleDate    string  `xml:"settleDate,attr"`
-			Description   string  `xml:"description,attr"`
+			TransactionID string   `xml:"transactionID,attr"`
+			Type          string   `xml:"type,attr"`
+			Currency      string   `xml:"currency,attr"`
+			FXRateToBase  float64  `xml:"fxRateToBase,attr"`
+			Amount        *float64 `xml:"amount,attr"`
+			DateTime      string   `xml:"dateTime,attr"`
+			SettleDate    string   `xml:"settleDate,attr"`
+			Description   string   `xml:"description,attr"`
 		} `xml:"CashTransactions>CashTransaction"`
 		Transfers []struct {
-			TransactionID        string  `xml:"transactionID,attr"`
-			Date                 string  `xml:"date,attr"`
-			Direction            string  `xml:"direction,attr"`
-			CashTransfer         float64 `xml:"cashTransfer,attr"`
-			PositionAmountInBase float64 `xml:"positionAmountInBase,attr"`
-			FXRateToBase         float64 `xml:"fxRateToBase,attr"`
-			Description          string  `xml:"description,attr"`
+			TransactionID        string   `xml:"transactionID,attr"`
+			Date                 string   `xml:"date,attr"`
+			Direction            string   `xml:"direction,attr"`
+			CashTransfer         *float64 `xml:"cashTransfer,attr"`
+			PositionAmountInBase float64  `xml:"positionAmountInBase,attr"`
+			FXRateToBase         float64  `xml:"fxRateToBase,attr"`
+			Description          string   `xml:"description,attr"`
 		} `xml:"Transfers>Transfer"`
 		Equity []struct {
 			ReportDate string  `xml:"reportDate,attr"`
@@ -152,6 +158,10 @@ func Parse(data []byte) ([]Statement, error) {
 			return nil, fmt.Errorf("statement whenGenerated: %w", err)
 		}
 		for _, c := range raw.Cash {
+			amount := 0.0
+			if c.Amount != nil {
+				amount = *c.Amount
+			}
 			line := CashLine{
 				Type:        strings.TrimSpace(c.Type),
 				Currency:    strings.TrimSpace(c.Currency),
@@ -166,8 +176,8 @@ func Parse(data []byte) ([]Statement, error) {
 			default:
 				line.Category = CategoryUncategorized
 			}
-			if c.FXRateToBase > 0 {
-				base := c.Amount * c.FXRateToBase
+			if c.Amount != nil && c.FXRateToBase > 0 {
+				base := amount * c.FXRateToBase
 				line.AmountBase = &base
 			}
 			dateSrc := c.SettleDate
@@ -177,13 +187,14 @@ func Parse(data []byte) ([]Statement, error) {
 			if line.ValueDate, err = parseFlexDate(dateSrc); err != nil {
 				return nil, fmt.Errorf("cash transaction date %q: %w", dateSrc, err)
 			}
-			line.ID = lineID(c.TransactionID, "cash", line.Type, dateSrc, c.Amount, line.Description)
+			line.ID = lineID(c.TransactionID, "cash", line.Type, dateSrc, amount, line.Description)
 			st.Cash = append(st.Cash, line)
 		}
 		for _, t := range raw.Transfers {
 			tr := Transfer{
-				Direction:   strings.ToUpper(strings.TrimSpace(t.Direction)),
-				Description: strings.TrimSpace(t.Description),
+				Direction:    strings.ToUpper(strings.TrimSpace(t.Direction)),
+				CashTransfer: t.CashTransfer,
+				Description:  strings.TrimSpace(t.Description),
 			}
 			if tr.Date, err = parseFlexDate(t.Date); err != nil {
 				return nil, fmt.Errorf("transfer date: %w", err)
@@ -192,8 +203,8 @@ func Parse(data []byte) ([]Statement, error) {
 			// position value. Only computed from what the line carries.
 			var base float64
 			var have bool
-			if t.CashTransfer != 0 && t.FXRateToBase > 0 {
-				base += t.CashTransfer * t.FXRateToBase
+			if t.CashTransfer != nil && t.FXRateToBase > 0 {
+				base += *t.CashTransfer * t.FXRateToBase
 				have = true
 			}
 			if t.PositionAmountInBase != 0 {
@@ -203,7 +214,11 @@ func Parse(data []byte) ([]Statement, error) {
 			if have {
 				tr.AmountBase = &base
 			}
-			tr.ID = lineID(t.TransactionID, "transfer", tr.Direction, t.Date, t.CashTransfer+t.PositionAmountInBase, tr.Description)
+			amount := t.PositionAmountInBase
+			if t.CashTransfer != nil {
+				amount += *t.CashTransfer
+			}
+			tr.ID = lineID(t.TransactionID, "transfer", tr.Direction, t.Date, amount, tr.Description)
 			st.Transfers = append(st.Transfers, tr)
 		}
 		for _, e := range raw.Equity {
