@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: marketplace-readiness.md sha256:aa424f9d4b2eaef0bf23b8d007be2bf77755efc6c45e806b91e26917b35250bf -->
+<!-- md-source: marketplace-readiness.md sha256:9e98a4d5cab4862ad73389483dcce5847e2e2a0a85df7d24a44c04b8971fb151 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -16,7 +16,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-07-18T21:20:00+02:00",
+    "dateModified": "2026-07-18T21:37:00+02:00",
     "description": "This page is the maintainer checklist for presenting ibkr in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user...",
     "headline": "Marketplace readiness",
     "isPartOf": {
@@ -158,7 +158,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="marketplace-readiness">Marketplace readiness</h1>
-<p>Last reviewed: 2026-07-18 21:20 CEST</p>
+<p>Last reviewed: 2026-07-18 21:37 CEST</p>
 <p>This page is the maintainer checklist for presenting <code>ibkr</code> in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user expectations; feature details live in the README and reference docs.</p>
 <h2 id="positioning">Positioning</h2>
 <p><code>ibkr</code> is a local platform for running an agentic trading desk on Interactive Brokers, aimed at individual traders who already run IB Gateway or TWS: agents get the full market-data surface (real-time per the user's IBKR market-data subscriptions) and portfolio context, while regime, canary, and rulebook checks stay advisory and risk policy plus statement reconciliation stay operator-owned in the terminal. The clearest marketplace description is:</p>
@@ -302,11 +302,11 @@ make smoke</code></pre>
 <p>Publish sequence:</p>
 <ol>
 <li>Release any MCPB-readiness changes through <code>make release RELEASE_VERSION=vX.Y.Z</code>; do not tag or create releases manually.</li>
-<li>Publish the open MCP Registry metadata only through <code>make registry-publish RELEASE_VERSION=vX.Y.Z MCP_PUBLISHER=bin/mcp-publisher</code>. If the Registry JWT is expired, the target starts <code>mcp-publisher login github</code>, prints the device-code instructions, waits for authorization, and retries publish automatically. Registry JWTs live only about 5 minutes, so this in-target login is the normal path on every publish, not a recovery: <code>make release</code> runs <code>make release-auth-preflight</code> before any gate work to verify gh auth and the publish tooling up front, but the device-code login itself always happens at the registry-publish leg — plan to be at a browser near the end of the pipeline.</li>
+<li>Publish the open MCP Registry metadata only through <code>make registry-publish RELEASE_VERSION=vX.Y.Z MCP_PUBLISHER=bin/mcp-publisher</code>. If the Registry JWT is expired, the target starts <code>mcp-publisher login github</code>, prints the device-code instructions, waits for authorization, and retries publish automatically. Registry JWTs live only about 5 minutes, so this in-target login is the normal path on every publish, not a recovery: <code>make release</code> runs <code>make release-auth-preflight</code> before any gate work to verify gh auth and the publish tooling up front, but the device-code login itself always happens at the registry-publish leg. Plan to be at a browser near the end of the pipeline.</li>
 <li>Submit to Anthropic&#39;s Desktop extension submission form from the Claude docs, attaching the public GitHub release asset URL and the submission materials above.</li>
 <li>Wait for Anthropic review. Directory approval, listing slug, and in-product availability are controlled by Anthropic; a successful MCP Registry publish is not a Claude Directory publish.</li>
 </ol>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice. ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>

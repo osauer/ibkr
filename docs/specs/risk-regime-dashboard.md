@@ -181,7 +181,7 @@ derived-IV share, top-strike concentration, and median per-expiry skew-fit R²
 are judged on that underlying's own slice. The skew bars are preferred ≥ 0.75
 SPX, ≥ 0.70 SPY, with a hard block below 0.50; a median between the block and
 preferred bars still ranks, with the gate's reason disclosing the
-sub-preferred fit — median R² is amplitude-relative and tracks intraday smile
+sub-preferred fit: median R² is amplitude-relative and tracks intraday smile
 noise rather than coverage health, so it is disclosure-worthy but not
 rank-blocking on its own. The combined node carries no pooled model gates:
 the pooled derived-IV share is leg-count weighted across both chains and the
@@ -193,7 +193,7 @@ slice's own verdict reaches the combined node through the `spx_coverage`
 gate. One consequence: a SPY slice ranking inside the disclosed skew window
 votes in the combined band weighting. Every successful compute appends
 per-slice skew diagnostics (per-expiry R² and residual RMS, coverage,
-rankability) to `$XDG_STATE_HOME/ibkr/gamma-skew-diagnostics.jsonl` — offline
+rankability) to `$XDG_STATE_HOME/ibkr/gamma-skew-diagnostics.jsonl`, offline
 calibration input for these heuristic bars; nothing reads it at runtime and
 it is safe to delete.
 
@@ -215,7 +215,7 @@ result.
 
 A red row may CONFIRM stress only when its evidence is deep, persistent, and
 cadence-fresh. Otherwise it is PROVISIONAL: visible on the row, listed in
-`lifecycle.unconfirmed`, able to drive `early_warning` — but it never counts
+`lifecycle.unconfirmed`, able to drive `early_warning`, but it never counts
 toward `confirmed_stress`/`panic`, never rescues another cluster from its
 isolated-red downgrade, and never reaches `confirmed_by`. This policy exists
 because of the 2026-06-12 false positive, where a 7 bps HYG break (one session
@@ -238,7 +238,7 @@ the band thresholds; values live in `internal/rpc/regime_policy.go`):
 | Breadth | <= 38% | <= 30% | 2 | last completed session's compute | > 45% |
 
 Eligibility latches for the life of the red streak (a depth wobble back inside
-the floor does not flip it); freshness is never latched — overdue data drops
+the floor does not flip it); freshness is never latched: overdue data drops
 eligibility immediately. Streaks count NY trading days; a weekend or holiday
 poll keys to the most recent trading day.
 
@@ -342,7 +342,7 @@ Every decision-relevant regime snapshot appends one line to
 metrics, streaks, freshness, eligibility, cluster tallies, lifecycle decision,
 and governor records. Lines dedupe on the snapshot's semantic fingerprint with
 an hourly heartbeat. The file is append-only, never read at runtime, and safe
-to delete — the same contract as `gamma-skew-diagnostics.jsonl`. It is the
+to delete, the same contract as `gamma-skew-diagnostics.jsonl`. It is the
 forward-collection corpus that makes the `pending_backtest` thresholds
 calibratable: a threshold set drops `pending_backtest` only with months of
 journal coverage, measured false-alarm/recall rates against labeled episodes,

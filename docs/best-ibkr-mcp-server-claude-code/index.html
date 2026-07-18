@@ -57,7 +57,7 @@
 <p>The short answer: choose a local MCP server that connects to IB Gateway or Trader Workstation (TWS), exposes explicit read-only tools, and makes order placement impossible at the tool boundary. <code>ibkr</code> is designed around that boundary.</p>
 <h2 id="why-read-only-matters">Why read-only matters</h2>
 <p>Claude Code is powerful enough to inspect files, run commands, and use MCP tools. That is useful for portfolio analysis, but it is the wrong default for unsupervised brokerage order placement.</p>
-<p><code>ibkr mcp</code> exposes account, positions, quotes, calendars, options, scanners, breadth, gamma, broad-market regime lifecycle, stress-monitoring, and sizing tools. It does not expose tools for placing, modifying, or cancelling Interactive Brokers orders. If Claude asks to trade through this MCP server, the correct answer is that no order-entry interface exists.</p>
+<p><code>ibkr mcp</code> exposes account, positions, quotes, calendars, options, scanners, breadth, gamma, broad-market regime lifecycle, stress-monitoring, and sizing tools. It does not expose tools for placing, modifying, or cancelling Interactive Brokers orders. If Claude asks to trade through this MCP server, there is no tool for it to call.</p>
 <h2 id="best-fit">Best fit</h2>
 <ul>
 <li>You want Claude Code to answer &#34;what do I own?&#34; and &#34;what changed?&#34; from live IBKR account context.</li>
@@ -110,6 +110,6 @@ claude plugin install ibkr@ibkr</code></pre>
 <li><a href="../reference/mcp-tools.html">MCP tools reference</a> for the tool schema Claude routes against.</li>
 </ul>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap fineprint">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap fineprint">Not financial advice. ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>

@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: regime-backtest-plan.md sha256:937bfc96a88bc29c0d2c8e66a69841fa260aa2b34bbf876b0005b05e27435807 -->
+<!-- md-source: regime-backtest-plan.md sha256:715913d2de2a70c73b68cbca4ac9bc07b44552ca0977311fe50b5a1b228d89c4 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -360,8 +360,8 @@ python3 scripts/backtest/compare-tier1-vol-rules.py</code></pre>
 </ul>
 <p>promoted into the live contract.</p>
 <h2 id="confirmation-gates-in-replay">Confirmation Gates In Replay</h2>
-<p>The live engine applies confirmation eligibility (depth + persistence + cadence-freshness, see the dashboard contract) before any red may confirm. Point-in-time panels are independent daily observations, so the replay evaluates DAY-1 gates: depth and freshness bind, persistence is sessions=1, and streak-gated indicators confirm only through their fast-path depths. Bands-only panel rows (no raw values) therefore cannot satisfy depth-gated fast paths — a known fidelity limit. Expected consequence in the curated sample: 2023-03-13 (SVB Monday) reads <code>early_warning</code> day 0 and confirms with persistence, while crash days (volmageddon, COVID, the 2024 carry unwind) still confirm same-day via fast paths and tape co-signs.</p>
-<p>Sequence-aware streak replay is the follow-up: the runtime decisions journal (<code>$XDG_STATE_HOME/ibkr/regime-decisions.jsonl</code>, see the dashboard contract) forward-collects raw values, depths, streaks, eligibility, and governor decisions per snapshot, and is the calibration corpus for promoting threshold sets out of <code>pending_backtest</code> — per versioned label, with measured false-alarm and recall rates.</p>
+<p>The live engine applies confirmation eligibility (depth + persistence + cadence-freshness, see the dashboard contract) before any red may confirm. Point-in-time panels are independent daily observations, so the replay evaluates DAY-1 gates: depth and freshness bind, persistence is sessions=1, and streak-gated indicators confirm only through their fast-path depths. Bands-only panel rows (no raw values) therefore cannot satisfy depth-gated fast paths, a known fidelity limit. Expected consequence in the curated sample: 2023-03-13 (SVB Monday) reads <code>early_warning</code> day 0 and confirms with persistence, while crash days (volmageddon, COVID, the 2024 carry unwind) still confirm same-day via fast paths and tape co-signs.</p>
+<p>Sequence-aware streak replay is the follow-up: the runtime decisions journal (<code>$XDG_STATE_HOME/ibkr/regime-decisions.jsonl</code>, see the dashboard contract) forward-collects raw values, depths, streaks, eligibility, and governor decisions per snapshot, and is the calibration corpus for promoting threshold sets out of <code>pending_backtest</code>, per versioned label, with measured false-alarm and recall rates.</p>
 <h2 id="data-gates">Data Gates</h2>
 <p>Tier 2 data is green only if all are true:</p>
 <ul>
@@ -412,6 +412,6 @@ ibkr backtest regime --input /tmp/ibkr-build-regime-smoke.jsonl</code></pre>
 <li>No MOVE/rates-vol input without a clean source.</li>
 </ul>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice. ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>

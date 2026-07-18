@@ -194,7 +194,10 @@ type ConnectorConfig struct {
 // currently rendered; they're cheap to plumb and ready for a future
 // `quote --verbose` view.
 type Subscription struct {
-	Symbol    string
+	Symbol string
+	// Right is the normalized option right ("C" or "P") for option-leg
+	// subscriptions. It is empty for non-option subscriptions.
+	Right     string
 	ReqID     int
 	Fields    []string
 	LastPrice float64
@@ -214,9 +217,10 @@ type Subscription struct {
 	AvgVolume int64
 	// OpenInt is the option open interest at this contract: tick 27
 	// (callOpenInterest) for CALL legs, tick 28 (putOpenInterest) for
-	// PUT legs. One leg subscription receives exactly one of the two —
-	// they do not race. OpenIntObserved distinguishes "gateway sent
-	// zero OI" from "gateway has not delivered the OI tick yet".
+	// PUT legs. The gateway also emits a zero-valued companion tick for
+	// the opposite right, so only the tick matching Right is committed.
+	// OpenIntObserved distinguishes "gateway sent zero OI for this right"
+	// from "gateway has not delivered the matching OI tick yet".
 	OpenInt         int64
 	OpenIntObserved bool
 	// ShortableShares is wire tick 89 (a tickSize), delivered for the
@@ -2982,10 +2986,15 @@ func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClas
 	// Register the reqID before the wire send so ticks 27/28 cannot race
 	// ahead of the connector routing maps.
 	reqID, err := conn.requestMarketDataWithContract(ctx, contract, OptionSubscriptionGenericTicks, false, false, func(reqID int) func() {
+		subscriptionRight := strings.ToUpper(strings.TrimSpace(contract.Right))
+		if subscriptionRight != "" {
+			subscriptionRight = subscriptionRight[:1]
+		}
 		c.subMu.Lock()
 		c.reqIDMap[reqID] = key
 		c.subscriptions[key] = &Subscription{
 			Symbol:   key,
+			Right:    subscriptionRight,
 			ReqID:    reqID,
 			LastTime: time.Now(),
 			RejectCh: make(chan SubscriptionRejection, 1),
@@ -4921,9 +4930,11 @@ func (c *Connector) handleTickSize(fields []string) {
 	// 21=average volume, delivered by the Misc Stats generic-tick bundle (165).
 	// Delayed subscriptions use 69/70/74 for bid size / ask size / volume.
 	// 5=LAST_SIZE is intentionally dropped — too noisy and not surfaced.
-	// 27=callOpenInterest, 28=putOpenInterest land on the same OpenInt
-	// slot because a given option-leg subscription is for one specific
-	// right; the gateway emits at most one of the two per subscription.
+	// 27=callOpenInterest, 28=putOpenInterest. On option-leg subscriptions,
+	// the gateway emits a zero-valued companion tick for the opposite right,
+	// so only the tick matching Subscription.Right may commit OpenInt. On
+	// right-less stock/ETF subscriptions these ticks are aggregate option OI;
+	// no consumer reads that value from this slot, so dropping it is deliberate.
 	switch tickType {
 	case 0, 69:
 		sub.BidSize = size
@@ -4933,9 +4944,16 @@ func (c *Connector) handleTickSize(fields []string) {
 		sub.Volume = size
 	case 21:
 		sub.AvgVolume = size
-	case 27, 28:
-		sub.OpenInt = size
-		sub.OpenIntObserved = true
+	case 27:
+		if sub.Right == "C" {
+			sub.OpenInt = size
+			sub.OpenIntObserved = true
+		}
+	case 28:
+		if sub.Right == "P" {
+			sub.OpenInt = size
+			sub.OpenIntObserved = true
+		}
 	case 89:
 		// Shortable share count, delivered for the generic-tick-236
 		// request (TWS build 974+). Feeds the borrow-inventory market-

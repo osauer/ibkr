@@ -53,7 +53,7 @@
 <p>Updated: 2026-07-18 21:05 CEST</p>
 <p><code>ibkr mcp</code> is intentionally a read-only MCP server for Interactive Brokers. It gives AI assistants account and market context from IB Gateway or TWS, but it does not expose a place-order, modify-order, or cancel-order tool.</p>
 <p>The read-only boundary is what makes the rest of the platform workable. Because agents hold no order-entry tools, the desk functions around them (regime context, stress checks, the 14-rule rulebook, an operator-written risk policy, daily statement reconciliation) can run with full market data and full portfolio context without a standing question about what the agent might do with them.</p>
-<p>This page describes the standard downloads — the installer, the Claude Desktop bundle, and the plain <code>ibkr</code> tarballs. Releases also publish a separate, clearly marked <code>ibkr-trading</code> tarball for users who explicitly opt into order management; nothing on this page applies to that variant, and it is never installed by default.</p>
+<p>This page describes the standard downloads: the installer, the Claude Desktop bundle, and the plain <code>ibkr</code> tarballs. Releases also publish a separate, clearly marked <code>ibkr-trading</code> tarball for users who explicitly opt into order management; nothing on this page applies to that variant, and it is never installed by default.</p>
 <p>This page is for searches such as &#34;read-only IBKR MCP server&#34;, &#34;safe AI trading assistant Interactive Brokers&#34;, &#34;Interactive Brokers MCP no order access&#34;, and &#34;portfolio analysis MCP server&#34;.</p>
 <h2 id="what-read-only-means-here">What read-only means here</h2>
 <p>Allowed surfaces:</p>
@@ -105,6 +105,6 @@ ibkr status</code></pre>
 <li><a href="../reference/mcp-tools.html">MCP tools reference</a> for the read-only tool inventory.</li>
 </ul>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap fineprint">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap fineprint">Not financial advice. ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>

@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: agentic-use.md sha256:a8de99f01cb6c6d803b566a8fc9ada6331ec4a97cfad638ab59f955a59ce3d15 -->
+<!-- md-source: agentic-use.md sha256:ad0dd6c10eeb80cf0314c3f3447fdfde74aea14a5dba89292ea272716d68b0c6 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -16,7 +16,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-06-07T08:48:00+02:00",
+    "dateModified": "2026-07-18T21:37:00+02:00",
     "description": "ibkr mcp makes read/status CLI operations and preview-only stock/ETF order drafts available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol.",
     "headline": "Agentic use",
     "isPartOf": {
@@ -158,7 +158,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="agentic-use">Agentic use</h1>
-<p>Updated: 2026-06-07 08:48 CEST</p>
+<p>Updated: 2026-07-18 21:37 CEST</p>
 <p><code>ibkr mcp</code> makes read/status CLI operations and preview-only stock/ETF order drafts available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.</p>
 <p>This page is for the human installing the plugin and wondering <em>&#34;what can I actually ask Claude with this?&#34;</em> For exact tool parameters and JSON envelopes, see the auto-generated <a href="../reference/mcp-tools.html">MCP tools reference</a>. For protocol mechanics, see the upstream <a href="https://modelcontextprotocol.io/">Model Context Protocol spec</a>.</p>
 <h2 id="setup">Setup</h2>
@@ -167,13 +167,13 @@
 claude mcp list                   # plugin:ibkr:ibkr connected
 ibkr status                       # daemon health, gateway connection, data freshness</code></pre>
 <p>Direct skill installs also work in Claude Code when <code>SKILL.md</code> is copied under <code>~/.claude/skills/&lt;name&gt;/</code>, but that creates only a skill command. Use the plugin path for normal IBKR installs because the MCP tools and safety hooks are plugin components.</p>
-<p>The MCP tools are listed in <a href="../reference/mcp-tools.html">reference/mcp-tools.md</a>. They mirror the agent-appropriate CLI commands — <code>ibkr_status</code> ↔ <code>ibkr status</code>, <code>ibkr_calendar</code> ↔ <code>ibkr calendar</code>, <code>ibkr_watch</code> ↔ enriched <code>ibkr watch</code> by default or read-only <code>ibkr watch --list</code> when <code>include_quotes</code> is false, <code>ibkr_gamma</code> ↔ <code>ibkr gamma</code>, <code>ibkr_market_events</code> ↔ <code>ibkr market-events</code>, <code>ibkr_order_preview</code> ↔ <code>ibkr order preview</code>, etc. — while local lifecycle verbs such as <code>setup</code>, <code>update</code>, <code>restart</code>, <code>mcp</code>, and <code>daemon</code> stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.</p>
+<p>The MCP tools are listed in <a href="../reference/mcp-tools.html">reference/mcp-tools.md</a>. They mirror the agent-appropriate CLI commands (<code>ibkr_status</code> ↔ <code>ibkr status</code>, <code>ibkr_calendar</code> ↔ <code>ibkr calendar</code>, <code>ibkr_watch</code> ↔ enriched <code>ibkr watch</code> by default or read-only <code>ibkr watch --list</code> when <code>include_quotes</code> is false, <code>ibkr_gamma</code> ↔ <code>ibkr gamma</code>, <code>ibkr_market_events</code> ↔ <code>ibkr market-events</code>, <code>ibkr_order_preview</code> ↔ <code>ibkr order preview</code>, etc.), while local lifecycle verbs such as <code>setup</code>, <code>update</code>, <code>restart</code>, <code>mcp</code>, and <code>daemon</code> stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.</p>
 <h2 id="example-conversations">Example conversations</h2>
 <p>These are the kinds of questions the tool handles. Each shows the user&#39;s message, the tool(s) Claude is likely to invoke from the descriptions, and what the human can expect back.</p>
 <h3 id="is-the-market-regime-favorable-right-now">&#34;Is the market regime favorable right now?&#34;</h3>
 <p>→ Claude invokes <code>ibkr_regime</code>.</p>
 <p>Returns the eight-row dashboard: VIX term structure, VVIX, HYG/SPY divergence, HY/IG OAS, funding spread, USD/JPY weekly move, dealer zero-gamma, and S&amp;P breadth. Each row carries raw measurements, compact band/as-of metadata, scoped warnings when data is stale or unavailable, and a <code>streak</code> field when the row is rankable. The top-level envelope also carries lifecycle stage, readiness, source health, and semantic fingerprints for monitor dedupe.</p>
-<p>Claude composes an answer that names which indicators are in which band, calls out any in red, and flags streaks (a Day-5 stress event reads differently from a Day-1 spike). The dashboard is <em>information</em>, not a verdict — the user&#39;s risk tolerance determines what to do with it. See <a href="../concepts.html#regime">Concepts → Regime</a>.</p>
+<p>Claude composes an answer that names which indicators are in which band, calls out any in red, and flags streaks (a Day-5 stress event reads differently from a Day-1 spike). The dashboard is <em>information</em>, not a verdict; the user&#39;s risk tolerance determines what to do with it. See <a href="../concepts.html#regime">Concepts → Regime</a>.</p>
 <h3 id="should-the-canary-stay-quiet-watch-act-rebalance-flag-opportunity-or-block-on-data-quality">&#34;Should the canary stay quiet, watch, act, rebalance, flag opportunity, or block on data quality?&#34;</h3>
 <p>→ Claude invokes <code>ibkr_canary</code>.</p>
 <p>Returns a stateless market-context portfolio monitor for scheduled stress checks. The canary combines market-regime clusters, direct SPY/VIX tape shock, current exposures, concentration, positions-only held-underlying stress, option-greeks coverage, and input-health gates into <code>action</code>, <code>market_confirmation</code>, <code>portfolio_fit</code>, and <code>input_health</code>.</p>
@@ -186,7 +186,7 @@ ibkr status                       # daemon health, gateway connection, data fres
 <p>Claude should report active flags as context and safety gates, not as standalone trade ideas. Unknown source health means unavailable evidence, not inactive. Borrow inventory and fee stress are only proposal modifiers for existing short buy-to-cover reductions; they do not justify opening or adding long exposure. Active halt/LULD flags block protection preview/submit; recent halt/LULD flags require fresh quote context.</p>
 <h3 id="show-me-my-spy-positions-and-any-options-on-them">&#34;Show me my SPY positions and any options on them.&#34;</h3>
 <p>→ Claude invokes <code>ibkr_positions</code> with <code>{&#34;symbol&#34;: &#34;SPY&#34;}</code>.</p>
-<p>Returns rows for SPY stock holdings and any SPY options, with per-leg Greeks (delta/gamma/theta/vega) for the options, plus a <code>portfolio</code> block aggregating effective_delta in share-equivalents. Claude typically renders the stock holding alongside an aggregate Greek line (&#34;you&#39;re net long ~1,500 SPY-deltas after the options&#34;). Daily P&amp;L is included from IBKR&#39;s reqPnLSingle stream — <code>null</code> when the daemon hasn&#39;t pre-warmed that contract, never zero-substituted.</p>
+<p>Returns rows for SPY stock holdings and any SPY options, with per-leg Greeks (delta/gamma/theta/vega) for the options, plus a <code>portfolio</code> block aggregating effective_delta in share-equivalents. Claude typically renders the stock holding alongside an aggregate Greek line (&#34;you&#39;re net long ~1,500 SPY-deltas after the options&#34;). Daily P&amp;L is included from IBKR&#39;s reqPnLSingle stream: <code>null</code> when the daemon hasn&#39;t pre-warmed that contract, never zero-substituted.</p>
 <p>If you also want context, follow-up questions naturally chain: <em>&#34;and what&#39;s SPY&#39;s dealer gamma profile?&#34;</em> invokes <code>ibkr_gamma</code>; <em>&#34;how does that compare to where SPY closed yesterday?&#34;</em> invokes <code>ibkr_history</code> + <code>ibkr_quote</code>.</p>
 <h3 id="whats-on-my-watchlist">&#34;What&#39;s on my watchlist?&#34;</h3>
 <p>→ Claude invokes <code>ibkr_watch</code>.</p>
@@ -199,10 +199,10 @@ ibkr status                       # daemon health, gateway connection, data fres
 <p>Returns the official market state for the relevant supported calendar: US cash equities, US listed options regular sessions, or German Xetra cash equities. A US quote at 1am ET will normally say the regular session is closed and show the next 09:30 ET open; a US holiday shows the holiday reason and the next known open. For example, Whit Monday 2026 is closed for US equities because it is Memorial Day, while Xetra is open.</p>
 <h3 id="are-spy-dealers-supporting-or-amplifying-todays-moves">&#34;Are SPY dealers supporting or amplifying today&#39;s moves?&#34;</h3>
 <p>→ Claude invokes <code>ibkr_gamma</code> (default scope = combined SPY+SPX).</p>
-<p>Returns the signed zero-gamma price level, the dealer book&#39;s current sign (<code>positive</code> = long-gamma = stabilising; <code>negative</code> = short-gamma = amplifying), the regime-agreement classifier between SPY and SPX (<code>agree:long-gamma</code> / <code>agree:short-gamma</code> / <code>agree:transition-gamma</code> / <code>disagree</code>), and the magnitude view via <code>gamma_total_abs</code> and <code>top_strikes</code>.</p>
+<p>Returns the signed zero-gamma price level, the dealer book&#39;s current sign (<code>positive</code> = long-gamma = stabilizing; <code>negative</code> = short-gamma = amplifying), the regime-agreement classifier between SPY and SPX (<code>agree:long-gamma</code> / <code>agree:short-gamma</code> / <code>agree:transition-gamma</code> / <code>disagree</code>), and the magnitude view via <code>gamma_total_abs</code> and <code>top_strikes</code>.</p>
 <p>Always read <code>quality.rankability</code> before treating gamma as a market-structure signal. <code>rankable</code> means the read is fresh and covered enough; <code>context_only</code> is awareness-only; <code>blocked</code> and <code>unavailable</code> are data-quality blockers.</p>
 <p>Do not treat missing 0DTE alone as a gamma no-vote. If SPX has healthy 1-7DTE and term coverage, the result can remain rankable while still disclosing the missing 0DTE bucket in <code>quality.coverage</code> and <code>warning_details</code>. After the expiring SPXW series closes, the 0DTE bucket can be absent even when the broader SPX surface is usable.</p>
-<p>The important diagnostic is <strong><code>disagree</code></strong> — one book stabilising while the other amplifies, indicating institutional/retail positioning divergence. Claude usually flags this prominently. The first call of an NY trading day kicks a multi-minute background compute; you&#39;ll see <code>status: &#34;computing&#34;</code> with an ETA — re-ask in a few minutes for the result. See <a href="../concepts.html#gamma">Concepts → Gamma</a>.</p>
+<p>The important diagnostic is <strong><code>disagree</code></strong>: one book stabilizing while the other amplifies, indicating institutional/retail positioning divergence. Claude usually flags this prominently. The first call of an NY trading day kicks a multi-minute background compute; you&#39;ll see <code>status: &#34;computing&#34;</code> with an ETA. Re-ask in a few minutes for the result. See <a href="../concepts.html#gamma">Concepts → Gamma</a>.</p>
 <h3 id="find-me-top-sp-500-names-trading-above-their-50-day-moving-average">&#34;Find me top S&amp;P 500 names trading above their 50-day moving average.&#34;</h3>
 <p>→ Claude invokes <code>ibkr_breadth</code> to get the index-wide reading, then <code>ibkr_scan</code> with the <code>top-movers</code> preset (or an ad-hoc scan) to return specific names.</p>
 <p>Returns the % of S&amp;P names above their 50-DMA (the tactical signal) and per-row scanner output enriched with last / prev_close / change_pct / volume / IV. Claude typically pairs the breadth context (&#34;market-wide reading: 54% above 50-DMA, healthy&#34;) with the specific names that match the scan. For follow-up questions like <em>&#34;show me daily bars for AAPL&#34;</em>, Claude chains to <code>ibkr_history</code>. See <a href="../concepts.html#breadth">Concepts → Breadth</a>.</p>
@@ -215,7 +215,7 @@ ibkr status                       # daemon health, gateway connection, data fres
 <li>✅ tell you what you own</li>
 <li>✅ read your local saved-symbol watchlist</li>
 <li>✅ tell you the market state</li>
-<li>✅ size a trade (<code>ibkr_size</code> — pure math against your NLV, never proposes an order)</li>
+<li>✅ size a trade (<code>ibkr_size</code>: pure math against your NLV, never proposes an order)</li>
 <li>✅ preview a locally gated stock/ETF LMT draft without broker submission</li>
 <li>❌ place an order</li>
 <li>❌ cancel an order</li>
@@ -234,19 +234,19 @@ ibkr status                       # daemon health, gateway connection, data fres
 <ul>
 <li><strong>Ask the question, don&#39;t name the tool.</strong> &#34;How does my portfolio look?&#34; works better than &#34;Run ibkr_positions.&#34; Claude picks the right tool based on the question; naming the tool just adds friction.</li>
 <li><strong>Chain follow-ups freely.</strong> Each tool call is cheap (cached when possible). &#34;And what about gamma for those?&#34; or &#34;How did that look yesterday?&#34; generate natural follow-up tool calls.</li>
-<li><strong>For the dashboard, ask &#34;how does the market regime look?&#34;</strong> — it triggers <code>ibkr_regime</code>, which returns the eight-row snapshot in one call. Faster than asking about each indicator separately.</li>
+<li><strong>For the dashboard, ask &#34;how does the market regime look?&#34;</strong> It triggers <code>ibkr_regime</code>, which returns the eight-row snapshot in one call. Faster than asking about each indicator separately.</li>
 <li><strong>For scheduled stress checks, ask for the canary.</strong> &#34;How does market weather interact with my portfolio right now?&#34; triggers <code>ibkr_canary</code>, which returns action, market confirmation, portfolio fit, held-underlying stress, input health, readiness, source health, fingerprints, and evidence rows without requiring the assistant to compose its own escalation ladder.</li>
 <li><strong>For sizing, give Claude the full plan.</strong> &#34;I want to enter AAPL at 180 with a stop at 175 and a target at 195, risking 1% of NLV&#34; lets <code>ibkr_size</code> return the R-multiple, breakeven win rate, and share count in one round-trip.</li>
 </ul>
 <h2 id="reference">Reference</h2>
 <ul>
-<li><a href="../reference/mcp-tools.html">MCP tools reference</a> — auto-generated table of every tool, parameters, descriptions.</li>
-<li><a href="../reference/mcp-resources.html">MCP resources reference</a> — streaming stock/ETF quote resource semantics.</li>
-<li><a href="../concepts.html">Concepts</a> — the mental model for regime / gamma / breadth.</li>
-<li><a href="updating.html">Updating</a> — keeping the binary + constituent list current.</li>
-<li><a href="https://modelcontextprotocol.io/">Model Context Protocol spec</a> — the upstream protocol.</li>
+<li><a href="../reference/mcp-tools.html">MCP tools reference</a>: auto-generated table of every tool, parameters, descriptions.</li>
+<li><a href="../reference/mcp-resources.html">MCP resources reference</a>: streaming stock/ETF quote resource semantics.</li>
+<li><a href="../concepts.html">Concepts</a>: the mental model for regime / gamma / breadth.</li>
+<li><a href="updating.html">Updating</a>: keeping the binary + constituent list current.</li>
+<li><a href="https://modelcontextprotocol.io/">Model Context Protocol spec</a>: the upstream protocol.</li>
 </ul>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice. ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>

@@ -51,7 +51,7 @@
   <main class="wrap doc">
 <h1 id="portfolio-review-with-claude-and-ibkr">Portfolio review with Claude and IBKR</h1>
 <p>Updated: 2026-07-18 21:05 CEST</p>
-<p><code>ibkr mcp</code> lets Claude review an Interactive Brokers portfolio from the same local IB Gateway or TWS session a trader already uses. The point is not to turn a broker account into a chatbot. The point is to give an assistant enough structured account, position, option, quote, calendar, scanner, sizing, and regime context to do the kind of review a disciplined trader would otherwise assemble by hand.</p>
+<p><code>ibkr mcp</code> lets Claude review an Interactive Brokers portfolio from the same local IB Gateway or TWS session a trader already uses. The job is to give an assistant enough structured account, position, option, quote, calendar, scanner, sizing, and regime context to do the kind of review a disciplined trader would otherwise assemble by hand.</p>
 <p>A review session can also lean on the discipline surfaces: <code>ibkr_rules</code> evaluates a 14-rule daily checklist over the live book (concentration, premium caps, theta budget, expiry runway, earnings coverage, hedge integrity) and names its offenders. Missing data degrades to unknown rather than a false pass, so a cold daemon cannot flatter the book. In the terminal, <code>ibkr policy</code> reports drawdown against a risk policy you wrote yourself, and <code>ibkr recon</code> checks the daily broker statement against your declared ledger.</p>
 <p>This page is for searches such as &#34;portfolio review with Claude and IBKR&#34;, &#34;Claude IBKR portfolio review&#34;, &#34;Interactive Brokers portfolio review AI&#34;, and &#34;IBKR portfolio analysis prompt&#34;.</p>
 <h2 id="who-this-is-for">Who this is for</h2>
@@ -81,7 +81,7 @@
 </ul>
 <p>The assistant should not treat any single tool result as a trade signal. The value is in combining the evidence, naming uncertainty, and showing which follow-up checks would change the decision.</p>
 <h2 id="use-this-prompt">Use this prompt</h2>
-<p>Start with the maintained prompt in <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_analysis_prompt.md">examples/ibkr_portfolio_analysis_prompt.md</a>. It is written for semi-professional retail traders who use IBKR as capital-markets infrastructure, not for a generic personal-finance summary.</p>
+<p>Start with the maintained prompt in <a href="https://github.com/osauer/ibkr/blob/main/examples/ibkr_portfolio_analysis_prompt.md">examples/ibkr_portfolio_analysis_prompt.md</a>. It is written for semi-professional retail traders who use IBKR as capital-markets infrastructure.</p>
 <p>Short version to paste into Claude:</p>
 <pre><code>Review my IBKR portfolio using the ibkr MCP tools. Start with account state,
 positions grouped by underlying, options Greeks, quote freshness, and the current
@@ -112,7 +112,7 @@ Next review steps
 - Pull fresh quotes for the three largest underlyings during the regular session.
 - Inspect the option chain around the dominant expiry before changing the position.
 - Run sizing math only after the stop and invalidation level are stated in price terms.</code></pre>
-<p>This is intentionally not a prediction engine. It is a structured review loop: current account state, current market context, current uncertainties, and the next checks that would make a decision better.</p>
+<p>It is a structured review loop: current account state, current market context, current uncertainties, and the next checks that would make a decision better.</p>
 <h2 id="how-to-install">How to install</h2>
 <p>Claude Desktop users can install the MCP Bundle:</p>
 <pre><code>https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb</code></pre>
@@ -140,6 +140,6 @@ ibkr status</code></pre>
 <li><a href="../reference/mcp-tools.html">MCP tools reference</a> for exact tool schemas.</li>
 </ul>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap fineprint">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap fineprint">Not financial advice. ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>

@@ -56,7 +56,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check agent-config-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check agent-config-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -163,6 +163,9 @@ app-smoke: ## Browser-smoke a running ibkr app without scanning a QR code
 # visible. See docs/social/canary-app-{mobile,desktop}.png.
 app-screenshots: ## Regenerate the published app screenshots from a running ibkr app (fixture account data)
 	node scripts/app-screenshots.mjs --base-url $(APP_SMOKE_URL) --browser $(APP_SMOKE_BROWSER)
+
+cli-screenshots: ## Regenerate the published CLI screenshots from cmd/_preview fixtures
+	node scripts/cli-screenshots.mjs
 
 APP_LIFECYCLE_ADDR ?= 127.0.0.1:18765
 APP_LIFECYCLE_URL ?= http://$(APP_LIFECYCLE_ADDR)

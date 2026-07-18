@@ -141,6 +141,7 @@ func TestSubscribeOptionCapturesImmediateOpenInterestTick(t *testing.T) {
 	writer := &immediateMktDataTickWriter{conn: conn}
 	writer.onReq = func(reqID int) {
 		c.handleTickSize([]string{"2", "6", strconv.Itoa(reqID), "27", "4321"})
+		c.handleTickSize([]string{"2", "6", strconv.Itoa(reqID), "28", "0"})
 	}
 	conn.writer = bufio.NewWriter(writer)
 
@@ -184,6 +185,16 @@ func TestSubscribeOptionCapturesImmediateOpenInterestTick(t *testing.T) {
 	}
 	if md[subKey].OpenInt != 4321 {
 		t.Fatalf("OpenInt = %d, want 4321", md[subKey].OpenInt)
+	}
+	if !md[subKey].OpenIntObserved {
+		t.Fatalf("OpenIntObserved = false, want true")
+	}
+
+	c.subMu.RLock()
+	storedRight := c.subscriptions[subKey].Right
+	c.subMu.RUnlock()
+	if storedRight != "C" {
+		t.Fatalf("stored subscription Right = %q, want C", storedRight)
 	}
 }
 

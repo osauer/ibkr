@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: updating.md sha256:d701f4875da599bb3113407c4e255c3b7fdbc459bf5724eac145616bdd05ec25 -->
+<!-- md-source: updating.md sha256:f0474297378cc5de3e30432576ad240c3f66977b46df86977aaa607423bf5ee3 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -16,7 +16,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-06-03T17:04:00+02:00",
+    "dateModified": "2026-07-18T21:37:00+02:00",
     "description": "Four things can affect data freshness: the binary (ibkr itself), the Claude Desktop MCPB when installed through Desktop Extensions, the S\u0026P 500 constituent...",
     "headline": "Updating",
     "isPartOf": {
@@ -158,14 +158,14 @@
   </header>
   <main class="wrap doc">
 <h1 id="updating">Updating</h1>
-<p>Updated: 2026-06-03 17:04 CEST</p>
+<p>Updated: 2026-07-18 21:37 CEST</p>
 <p>Four things can affect data freshness: the <strong>binary</strong> (<code>ibkr</code> itself), the <strong>Claude Desktop MCPB</strong> when installed through Desktop Extensions, the <strong>S&amp;P 500 constituent list</strong> the breadth indicator uses, and the embedded <strong>official market calendars</strong>. They update independently because they have different sources and cadences.</p>
-<h2 id="updating-the-binary-ibkr-update">Updating the binary — <code>ibkr update</code></h2>
+<h2 id="updating-the-binary-ibkr-update">Updating the binary: <code>ibkr update</code></h2>
 <p>Once you&#39;re on v1.0.0 or later, the next upgrade is one command:</p>
 <pre><code>ibkr update            # fetch latest, prompt to restart daemon</code></pre>
 <p>The CLI checks the <a href="https://api.github.com/repos/osauer/ibkr/releases/latest">GitHub <code>/releases/latest</code></a> endpoint, matches your OS/arch against the published tarballs, verifies the <strong>PGP signature on <code>SHA256SUMS</code></strong> against the maintainer&#39;s public key embedded in your current <code>ibkr</code> binary, then SHA-verifies the tarball and atomically replaces <code>~/.local/bin/ibkr</code>. The prior binary is stashed as <code>~/.local/bin/ibkr.bak</code> for one-step rollback (<code>mv ~/.local/bin/ibkr.bak ~/.local/bin/ibkr</code>).</p>
-<p>A running daemon is asked to restart at the end — the daemon picks up the new binary on its next autospawn.</p>
-<h2 id="restarting-local-processes-ibkr-restart">Restarting local processes - <code>ibkr restart</code></h2>
+<p>A running daemon is asked to restart at the end; the daemon picks up the new binary on its next autospawn.</p>
+<h2 id="restarting-local-processes-ibkr-restart">Restarting local processes: <code>ibkr restart</code></h2>
 <p>Use <code>ibkr restart</code> when you changed daemon-loaded config, installed a new binary outside <code>ibkr update</code>, or want to clear stale gateway connection state:</p>
 <pre><code>ibkr restart</code></pre>
 <p>The command verifies the pidfile holder is really an <code>ibkr daemon</code> process, sends SIGTERM, waits for cleanup, starts a fresh daemon, then reports the new PID and gateway health. It also refreshes an already-running <code>ibkr app</code> host, preserving app flags such as <code>--remote</code>; if no app host is running, it leaves the app stopped. If no daemon was running, it starts one and says so.</p>
@@ -180,7 +180,7 @@ ibkr app restart              # same app-only restart path, grouped under app co
 <p><code>ibkr restart --app</code> targets only the long-running <code>ibkr app</code> HyperServe process. It finds a local <code>ibkr app</code> server process, sends SIGTERM so HyperServe can shut down gently, preserves the old app flags such as <code>--addr</code>, <code>--public-url</code>, or <code>--remote</code>, and then starts the app again. If launchd or another supervisor respawns the app after SIGTERM, the command reports that PID and does not start a duplicate. If no app is running, it starts <code>ibkr app</code> with default/env configuration.</p>
 <p>In remote mode the hosted Cloudflare Worker is not restarted or redeployed by this command. The local app process restarts its outbound relay connector and reuses the persisted relay route while that route remains inside the relay TTL, so paired phones and Home Screen installs can keep opening the same relay origin across ordinary app restarts.</p>
 <h3 id="release-integrity">Release integrity</h3>
-<p>From v1.0.0 onward, every release ships <code>SHA256SUMS.asc</code> — a PGP detached signature over <code>SHA256SUMS</code>, produced by the maintainer&#39;s Ed25519 key (fingerprint <code>D984 26D4 8FED 85EF A339  0469 4D92 2A4F 922B 7D7D</code>). The public key is embedded in every ibkr binary, so <code>ibkr update</code> verifies the next release using a key your already-installed binary carries — no network bootstrap an attacker could swap.</p>
+<p>From v1.0.0 onward, every release ships <code>SHA256SUMS.asc</code>: a PGP detached signature over <code>SHA256SUMS</code>, produced by the maintainer&#39;s Ed25519 key (fingerprint <code>D984 26D4 8FED 85EF A339  0469 4D92 2A4F 922B 7D7D</code>). The public key is embedded in every ibkr binary, so <code>ibkr update</code> verifies the next release using a key your already-installed binary carries, with no network bootstrap an attacker could swap.</p>
 <p>Releases that publish an MCP Bundle include both <code>ibkr-vX.Y.Z.mcpb</code> and the stable latest-download asset <code>ibkr.mcpb</code> in <code>SHA256SUMS</code>. The MCP Registry publish artifact also records the versioned MCPB file&#39;s SHA-256 in <code>server.json</code> as <code>fileSha256</code>.</p>
 <p>The MCPB container itself is not yet code-signed. Treat MCPB release integrity as signed-checksum and registry-hash based unless <code>mcpb verify ibkr-vX.Y.Z.mcpb</code> succeeds for a future release.</p>
 <p><code>ibkr update</code> <strong>refuses</strong> any release missing the signature, and any release whose signature does not verify against the embedded key. There is no <code>--insecure</code> flag. If you ever need to debug a verification failure, the underlying error is printed verbatim and the manual verification steps are in <a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md#release-integrity-v100">SECURITY.md → Release integrity</a>.</p>
@@ -188,11 +188,11 @@ ibkr app restart              # same app-only restart path, grouped under app co
 <p>In non-interactive contexts (cron, systemd timers, CI, stdin-redirected shells) the <code>[Y/n]</code> prompt would block. Pass an explicit restart decision:</p>
 <pre><code>ibkr update --restart        # auto-restart daemon
 ibkr update --no-restart     # don&#39;t restart; print &#34;restart pending&#34; hint</code></pre>
-<p>Running <code>ibkr update</code> from a non-TTY <em>without</em> either flag exits non-zero with <code>ambiguous in non-interactive mode</code> and does not install. This is deliberate — silent default-to-N would be a footgun for systemd timers expecting auto-restart.</p>
+<p>Running <code>ibkr update</code> from a non-TTY <em>without</em> either flag exits non-zero with <code>ambiguous in non-interactive mode</code> and does not install. This is deliberate: silent default-to-N would be a footgun for systemd timers expecting auto-restart.</p>
 <h3 id="other-flags">Other flags</h3>
 <pre><code>ibkr update --check          # dry-run: print &#34;would install vX.Y.Z&#34;, exit 0
 ibkr update --force          # re-install latest even if same version (corrupt-binary recovery)</code></pre>
-<p><code>--check</code> exits 0 whether or not an update is available — only fetch failures exit non-zero. So <code>ibkr update --check &amp;&amp; ibkr update</code> is the idiomatic confirm-then-install pattern.</p>
+<p><code>--check</code> exits 0 whether or not an update is available; only fetch failures exit non-zero. So <code>ibkr update --check &amp;&amp; ibkr update</code> is the idiomatic confirm-then-install pattern.</p>
 <h3 id="pre-v100-binaries">Pre-v1.0.0 binaries</h3>
 <p><code>ibkr update</code> only exists from v1.0.0 onward. Earlier installs upgrade once manually (download the tarball from <a href="https://github.com/osauer/ibkr/releases">releases</a>, extract, run <code>make install</code>), then carry forward with <code>ibkr update</code>.</p>
 <h2 id="updating-claude-desktop-mcpb-installs">Updating Claude Desktop MCPB installs</h2>
@@ -200,14 +200,14 @@ ibkr update --force          # re-install latest even if same version (corrupt-b
 <p>To update a Claude Desktop MCPB install, download the latest bundle and reinstall it in Claude Desktop:</p>
 <p><a href="https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb">https://github.com/osauer/ibkr/releases/latest/download/ibkr.mcpb</a></p>
 <p>After reinstalling, fully quit Claude Desktop and reopen it so it respawns the MCP server from the updated bundle.</p>
-<h2 id="updating-the-sp-500-list-automatic">Updating the S&amp;P 500 list — automatic</h2>
+<h2 id="updating-the-sp-500-list-automatic">Updating the S&amp;P 500 list: automatic</h2>
 <p>The daemon refreshes the constituent list from <a href="https://en.wikipedia.org/wiki/List_of_S%26P_500_companies">Wikipedia&#39;s &#34;List of S&amp;P 500 companies&#34;</a> on three triggers, all converging on one shared fetch:</p>
 <ul>
-<li><strong>Daily at 02:30 ET</strong> — between midnight NY-session-key roll and 04:00 ET pre-market open. Catches reconstitution effective dates that Wikipedia editors typically have ready by the morning of the change.</li>
+<li><strong>Daily at 02:30 ET</strong>: between midnight NY-session-key roll and 04:00 ET pre-market open. Catches reconstitution effective dates that Wikipedia editors typically have ready by the morning of the change.</li>
 <li><strong>On daemon startup</strong> if the cached file is from a NY trading date earlier than today (covers laptop-closed-at-02:30).</li>
 <li><strong>On the first breadth call after midnight ET rollover</strong> if neither of the above fired (network outage during the ticker, etc.).</li>
 </ul>
-<p>On success the new list is written to <code>~/.cache/ibkr/spx-members/sp500-members.json</code> and pushed into the breadth engine. On any failure (network, parse error, count outside the 450–520 sanity band), the daemon keeps using whatever was loaded — breadth never goes silent.</p>
+<p>On success the new list is written to <code>~/.cache/ibkr/spx-members/sp500-members.json</code> and pushed into the breadth engine. On any failure (network, parse error, count outside the 450–520 sanity band), the daemon keeps using whatever was loaded, so breadth never goes silent.</p>
 <h3 id="pinning-the-list-regulated-traders-reproducibility-audits-air-gapped">Pinning the list (regulated traders, reproducibility audits, air-gapped)</h3>
 <p>Some users need a frozen membership list. Two override layers, with symmetric semantics:</p>
 <p><strong>Persistent (TOML config):</strong></p>
@@ -216,32 +216,32 @@ members_auto_refresh = false</code></pre>
 <p><strong>Ad-hoc (env var, overrides TOML):</strong></p>
 <pre><code>IBKR_SPX_MEMBERS_AUTO_REFRESH=0 ibkr daemon   # force off
 IBKR_SPX_MEMBERS_AUTO_REFRESH=1 ibkr daemon   # force on (even if TOML says off)</code></pre>
-<p>When pinned, <code>ibkr status</code> shows the reason — <code>refresh:disabled (env)</code> vs <code>refresh:disabled (config)</code> — so a confused user knows which knob to flip.</p>
+<p>When pinned, <code>ibkr status</code> shows the reason, <code>refresh:disabled (env)</code> vs <code>refresh:disabled (config)</code>, so a confused user knows which knob to flip.</p>
 <h3 id="status-row">Status row</h3>
 <p><code>ibkr status</code> always carries a one-line summary of the members source and refresh health:</p>
 <pre><code>Members  cache:2026-05-22  count:503                            # healthy
 Members  embedded:2026-05-22  count:503  refresh:parse_failed   # silent rot (Wikipedia changed HTML)
 Members  embedded:2026-05-22  count:503  refresh:network_failed # offline / DNS down</code></pre>
 <p>The <code>cache:DATE</code> vs <code>embedded:DATE</code> source token tells you whether the in-process list is from the auto-refresh path or the binary&#39;s compiled-in fallback. The bracketed <code>refresh:&lt;state&gt;</code> suffix appears only when something needs attention.</p>
-<h2 id="updating-market-calendars-binary-release">Updating market calendars - binary release</h2>
+<h2 id="updating-market-calendars-binary-release">Updating market calendars: binary release</h2>
 <p>Market calendars are embedded official exchange schedules in this first release. The supported calendars are US cash equities, US listed options regular sessions, and German Xetra cash equities. They do not cold-start, hit a network cache, or apply an IBKR-specific overlay at runtime; the official exchange calendar is the binding source for open/closed/holiday/early-close context.</p>
 <p>Each response includes <code>coverage_start</code> and <code>coverage_end</code>. Queries outside embedded coverage return <code>state: &#34;unknown&#34;</code> rather than guessing from weekdays. The CLI/MCP <code>days</code> horizon is capped at 400 calendar days, which covers the practical risk-manager lookahead for next-session, long-weekend, year-end, and next-year holiday checks while keeping responses bounded.</p>
 <p>Calendar updates arrive with normal <code>ibkr</code> binary updates. If a supported exchange publishes an unscheduled closure or changes a future holiday after your installed binary was built, update the binary once a release carrying the refreshed calendar is available.</p>
 <h2 id="where-state-lives">Where state lives</h2>
 <ul>
-<li><code>~/.local/bin/ibkr</code> — installed binary; <code>.bak</code> carries the immediately-prior version.</li>
-<li>Claude Desktop extension storage — MCPB-managed installs carry a separate embedded binary; update by reinstalling <code>ibkr.mcpb</code>.</li>
-<li><code>~/.cache/ibkr/spx-members/sp500-members.json</code> — runtime-refreshed members file.</li>
-<li><code>~/.cache/ibkr/update/</code> — install-time scratch space (downloaded tarball, lock file).</li>
-<li><code>~/.config/ibkr/config.toml</code> — optional persistent config (see <a href="../reference/config.html">config reference</a>).</li>
+<li><code>~/.local/bin/ibkr</code>: installed binary; <code>.bak</code> carries the immediately-prior version.</li>
+<li>Claude Desktop extension storage: MCPB-managed installs carry a separate embedded binary; update by reinstalling <code>ibkr.mcpb</code>.</li>
+<li><code>~/.cache/ibkr/spx-members/sp500-members.json</code>: runtime-refreshed members file.</li>
+<li><code>~/.cache/ibkr/update/</code>: install-time scratch space (downloaded tarball, lock file).</li>
+<li><code>~/.config/ibkr/config.toml</code>: optional persistent config (see <a href="../reference/config.html">config reference</a>).</li>
 </ul>
 <p>All under <code>$XDG_CACHE_HOME</code> / <code>$XDG_CONFIG_HOME</code> when set; the paths above are the fallback.</p>
 <h2 id="reference">Reference</h2>
 <ul>
-<li><a href="../reference/config.html">Configuration reference</a> — every TOML field and <code>IBKR_*</code> env var.</li>
+<li><a href="../reference/config.html">Configuration reference</a>: every TOML field and <code>IBKR_*</code> env var.</li>
 <li>The updater keeps one <code>.bak</code> binary beside <code>~/.local/bin/ibkr</code>, and the SPX members cache lives under <code>~/.cache/ibkr/</code> unless XDG paths override it.</li>
 </ul>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
+  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice. ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
 </body>
 </html>

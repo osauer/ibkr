@@ -576,42 +576,79 @@ func TestParseTickSize_NormalizesDecimalEncodedVolume(t *testing.T) {
 }
 
 // TestHandleTickSize_OpenInterest pins tick types 27 (callOpenInterest) and
-// 28 (putOpenInterest) into Subscription.OpenInt. The two ticks share the
-// same slot because a given option-leg subscription is for exactly one
-// right; callers fetch the OI by reading the leg's MarketData.OpenInt.
+// 28 (putOpenInterest) into Subscription.OpenInt only when the tick matches
+// the subscribed option right. The gateway also emits a zero-valued companion
+// tick for the opposite right, which must not overwrite the real observation.
 //
 // The zero-gamma RPC depends on this — without the parser, the field stays
 // at zero and the dealer GEX integral collapses silently.
 func TestHandleTickSize_OpenInterest(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
-		tickType string
+		right    string
+		ticks    [][2]string
+		want     int64
+		observed bool
 	}{
-		{"call_oi", "27"},
-		{"put_oi", "28"},
+		{
+			name:     "call_companion_zero_does_not_overwrite",
+			right:    "C",
+			ticks:    [][2]string{{"27", "6991"}, {"28", "0"}},
+			want:     6991,
+			observed: true,
+		},
+		{
+			name:     "put_companion_zero_does_not_overwrite",
+			right:    "P",
+			ticks:    [][2]string{{"28", "6049"}, {"27", "0"}},
+			want:     6049,
+			observed: true,
+		},
+		{
+			name:  "call_leg_ignores_put_tick_alone",
+			right: "C",
+			ticks: [][2]string{{"28", "777"}},
+		},
+		{
+			name:  "put_leg_ignores_call_tick_alone",
+			right: "P",
+			ticks: [][2]string{{"27", "888"}},
+		},
+		{
+			name:  "right_less_subscription_drops_aggregate_ticks",
+			ticks: [][2]string{{"27", "999"}, {"28", "1000"}},
+		},
+		{
+			name:     "matching_zero_is_observed",
+			right:    "C",
+			ticks:    [][2]string{{"27", "0"}},
+			observed: true,
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := NewConnector(&ConnectorConfig{})
-			key := "SPX 20260619 5000 " + tt.name
+			key := "SPX 20260619 5000 " + tt.right
 			c.subMu.Lock()
 			c.reqIDMap[11] = key
-			c.subscriptions[key] = &Subscription{Symbol: key}
+			c.subscriptions[key] = &Subscription{Symbol: key, Right: tt.right}
 			c.subMu.Unlock()
 
-			c.handleTickSize([]string{"2", "6", "11", tt.tickType, "12345"})
+			for _, tick := range tt.ticks {
+				c.handleTickSize([]string{"2", "6", "11", tick[0], tick[1]})
+			}
 
 			c.subMu.RLock()
 			sub := c.subscriptions[key]
 			c.subMu.RUnlock()
 
-			if sub.OpenInt != 12345 {
-				t.Errorf("OpenInt for tick %s: want 12345, got %d", tt.tickType, sub.OpenInt)
+			if sub.OpenInt != tt.want {
+				t.Errorf("OpenInt: want %d, got %d", tt.want, sub.OpenInt)
 			}
-			if !sub.OpenIntObserved {
-				t.Errorf("OpenIntObserved for tick %s: want true", tt.tickType)
+			if sub.OpenIntObserved != tt.observed {
+				t.Errorf("OpenIntObserved: want %t, got %t", tt.observed, sub.OpenIntObserved)
 			}
 			if !sub.Observed {
-				t.Errorf("Observed flag not set after OI tick %s", tt.tickType)
+				t.Errorf("Observed flag not set after OI ticks")
 			}
 
 			// Round-trip: prove the OI also surfaces via MarketDataSnapshot,
@@ -622,11 +659,11 @@ func TestHandleTickSize_OpenInterest(t *testing.T) {
 			if md[key] == nil {
 				t.Fatalf("MarketDataSnapshot missing entry for %q", key)
 			}
-			if md[key].OpenInt != 12345 {
-				t.Errorf("MarketData.OpenInt: want 12345, got %d", md[key].OpenInt)
+			if md[key].OpenInt != tt.want {
+				t.Errorf("MarketData.OpenInt: want %d, got %d", tt.want, md[key].OpenInt)
 			}
-			if !md[key].OpenIntObserved {
-				t.Errorf("MarketData.OpenIntObserved: want true")
+			if md[key].OpenIntObserved != tt.observed {
+				t.Errorf("MarketData.OpenIntObserved: want %t, got %t", tt.observed, md[key].OpenIntObserved)
 			}
 		})
 	}
@@ -637,7 +674,7 @@ func TestHandleTickSize_OpenInterestAcceptsDecimalPayload(t *testing.T) {
 	key := "SPY 20260602 758 P"
 	c.subMu.Lock()
 	c.reqIDMap[11] = key
-	c.subscriptions[key] = &Subscription{Symbol: key}
+	c.subscriptions[key] = &Subscription{Symbol: key, Right: "P"}
 	c.subMu.Unlock()
 
 	c.handleTickSize([]string{"2", "6", "11", "28", "2180.0"})
