@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v2.1.1 — 2026-07-18 20:55 CEST
+
+### What's new
+
+- **Maintenance release for the release pipeline itself** — no functional changes to the CLI, MCP tools, or paired app. The release credential preflight now matches the MCP Registry's short-lived login tokens (about five minutes), so releases no longer gate on a token-validity minimum that could never pass.
+
+### Changed
+
+- The release credential preflight no longer gates on stored MCP Registry JWT validity: registry JWTs live only about five minutes, so the former 30-minute minimum (and its `REGISTRY_TOKEN_MIN_VALID_MINUTES` override) could never pass, and a start-of-pipeline refresh would expire before the registry leg anyway. The preflight now verifies gh auth and the publish tooling, and fails fast only when the registry leg's automatic device-code login is disabled (`MCP_REGISTRY_AUTO_LOGIN=0`); the login itself always happens at the registry-publish leg with the operator at a browser.
+
 ## v2.1.0 — 2026-07-18 20:28 CEST
 
 ### What's new
