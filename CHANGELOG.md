@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-## v2.1.0 — 2026-07-18 18:42 CEST
+## v2.1.0 — 2026-07-18 20:28 CEST
 
 ### What's new
 
@@ -17,6 +17,8 @@ All notable changes to this project are documented here. The project adheres to 
 - Recon backtest: `ibkr recon backtest` reviews every flow in the retained statement window and replays the daily equity series against the recorded peak and drawdown-ladder crossings; the equity comparison is same-day (statement close vs that day's runtime observation) instead of latest-vs-latest.
 - Risk-policy v3: clean-report auto-extend of the reconcile clock behind a strict same-day equity-divergence gate (new operator-authored key `recon.max_equity_divergence_pct`); statement-authoritative cumulative flows with declarations demoted to provisional same-day bridge entries; new non-exception `confirmed` category for broker-confirmed undeclared flows; statement value-date peak correction, exactly once per statement line; declared-vs-statement figures displayed side by side during the transition. Pre-genesis statement flows classify as disclosed, report-id-pinned `baseline` rows — never exceptions, never signature-gated.
 - Codex delegation runner with a transactional lifecycle (fresh-task/resume/cleanup guards), pinned model/effort/service tier per run, offline-only gates for delegates, and a project execpolicy that prompts on live targets.
+- The paired app's monitor tab opens with a daemon-composed daily brief: five sections (market, calendar, portfolio, risk, process) built from existing typed results with per-row disclosed degradation. Viewing stamps the brief once per foreground look with a server-assigned human origin — agent renders never stamp — and a one-tap sign-off submits the reconcile attestation for exactly the report the operator saw. A governance write, not a broker write; the CLI renders the same snapshot.
+- `ibkr app devices` lists paired-device grants, and `ibkr app devices prune [--keep-days N]` (default 7) retires stale grants and their push subscriptions while keeping freshly-paired-but-unused devices (activity is the later of created and last-seen). The endpoints answer only local-Mac callers and the relay refuses to forward the device paths, so relayed requests cannot reach them.
 
 ### Changed
 
@@ -27,6 +29,7 @@ All notable changes to this project are documented here. The project adheres to 
 - The Canary SPA is split into ES-module feature files behind a drift gate, and the canary engine moved from `internal/cli` into `internal/canary`; no rendered-output change.
 - CLI gamma open-interest warnings trust the daemon's session classification instead of reclassifying locally.
 - Proposal-outcome deduplication keys are cached; dead outcome fields and unused MCP modes were removed from the proposal surface.
+- `make release` now preflights credentials before any gate work: gh CLI auth plus the stored MCP Registry JWT's expiry (30-minute minimum, `REGISTRY_TOKEN_MIN_VALID_MINUTES` overrides), running the interactive device-code refresh up front instead of stranding at the final registry-publish leg.
 
 ### Fixed
 
@@ -36,11 +39,13 @@ All notable changes to this project are documented here. The project adheres to 
 - Paired PWA sessions survive daemon restarts, binary rebuilds, and iOS home-screen isolation; pairing state no longer resets.
 - Opportunity refresh backoff is capped at 15 minutes and shared across engines, so a transient failure no longer parks a feed for hours.
 - Integration tests against a live gateway no longer race the async handshake (they poll up to 25 s), and closed-market skips key on typed calendar/session authorities, never on error text.
+- The paired app's market-session clock renders in the browser's locale instead of hard-coded en-US string surgery.
 
 ### Engineering notes
 
 - Remote-relay unit tests and the embedded PWA asset-syntax check are bound into `make check`; delegated Go briefs require `make check` in-worktree.
 - v2 policy files cannot drift spuriously under the new binary: the pre-v3 constitution-fingerprint projection and the v2 recon report-id projection are preserved byte-for-byte, regression-tested.
+- The browser smoke now covers settings-tab navigation and visibility — previously the only panel without id-contract coverage.
 
 ## v2.0.0 — 2026-07-11 22:41 CEST
 
