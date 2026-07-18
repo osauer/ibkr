@@ -3,7 +3,7 @@ name: codex-delegate
 description: Delegate implementation to headless Codex (gpt-5.6-sol) in a sibling worktree while this session keeps planning, review, judgement, and integration. This is the ONLY coding lane in this repo (root AGENTS.md, ibkr pilot) — the implementation-lane hook deterministically blocks inline code edits by Claude sessions and subagents; docs and config stay direct. Delegate directly or via the coder agent; inline code edits need the human-approved break-glass scripts/waive-inline.sh. Never for broker writes, guardrail changes, or releases.
 ---
 
-Updated: 2026-07-18 15:05 CEST
+Updated: 2026-07-18 16:02 CEST
 
 # Codex delegation loop
 
@@ -78,15 +78,23 @@ user, per root `AGENTS.md`.
    boundaries (daemon/risk/rpc own policy; adapters must not re-create it),
    idiom (`make check` enforces modern Go), and scope creep.
 
-4. **Gate** — run the repo gates against the worktree:
+4. **Gate** — run the trimmed accept gate against the worktree:
 
    ```sh
    git -C ../ibkr-codex-<name> status --porcelain   # scope check
-   make -C ../ibkr-codex-<name> test                # binding for Go changes
+   cd ../ibkr-codex-<name> && go build ./... \
+     && go test -race ./<affected-packages>/...     # accept/reject
    ```
 
+   Build the whole module, race-test the packages the diff touches —
+   including any unfiltered runs the sandbox denied. The full `make test`
+   runs once, in the primary tree after integration (step 6); that single
+   run is the binding gate. Escalate to a full worktree
+   `make -C ../ibkr-codex-<name> test` before integrating only for
+   wide-blast-radius diffs (cross-package signatures, shared contracts,
+   generated code) — orchestrator's judgment at review time.
    Gateway-touching smokes serialize via `scripts/with-gateway-lock.sh` and
-   normally run from the primary tree after integration, not per-worktree.
+   run from the primary tree after integration, never per-worktree.
 
 5. **Iterate** — feed precise review findings back to the same thread:
 
@@ -106,7 +114,8 @@ user, per root `AGENTS.md`.
    git apply --3way .claude/codex-runs/<name>/<stamp>/diff.patch
    ```
 
-   Re-run `make test` in the primary tree. Commit only when the user asks.
+   Run the full `make test` in the primary tree — the binding gate for Go
+   changes. Commit only when the user asks.
 
 7. **Clean up** — after the patch is applied and the primary-tree gates are
    green (never between iteration rounds):
@@ -130,6 +139,16 @@ user, per root `AGENTS.md`.
   cache (`--add-dir "$(go env GOCACHE)"` — without it `go build` fails on
   `~/Library/Caches/go-build`). Direct network access is denied, so module
   downloads fail: adding dependencies is a main-session decision.
+- The seatbelt also denies `bind`, so unit tests that open TCP/Unix
+  listeners fail in-sandbox (observed: parts of `./internal/daemon/...`).
+  Accepted, not a defect: codex-cli's only escalations are the boolean
+  workspace-write `network_access` (which opens outbound too) or a full
+  bypass, and both erode the fail-closed design in a trading repo. Fail
+  early by contract instead — every brief requires Codex to run the widest
+  offline test selection it can and to name exactly which tests the
+  sandbox denied, and the orchestrator's first gate action after every run
+  is the unfiltered package test in the worktree, before the full
+  `make test`.
 - Sibling worktrees inherit Codex project trust from `~/dev`, so repo
   `AGENTS.md`, skills, and `.codex/config.toml` load. Hook trust is pinned
   to the primary repo path and does not follow worktrees — treat hooks as
@@ -137,9 +156,13 @@ user, per root `AGENTS.md`.
   either way; briefs keep ibkr usage read-only.
 - Codex reaches live read-only data through the `ibkr` MCP server (spawned
   outside the sandbox); that surface cannot submit orders.
-- Model and effort come from the user's Codex config (`gpt-5.6-sol`;
-  requires codex-cli ≥ 0.144). Per-run overrides are deliberately not
-  exposed; the user's config is the single knob.
+- Model, effort, and speed are pinned per-run by the runner:
+  `-c model="gpt-5.6-sol"`, `-c model_reasoning_effort="high"`,
+  `-c service_tier="priority"` (requires codex-cli ≥ 0.144). Pinned by
+  user decision 2026-07-18 because the ChatGPT desktop app rewrites
+  `~/.codex/config.toml` mid-session; delegation must not drift with it.
+  Changing the pins is the user's call, and the user's codex config is
+  never edited.
 - Launching write-mode headless Codex is itself a gated action in Claude
   sessions: expect a permission prompt per run in interactive sessions. In
   autonomous sessions it is denied unless the user has allowlisted

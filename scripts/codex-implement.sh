@@ -131,10 +131,15 @@ mv "$BRIEF_TMP" "$RUN_DIR/brief.md"
 
 # Fixed, non-negotiable execution shape. No approval or hook-trust bypass
 # flags may be added here; headless denials failing closed is the design.
-# Model and effort come from the user's Codex config on purpose.
+# Model, effort, and speed are pinned per-run (user decision 2026-07-18):
+# the ChatGPT desktop app rewrites ~/.codex/config.toml mid-session, so
+# delegation behavior must not inherit that drift.
 CMD=(codex exec --json
     -C "$WORKTREE"
     -s "$SANDBOX"
+    -c 'model="gpt-5.6-sol"'
+    -c 'model_reasoning_effort="high"'
+    -c 'service_tier="priority"'
     -o "$RUN_DIR/last-message.md")
 if command -v go >/dev/null 2>&1 && [[ "$SANDBOX" == "workspace-write" ]]; then
     CMD+=(--add-dir "$(go env GOCACHE)")
