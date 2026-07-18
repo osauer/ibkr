@@ -20,6 +20,10 @@ func readyNudgeHealth(at time.Time) rpc.NudgeSourceHealth {
 	}
 }
 
+func reviewedNudgeCoverage(at time.Time) *rpc.NudgeConfirmedFlowCoverage {
+	return &rpc.NudgeConfirmedFlowCoverage{CoverageFrom: at}
+}
+
 func validRPCNudgeCandidate(at time.Time) rpc.NudgeCandidate {
 	return rpc.NudgeCandidate{
 		Fingerprint: "sha256:" + strings.Repeat("a", 64),
@@ -33,7 +37,10 @@ func TestNudgeSourceHealthReadyEmptyVersusSuppressedEmpty(t *testing.T) {
 	at := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	ready := readyNudgeHealth(at)
 	ready.Aggregate = rpc.AggregateNudgeSourceHealth(ready, 0)
-	readyResult := rpc.NudgesSnapshotResult{AsOf: at, Candidates: []rpc.NudgeCandidate{}, SourceHealth: ready}
+	readyResult := rpc.NudgesSnapshotResult{
+		AsOf: at, Candidates: []rpc.NudgeCandidate{}, SourceHealth: ready,
+		ConfirmedFlowCoverage: reviewedNudgeCoverage(at),
+	}
 	if ready.Aggregate != rpc.NudgeAggregateReady || !readyResult.IsCleanEmpty() {
 		t.Fatalf("ready empty result = %#v, want clean", readyResult)
 	}
@@ -43,7 +50,10 @@ func TestNudgeSourceHealthReadyEmptyVersusSuppressedEmpty(t *testing.T) {
 		Status: rpc.NudgeInputStatusUnapproved, Reason: rpc.NudgeHealthReasonCadenceUnapproved, AsOf: at,
 	}
 	suppressed.Aggregate = rpc.AggregateNudgeSourceHealth(suppressed, 0)
-	suppressedResult := rpc.NudgesSnapshotResult{AsOf: at, Candidates: []rpc.NudgeCandidate{}, SourceHealth: suppressed}
+	suppressedResult := rpc.NudgesSnapshotResult{
+		AsOf: at, Candidates: []rpc.NudgeCandidate{}, SourceHealth: suppressed,
+		ConfirmedFlowCoverage: reviewedNudgeCoverage(at),
+	}
 	if suppressed.Aggregate != rpc.NudgeAggregateSuppressed || suppressedResult.IsCleanEmpty() {
 		t.Fatalf("suppressed empty result = %#v, must not reassure", suppressedResult)
 	}
@@ -103,6 +113,7 @@ func TestNudgeSnapshotCanonicalizesCandidateCopy(t *testing.T) {
 	candidate.Destination = "caller-selected"
 	result := rpc.NudgesSnapshotResult{
 		AsOf: at, Candidates: []rpc.NudgeCandidate{candidate}, SourceHealth: readyNudgeHealth(at),
+		ConfirmedFlowCoverage: reviewedNudgeCoverage(at),
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
@@ -147,6 +158,7 @@ func TestNudgeSnapshotRejectsStructurallyInvalidCandidates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			result := rpc.NudgesSnapshotResult{
 				AsOf: at, Candidates: []rpc.NudgeCandidate{tc.candidate}, SourceHealth: readyNudgeHealth(at),
+				ConfirmedFlowCoverage: reviewedNudgeCoverage(at),
 			}
 			if raw, err := json.Marshal(result); err == nil {
 				t.Fatalf("invalid candidate serialized: %s", raw)
@@ -198,7 +210,10 @@ func TestNudgeSnapshotJSONNormalizesSourceHealth(t *testing.T) {
 			health := readyNudgeHealth(at)
 			health.Aggregate = rpc.NudgeAggregateReady
 			health.Cadence = inputHealth
-			input := rpc.NudgesSnapshotResult{AsOf: at, Candidates: []rpc.NudgeCandidate{}, SourceHealth: health}
+			input := rpc.NudgesSnapshotResult{
+				AsOf: at, Candidates: []rpc.NudgeCandidate{}, SourceHealth: health,
+				ConfirmedFlowCoverage: reviewedNudgeCoverage(at),
+			}
 			got := decode(t, input)
 			if got.SourceHealth.Aggregate != rpc.NudgeAggregateSuppressed || input.IsCleanEmpty() {
 				t.Fatalf("normalized health = %#v, false ready survived", got.SourceHealth)
@@ -221,7 +236,10 @@ func TestNudgeSnapshotJSONNormalizesSourceHealth(t *testing.T) {
 		health := readyNudgeHealth(at)
 		health.Aggregate = rpc.NudgeAggregateReady
 		health.Pins.AsOf = time.Time{}
-		got := decode(t, rpc.NudgesSnapshotResult{AsOf: at, Candidates: []rpc.NudgeCandidate{}, SourceHealth: health})
+		got := decode(t, rpc.NudgesSnapshotResult{
+			AsOf: at, Candidates: []rpc.NudgeCandidate{}, SourceHealth: health,
+			ConfirmedFlowCoverage: reviewedNudgeCoverage(at),
+		})
 		if got.SourceHealth.Pins.Status != rpc.NudgeInputStatusError || got.SourceHealth.Pins.Reason != rpc.NudgeHealthReasonInvalid || !got.SourceHealth.Pins.AsOf.IsZero() {
 			t.Fatalf("zero-as-of health = %#v, want safe error without fabricated timestamp", got.SourceHealth.Pins)
 		}
@@ -243,7 +261,10 @@ func TestNudgeSnapshotJSONNormalizesSourceHealth(t *testing.T) {
 			health := readyNudgeHealth(at)
 			health.Aggregate = rpc.NudgeAggregateReady
 			health.Policy = rpc.NudgeInputHealth{Status: tc.status, Reason: tc.reason, AsOf: at}
-			result := rpc.NudgesSnapshotResult{AsOf: at, Candidates: []rpc.NudgeCandidate{}, SourceHealth: health}
+			result := rpc.NudgesSnapshotResult{
+				AsOf: at, Candidates: []rpc.NudgeCandidate{}, SourceHealth: health,
+				ConfirmedFlowCoverage: reviewedNudgeCoverage(at),
+			}
 			raw, err := json.Marshal(result)
 			if err != nil {
 				t.Fatal(err)
@@ -269,7 +290,8 @@ func TestNudgeSnapshotJSONNormalizesSourceHealth(t *testing.T) {
 		health.Cadence = rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusStale, Reason: rpc.NudgeHealthReasonEvidenceStale, AsOf: at}
 		got := decode(t, rpc.NudgesSnapshotResult{
 			AsOf: at, Candidates: []rpc.NudgeCandidate{validRPCNudgeCandidate(at)},
-			SourceHealth: health,
+			SourceHealth:          health,
+			ConfirmedFlowCoverage: reviewedNudgeCoverage(at),
 		})
 		if got.SourceHealth.Aggregate != rpc.NudgeAggregateDegraded {
 			t.Fatalf("partial candidate aggregate = %q, want degraded", got.SourceHealth.Aggregate)
