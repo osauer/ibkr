@@ -123,6 +123,16 @@
 
       <section class="tab-panels" id="tabPanels" hidden>
       <section class="dashboard tab-panel" id="dashboard" data-tab-panel="monitor" role="tabpanel" aria-labelledby="tabMonitor">
+        <article class="panel brief-panel" id="briefPanel" hidden>
+          <div class="panel-head">
+            <span>Daily brief</span>
+            <span class="panel-time" id="briefAsOf">--</span>
+          </div>
+          <div class="source-inline brief-source" id="briefSourceBanner" role="status" hidden></div>
+          <div class="brief-sections" id="briefSections"></div>
+          <p class="brief-receipt" id="briefAckStatus" role="status" hidden></p>
+        </article>
+
         <article class="panel signal-panel signal-panel--combined" id="signalPanel">
           <div class="panel-head">
             <span>Market &amp; Portfolio</span>

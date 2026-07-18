@@ -1,0 +1,77 @@
+package appweb
+
+import (
+	"slices"
+	"strings"
+	"testing"
+)
+
+func TestBriefCardStaticContract(t *testing.T) {
+	t.Parallel()
+
+	htmlData, err := Files.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlData)
+	briefAt := strings.Index(html, `id="briefPanel"`)
+	signalAt := strings.Index(html, `id="signalPanel"`)
+	if briefAt < 0 || signalAt < 0 || briefAt > signalAt {
+		t.Fatalf("brief card must be the first monitor card: brief=%d signal=%d", briefAt, signalAt)
+	}
+	for _, id := range []string{"briefPanel", "briefAsOf", "briefSourceBanner", "briefSections", "briefAckStatus"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("index.html missing brief id %q", id)
+		}
+	}
+
+	briefData, err := Files.ReadFile("brief.js")
+	if err != nil {
+		t.Fatal("brief.js is not embedded:", err)
+	}
+	brief := string(briefData)
+	for _, want := range []string{
+		`renderMarketSection(brief.market || {})`,
+		`renderCalendarSection(brief.calendar || {})`,
+		`renderPortfolioSection(brief.portfolio || {})`,
+		`renderRiskSection(brief.risk_limits || {})`,
+		`renderProcessSection(brief.process || {}, brief)`,
+		`row.signable === true`,
+		`Sign off report ${reportID} — clean`,
+		`fetch("/api/recon/signoff"`,
+		`body: JSON.stringify({ report_id: reportID })`,
+		`fetch("/api/brief/seen"`,
+		`body: JSON.stringify({ kind: brief.stamp_target, brief_fingerprint: fingerprint })`,
+		`state.authenticated === true`,
+		`state.activeTab === "monitor"`,
+		`document.visibilityState === "visible"`,
+	} {
+		if !strings.Contains(brief, want) {
+			t.Errorf("brief.js missing contract %q", want)
+		}
+	}
+	for _, forbidden := range []string{"window.confirm", "confirm_account", "confirm_mode"} {
+		if strings.Contains(brief, forbidden) {
+			t.Errorf("brief.js contains forbidden confirmation logic %q", forbidden)
+		}
+	}
+
+	appData, err := Files.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := string(appData)
+	if !strings.Contains(app, `from "./brief.js"`) || strings.Count(app, "renderBriefCard(snap);") < 2 || !strings.Contains(app, "setupBriefVisibility();") {
+		t.Fatal("app.js does not wire the brief renderer into renderAll, the one-second loop, and visibility setup")
+	}
+	lifecycleData, err := Files.ReadFile("lifecycle.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(lifecycleData), `"rules", "brief"`) {
+		t.Fatal("lifecycle.js does not subscribe to incremental brief events")
+	}
+	if !slices.Contains(EmbeddedJavaScriptFileNames(), "brief.js") {
+		t.Fatal("EmbeddedJavaScriptFileNames omits brief.js")
+	}
+}

@@ -980,6 +980,18 @@ func (routeFakeClient) Rules(context.Context) (*rpc.RulesResult, error) {
 	return &rpc.RulesResult{Enabled: true, Status: "ok"}, nil
 }
 
+func (routeFakeClient) Brief(context.Context) (*rpc.BriefResult, error) {
+	return &rpc.BriefResult{BriefFingerprint: "brief-1"}, nil
+}
+
+func (routeFakeClient) BriefAck(context.Context, rpc.BriefAckParams) (*rpc.BriefAckResult, error) {
+	return &rpc.BriefAckResult{OK: true}, nil
+}
+
+func (routeFakeClient) ReconcileSignoff(context.Context, rpc.CapitalEventParams) (*rpc.RiskPolicyWriteResult, error) {
+	return &rpc.RiskPolicyWriteResult{OK: true}, nil
+}
+
 func (routeFakeClient) TradingStatus(context.Context) (*rpc.TradingStatus, error) {
 	return &rpc.TradingStatus{
 		Mode:       "paper",
