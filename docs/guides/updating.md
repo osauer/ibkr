@@ -1,10 +1,10 @@
 # Updating
 
-Updated: 2026-06-03 17:04 CEST
+Updated: 2026-07-18 21:37 CEST
 
 Four things can affect data freshness: the **binary** (`ibkr` itself), the **Claude Desktop MCPB** when installed through Desktop Extensions, the **S&P 500 constituent list** the breadth indicator uses, and the embedded **official market calendars**. They update independently because they have different sources and cadences.
 
-## Updating the binary — `ibkr update`
+## Updating the binary: `ibkr update`
 
 Once you're on v1.0.0 or later, the next upgrade is one command:
 
@@ -14,9 +14,9 @@ ibkr update            # fetch latest, prompt to restart daemon
 
 The CLI checks the [GitHub `/releases/latest`](https://api.github.com/repos/osauer/ibkr/releases/latest) endpoint, matches your OS/arch against the published tarballs, verifies the **PGP signature on `SHA256SUMS`** against the maintainer's public key embedded in your current `ibkr` binary, then SHA-verifies the tarball and atomically replaces `~/.local/bin/ibkr`. The prior binary is stashed as `~/.local/bin/ibkr.bak` for one-step rollback (`mv ~/.local/bin/ibkr.bak ~/.local/bin/ibkr`).
 
-A running daemon is asked to restart at the end — the daemon picks up the new binary on its next autospawn.
+A running daemon is asked to restart at the end; the daemon picks up the new binary on its next autospawn.
 
-## Restarting local processes - `ibkr restart`
+## Restarting local processes: `ibkr restart`
 
 Use `ibkr restart` when you changed daemon-loaded config, installed a new binary outside `ibkr update`, or want to clear stale gateway connection state:
 
@@ -50,7 +50,7 @@ origin across ordinary app restarts.
 
 ### Release integrity
 
-From v1.0.0 onward, every release ships `SHA256SUMS.asc` — a PGP detached signature over `SHA256SUMS`, produced by the maintainer's Ed25519 key (fingerprint `D984 26D4 8FED 85EF A339  0469 4D92 2A4F 922B 7D7D`). The public key is embedded in every ibkr binary, so `ibkr update` verifies the next release using a key your already-installed binary carries — no network bootstrap an attacker could swap.
+From v1.0.0 onward, every release ships `SHA256SUMS.asc`: a PGP detached signature over `SHA256SUMS`, produced by the maintainer's Ed25519 key (fingerprint `D984 26D4 8FED 85EF A339  0469 4D92 2A4F 922B 7D7D`). The public key is embedded in every ibkr binary, so `ibkr update` verifies the next release using a key your already-installed binary carries, with no network bootstrap an attacker could swap.
 
 Releases that publish an MCP Bundle include both `ibkr-vX.Y.Z.mcpb` and the stable latest-download asset `ibkr.mcpb` in `SHA256SUMS`. The MCP Registry publish artifact also records the versioned MCPB file's SHA-256 in `server.json` as `fileSha256`.
 
@@ -67,7 +67,7 @@ ibkr update --restart        # auto-restart daemon
 ibkr update --no-restart     # don't restart; print "restart pending" hint
 ```
 
-Running `ibkr update` from a non-TTY *without* either flag exits non-zero with `ambiguous in non-interactive mode` and does not install. This is deliberate — silent default-to-N would be a footgun for systemd timers expecting auto-restart.
+Running `ibkr update` from a non-TTY *without* either flag exits non-zero with `ambiguous in non-interactive mode` and does not install. This is deliberate: silent default-to-N would be a footgun for systemd timers expecting auto-restart.
 
 ### Other flags
 
@@ -76,7 +76,7 @@ ibkr update --check          # dry-run: print "would install vX.Y.Z", exit 0
 ibkr update --force          # re-install latest even if same version (corrupt-binary recovery)
 ```
 
-`--check` exits 0 whether or not an update is available — only fetch failures exit non-zero. So `ibkr update --check && ibkr update` is the idiomatic confirm-then-install pattern.
+`--check` exits 0 whether or not an update is available; only fetch failures exit non-zero. So `ibkr update --check && ibkr update` is the idiomatic confirm-then-install pattern.
 
 ### Pre-v1.0.0 binaries
 
@@ -92,15 +92,15 @@ To update a Claude Desktop MCPB install, download the latest bundle and reinstal
 
 After reinstalling, fully quit Claude Desktop and reopen it so it respawns the MCP server from the updated bundle.
 
-## Updating the S&P 500 list — automatic
+## Updating the S&P 500 list: automatic
 
 The daemon refreshes the constituent list from [Wikipedia's "List of S&P 500 companies"](https://en.wikipedia.org/wiki/List_of_S%26P_500_companies) on three triggers, all converging on one shared fetch:
 
-- **Daily at 02:30 ET** — between midnight NY-session-key roll and 04:00 ET pre-market open. Catches reconstitution effective dates that Wikipedia editors typically have ready by the morning of the change.
+- **Daily at 02:30 ET**: between midnight NY-session-key roll and 04:00 ET pre-market open. Catches reconstitution effective dates that Wikipedia editors typically have ready by the morning of the change.
 - **On daemon startup** if the cached file is from a NY trading date earlier than today (covers laptop-closed-at-02:30).
 - **On the first breadth call after midnight ET rollover** if neither of the above fired (network outage during the ticker, etc.).
 
-On success the new list is written to `~/.cache/ibkr/spx-members/sp500-members.json` and pushed into the breadth engine. On any failure (network, parse error, count outside the 450–520 sanity band), the daemon keeps using whatever was loaded — breadth never goes silent.
+On success the new list is written to `~/.cache/ibkr/spx-members/sp500-members.json` and pushed into the breadth engine. On any failure (network, parse error, count outside the 450–520 sanity band), the daemon keeps using whatever was loaded, so breadth never goes silent.
 
 ### Pinning the list (regulated traders, reproducibility audits, air-gapped)
 
@@ -120,7 +120,7 @@ IBKR_SPX_MEMBERS_AUTO_REFRESH=0 ibkr daemon   # force off
 IBKR_SPX_MEMBERS_AUTO_REFRESH=1 ibkr daemon   # force on (even if TOML says off)
 ```
 
-When pinned, `ibkr status` shows the reason — `refresh:disabled (env)` vs `refresh:disabled (config)` — so a confused user knows which knob to flip.
+When pinned, `ibkr status` shows the reason, `refresh:disabled (env)` vs `refresh:disabled (config)`, so a confused user knows which knob to flip.
 
 ### Status row
 
@@ -134,7 +134,7 @@ Members  embedded:2026-05-22  count:503  refresh:network_failed # offline / DNS 
 
 The `cache:DATE` vs `embedded:DATE` source token tells you whether the in-process list is from the auto-refresh path or the binary's compiled-in fallback. The bracketed `refresh:<state>` suffix appears only when something needs attention.
 
-## Updating market calendars - binary release
+## Updating market calendars: binary release
 
 Market calendars are embedded official exchange schedules in this first release. The supported calendars are US cash equities, US listed options regular sessions, and German Xetra cash equities. They do not cold-start, hit a network cache, or apply an IBKR-specific overlay at runtime; the official exchange calendar is the binding source for open/closed/holiday/early-close context.
 
@@ -144,15 +144,15 @@ Calendar updates arrive with normal `ibkr` binary updates. If a supported exchan
 
 ## Where state lives
 
-- `~/.local/bin/ibkr` — installed binary; `.bak` carries the immediately-prior version.
-- Claude Desktop extension storage — MCPB-managed installs carry a separate embedded binary; update by reinstalling `ibkr.mcpb`.
-- `~/.cache/ibkr/spx-members/sp500-members.json` — runtime-refreshed members file.
-- `~/.cache/ibkr/update/` — install-time scratch space (downloaded tarball, lock file).
-- `~/.config/ibkr/config.toml` — optional persistent config (see [config reference](../reference/config.md)).
+- `~/.local/bin/ibkr`: installed binary; `.bak` carries the immediately-prior version.
+- Claude Desktop extension storage: MCPB-managed installs carry a separate embedded binary; update by reinstalling `ibkr.mcpb`.
+- `~/.cache/ibkr/spx-members/sp500-members.json`: runtime-refreshed members file.
+- `~/.cache/ibkr/update/`: install-time scratch space (downloaded tarball, lock file).
+- `~/.config/ibkr/config.toml`: optional persistent config (see [config reference](../reference/config.md)).
 
 All under `$XDG_CACHE_HOME` / `$XDG_CONFIG_HOME` when set; the paths above are the fallback.
 
 ## Reference
 
-- [Configuration reference](../reference/config.md) — every TOML field and `IBKR_*` env var.
+- [Configuration reference](../reference/config.md): every TOML field and `IBKR_*` env var.
 - The updater keeps one `.bak` binary beside `~/.local/bin/ibkr`, and the SPX members cache lives under `~/.cache/ibkr/` unless XDG paths override it.

@@ -1,6 +1,6 @@
 # Mobile App
 
-Updated: 2026-07-14 06:09 CEST
+Updated: 2026-07-18 21:37 CEST
 
 The mobile app layer is served by `ibkr app`. It is a HyperServe process that
 serves the PWA, owns pairing, streams `/api/events`, and sends opt-in canary
@@ -55,8 +55,8 @@ ibkr app pair
 The printed pairing URL uses the relay origin and includes a `remote=` route id.
 The route id and connector token are persisted locally and resumed across app
 restarts, new builds, and relay-side route expiry: a token-matched resume
-revives the route at the relay, so the route id — and with it every paired
-phone — survives arbitrary Mac downtime as long as the app state directory
+revives the route at the relay, so the route id (and with it every paired
+phone) survives arbitrary Mac downtime as long as the app state directory
 keeps `state.json`. Registration happens inside the connector loop with
 backoff, so a relay or DNS outage at startup degrades the relay instead of
 killing `ibkr app --remote`. A new route id is minted only when the relay
@@ -76,7 +76,7 @@ app definitively rejected the device.
 Session continuity does not depend on script-visible storage: pairing also
 sets a long-lived HttpOnly `ibkr_app_device` cookie whose hash is stored on
 the device grant, and the app mints fresh sessions from it. This is what
-keeps an iOS Home Screen install alive — its container inherits Safari's
+keeps an iOS Home Screen install alive; its container inherits Safari's
 cookies but not Safari's localStorage/IndexedDB, so a key-based re-login can
 never run there. Key/secret logins re-provision the cookie, and grants keep
 a capped list of valid cookie hashes so Safari and the installed app (twin

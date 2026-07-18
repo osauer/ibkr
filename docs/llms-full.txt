@@ -10,7 +10,7 @@ The public project home is https://osauer.dev/ibkr/. The source repository is ht
 
 ## Boundary
 
-The standard downloads (installer, Claude Desktop MCPB, plain `ibkr` tarballs) are read-only builds: account and market data, diagnostics, sizing math, and analysis workflows, with no order placement, modification, or cancellation compiled in. The MCP tool surface is preview-only in every variant — it can draft an order preview and mint a local preview token, but cannot place, modify, cancel, or transmit a broker order.
+The standard downloads (installer, Claude Desktop MCPB, plain `ibkr` tarballs) are read-only builds: account and market data, diagnostics, sizing math, and analysis workflows, with no order placement, modification, or cancellation compiled in. The MCP tool surface is preview-only in every variant: it can draft an order preview and mint a local preview token, but cannot place, modify, cancel, or transmit a broker order.
 
 Each release also publishes a clearly marked `ibkr-trading` tarball whose CLI carries broker-write capability for users who explicitly opt into order management. It ships with warnings and layered safeguards: paper and live broker writes require a verified gateway session, trading-capable build, submit-eligible preview token when applicable, local journal, daemon authorization, and a runtime freeze switch (`trading.freeze`) that blocks new broker writes instantly. Do not describe any published variant as an automated trading system: order writes are preview-backed, journaled, and gated by local daemon policy.
 
@@ -112,16 +112,16 @@ Important tools:
 - `ibkr_canary`: portfolio stress-check tool that combines account, positions, market, and regime context into a watch/warn/critical status.
 - `ibkr_rules`: portfolio risk-rulebook check with per-rule pass/watch/act verdicts, named offenders, and disclosed data gaps.
 - `ibkr_size`: fixed-fractional position sizing from entry, stop, account equity, and configured risk rules.
-- `ibkr_scan_params`: scanner catalog discovery — every gateway-supported scan code, location code, and instrument type for composing ad-hoc scans.
-- `ibkr_market_events`: observed market-event flags for held or requested symbols — borrow tightness, extreme borrow fee, Reg SHO threshold membership, LULD and regulatory halts.
+- `ibkr_scan_params`: scanner catalog discovery, listing every gateway-supported scan code, location code, and instrument type for composing ad-hoc scans.
+- `ibkr_market_events`: observed market-event flags for held or requested symbols (borrow tightness, extreme borrow fee, Reg SHO threshold membership, LULD and regulatory halts).
 - `ibkr_proposals`: read daemon-owned protection proposals (trailing stops, theta hygiene, risk reduction) with per-row blockers; read-only.
 - `ibkr_opportunities`: read daemon-owned opportunity snapshots and research diagnostics; read-only.
-- `ibkr_trading_status`: read-only order-entry readiness — disabled, paper-ready, live-ready, or blocked, with pinned-session evidence and concrete blockers.
+- `ibkr_trading_status`: read-only order-entry readiness (disabled, paper-ready, live-ready, or blocked), with pinned-session evidence and concrete blockers.
 - `ibkr_orders_open`: read-only open-order lifecycle state for the connected broker account and mode.
 - `ibkr_orders_history`: bounded local order-journal history for the connected broker account and mode; not an IBKR Activity Statement or broker audit.
 - `ibkr_order_status`: read-only lifecycle and audit events for one locally journaled order.
 - `ibkr_order_preview`: draft a locally gated order and mint a short-lived local preview token; cannot place, modify, cancel, or transmit a broker order.
-- `ibkr_settings`: read platform settings and observed state — feature enablement, trading mode/account/build capability, safety limits; cannot change settings.
+- `ibkr_settings`: read platform settings and observed state (feature enablement, trading mode/account/build capability, safety limits); cannot change settings.
 
 See the canonical tool schema and parameter descriptions at https://osauer.dev/ibkr/reference/mcp-tools.html.
 

@@ -1,6 +1,6 @@
 # Agentic use
 
-Updated: 2026-06-07 08:48 CEST
+Updated: 2026-07-18 21:37 CEST
 
 `ibkr mcp` makes read/status CLI operations and preview-only stock/ETF order drafts available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
@@ -23,7 +23,7 @@ Direct skill installs also work in Claude Code when `SKILL.md` is copied under
 plugin path for normal IBKR installs because the MCP tools and safety hooks are
 plugin components.
 
-The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands — `ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ enriched `ibkr watch` by default or read-only `ibkr watch --list` when `include_quotes` is false, `ibkr_gamma` ↔ `ibkr gamma`, `ibkr_market_events` ↔ `ibkr market-events`, `ibkr_order_preview` ↔ `ibkr order preview`, etc. — while local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
+The MCP tools are listed in [reference/mcp-tools.md](../reference/mcp-tools.md). They mirror the agent-appropriate CLI commands (`ibkr_status` ↔ `ibkr status`, `ibkr_calendar` ↔ `ibkr calendar`, `ibkr_watch` ↔ enriched `ibkr watch` by default or read-only `ibkr watch --list` when `include_quotes` is false, `ibkr_gamma` ↔ `ibkr gamma`, `ibkr_market_events` ↔ `ibkr market-events`, `ibkr_order_preview` ↔ `ibkr order preview`, etc.), while local lifecycle verbs such as `setup`, `update`, `restart`, `mcp`, and `daemon` stay outside the MCP tool set. Claude calls the tools as MCP operations rather than CLI subcommands.
 
 ## Example conversations
 
@@ -35,7 +35,7 @@ These are the kinds of questions the tool handles. Each shows the user's message
 
 Returns the eight-row dashboard: VIX term structure, VVIX, HYG/SPY divergence, HY/IG OAS, funding spread, USD/JPY weekly move, dealer zero-gamma, and S&P breadth. Each row carries raw measurements, compact band/as-of metadata, scoped warnings when data is stale or unavailable, and a `streak` field when the row is rankable. The top-level envelope also carries lifecycle stage, readiness, source health, and semantic fingerprints for monitor dedupe.
 
-Claude composes an answer that names which indicators are in which band, calls out any in red, and flags streaks (a Day-5 stress event reads differently from a Day-1 spike). The dashboard is *information*, not a verdict — the user's risk tolerance determines what to do with it. See [Concepts → Regime](../concepts.md#regime).
+Claude composes an answer that names which indicators are in which band, calls out any in red, and flags streaks (a Day-5 stress event reads differently from a Day-1 spike). The dashboard is *information*, not a verdict; the user's risk tolerance determines what to do with it. See [Concepts → Regime](../concepts.md#regime).
 
 ### "Should the canary stay quiet, watch, act, rebalance, flag opportunity, or block on data quality?"
 
@@ -61,7 +61,7 @@ Claude should report active flags as context and safety gates, not as standalone
 
 → Claude invokes `ibkr_positions` with `{"symbol": "SPY"}`.
 
-Returns rows for SPY stock holdings and any SPY options, with per-leg Greeks (delta/gamma/theta/vega) for the options, plus a `portfolio` block aggregating effective_delta in share-equivalents. Claude typically renders the stock holding alongside an aggregate Greek line ("you're net long ~1,500 SPY-deltas after the options"). Daily P&L is included from IBKR's reqPnLSingle stream — `null` when the daemon hasn't pre-warmed that contract, never zero-substituted.
+Returns rows for SPY stock holdings and any SPY options, with per-leg Greeks (delta/gamma/theta/vega) for the options, plus a `portfolio` block aggregating effective_delta in share-equivalents. Claude typically renders the stock holding alongside an aggregate Greek line ("you're net long ~1,500 SPY-deltas after the options"). Daily P&L is included from IBKR's reqPnLSingle stream: `null` when the daemon hasn't pre-warmed that contract, never zero-substituted.
 
 If you also want context, follow-up questions naturally chain: *"and what's SPY's dealer gamma profile?"* invokes `ibkr_gamma`; *"how does that compare to where SPY closed yesterday?"* invokes `ibkr_history` + `ibkr_quote`.
 
@@ -87,7 +87,7 @@ Returns the official market state for the relevant supported calendar: US cash e
 
 → Claude invokes `ibkr_gamma` (default scope = combined SPY+SPX).
 
-Returns the signed zero-gamma price level, the dealer book's current sign (`positive` = long-gamma = stabilising; `negative` = short-gamma = amplifying), the regime-agreement classifier between SPY and SPX (`agree:long-gamma` / `agree:short-gamma` / `agree:transition-gamma` / `disagree`), and the magnitude view via `gamma_total_abs` and `top_strikes`.
+Returns the signed zero-gamma price level, the dealer book's current sign (`positive` = long-gamma = stabilizing; `negative` = short-gamma = amplifying), the regime-agreement classifier between SPY and SPX (`agree:long-gamma` / `agree:short-gamma` / `agree:transition-gamma` / `disagree`), and the magnitude view via `gamma_total_abs` and `top_strikes`.
 
 Always read `quality.rankability` before treating gamma as a market-structure signal. `rankable` means the read is fresh and covered enough; `context_only` is awareness-only; `blocked` and `unavailable` are data-quality blockers.
 
@@ -97,7 +97,7 @@ missing 0DTE bucket in `quality.coverage` and `warning_details`. After the
 expiring SPXW series closes, the 0DTE bucket can be absent even when the broader
 SPX surface is usable.
 
-The important diagnostic is **`disagree`** — one book stabilising while the other amplifies, indicating institutional/retail positioning divergence. Claude usually flags this prominently. The first call of an NY trading day kicks a multi-minute background compute; you'll see `status: "computing"` with an ETA — re-ask in a few minutes for the result. See [Concepts → Gamma](../concepts.md#gamma).
+The important diagnostic is **`disagree`**: one book stabilizing while the other amplifies, indicating institutional/retail positioning divergence. Claude usually flags this prominently. The first call of an NY trading day kicks a multi-minute background compute; you'll see `status: "computing"` with an ETA. Re-ask in a few minutes for the result. See [Concepts → Gamma](../concepts.md#gamma).
 
 ### "Find me top S&P 500 names trading above their 50-day moving average."
 
@@ -118,7 +118,7 @@ The MCP interface intentionally has no trade-execution tool. Claude can:
 - ✅ tell you what you own
 - ✅ read your local saved-symbol watchlist
 - ✅ tell you the market state
-- ✅ size a trade (`ibkr_size` — pure math against your NLV, never proposes an order)
+- ✅ size a trade (`ibkr_size`: pure math against your NLV, never proposes an order)
 - ✅ preview a locally gated stock/ETF LMT draft without broker submission
 - ❌ place an order
 - ❌ cancel an order
@@ -140,14 +140,14 @@ A few prompt patterns that work well, learned from observing real conversations:
 
 - **Ask the question, don't name the tool.** "How does my portfolio look?" works better than "Run ibkr_positions." Claude picks the right tool based on the question; naming the tool just adds friction.
 - **Chain follow-ups freely.** Each tool call is cheap (cached when possible). "And what about gamma for those?" or "How did that look yesterday?" generate natural follow-up tool calls.
-- **For the dashboard, ask "how does the market regime look?"** — it triggers `ibkr_regime`, which returns the eight-row snapshot in one call. Faster than asking about each indicator separately.
+- **For the dashboard, ask "how does the market regime look?"** It triggers `ibkr_regime`, which returns the eight-row snapshot in one call. Faster than asking about each indicator separately.
 - **For scheduled stress checks, ask for the canary.** "How does market weather interact with my portfolio right now?" triggers `ibkr_canary`, which returns action, market confirmation, portfolio fit, held-underlying stress, input health, readiness, source health, fingerprints, and evidence rows without requiring the assistant to compose its own escalation ladder.
 - **For sizing, give Claude the full plan.** "I want to enter AAPL at 180 with a stop at 175 and a target at 195, risking 1% of NLV" lets `ibkr_size` return the R-multiple, breakeven win rate, and share count in one round-trip.
 
 ## Reference
 
-- [MCP tools reference](../reference/mcp-tools.md) — auto-generated table of every tool, parameters, descriptions.
-- [MCP resources reference](../reference/mcp-resources.md) — streaming stock/ETF quote resource semantics.
-- [Concepts](../concepts.md) — the mental model for regime / gamma / breadth.
-- [Updating](./updating.md) — keeping the binary + constituent list current.
-- [Model Context Protocol spec](https://modelcontextprotocol.io/) — the upstream protocol.
+- [MCP tools reference](../reference/mcp-tools.md): auto-generated table of every tool, parameters, descriptions.
+- [MCP resources reference](../reference/mcp-resources.md): streaming stock/ETF quote resource semantics.
+- [Concepts](../concepts.md): the mental model for regime / gamma / breadth.
+- [Updating](./updating.md): keeping the binary + constituent list current.
+- [Model Context Protocol spec](https://modelcontextprotocol.io/): the upstream protocol.

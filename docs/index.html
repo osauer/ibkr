@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ibkr canary — agentic trading desk for Interactive Brokers</title>
+  <title>ibkr canary | agentic trading desk for Interactive Brokers</title>
   <meta name="description" content="An agentic trading desk on Interactive Brokers: full market data for AI agents, risk controls, daily statement reconciliation, and a paired app. Read-only by default.">
   <link rel="canonical" href="https://osauer.dev/ibkr/">
   <link rel="icon" type="image/png" href="social/canary-icon.png">
 
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://osauer.dev/ibkr/">
-  <meta property="og:title" content="ibkr canary — an agentic trading desk on IBKR">
+  <meta property="og:title" content="ibkr canary | an agentic trading desk on IBKR">
   <meta property="og:description" content="Run an agentic trading desk on a local Interactive Brokers session: full market data for AI agents via MCP, advisory risk controls, statement reconciliation, and a paired monitoring app.">
   <meta property="og:image" content="https://osauer.dev/ibkr/social/social-preview.png">
   <meta property="og:image:width" content="1280">
   <meta property="og:image:height" content="640">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="ibkr canary — an agentic trading desk on IBKR">
+  <meta name="twitter:title" content="ibkr canary | an agentic trading desk on IBKR">
   <meta name="twitter:description" content="Full market data for AI agents plus advisory risk controls on a local IBKR TWS or IB Gateway session.">
   <meta name="twitter:image" content="https://osauer.dev/ibkr/social/social-preview.png">
 
@@ -668,8 +668,8 @@
       <div>
         <p class="eyebrow">Agentic trading desk</p>
         <h1 id="hero-title">An agentic trading desk on your own Interactive Brokers account</h1>
-        <p class="lead">ibkr canary connects a local TWS or IB Gateway session to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Around that connection it has grown the working parts of a small desk: regime context, stress checks, a discipline rulebook, an operator-written risk policy, daily statement reconciliation. Built for individual traders, and still growing in that direction.</p>
-        <p class="lead">Agents get the full market-data surface — real-time and streaming quotes, option chains with Greeks and open interest, daily history, scanners, dealer gamma, breadth — through your own broker session and your own IBKR market-data subscriptions.</p>
+        <p class="lead">ibkr canary connects a local TWS or IB Gateway session to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Around that connection it has grown the working parts of a small desk: regime context, stress checks, a discipline rulebook, an operator-written risk policy, and daily statement reconciliation. Built for individual traders, and still growing in that direction.</p>
+        <p class="lead">Agents get the full market-data surface: real-time and streaming quotes, option chains with Greeks and open interest, daily history, scanners, dealer gamma, and breadth. It all flows through your own broker session and your own IBKR market-data subscriptions.</p>
         <p class="safety">The bundled MCP surface is read-side only: agents can analyze, monitor, and size plans without receiving order-entry tools.</p>
         <div class="actions" aria-label="Main actions">
           <a class="button primary" href="claude-desktop-interactive-brokers/">Claude Desktop Install</a>
@@ -678,7 +678,7 @@
           <a class="button" href="reference/mcp-tools.html">Read MCP tools</a>
         </div>
         <p class="install-note">For Claude Desktop, use the MCPB install page, restart Claude, and keep IB Gateway or TWS running locally. The shell and Claude Code paths are there when you want one shared binary.</p>
-        <p class="disclaimer">ibkr is analysis software, not financial advice — nothing it shows or says is a recommendation to buy or sell any security.</p>
+        <p class="disclaimer">ibkr is analysis software, not financial advice. Nothing it shows or says is a recommendation to buy or sell any security.</p>
       </div>
       <div class="hero-media">
         <div class="hero-shot">
@@ -760,12 +760,12 @@ ibkr setup claude-desktop
         <article class="feature">
           <small>Discipline</small>
           <h3>A 14-rule trading rulebook</h3>
-          <p>A daily checklist over the live book: concentration, premium caps, theta budget, expiry runway, earnings coverage, hedge integrity. Missing data degrades to unknown — never to a false pass. Advisory throughout.</p>
+          <p>A daily checklist over the live book: concentration, premium caps, theta budget, expiry runway, earnings coverage, hedge integrity. Missing data degrades to unknown, never to a false pass. Advisory throughout.</p>
         </article>
         <article class="feature">
           <small>Risk policy</small>
           <h3>A risk policy you write yourself</h3>
-          <p><code>ibkr policy</code> reads a file you author: protected equity floor, declared risk capital, drawdown ladder. No default numbers exist in code. It reports; it does not block. Terminal only.</p>
+          <p><code>ibkr policy</code> reads a file you author: protected equity floor, declared risk capital, drawdown ladder. There are no default numbers in code, and nothing it reports ever blocks an order. Terminal only.</p>
         </article>
         <article class="feature">
           <small>Reconciliation</small>
@@ -780,7 +780,7 @@ ibkr setup claude-desktop
         <article class="feature">
           <small>Desk brief</small>
           <h3>A daily brief on your phone</h3>
-          <p>The paired Canary app opens on a five-section brief — market, calendar, portfolio, risk, process — built by the daemon from the same typed results the tools use. An experimental relay adds access away from home.</p>
+          <p>The paired Canary app opens on a five-section brief (market, calendar, portfolio, risk, process) built by the daemon from the same typed results the tools use. An experimental relay adds access away from home.</p>
         </article>
         <article class="feature">
           <small>Boundary</small>
@@ -834,7 +834,7 @@ ibkr setup claude-desktop
         <li>Are dealers supporting or amplifying today's SPY move?</li>
         <li>What expiries are listed for SPY and what is the implied move?</li>
         <li>If I enter MSFT at 418 with a stop at 408, what is my EUR risk?</li>
-        <li>Quote NVDA — how fresh is the price and how wide is the spread?</li>
+        <li>Quote NVDA: how fresh is the price, and how wide is the spread?</li>
         <li>Which of my discipline rules is the book breaking today?</li>
       </ul>
     </section>
@@ -902,7 +902,7 @@ ibkr setup claude-desktop
         </article>
         <article class="feature">
           <h3>Can it place orders?</h3>
-          <p>Not in the standard downloads: the installer, the Claude Desktop bundle, and the plain <code>ibkr</code> tarballs are read-only builds with no place, modify, or cancel tools compiled in. Each release also publishes a clearly marked <code>ibkr-trading</code> tarball for users who explicitly opt into order management — it ships with warnings and layered safeguards.</p>
+          <p>Not in the standard downloads: the installer, the Claude Desktop bundle, and the plain <code>ibkr</code> tarballs are read-only builds with no place, modify, or cancel tools compiled in. Each release also publishes a clearly marked <code>ibkr-trading</code> tarball for users who explicitly opt into order management. It ships with warnings and layered safeguards.</p>
         </article>
         <article class="feature">
           <h3>Does it use TWS or IB Gateway?</h3>
@@ -918,7 +918,7 @@ ibkr setup claude-desktop
         </article>
         <article class="feature">
           <h3>What is an agentic trading desk?</h3>
-          <p>AI agents working with live broker and market context under rules the trader controls. Here that means read-side MCP tools with full market data, advisory risk surfaces, and a paired monitoring app — all local.</p>
+          <p>AI agents working with live broker and market context under rules the trader controls. Here that means read-side MCP tools with full market data, advisory risk surfaces, and a paired monitoring app, all running on your machine.</p>
         </article>
       </div>
     </section>
