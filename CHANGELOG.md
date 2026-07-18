@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## Unreleased
+
+### Fixed
+
+- Per-leg call open interest is no longer zeroed by the gateway's put-side companion tick. The gateway delivers a call-OI and a put-OI tick on the same option-leg subscription — the opposite-right one carrying zero — and last-write-wins left every call leg at OI 0 (observed: all 6,991 journaled SPX call contracts across five weeks, while puts stayed positive). With call legs zeroed, the dealer-GEX profile became put-only, every sweep point went negative, and the regime dashboard's gamma row was pinned to a permanent "wholly short" reading with `no_crossing_in_window` on 100% of computes — a measurement artifact, not a market state. `ibkr chain` per-leg call OI was corrupted the same way. Open-interest capture is now right-aware: a subscription commits only the tick matching its own call/put right, and the zero companion is discarded. Gamma journal rows recorded before this fix (regime gamma decisions and `gamma_sign` diagnostics) are artifact data — calibration windows restart at the fix.
+- The regime dashboard's HYG/SPY row no longer drops to `error` when the HYG spot subscribe delivers no tick: the fetcher now falls through to the latest official daily close as banding input at any hour and marks the row `stale` (disclosed via `fields_missing: hyg_spot_tick` and the quality label). An errored row blanked the band, which bypassed red-exit hysteresis and the confirmation latch — a latched red de-confirmed and re-confirmed around every transient gateway blip (8,012 stage transitions in 5 weeks, median dwell 34 seconds, including 2,344 on a closed-market holiday). A stale row keeps its band, so confirmations now hold through fetch failures; a genuinely unavailable close (no spot tick and no usable history) still lands `error`. Off-hours behavior with a live tick is unchanged: official close, status `ok`.
+- Market-data subscribe errors in the daemon's snapshot helpers are now logged with the symbol instead of silently discarded, so gateway farm blips and silent subscribe timeouts are distinguishable in the daemon log.
+
 ## v2.1.1 — 2026-07-18 20:55 CEST
 
 ### What's new
