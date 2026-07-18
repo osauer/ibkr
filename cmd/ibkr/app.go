@@ -30,6 +30,8 @@ func runApp(args []string) int {
 			return 0
 		case "pair":
 			return runAppPair(args[1:])
+		case "devices":
+			return runAppDevices(args[1:])
 		case "restart":
 			return runAppRestart(args[1:])
 		case "serve":
@@ -157,6 +159,133 @@ func runAppPair(args []string) int {
 	return 0
 }
 
+func runAppDevices(args []string) int {
+	prune := false
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		switch args[0] {
+		case "prune":
+			prune = true
+			args = args[1:]
+		case "list":
+			args = args[1:]
+		default:
+			fmt.Fprintf(os.Stderr, "ibkr app devices: unknown subcommand %q (try `ibkr app devices` or `ibkr app devices prune`)\n", args[0])
+			return 2
+		}
+	}
+	opts := mobileapp.DefaultOptions(effectiveVersion())
+	fs := flag.NewFlagSet("ibkr app devices", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	devicesUsage := func(w io.Writer) {
+		fmt.Fprintln(w, "ibkr app devices - list or prune paired device grants on the local app host.")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Usage:")
+		fmt.Fprintln(w, "  ibkr app devices [--addr HOST:PORT] [--json]")
+		fmt.Fprintln(w, "  ibkr app devices prune [--keep-days N] [--addr HOST:PORT] [--json]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Flags:")
+		printFlagDefaults(w, fs)
+	}
+	fs.Usage = func() { devicesUsage(os.Stdout) }
+	addr := fs.String("addr", opts.Addr, "local app host listen address")
+	keepDays := fs.Int("keep-days", 7, "prune grants whose last activity is older than this many days")
+	asJSON := fs.Bool("json", false, "print the result as JSON")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		return rejectUnexpectedArgument(os.Stderr, "ibkr app devices", fs, devicesUsage)
+	}
+	baseURL := "http://" + mobileapp.LoopbackAddrForLocalConnect(strings.TrimSpace(*addr))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var req *http.Request
+	var err error
+	if prune {
+		body, merr := json.Marshal(struct {
+			KeepDays int `json:"keep_days"`
+		}{KeepDays: *keepDays})
+		if merr != nil {
+			fmt.Fprintf(os.Stderr, "ibkr app devices: %v\n", merr)
+			return 1
+		}
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/devices/prune", bytes.NewReader(body))
+		if req != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+	} else {
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/devices", nil)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ibkr app devices: %v\n", err)
+		return 1
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ibkr app devices: connect to local app host at %s: %v (start it with `ibkr app`)\n", baseURL, err)
+		return 1
+	}
+	defer res.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ibkr app devices: %v\n", err)
+		return 1
+	}
+	if res.StatusCode != http.StatusOK {
+		var e struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &e)
+		if e.Error == "" {
+			e.Error = res.Status
+		}
+		fmt.Fprintf(os.Stderr, "ibkr app devices: %s\n", e.Error)
+		return 1
+	}
+	if *asJSON {
+		fmt.Fprintln(os.Stdout, strings.TrimSpace(string(raw)))
+		return 0
+	}
+	if prune {
+		var out struct {
+			Removed  int `json:"removed"`
+			Kept     int `json:"kept"`
+			KeepDays int `json:"keep_days"`
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			fmt.Fprintf(os.Stderr, "ibkr app devices: decode response: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stdout, "Pruned %d device grant(s) not seen in the last %d day(s); %d kept.\n", out.Removed, out.KeepDays, out.Kept)
+		return 0
+	}
+	var out struct {
+		Devices []struct {
+			ID         string    `json:"id"`
+			Name       string    `json:"name"`
+			CreatedAt  time.Time `json:"created_at"`
+			LastSeenAt time.Time `json:"last_seen_at"`
+		} `json:"devices"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		fmt.Fprintf(os.Stderr, "ibkr app devices: decode response: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stdout, "%d paired device grant(s):\n", out.Total)
+	for _, d := range out.Devices {
+		seen := "never"
+		if !d.LastSeenAt.IsZero() {
+			seen = d.LastSeenAt.Local().Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(os.Stdout, "  %-24s %-10s paired %s  last seen %s\n", d.ID, d.Name, d.CreatedAt.Local().Format("2006-01-02 15:04"), seen)
+	}
+	return 0
+}
+
 func createPairingSession(addr, publicURL string) (auth.PairingSession, error) {
 	baseURL := "http://" + mobileapp.LoopbackAddrForLocalConnect(addr)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -222,6 +351,7 @@ func printAppUsage(w io.Writer) {
 	fmt.Fprintln(w, "  ibkr app [--addr HOST:PORT] [--public-url URL] [--remote] [--remote-url URL] [--state-dir PATH]")
 	fmt.Fprintln(w, "  ibkr app restart [--addr HOST:PORT] [--public-url URL] [--remote] [--remote-url URL] [--state-dir PATH]")
 	fmt.Fprintln(w, "  ibkr app pair [--addr HOST:PORT] [--public-url URL] [--json]")
+	fmt.Fprintln(w, "  ibkr app devices [prune] [--keep-days N] [--addr HOST:PORT] [--json]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "The app serves a mobile-first PWA, live SSE snapshots,")
 	fmt.Fprintln(w, "and opt-in canary Web Push subscriptions. Pairing URLs are short-lived.")

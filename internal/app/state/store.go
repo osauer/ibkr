@@ -207,6 +207,43 @@ func (s *Store) AddDeviceCookieHash(id, hash string) error {
 	return fmt.Errorf("device %s not found", id)
 }
 
+func (s *Store) Devices() []DeviceGrant {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]DeviceGrant, len(s.data.Devices))
+	copy(out, s.data.Devices)
+	return out
+}
+
+// PruneDevices removes device grants whose last activity predates cutoff,
+// along with their push subscriptions. Activity is the later of creation
+// and last-seen, so a freshly paired but not-yet-used device survives.
+func (s *Store) PruneDevices(cutoff time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := map[string]bool{}
+	kept := make([]DeviceGrant, 0, len(s.data.Devices))
+	for _, d := range s.data.Devices {
+		last := d.LastSeenAt
+		if d.CreatedAt.After(last) {
+			last = d.CreatedAt
+		}
+		if last.Before(cutoff) {
+			removed[d.ID] = true
+			continue
+		}
+		kept = append(kept, d)
+	}
+	if len(removed) == 0 {
+		return 0, nil
+	}
+	s.data.Devices = kept
+	s.data.PushSubscriptions = slices.DeleteFunc(s.data.PushSubscriptions, func(sub PushSubscription) bool {
+		return removed[sub.DeviceID]
+	})
+	return len(removed), s.save()
+}
+
 func (s *Store) SetDeviceSeen(id string, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

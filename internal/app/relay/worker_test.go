@@ -35,8 +35,10 @@ func TestWorkerPairingURLAddsRemoteRoute(t *testing.T) {
 func TestForwardableAppPathBlocksPairingSessionCreation(t *testing.T) {
 	t.Parallel()
 
-	if forwardableAppPath("/api/pairing/sessions") {
-		t.Fatalf("pairing session creation should not be forwarded through remote relay")
+	for _, path := range []string{"/api/pairing/sessions", "/api/devices", "/api/devices/prune"} {
+		if forwardableAppPath(path) {
+			t.Fatalf("local-control path %q should not be forwarded through remote relay", path)
+		}
 	}
 	for _, path := range []string{"/", "/pair.html?remote=r1&pair=p&nonce=n", "/api/bootstrap", "/api/events", "/app.js?v=1"} {
 		if !forwardableAppPath(path) {

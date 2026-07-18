@@ -274,6 +274,40 @@ func TestDeviceCookieMintsSessionAfterRestart(t *testing.T) {
 	}
 }
 
+func TestDeviceManagementIsLocalMacOnly(t *testing.T) {
+	t.Parallel()
+	handler := newTestHandler(t).Handler()
+	listReq := httptest.NewRequest(http.MethodGet, "/api/devices", nil)
+	listReq.RemoteAddr = "192.0.2.10:44321"
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, listReq)
+	if listRes.Code != http.StatusForbidden {
+		t.Fatalf("remote devices list status=%d, want 403", listRes.Code)
+	}
+	pruneReq := httptest.NewRequest(http.MethodPost, "/api/devices/prune", bytes.NewReader([]byte(`{"keep_days":7}`)))
+	pruneReq.RemoteAddr = "192.0.2.10:44321"
+	pruneRes := httptest.NewRecorder()
+	handler.ServeHTTP(pruneRes, pruneReq)
+	if pruneRes.Code != http.StatusForbidden {
+		t.Fatalf("remote devices prune status=%d, want 403", pruneRes.Code)
+	}
+
+	localList := httptest.NewRequest(http.MethodGet, "/api/devices", nil)
+	localList.RemoteAddr = "127.0.0.1:44321"
+	localListRes := httptest.NewRecorder()
+	handler.ServeHTTP(localListRes, localList)
+	if localListRes.Code != http.StatusOK {
+		t.Fatalf("local devices list status=%d: %s", localListRes.Code, localListRes.Body.String())
+	}
+	localPrune := httptest.NewRequest(http.MethodPost, "/api/devices/prune", bytes.NewReader([]byte(`{"keep_days":0}`)))
+	localPrune.RemoteAddr = "127.0.0.1:44321"
+	localPruneRes := httptest.NewRecorder()
+	handler.ServeHTTP(localPruneRes, localPrune)
+	if localPruneRes.Code != http.StatusBadRequest {
+		t.Fatalf("keep_days=0 status=%d, want 400 (a zero-day prune would delete every device)", localPruneRes.Code)
+	}
+}
+
 func TestPairingSessionUsesRelayURLWithoutExplicitOverride(t *testing.T) {
 	t.Parallel()
 	handler := newTestHandlerWithClientAndRelay(t, routeFakeClient{}, routeTestRelay{route: "r_route"}).Handler()

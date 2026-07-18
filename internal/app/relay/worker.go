@@ -550,7 +550,10 @@ func forwardableAppPath(raw string) bool {
 		return false
 	}
 	p := u.Path
-	if p == "/api/pairing/sessions" {
+	// Local-control surfaces must not be reachable through the relay:
+	// forwarded requests arrive at the app from 127.0.0.1 and would pass
+	// its local-Mac gate.
+	if p == "/api/pairing/sessions" || p == "/api/devices" || strings.HasPrefix(p, "/api/devices/") {
 		return false
 	}
 	if p == "/" || p == "/pair.html" || strings.HasPrefix(p, "/api/") {

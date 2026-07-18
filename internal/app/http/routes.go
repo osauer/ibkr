@@ -71,6 +71,8 @@ func Register(deps Dependencies) {
 	srv.GET("/favicon.ico", h.serveIcon)
 
 	srv.POST("/api/pairing/sessions", h.handleStartPairing)
+	srv.GET("/api/devices", h.handleDevicesList)
+	srv.POST("/api/devices/prune", h.handleDevicesPrune)
 	srv.POST("/api/pairing/complete", h.handleCompletePairing)
 	srv.POST("/api/auth/challenge", h.handleAuthChallenge)
 	srv.POST("/api/auth/session", h.handleAuthSession)
@@ -169,6 +171,68 @@ func (h *handler) handleStartPairing(w nethttp.ResponseWriter, r *nethttp.Reques
 		session.URL = h.deps.Relay.PairingURL(session.URL)
 	}
 	writeJSON(w, session)
+}
+
+type deviceSummary struct {
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	CreatedAt       time.Time `json:"created_at"`
+	LastSeenAt      time.Time `json:"last_seen_at,omitzero"`
+	HasKey          bool      `json:"has_key"`
+	HasSecret       bool      `json:"has_secret"`
+	CookieCredCount int       `json:"cookie_credentials"`
+}
+
+// handleDevicesList and handleDevicesPrune are local-Mac management
+// surfaces, like pairing-session creation: the relay refuses to forward
+// them (forwardableAppPath), because relay-forwarded requests reach this
+// process from 127.0.0.1 and would otherwise pass the local gate.
+func (h *handler) handleDevicesList(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if !isLocalMac(r.RemoteAddr) {
+		writeError(w, nethttp.StatusForbidden, "device management is local-Mac only")
+		return
+	}
+	grants := h.deps.Store.Devices()
+	devices := make([]deviceSummary, 0, len(grants))
+	for _, d := range grants {
+		devices = append(devices, deviceSummary{
+			ID:              d.ID,
+			Name:            d.Name,
+			CreatedAt:       d.CreatedAt,
+			LastSeenAt:      d.LastSeenAt,
+			HasKey:          strings.TrimSpace(d.PublicKeyJWK) != "",
+			HasSecret:       strings.TrimSpace(d.DeviceSecretHash) != "",
+			CookieCredCount: len(d.DeviceCookieHashes),
+		})
+	}
+	writeJSON(w, map[string]any{"devices": devices, "total": len(devices)})
+}
+
+func (h *handler) handleDevicesPrune(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if !isLocalMac(r.RemoteAddr) {
+		writeError(w, nethttp.StatusForbidden, "device management is local-Mac only")
+		return
+	}
+	var req struct {
+		KeepDays int `json:"keep_days"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	if req.KeepDays < 1 {
+		writeError(w, nethttp.StatusBadRequest, "keep_days must be at least 1")
+		return
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -req.KeepDays)
+	removed, err := h.deps.Store.PruneDevices(cutoff)
+	if err != nil {
+		writeError(w, nethttp.StatusInternalServerError, err.Error())
+		return
+	}
+	kept := len(h.deps.Store.Devices())
+	log.Printf("ibkr app auth: pruned %d device grants older than %d days (%d kept)", removed, req.KeepDays, kept)
+	writeJSON(w, map[string]any{"removed": removed, "kept": kept, "keep_days": req.KeepDays})
 }
 
 func cleanPairingPublicURL(raw string) (string, error) {

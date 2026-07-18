@@ -70,6 +70,50 @@ func TestRelayRoutePersistsAndFiltersByRemoteURL(t *testing.T) {
 	}
 }
 
+func TestPruneDevicesRemovesStaleGrantsAndTheirPushSubscriptions(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	now := time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)
+	stale := DeviceGrant{ID: "dev-stale", Name: "old", CreatedAt: now.AddDate(0, 0, -40), LastSeenAt: now.AddDate(0, 0, -30)}
+	// Freshly paired but never used: activity is the later of created/seen.
+	freshUnused := DeviceGrant{ID: "dev-fresh", Name: "new", CreatedAt: now.AddDate(0, 0, -1)}
+	active := DeviceGrant{ID: "dev-active", Name: "iPhone", CreatedAt: now.AddDate(0, 0, -60), LastSeenAt: now.AddDate(0, 0, -2)}
+	for _, d := range []DeviceGrant{stale, freshUnused, active} {
+		if err := store.AddDevice(d); err != nil {
+			t.Fatalf("AddDevice: %v", err)
+		}
+	}
+	if err := store.AddPushSubscription(PushSubscription{ID: "s1", DeviceID: "dev-stale", Endpoint: "https://push/stale"}); err != nil {
+		t.Fatalf("AddPushSubscription: %v", err)
+	}
+	if err := store.AddPushSubscription(PushSubscription{ID: "s2", DeviceID: "dev-active", Endpoint: "https://push/active"}); err != nil {
+		t.Fatalf("AddPushSubscription: %v", err)
+	}
+
+	removed, err := store.PruneDevices(now.AddDate(0, 0, -7))
+	if err != nil {
+		t.Fatalf("PruneDevices: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, ok := store.Device("dev-stale"); ok {
+		t.Fatalf("stale device survived the prune")
+	}
+	for _, id := range []string{"dev-fresh", "dev-active"} {
+		if _, ok := store.Device(id); !ok {
+			t.Fatalf("device %s should have survived the prune", id)
+		}
+	}
+	subs := store.PushSubscriptions()
+	if len(subs) != 1 || subs[0].DeviceID != "dev-active" {
+		t.Fatalf("push subscriptions = %#v, want only the active device's", subs)
+	}
+}
+
 func TestSetRelayRouteKeepsCreatedAtForSameRoute(t *testing.T) {
 	t.Parallel()
 	store, err := Open(t.TempDir())
