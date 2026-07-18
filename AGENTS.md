@@ -19,12 +19,17 @@ app, and SPA code are adapters and must not re-create daemon or risk policy.
 - For change, build, or fix requests, make the in-scope local changes and run
   the relevant non-destructive checks without asking first.
 - Delegate bounded, independent exploration and review to read-only subagents.
-  Keep writes in the main session. Once reviewed fix batches are independent,
-  fresh worktree agents may implement them from local `main`, not `origin/main`.
-- Bounded implementation may be delegated to headless Codex in a sibling
-  worktree via `scripts/codex-implement.sh`; the orchestrating session owns
-  the brief, diff review, gates, and integration
-  (`.claude/skills/codex-delegate/SKILL.md`).
+  Planning, briefs, diff review, integration, docs, and config stay in the
+  main session — that is the higher-value lane and it is Claude's.
+- All code implementation goes through headless Codex in a sibling worktree:
+  run `scripts/codex-implement.sh` directly or drive it via the `coder` agent
+  (`.claude/agents/coder.md`). The orchestrating session owns the brief, diff
+  review, gates, and integration (`.claude/skills/codex-delegate/SKILL.md`).
+  The implementation-lane hook (`.claude/hooks/implementation-lane.sh`)
+  deterministically blocks inline code edits by Claude sessions and their
+  subagents; `scripts/waive-inline.sh` is the human-approved break-glass and
+  stays un-allowlisted so every use needs the user's click. Delegated Codex
+  runs implement their brief and never re-delegate.
 - The Makefile is the target inventory. Run `make help` before using an
   unfamiliar target.
 

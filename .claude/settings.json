@@ -42,5 +42,18 @@
       "Bash(make account-data-check)",
       "Bash(scripts/codex-implement.sh *)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/implementation-lane.sh\""
+          }
+        ]
+      }
+    ]
   }
 }

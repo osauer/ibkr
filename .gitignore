@@ -31,6 +31,7 @@ cloudflare/remote-relay/.dev.vars
 # Headless Codex delegation artifacts (scripts/codex-implement.sh): briefs,
 # event logs, and per-run diffs. Local orchestration evidence, not source.
 .claude/codex-runs/
+.claude/state/
 
 # Claude Code agent worktrees — created at the repo root with
 # <adjective>-<noun>-<6 hex chars> names (e.g. optimistic-newton-2eb23f/)

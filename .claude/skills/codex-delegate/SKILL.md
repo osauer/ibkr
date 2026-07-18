@@ -1,9 +1,9 @@
 ---
 name: codex-delegate
-description: Delegate a bounded implementation task to headless Codex (gpt-5.6-sol) in a sibling worktree while this session keeps planning, review, judgement, and integration. Use when asked to delegate/hand off coding to Codex, to implement via Codex, or to run reviewed independent fix batches in parallel. Never for broker writes, guardrail changes, or releases.
+description: Delegate implementation to headless Codex (gpt-5.6-sol) in a sibling worktree while this session keeps planning, review, judgement, and integration. This is the ONLY coding lane in this repo (root AGENTS.md, ibkr pilot) — the implementation-lane hook deterministically blocks inline code edits by Claude sessions and subagents; docs and config stay direct. Delegate directly or via the coder agent; inline code edits need the human-approved break-glass scripts/waive-inline.sh. Never for broker writes, guardrail changes, or releases.
 ---
 
-Updated: 2026-07-12 09:26 CEST
+Updated: 2026-07-18 15:05 CEST
 
 # Codex delegation loop
 
@@ -12,7 +12,23 @@ integrates. Codex implements inside an isolated sibling worktree created from
 local `main`. The primary working tree and its in-flight changes are never the
 delegate's workspace.
 
+The split is enforced, not advisory: the implementation-lane hook
+(`.claude/hooks/implementation-lane.sh`, registered in `.claude/settings.json`)
+blocks Edit/Write on code files (`.go`, `.js`, `.mjs`, `.ts`, `.tsx`, `.sh`,
+`.bash`, `.html`, `.css`, `Makefile`, `*.mk`) inside this checkout for Claude
+sessions and their subagents. Markdown, TOML, JSON, and files outside the
+checkout stay direct. The break-glass is
+`scripts/waive-inline.sh <session-id> "<reason>"` — deliberately
+un-allowlisted, so each use requires the user's permission click; the block
+message prints the exact command. Waivers are per-session, gitignored under
+`.claude/state/inline-waivers/`, and expire after 48h.
+
 ## When to delegate
+
+All code implementation (root `AGENTS.md`) — this lane is not optional and
+not on-request. The `coder` agent (`.claude/agents/coder.md`) is a thin
+driver over the same runner for fan-out or context isolation; review and
+integration never move with it.
 
 Good: bounded, well-specified implementation — a reviewed fix batch, a
 mechanical refactor, test scaffolding, a feature slice whose contract is
