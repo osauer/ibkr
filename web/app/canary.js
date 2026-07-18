@@ -430,19 +430,20 @@ function renderMarketContext(snap) {
   const quotes = snap.market_quotes?.quotes || {};
   const strip = $("marketQuoteStrip");
   const symbols = ["SPY", "VIX", "QQQ", "IWM", "HYG", "TLT"];
-  strip.replaceChildren(...symbols.map((symbol) => marketQuoteCell(symbol, quoteBySymbol(quotes, symbol), market, snap.market_quotes)));
+  strip.replaceChildren(...symbols.map((symbol) => marketQuoteCell(symbol, quoteBySymbol(quotes, symbol), market, snap.market_quotes, snap.market_calendar)));
 }
 
-function marketQuoteCell(symbol, quote, market, marketQuotes) {
+function marketQuoteCell(symbol, quote, market, marketQuotes, marketCalendar) {
   const fallback = marketQuoteFallback(symbol, market);
   const price = quotePrice(quote) ?? fallback.price;
   const change = quoteChangePct(quote) ?? fallback.changePct;
   const error = marketQuotes?.errors?.[symbol] || "";
+  const closed = Boolean(error) && marketQuoteSessionClosed(marketCalendar);
   const hasPrice = typeof price === "number";
   const cell = document.createElement("div");
   cell.className = "market-quote-cell";
   cell.classList.toggle("market-quote-cell--missing", !hasPrice);
-  if (error) cell.classList.add("market-quote-cell--error");
+  if (error && !closed) cell.classList.add("market-quote-cell--error");
   cell.setAttribute("aria-label", `${symbol} ${hasPrice ? numberRead(price) : "price pending"} ${typeof change === "number" ? signedPct(change) : "change pending"}`);
 
   const head = document.createElement("div");
@@ -461,15 +462,21 @@ function marketQuoteCell(symbol, quote, market, marketQuotes) {
   valueLine.append(value, changeEl);
 
   const source = document.createElement("small");
-  source.className = "market-quote-cell__source" + (error ? " error" : "");
+  source.className = "market-quote-cell__source" + (error && !closed ? " error" : "");
   source.textContent = error
-    ? marketQuoteInterruptedLine(quote, marketQuotes, hasPrice)
+    ? closed ? "Closed" : marketQuoteInterruptedLine(quote, marketQuotes, hasPrice)
     : marketQuoteSourceLine(quote, marketQuotes, fallback.source);
   source.title = error
-    ? `${marketQuoteErrorLabel(error)}; ${hasPrice ? "showing last available quote" : "no frozen quote available yet"}`
+    ? closed ? "Selected market session is closed" : `${marketQuoteErrorLabel(error)}; ${hasPrice ? "showing last available quote" : "no frozen quote available yet"}`
     : source.textContent;
   cell.append(head, valueLine, source);
   return cell;
+}
+
+function marketQuoteSessionClosed(calendar) {
+  const session = calendar?.session;
+  const sessionState = String(session?.state || "").toLowerCase();
+  return Boolean(session) && Boolean(sessionState) && session.is_open === false && sessionState !== "unknown";
 }
 
 function marketQuoteChangeClass(symbol, change) {

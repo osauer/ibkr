@@ -1,4 +1,4 @@
-import { $, money, readJSONOrText, shortTimeWithZone } from "./shared.js";
+import { $, money, readJSONOrText } from "./shared.js";
 import { state } from "./state.js";
 
 const attemptedStampFingerprints = new Set();
@@ -6,12 +6,22 @@ const pendingStampFingerprints = new Set();
 const stampOutcomes = new Map();
 const signoffOutcomes = new Map();
 let visibilityBound = false;
+let briefStampArmed = true;
+let briefStampScheduled = false;
+let briefStampInFlight = false;
+let briefStampLook = 0;
 
 function setupBriefVisibility() {
   if (visibilityBound) return;
   visibilityBound = true;
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") renderBriefCard(state.snapshot || {});
+    if (document.visibilityState !== "visible") {
+      briefStampLook += 1;
+      briefStampArmed = false;
+      return;
+    }
+    briefStampArmed = true;
+    renderBriefCard(state.snapshot || {});
   });
   const dashboard = $("dashboard");
   if (dashboard && typeof MutationObserver !== "undefined") {
@@ -37,10 +47,10 @@ function renderBriefCard(snap = state.snapshot || {}) {
     return;
   }
 
-  $("briefAsOf").textContent = shortTimeWithZone(brief.as_of);
+  $("briefAsOf").textContent = dateTimeValue(brief.as_of);
   $("briefSections").replaceChildren(
     renderMarketSection(brief.market || {}),
-    renderCalendarSection(brief.calendar || {}),
+    renderCalendarSection(brief.calendar || {}, snap.sources || {}),
     renderPortfolioSection(brief.portfolio || {}),
     renderRiskSection(brief.risk_limits || {}),
     renderProcessSection(brief.process || {}, brief),
@@ -75,32 +85,44 @@ function renderMarketSection(section) {
   return briefSection("A", "Market", section, [
     briefRow("Regime", section.regime, joinValues(section.regime?.stage, section.regime?.verdict)),
     briefRow("Breadth", section.breadth, joinValues(
-      fieldValue(section.breadth, "pct_above_50dma", "50-DMA", "%"),
-      fieldValue(section.breadth, "pct_above_200dma", "200-DMA", "%"),
-      fieldValue(section.breadth, "net_new_highs_pct", "Net new highs", "%"),
+      percentValue(section.breadth, "pct_above_50dma", "50-DMA"),
+      percentValue(section.breadth, "pct_above_200dma", "200-DMA"),
+      percentValue(section.breadth, "net_new_highs_pct", "Net new highs"),
       fieldValue(section.breadth, "data_type", "Data"),
     )),
     briefRow("Dealer gamma", section.gamma, joinValues(
-      fieldValue(section.gamma, "spot", "Spot"),
-      fieldValue(section.gamma, "zero_gamma", "Zero gamma"),
-      fieldValue(section.gamma, "gap_pct", "Gap", "%"),
+      numberValue(section.gamma, "spot", "Spot"),
+      numberValue(section.gamma, "zero_gamma", "Zero gamma"),
+      percentValue(section.gamma, "gap_pct", "Gap", true),
       fieldValue(section.gamma, "gamma_sign", "Sign"),
     )),
     briefRow("Canary", section.canary, joinValues(section.canary?.action, section.canary?.severity, section.canary?.summary)),
   ]);
 }
 
-function renderCalendarSection(section) {
+function renderCalendarSection(section, sources = {}) {
   const rows = [
     briefRow("Session", section.session, joinValues(section.session?.market, section.session?.state)),
   ];
-  for (const event of section.market_events || []) {
-    rows.push(briefRow(`Event · ${event.kind || "--"}`, event, joinValues(
-      fieldValue(event, "count", "Count"),
-      (event.symbols || []).join(", "),
-    )));
+  const events = section.market_events || [];
+  if (heldNameEventsUnavailable(sources)) {
+    rows.push(briefRow("Held-name events", {
+      status: "unavailable",
+      detail: "Held-name events require an available positions snapshot.",
+    }, "unavailable"));
+  } else {
+    for (const event of events) {
+      rows.push(briefRow(`Event · ${event.kind || "--"}`, event, joinValues(
+        integerValue(event, "count", "Count"),
+        (event.symbols || []).join(", "),
+      )));
+    }
   }
   return briefSection("B", "Calendar", section, rows);
+}
+
+function heldNameEventsUnavailable(sources) {
+  return Boolean(sources?.positions?.error);
 }
 
 function renderPortfolioSection(section) {
@@ -114,7 +136,7 @@ function renderPortfolioSection(section) {
     briefRow("Movers", section.movers, (section.movers?.rows || []).map((row) => `${row.symbol || "--"} ${money(row.daily_pnl_base, currency)}`).join(" · ")),
     briefRow("Premium at risk", section.premium_at_risk, moneyCoverageValue(section.premium_at_risk)),
     briefRow("Hedge cost / day", section.hedge_cost, moneyCoverageValue(section.hedge_cost)),
-    briefRow("Working orders", section.working_orders, fieldValue(section.working_orders, "count", "Count")),
+    briefRow("Working orders", section.working_orders, integerValue(section.working_orders, "count", "Count")),
   ]);
 }
 
@@ -124,16 +146,16 @@ function renderRiskSection(section) {
     briefRow("Capital", capital, joinValues(
       capital.tier,
       capital.enforcement,
-      fieldValue(capital, "consumed_pct", "Consumed", "%"),
+      percentValue(capital, "consumed_pct", "Consumed"),
       moneyValue(capital, "drawdown_base", capital.base_currency, "Drawdown"),
       moneyValue(capital, "adjusted_peak_base", capital.base_currency, "Adjusted peak"),
     )),
     briefRow("Drawdown latch", section.latch, joinValues(
       hasField(section.latch, "latched") ? (section.latch.latched ? "latched" : "open") : "",
-      fieldValue(section.latch, "age_days", "Age", " day(s)"),
+      integerValue(section.latch, "age_days", "Age", " day(s)"),
       dateValue(section.latch?.latched_at),
     )),
-    briefRow("Active overrides", section.overrides, (section.overrides?.rows || []).map((row) => joinValues(row.control, dateValue(row.expires_at))).join(" · ")),
+    briefRow("Active overrides", section.overrides, (section.overrides?.rows || []).map((row) => joinValues(row.control, dateTimeValue(row.expires_at))).join(" · ")),
     briefRow("Policy drift", section.policy_drift, (section.policy_drift?.rows || []).map((row) => joinValues(row.policy, row.status, row.live_id, row.live_version)).join(" · ")),
   ]);
 }
@@ -141,25 +163,29 @@ function renderRiskSection(section) {
 function renderProcessSection(section, brief) {
   const rows = [
     briefRow("Reconcile", section.reconcile, joinValues(
-      dateValue(section.reconcile?.last_reconciled_at),
+      dateTimeValue(section.reconcile?.last_reconciled_at),
       section.reconcile?.source,
-      section.reconcile?.deadline ? `Due ${dateValue(section.reconcile.deadline)}` : "",
-      fieldValue(section.reconcile, "days_remaining", "Days remaining"),
+      section.reconcile?.deadline ? `due ${dateValue(section.reconcile.deadline)}` : "",
+      integerValue(section.reconcile, "days_remaining", "Days remaining"),
     )),
-    briefRow("Auto-extend", section.auto_extend, joinValues(section.auto_extend?.report_id, dateValue(section.auto_extend?.at))),
+    briefRow("Auto-extend", section.auto_extend, joinValues(section.auto_extend?.report_id, dateTimeValue(section.auto_extend?.at))),
     renderOneTapRow(section.one_tap || {}, brief),
     briefRow("Rules delta", section.rules_delta, rulesDeltaValue(section.rules_delta || {})),
   ];
-  rows.push(briefRow("Artefacts", section.artefacts, ""));
+  rows.push(briefRow("Artefacts", section.artefacts, null));
   for (const artefact of section.artefacts?.rows || []) {
-    rows.push(briefRow(`Artefact · ${artefact.kind || "--"}`, artefact, joinValues(
-      artefact.cadence,
-      hasField(artefact, "declared") ? `declared ${artefact.declared}` : "",
-      hasField(artefact, "completed") ? `completed ${artefact.completed}` : "",
-      dateValue(artefact.completed_at),
-    ), "brief-row--nested"));
+    rows.push(briefRow(`Artefact · ${artefact.kind || "--"}`, artefact, artefactValue(artefact), "brief-row--nested"));
   }
   return briefSection("E", "Process", section, rows, "brief-section--process");
+}
+
+function artefactValue(artefact) {
+  if (artefact?.declared !== true) return "not declared";
+  if (artefact.completed === true) {
+    const completedAt = dateTimeValue(artefact.completed_at);
+    return completedAt ? `completed ${completedAt}` : "completed";
+  }
+  return artefact.cadence === "weekly" ? "not completed this week" : "not completed today";
 }
 
 function briefSection(letter, title, section, rows, className = "") {
@@ -194,7 +220,9 @@ function briefRow(label, row = {}, value = "", className = "") {
   const detail = document.createElement("p");
   detail.className = "brief-row__detail";
   detail.textContent = verbatimText(row?.detail);
-  el.append(head, provided, detail);
+  el.append(head);
+  if (value !== null) el.append(provided);
+  el.append(detail);
   return el;
 }
 
@@ -264,15 +292,19 @@ function signoffOutcome(fingerprint, reportID) {
 
 function scheduleBriefStamp(brief) {
   const fingerprint = String(brief?.brief_fingerprint || "");
-  if (!brief?.stamp_target || !fingerprint || attemptedStampFingerprints.has(fingerprint) || pendingStampFingerprints.has(fingerprint)) return;
+  if (!briefStampArmed || briefStampScheduled || briefStampInFlight || !brief?.stamp_target || !fingerprint || attemptedStampFingerprints.has(fingerprint) || pendingStampFingerprints.has(fingerprint)) return;
   if (!briefStampVisible()) return;
+  const look = briefStampLook;
+  briefStampScheduled = true;
   pendingStampFingerprints.add(fingerprint);
   const afterRender = globalThis.requestAnimationFrame || ((callback) => globalThis.setTimeout(callback, 0));
   afterRender(() => {
+    briefStampScheduled = false;
     pendingStampFingerprints.delete(fingerprint);
-    if (!briefStampVisible() || state.snapshot?.brief?.brief_fingerprint !== fingerprint || attemptedStampFingerprints.has(fingerprint)) return;
+    if (!briefStampArmed || briefStampInFlight || look !== briefStampLook || !briefStampVisible() || state.snapshot?.brief?.brief_fingerprint !== fingerprint || attemptedStampFingerprints.has(fingerprint)) return;
     attemptedStampFingerprints.add(fingerprint);
-    acknowledgeBrief(brief, fingerprint);
+    briefStampInFlight = true;
+    acknowledgeBrief(brief, fingerprint, look);
   });
 }
 
@@ -281,7 +313,7 @@ function briefStampVisible() {
   return state.authenticated === true && state.activeTab === "monitor" && panel && !panel.hidden && document.visibilityState === "visible";
 }
 
-async function acknowledgeBrief(brief, fingerprint) {
+async function acknowledgeBrief(brief, fingerprint, look) {
   try {
     const res = await fetch("/api/brief/seen", {
       method: "POST",
@@ -291,10 +323,12 @@ async function acknowledgeBrief(brief, fingerprint) {
     });
     const body = await readJSONOrText(res);
     if (!res.ok) throw new Error(body.error || body.message || String(body));
+    if (look === briefStampLook) briefStampArmed = false;
     stampOutcomes.set(fingerprint, { result: body, error: "" });
   } catch (err) {
     stampOutcomes.set(fingerprint, { result: null, error: err.message });
   } finally {
+    briefStampInFlight = false;
     renderBriefCard(state.snapshot || {});
   }
 }
@@ -334,8 +368,8 @@ function statusClass(status) {
 function moneyCoverageValue(row = {}) {
   return joinValues(
     moneyValue(row, "amount_base", row.base_currency, "Amount"),
-    fieldValue(row, "included_legs", "Included legs"),
-    fieldValue(row, "excluded_legs", "Excluded legs"),
+    integerValue(row, "included_legs", "Included legs"),
+    integerValue(row, "excluded_legs", "Excluded legs"),
   );
 }
 
@@ -347,7 +381,7 @@ function rulesDeltaValue(row = {}) {
     ...transitions,
     ...added,
     ...removed,
-    hasField(row, "rulebook_fingerprint_changed") ? `fingerprint changed ${row.rulebook_fingerprint_changed}` : "",
+    row.rulebook_fingerprint_changed === true ? "fingerprint changed" : "",
   );
 }
 
@@ -361,6 +395,22 @@ function fieldValue(object, key, label, suffix = "") {
   return `${label} ${object[key]}${suffix}`;
 }
 
+function numberValue(object, key, label) {
+  if (!hasField(object, key) || !Number.isFinite(object[key])) return "";
+  return `${label} ${object[key].toFixed(2)}`;
+}
+
+function percentValue(object, key, label, signed = false) {
+  if (!hasField(object, key) || !Number.isFinite(object[key])) return "";
+  const prefix = signed && object[key] > 0 ? "+" : "";
+  return `${label} ${prefix}${object[key].toFixed(1)}%`;
+}
+
+function integerValue(object, key, label, suffix = "") {
+  if (!hasField(object, key) || !Number.isFinite(object[key])) return "";
+  return `${label} ${Math.trunc(object[key])}${suffix}`;
+}
+
 function hasField(object, key) {
   return Boolean(object) && Object.prototype.hasOwnProperty.call(object, key);
 }
@@ -368,7 +418,19 @@ function hasField(object, key) {
 function dateValue(value) {
   if (!value) return "";
   const at = new Date(value);
-  return Number.isNaN(at.getTime()) ? String(value) : at.toLocaleString();
+  if (Number.isNaN(at.getTime())) return String(value);
+  return `${at.getFullYear()}-${padDatePart(at.getMonth() + 1)}-${padDatePart(at.getDate())}`;
+}
+
+function dateTimeValue(value) {
+  if (!value) return "";
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return String(value);
+  return `${dateValue(at)} ${padDatePart(at.getHours())}:${padDatePart(at.getMinutes())}`;
+}
+
+function padDatePart(value) {
+  return String(value).padStart(2, "0");
 }
 
 function joinValues(...values) {

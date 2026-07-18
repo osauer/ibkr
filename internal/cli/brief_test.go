@@ -52,6 +52,16 @@ func TestRenderBriefFiveSectionsAndDegradation(t *testing.T) {
 			t.Fatalf("brief render missing %q:\n%s", want, got)
 		}
 	}
+	var regimeLine string
+	for line := range strings.SplitSeq(got, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "regime ") {
+			regimeLine = line
+			break
+		}
+	}
+	if regimeLine == "" || !strings.HasSuffix(regimeLine, " —") || strings.Contains(regimeLine, "·") {
+		t.Fatalf("empty regime stage and verdict must render an em dash, got %q:\n%s", regimeLine, got)
+	}
 }
 
 func TestBriefHumanOriginClassification(t *testing.T) {

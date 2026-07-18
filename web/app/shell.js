@@ -14,14 +14,40 @@ function snapshotIssueSummary(errors, snap = {}) {
   const sources = [...new Set(errors.map((err) => snapshotSourceLabel(err.source)).filter(Boolean))];
   const sourceText = humanList(sources, 3);
   const title = errors.map((err) => `${err.source}: ${err.message}`).join(" | ");
+  const missingSources = errors
+    .filter((err) => !snapshotPayloadPresent(snap, err.source))
+    .map((err) => snapshotSourceLabel(err.source));
+  const unavailablePortfolio = errors
+    .filter((err) => ["account", "positions"].includes(String(err.source || "").toLowerCase()))
+    .filter((err) => !snapshotPayloadPresent(snap, err.source))
+    .map((err) => snapshotSourceLabel(err.source));
+  if (unavailablePortfolio.length > 0) {
+    const unavailableSources = [...new Set(unavailablePortfolio)];
+    if (unavailableSources.includes("account") && unavailableSources.includes("positions")) {
+      return { text: "Account and positions unavailable.", title };
+    }
+    const unavailableText = humanList(unavailableSources, 3) || "Data";
+    return { text: `${unavailableText.charAt(0).toUpperCase()}${unavailableText.slice(1)} unavailable.`, title };
+  }
   const gateway = gatewayIssueText(snap);
   if (gateway) {
     return { text: gateway, title };
+  }
+  if (missingSources.length > 0) {
+    const missingText = humanList([...new Set(missingSources)], 3) || "Data";
+    return { text: `${missingText.charAt(0).toUpperCase()}${missingText.slice(1)} unavailable.`, title };
   }
   return {
     text: `${sourceText || "Data"} feed interrupted; showing last good snapshot.`,
     title,
   };
+}
+
+function snapshotPayloadPresent(snap, source) {
+  const sourceKey = String(source || "").toLowerCase();
+  const key = sourceKey === "calendar" ? "market_calendar" : sourceKey;
+  const payload = snap?.[key];
+  return Boolean(payload) && typeof payload === "object" && Object.keys(payload).length > 0;
 }
 
 function gatewayIssueText(snap = {}) {

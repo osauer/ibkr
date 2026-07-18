@@ -134,6 +134,59 @@ func TestAppJSTradingStateUsesSnapshotCanWrite(t *testing.T) {
 	}
 }
 
+func TestAppJSQuoteErrorsRespectSnapshotMarketSession(t *testing.T) {
+	t.Parallel()
+	js := embeddedSPASource(t)
+	render := jsFunctionBlock(t, js, "renderMarketContext")
+	if !strings.Contains(render, "snap.market_calendar") {
+		t.Fatalf("renderMarketContext must thread the snapshot market calendar into quote tiles:\n%s", render)
+	}
+	closed := jsFunctionBlock(t, js, "marketQuoteSessionClosed")
+	for _, want := range []string{"Boolean(sessionState)", "session.is_open === false", `session?.state || ""`, `sessionState !== "unknown"`} {
+		if !strings.Contains(closed, want) {
+			t.Errorf("marketQuoteSessionClosed missing contract %q", want)
+		}
+	}
+	cell := jsFunctionBlock(t, js, "marketQuoteCell")
+	for _, want := range []string{`closed ? "Closed" : marketQuoteInterruptedLine`, `error && !closed`, `"Selected market session is closed"`} {
+		if !strings.Contains(cell, want) {
+			t.Errorf("marketQuoteCell missing closed-session quote contract %q", want)
+		}
+	}
+	interrupted := jsFunctionBlock(t, js, "marketQuoteInterruptedLine")
+	if !strings.Contains(interrupted, `"Feed issue"`) {
+		t.Fatal("open-session quote errors must retain the Feed issue fallback")
+	}
+}
+
+func TestAppJSSnapshotBannerClaimsLastGoodOnlyWhenPresent(t *testing.T) {
+	t.Parallel()
+	js := embeddedSPASource(t)
+	summary := jsFunctionBlock(t, js, "snapshotIssueSummary")
+	for _, want := range []string{
+		`["account", "positions"]`,
+		`!snapshotPayloadPresent(snap, err.source)`,
+		`Account and positions unavailable.`,
+		`if (missingSources.length > 0)`,
+		`feed interrupted; showing last good snapshot.`,
+	} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("snapshotIssueSummary missing last-good honesty contract %q", want)
+		}
+	}
+	present := jsFunctionBlock(t, js, "snapshotPayloadPresent")
+	for _, want := range []string{`sourceKey === "calendar" ? "market_calendar" : sourceKey`, "Object.keys(payload).length > 0"} {
+		if !strings.Contains(present, want) {
+			t.Errorf("snapshotPayloadPresent missing retained-payload contract %q", want)
+		}
+	}
+	portfolioUnavailable := strings.Index(summary, `if (unavailablePortfolio.length > 0)`)
+	gateway := strings.Index(summary, `const gateway = gatewayIssueText(snap)`)
+	if portfolioUnavailable < 0 || gateway < portfolioUnavailable {
+		t.Fatalf("cold account/positions unavailability must take precedence over gateway copy:\n%s", summary)
+	}
+}
+
 func TestAppJSConfirmInputsUsesTraderSafeCopy(t *testing.T) {
 	t.Parallel()
 	js := embeddedSPASource(t)

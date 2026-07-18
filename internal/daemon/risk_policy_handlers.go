@@ -177,7 +177,7 @@ func (s *Server) reconcileReportGate(reportID string) (*rpc.ReconResult, error) 
 func (s *Server) reconcileReportAssessment(reportID string) (*rpc.ReconResult, []string) {
 	reportID = strings.TrimSpace(reportID)
 	if reportID == "" {
-		return nil, []string{"reconcile requires --report <id> from `ibkr recon` (bare attestation retired in phase 3a)"}
+		return nil, []string{"current reconcile report is unavailable to sign off; review `ibkr recon` for its blocking status"}
 	}
 	rep := s.buildReconReport()
 	switch rep.Status {

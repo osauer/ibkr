@@ -71,7 +71,7 @@ func renderBrief(env *Env, res rpc.BriefResult) {
 
 	fmt.Fprintln(env.Stdout, "\nA  Market")
 	briefLine(env, "regime", res.Market.Regime.BriefRowState,
-		strings.TrimSpace(strings.Join([]string{res.Market.Regime.Stage, res.Market.Regime.Verdict}, " · ")))
+		briefJoin(res.Market.Regime.Stage, res.Market.Regime.Verdict))
 	breadth := "—"
 	if res.Market.Breadth.PctAbove50DMA != nil {
 		breadth = fmt.Sprintf("50-DMA %.1f%%", *res.Market.Breadth.PctAbove50DMA)
@@ -92,10 +92,10 @@ func renderBrief(env *Env, res rpc.BriefResult) {
 	}
 	briefLine(env, "dealer gamma", res.Market.Gamma.BriefRowState, gamma)
 	briefLine(env, "canary", res.Market.Canary.BriefRowState,
-		strings.TrimSpace(strings.Join([]string{res.Market.Canary.Action, res.Market.Canary.Severity, res.Market.Canary.Summary}, " · ")))
+		briefJoin(res.Market.Canary.Action, res.Market.Canary.Severity, res.Market.Canary.Summary))
 
 	fmt.Fprintln(env.Stdout, "\nB  Calendar")
-	session := strings.TrimSpace(strings.Join([]string{res.Calendar.Session.Market, res.Calendar.Session.State}, " · "))
+	session := briefJoin(res.Calendar.Session.Market, res.Calendar.Session.State)
 	briefLine(env, "session", res.Calendar.Session.BriefRowState, session)
 	for _, event := range res.Calendar.MarketEvents {
 		value := fmt.Sprintf("%d", event.Count)
@@ -128,9 +128,9 @@ func renderBrief(env *Env, res rpc.BriefResult) {
 	briefLine(env, "working orders", res.Portfolio.WorkingOrders.BriefRowState, orders)
 
 	fmt.Fprintln(env.Stdout, "\nD  Risk & limits")
-	capital := strings.TrimSpace(strings.Join([]string{res.RiskLimits.Capital.Tier, res.RiskLimits.Capital.Enforcement}, " · "))
+	capital := briefJoin(res.RiskLimits.Capital.Tier, res.RiskLimits.Capital.Enforcement)
 	if res.RiskLimits.Capital.ConsumedPct != nil {
-		capital += fmt.Sprintf(" · %.1f%% consumed", *res.RiskLimits.Capital.ConsumedPct)
+		capital = briefJoin(capital, fmt.Sprintf("%.1f%% consumed", *res.RiskLimits.Capital.ConsumedPct))
 	}
 	briefLine(env, "capital", res.RiskLimits.Capital.BriefRowState, capital)
 	latch := "open"
@@ -190,6 +190,16 @@ func briefLine(env *Env, label string, state rpc.BriefRowState, value string) {
 	}
 	fmt.Fprintf(env.Stdout, "  %-18s %-11s %s\n", label, state.Status, value)
 	fmt.Fprintf(env.Stdout, "    %s\n", state.Detail)
+}
+
+func briefJoin(values ...string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, " · ")
 }
 
 func briefMoney(row rpc.BriefMoneyCoverageRow) string {

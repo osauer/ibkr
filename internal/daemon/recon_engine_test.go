@@ -457,6 +457,11 @@ policy_version = 1
 	if _, err := s2.reconcileReportGate("recon-whatever"); err == nil || !strings.Contains(err.Error(), "no recon report") {
 		t.Fatalf("gate err = %v, want unavailable refusal", err)
 	}
+	if _, err := s2.handleRiskPolicyCapitalEvent(context.Background(), rawParams(t, rpc.CapitalEventParams{
+		Type: "reconcile", Origin: rpc.OrderOriginHumanTTY,
+	})); err == nil || !strings.Contains(err.Error(), "unavailable to sign off") || strings.Contains(err.Error(), "requires --report") {
+		t.Fatalf("defaulted unavailable report err = %v, want unavailable-to-sign-off refusal", err)
+	}
 }
 
 func TestReconcileReportGate(t *testing.T) {
@@ -471,9 +476,9 @@ func TestReconcileReportGate(t *testing.T) {
 		t.Fatalf("fixture not clean: %+v", rep.Counts)
 	}
 
-	// Bare attestation is retired.
-	if _, err := s.reconcileReportGate(""); err == nil || !strings.Contains(err.Error(), "requires --report") {
-		t.Fatalf("err = %v, want report requirement", err)
+	// An empty resolved id means there is no current report to sign off.
+	if _, err := s.reconcileReportGate(""); err == nil || !strings.Contains(err.Error(), "unavailable to sign off") {
+		t.Fatalf("err = %v, want unavailable-to-sign-off refusal", err)
 	}
 	// Superseded/wrong ids are refused, and the error names the current one.
 	if _, err := s.reconcileReportGate("recon-stale123"); err == nil || !strings.Contains(err.Error(), rep.ReportID) {
