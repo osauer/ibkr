@@ -18,12 +18,28 @@ fi
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-if "$publisher" publish "$server_json" >"$tmp" 2>&1; then
+# The registry-publish GitHub Actions workflow (OIDC) may win the race while
+# this script waits at the device-code prompt. An already-published version is
+# a success, not a failure.
+published_already() {
+    if grep -Eiq 'already exists|already published|duplicate|version .+ exists|conflict|\b409\b' "$1"; then
+        echo "registry-publish: version already published (the registry-publish CI workflow likely won the race) — treating as success." >&2
+        return 0
+    fi
+    return 1
+}
+
+status=0
+"$publisher" publish "$server_json" >"$tmp" 2>&1 || status=$?
+if [[ "$status" -eq 0 ]]; then
     cat "$tmp"
     exit 0
 fi
-status=$?
 cat "$tmp" >&2
+
+if published_already "$tmp"; then
+    exit 0
+fi
 
 if [[ "$auto_login" != "1" ]]; then
     exit "$status"
@@ -48,4 +64,14 @@ Set MCP_REGISTRY_AUTO_LOGIN=0 to disable this retry behavior.
 EOF
 
 "$publisher" login "$login_method"
-"$publisher" publish "$server_json"
+status=0
+"$publisher" publish "$server_json" >"$tmp" 2>&1 || status=$?
+if [[ "$status" -eq 0 ]]; then
+    cat "$tmp"
+    exit 0
+fi
+cat "$tmp" >&2
+if published_already "$tmp"; then
+    exit 0
+fi
+exit "$status"
