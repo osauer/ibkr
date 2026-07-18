@@ -264,21 +264,21 @@ function marketStatusPhrase(phase, verb, countdown) {
 }
 
 function marketSessionNow(session) {
-  const formatted = new Date().toLocaleString("en-US", {
+  const parts = new Intl.DateTimeFormat(undefined, {
     day: "numeric",
     month: "short",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false,
     timeZoneName: "short",
     timeZone: session?.timezone || undefined,
-  }).replaceAll(",", "");
-  const parts = formatted.split(/\s+/).filter(Boolean);
-  if (parts.length >= 5) {
-    return `${parts[1]} ${parts[0].toUpperCase()} ${parts[2]} ${parts[3]} ${parts[4]}`;
-  }
-  return formatted.toUpperCase();
+  }).formatToParts(new Date());
+  const visiblePartTypes = new Set(["day", "month", "year", "hour", "minute", "dayPeriod", "timeZoneName", "literal"]);
+  return parts
+    .filter(({ type }) => visiblePartTypes.has(type))
+    .map(({ value }) => value)
+    .join("")
+    .trim();
 }
 
 function countdownLabel(target) {

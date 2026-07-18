@@ -162,6 +162,7 @@ try {
   const protectionRiskRendering = await exerciseProtectionRiskRendering(page);
   const alertHistory = await exerciseAlertHistory(page);
   const openOrders = await exerciseOpenOrders(page);
+  const settingsTab = await exerciseSettingsTab(page);
   const debugTools = await assertDebugToolsRemoved(page, baseURL);
   if (noNotification && pushState !== "push unsupported") {
     throw new Error(`expected push unsupported with Notification removed, got ${JSON.stringify(pushState)}`);
@@ -201,6 +202,7 @@ try {
     protection_risk_rendering: protectionRiskRendering,
     alert_history: alertHistory,
     open_orders: openOrders,
+    settings_tab: settingsTab,
     debug_tools: debugTools,
     events: {
       opened_event_streams: eventsBefore.opened_event_streams,
@@ -1216,6 +1218,47 @@ async function exerciseOpenOrders(page) {
     empty: info.empty,
     count_text: info.countText,
     buttons: info.buttons.map((button) => ({ text: button.text, disabled: button.disabled, has_reason: !!button.title })),
+  };
+}
+
+async function exerciseSettingsTab(page) {
+  await page.locator("#tabSettings").click();
+  await page.waitForFunction(() => document.getElementById("settingsTab")?.hidden === false, { timeout: 5000 });
+  const selectors = [
+    "#settingsTab",
+    "#settingsAsOf",
+    "#purgeRestoreToggle",
+    "#stockProtectionToggle",
+    "#settingsTradingStatus",
+    "#settingsTradingMeta",
+    "#settingsTradingLimits",
+    "#settingsTradingLimitsMeta",
+    "#settingsMarketDataStatus",
+    "#settingsMarketDataMeta",
+    "#settingsBuildStatus",
+    "#settingsBuildMeta",
+    "#settingsProtectionStatus",
+    "#settingsProtectionMeta",
+    "#settingsPolicyStatus",
+    "#settingsPolicyMeta",
+  ];
+  const elements = await page.evaluate((expectedSelectors) => expectedSelectors.map((selector) => {
+    const element = document.querySelector(selector);
+    return {
+      selector,
+      present: Boolean(element),
+      visible: Boolean(element && !element.closest("[hidden]") && element.getClientRects().length > 0),
+    };
+  }), selectors);
+  for (const element of elements) {
+    if (!element.present || !element.visible) {
+      throw new Error(`Settings tab element ${element.selector} should be present and visible: ${JSON.stringify(element)}`);
+    }
+  }
+  await page.locator("#tabMonitor").click();
+  await page.waitForFunction(() => document.getElementById("dashboard")?.hidden === false, { timeout: 5000 });
+  return {
+    elements: elements.map((element) => element.selector),
   };
 }
 
