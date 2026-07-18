@@ -2,12 +2,7 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-## Unreleased
-
-<!-- At the next cut: rename this heading to "## vX.Y.Z — YYYY-MM-DD HH:MM CEST"
-     and skip `make changelog-stub` (this section already is the entry);
-     `make changelog-lint RELEASE_VERSION=vX.Y.Z` then validates it.
-     Remember the plugin.json version bump the release gate enforces. -->
+## v2.1.0 — 2026-07-18 18:42 CEST
 
 ### What's new
 
