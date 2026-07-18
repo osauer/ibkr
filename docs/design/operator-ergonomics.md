@@ -276,9 +276,12 @@ Shipped and active 2026-07-18 evening, Codex-only lane, all gates green
   `confirmed` statement flow." Post-flip flows are deliberately not
   exceptions; a push should still announce money movement so an unexpected
   disbursement is seen before the monthly pulse.
-- **Still pending at IBKR (operator):** reverting the Flex query period from
-  the 365-day backfill window to the daily rolling window; the next fetch
-  after the change confirms it. Correctness is unaffected meanwhile.
+- **Flex query window (operator decision, 2026-07-18):** reverted from the
+  365-day backfill not to daily but to a **14-calendar-day rolling window** —
+  deliberately wider so a daemon outage of up to two weeks loses no history
+  and late restatements are re-read. The retained backfill file keeps the
+  full-year coverage in the merged report either way; the next fetch
+  confirms the new window.
 - **Expected first automatic extension:** the first fetch that brings a
   same-day equity pair (statement day paired with a runtime daily sample —
   ~2026-07-19), comfortably before the 2026-07-25 clock expiry.

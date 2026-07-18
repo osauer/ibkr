@@ -2,6 +2,51 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## Unreleased
+
+<!-- At the next cut: rename this heading to "## vX.Y.Z — YYYY-MM-DD HH:MM CEST"
+     and skip `make changelog-stub` (this section already is the entry);
+     `make changelog-lint RELEASE_VERSION=vX.Y.Z` then validates it.
+     Remember the plugin.json version bump the release gate enforces. -->
+
+### What's new
+
+- **A personal risk constitution now governs capital discipline** (advisory/shadow — nothing blocks orders). The operator writes every number into `~/.config/ibkr/policies/risk-policy.toml` (no defaults in code): protected equity floor, declared risk capital, a two-tier drawdown ladder measured from a cash-flow-adjusted peak with a latching shadow block, one-shot expiring overrides, and reconciliation tolerances. `ibkr policy show --explain` renders the whole contract in plain language.
+- **Broker statements are ingested and reconciled daily.** A `[flex]` config section fetches IBKR Flex statements on a daily schedule (immutable raw retention), a recon engine matches statement flows against the declared ledger with never-false-match semantics, and `ibkr recon` renders the report. At policy v3, broker-confirmed flows become the authoritative capital-flow input and a fully clean, fresh report extends the reconcile clock automatically — recurring sign-off chores are retired; exceptions, and only exceptions, require the human. `ibkr recon backtest` replays the full statement window (complete flow review plus capital-ladder equity replay) for validation before trust.
+- **Agent sessions now implement through a hook-enforced Codex-only lane** (`scripts/codex-implement.sh`): planning, review, and integration stay in the orchestrating session, implementation runs headless in an isolated sibling worktree with fail-closed approvals, and inline code edits by agent sessions are deterministically blocked (human-approved break-glass: `scripts/waive-inline.sh`). **Action required:** none for CLI/MCP/app users; repo contributors using agent sessions get the new flow automatically.
+
+### Added
+
+- Risk constitution phase 1: `ibkr policy` (show/--explain, capital-event, override, reset-drawdown, artefact) over an operator-authored `risk-policy.toml`; capital-event journal with replay; drawdown warn/block ladder where the block latches until a journaled human reset; policy fingerprinting and sibling-policy drift display. All five policy write verbs are human-origin-only at the daemon.
+- Post-trade truth (phase 3a): `[flex]` daily statement ingestion with single-purpose token-file rules; `internal/flexstmt` typed parser — unknown line types become loud `uncategorized` exceptions, never actions; recon engine + `ibkr recon [--json]`; the reconcile verb is report-gated (bare attestation retired) with a one-shot override as the statement-outage valve.
+- Recon backtest: `ibkr recon backtest` reviews every flow in the retained statement window and replays the daily equity series against the recorded peak and drawdown-ladder crossings; the equity comparison is same-day (statement close vs that day's runtime observation) instead of latest-vs-latest.
+- Risk-policy v3: clean-report auto-extend of the reconcile clock behind a strict same-day equity-divergence gate (new operator-authored key `recon.max_equity_divergence_pct`); statement-authoritative cumulative flows with declarations demoted to provisional same-day bridge entries; new non-exception `confirmed` category for broker-confirmed undeclared flows; statement value-date peak correction, exactly once per statement line; declared-vs-statement figures displayed side by side during the transition. Pre-genesis statement flows classify as disclosed, report-id-pinned `baseline` rows — never exceptions, never signature-gated.
+- Codex delegation runner with a transactional lifecycle (fresh-task/resume/cleanup guards), pinned model/effort/service tier per run, offline-only gates for delegates, and a project execpolicy that prompts on live targets.
+
+### Changed
+
+- `pkg/ibkr` constructors now clone caller-supplied configs — later mutations of the caller's config struct no longer leak into a live client — and stale nil-context doc promises are dropped.
+- Rulebook policy fingerprint moved to a JSON projection (`rulebook-fp-v3`); the rules-decisions journal now records the policy fingerprint with every transition, so journaled verdicts name the policy identity that produced them.
+- Runtime settings surfaces are single-sourced from the settings registry behind the generated reference — daemon flatten/apply, CLI grammar/help, and generated docs consume one table, parity-gated.
+- `ibkr policy show` renders capital state as plain-language sentences (risk brake, money at risk, ledger check) instead of raw field dumps.
+- The Canary SPA is split into ES-module feature files behind a drift gate, and the canary engine moved from `internal/cli` into `internal/canary`; no rendered-output change.
+- CLI gamma open-interest warnings trust the daemon's session classification instead of reclassifying locally.
+- Proposal-outcome deduplication keys are cached; dead outcome fields and unused MCP modes were removed from the proposal surface.
+
+### Fixed
+
+- Option days-to-expiry calculations were off by one across DST boundaries (both copies of the date math agree again).
+- Flex statement lines with a missing amount attribute parse as unavailable and surface as loud `uncategorized` exceptions, instead of fabricating an amount of 0.00; an explicit zero stays present.
+- The documented reconcile-clock outage valve — a one-shot override on `capital.max_unreconciled_days` — was recorded, journaled, and displayed but never consumed by evaluation; it now extends the clock, for exactly that one control.
+- Paired PWA sessions survive daemon restarts, binary rebuilds, and iOS home-screen isolation; pairing state no longer resets.
+- Opportunity refresh backoff is capped at 15 minutes and shared across engines, so a transient failure no longer parks a feed for hours.
+- Integration tests against a live gateway no longer race the async handshake (they poll up to 25 s), and closed-market skips key on typed calendar/session authorities, never on error text.
+
+### Engineering notes
+
+- Remote-relay unit tests and the embedded PWA asset-syntax check are bound into `make check`; delegated Go briefs require `make check` in-worktree.
+- v2 policy files cannot drift spuriously under the new binary: the pre-v3 constitution-fingerprint projection and the v2 recon report-id projection are preserved byte-for-byte, regression-tested.
+
 ## v2.0.0 — 2026-07-11 22:41 CEST
 
 ### What's new

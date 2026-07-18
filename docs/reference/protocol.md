@@ -1,6 +1,6 @@
 # TWS protocol coverage
 
-Last reviewed: 2026-06-11 08:17 CEST
+Last reviewed: 2026-07-18 18:23 CEST
 
 `pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the `ibkr` binary, daemon, CLI, and MCP server need.
 
@@ -33,6 +33,13 @@ classified market state, source-health buckets, row titles/states, and
 `source_fingerprints.account`,
 `source_fingerprints.positions`, `source_fingerprints.regime`, and
 `source_fingerprints.market_events`.
+
+`rules.snapshot` emits `rulebook-fp-v3` — a policy-identity fingerprint, not
+a classified-state hash: the key is a SHA-256 of a JSON projection of the
+active rulebook policy (rule set, thresholds, regime-conditional sets), so it
+changes when the policy changes, not when verdicts move. The rules-decisions
+journal records the same `policy_fingerprint` with every transition, naming
+the policy identity that produced each journaled verdict.
 
 Regime also exposes a nested `lifecycle.fingerprint` for consumers that dedupe
 by broad-market lifecycle transition rather than by the full regime snapshot.

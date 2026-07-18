@@ -47,6 +47,26 @@ prefix_rule(
 )
 
 prefix_rule(
+    pattern = ["ibkr", "policy", "show"],
+    decision = "allow",
+    justification = "Risk-constitution read view; every policy write verb (capital-event, override, reset-drawdown, artefact) is a separate human-only subcommand outside this rule.",
+    match = [
+        "ibkr policy show --json",
+        "ibkr policy show --explain",
+    ],
+)
+
+prefix_rule(
+    pattern = ["ibkr", "recon", ["show", "backtest"]],
+    decision = "allow",
+    justification = "Post-trade reconciliation read views over retained local statements; dismiss and the reconcile sign-off are human-only governance verbs outside this rule.",
+    match = [
+        "ibkr recon show --json",
+        "ibkr recon backtest --json",
+    ],
+)
+
+prefix_rule(
     pattern = ["ibkr", "proposals", ["status", "list", "refresh", "preview"]],
     decision = "allow",
     justification = "Protection proposal discovery and preview do not submit broker orders.",

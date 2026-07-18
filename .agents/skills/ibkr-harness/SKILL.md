@@ -3,7 +3,7 @@ name: ibkr-harness
 description: Use repo-local IBKR MCP/CLI for account, market, rulebook, canary, proposal, opportunity, and order investigations while developing the trading harness. Read/preview first; explicit current-turn broker writes use only the gated CLI.
 ---
 
-Updated: 2026-07-10 08:35 CEST
+Updated: 2026-07-18 18:23 CEST
 
 ## Contract
 
@@ -12,7 +12,9 @@ daily P&L, watchlist, quotes, calendars, option chains, daily history, scanners,
 technical screens, fixed-fractional sizing, broad-market regime, dealer gamma,
 market breadth, portfolio canary posture, held-name market events, protection
 proposals, option-exercise opportunities, trading-rulebook status, runtime
-settings/freeze state, order preview, order status, or order history.
+settings/freeze state, risk-constitution capital state (`ibkr policy show
+[--explain]`), post-trade reconciliation reads (`ibkr recon show` /
+`ibkr recon backtest`), order preview, order status, or order history.
 
 Prefer MCP tools for read-only snapshots when the `ibkr` MCP server is available.
 Use the CLI with `--json` when the MCP surface is not available or when a project
@@ -22,6 +24,12 @@ Use `ibkr opportunities status --json`, `ibkr opportunities list --json`, or
 `ibkr opportunities refresh --json` only for read-only opportunity discovery.
 `ibkr opportunities preview`, `ibkr opportunities exercise`, and
 `ibkr opportunities ignore` are outside this read-only skill contract.
+
+`ibkr policy show` and `ibkr recon show`/`backtest` are read-only views of the
+risk constitution and post-trade reconciliation. Every policy/recon write verb
+(capital-event incl. the reconcile sign-off, override, reset-drawdown,
+artefact, dismiss) is a human-only governance act the daemon rejects from
+agent origins — read the views, never operate the verbs.
 
 `ibkr backtest research-opportunity ...` is an offline/local research harness,
 not a daemon opportunity feed and not a broker-action surface. Use it only when

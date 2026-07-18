@@ -1,6 +1,6 @@
 # Codex Workflow
 
-Updated: 2026-07-12 07:29 CEST
+Updated: 2026-07-18 18:23 CEST
 
 This page is a navigation aid, not a second copy of the repo rules. The
 canonical instructions live in [`AGENTS.md`](../../AGENTS.md); use this guide to
@@ -24,8 +24,11 @@ find the supporting surfaces quickly.
   `make smoke` wire matrix is binding for daemon/CLI/wire-path changes and
   releases. Both wait on `scripts/with-gateway-lock.sh` instead of racing
   other sessions for the gateway.
-- Use read-only subagents for exploration and review, and keep writes in the
-  main session.
+- Use read-only subagents for exploration and review. All code implementation
+  goes through the Codex-only delegation lane below — the implementation-lane
+  hook deterministically blocks inline code edits by agent sessions and their
+  subagents (root `AGENTS.md`, pilot since 2026-07-18); docs and config edits
+  stay direct in the main session.
 - For broker-adjacent or SPA work, start from the canonical templates instead
   of re-deriving the contract here.
 
@@ -69,8 +72,9 @@ and [Codex AGENTS.md guidance](https://developers.openai.com/codex/guides/agents
 
 ## Headless Delegation (Orchestrated)
 
-When another session orchestrates (typically Claude planning and reviewing),
-delegate one bounded implementation task per run:
+This is the repo's only coding lane for agent sessions, not an option: the
+orchestrating session (typically Claude) plans, specs, reviews, and
+integrates, and delegates one bounded implementation task per run:
 
 ```sh
 scripts/codex-implement.sh --task <name> --brief <file>
@@ -83,10 +87,12 @@ under `.claude/codex-runs/<name>/`. The orchestrator reviews the diff against
 the brief, runs the gates, iterates with `--resume <thread-id>`, integrates
 by applying the reviewed patch in the primary tree, and finishes with
 `--cleanup` (worktree and branch removal; the runner refuses fresh tasks
-over leftovers, so skipped cleanup surfaces instead of littering). The full loop,
+over leftovers, so skipped cleanup surfaces instead of littering). Model, reasoning effort, and service tier are pinned per-run by the runner so
+delegation cannot drift with the desktop Codex config. The full loop,
 brief template, and sandbox facts live in
 [`.claude/skills/codex-delegate/SKILL.md`](../../.claude/skills/codex-delegate/SKILL.md).
-Broker writes, guardrail changes, and release work are never delegated.
+Broker writes, guardrail changes, risk-policy threshold decisions, and release
+work are never delegated; delegates run offline gates only.
 `internal/agentconfig` gates the runner's fail-closed shape.
 
 ## Completion Evidence

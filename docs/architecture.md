@@ -10,11 +10,17 @@ state; every other surface is an adapter over typed RPC contracts.
 - `internal/daemon` is the long-running owner of the gateway connection, caches,
   schedulers, journals, market-event source caches, and XDG state files. It
   serves newline-delimited JSON-RPC over a local Unix socket and must stay useful
-  when the gateway is disconnected whenever a method is state/config-only.
+  when the gateway is disconnected whenever a method is state/config-only. It
+  also owns the risk-capital runtime state (peak/latch/capital-event journals),
+  daily Flex statement ingestion, and the post-trade recon engine
+  (`docs/design/post-trade-truth.md`, `docs/design/operator-ergonomics.md`).
 - `internal/risk` is the pure evaluation library behind advisory verdicts:
   shared risk thresholds and policy fingerprints, canary signal types, option
-  math, and the daily trading rulebook (design and semantics:
-  `docs/design/trading-rulebook.md`). No I/O or broker state; keep rule and
+  math, the daily trading rulebook (design and semantics:
+  `docs/design/trading-rulebook.md`), and the risk-constitution schema and
+  capital evaluation for the operator-authored `risk-policy.toml`
+  (`docs/design/risk-policy.md` — no embedded defaults; a missing key is
+  `unapproved`, never a code value). No I/O or broker state; keep rule and
   threshold semantics here, not in adapters.
 - `internal/rpc` is the contract layer: method names plus request/response
   structs shared by daemon, CLI, app, and MCP. Add fields here before teaching

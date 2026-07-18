@@ -16,7 +16,7 @@ allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
-Updated: 2026-07-09 06:45 CEST
+Updated: 2026-07-18 18:23 CEST
 
 ## When to use
 

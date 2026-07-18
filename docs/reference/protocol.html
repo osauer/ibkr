@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: protocol.md sha256:198f34e0d0e03cff3ecdbd7c3abc2de4c40ff2f636595fc86ddc576e89cb4f37 -->
+<!-- md-source: protocol.md sha256:62220e95fa80a56444ab33d250cf6f5533bb4a6ccf762c847e5466bda7903876 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -158,7 +158,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="tws-protocol-coverage">TWS protocol coverage</h1>
-<p>Last reviewed: 2026-06-11 08:17 CEST</p>
+<p>Last reviewed: 2026-07-18 18:23 CEST</p>
 <p><code>pkg/ibkr</code> is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the <code>ibkr</code> binary, daemon, CLI, and MCP server need.</p>
 <p>Order-writing methods exist only in trading-capable builds. Default builds return <code>pkg/ibkr.ErrTradingDisabled</code> before any order write reaches the socket. Trading builds expose gated daemon/CLI order paths behind trading status, pinned account/mode, preview-token, freeze, journal, and broker checks; the MCP server remains preview/read-oriented and does not expose place/modify/cancel tools.</p>
 <h2 id="semantic-fingerprints">Semantic fingerprints</h2>
@@ -168,6 +168,7 @@
 <p><code>regime.snapshot</code> emits <code>regime-fp-v1</code> from indicator bands/statuses, composite counts, lifecycle stage/severity/readiness buckets, warning codes/scopes/severities, high-level data quality, source-health buckets, and gamma/breadth semantic state.</p>
 <p><code>market_events.snapshot</code> emits <code>market-events-fp-v1</code> from requested symbols, semantic flag categories/statuses/severities/roles/sources, and source-health buckets. It excludes timestamps, exact rates/share counts inside the same flag classification, source prose, and rendering order.</p>
 <p><code>canary</code> emits <code>canary-fp-v1</code> from policy, action, market confirmation, portfolio fit, input health, direction, severity, planner mode/readiness, primary drivers, signal semantics including held-underlying stress buckets, classified market state, source-health buckets, row titles/states, and <code>source_fingerprints.account</code>, <code>source_fingerprints.positions</code>, <code>source_fingerprints.regime</code>, and <code>source_fingerprints.market_events</code>.</p>
+<p><code>rules.snapshot</code> emits <code>rulebook-fp-v3</code> — a policy-identity fingerprint, not a classified-state hash: the key is a SHA-256 of a JSON projection of the active rulebook policy (rule set, thresholds, regime-conditional sets), so it changes when the policy changes, not when verdicts move. The rules-decisions journal records the same <code>policy_fingerprint</code> with every transition, naming the policy identity that produced each journaled verdict.</p>
 <p>Regime also exposes a nested <code>lifecycle.fingerprint</code> for consumers that dedupe by broad-market lifecycle transition rather than by the full regime snapshot. Canary is stateless and does not expose a canary lifecycle fingerprint. Source fingerprints and source-health entries use semantic buckets only; timestamps, tiny raw-value movement inside a bucket, and prose changes must not churn the hash.</p>
 <h2 id="market-events">Market events</h2>
 <p><code>market_events.snapshot</code> returns <code>MarketEventsResult</code> for explicit symbols or, when symbols are omitted, held stock/ETF underlyings from the positions snapshot. The result contains <code>flags[]</code>, <code>by_symbol</code>, <code>source_health[]</code>, <code>warning_details[]</code>, <code>fingerprint</code>, and <code>not_execution</code>.</p>
