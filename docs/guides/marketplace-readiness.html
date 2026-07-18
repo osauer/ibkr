@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: marketplace-readiness.md sha256:6aec30ba719ce38d45ab4ec96494539e7e64f7dd012ea10ec245ddc8542e5a7d -->
+<!-- md-source: marketplace-readiness.md sha256:1824d5d2f83bc7a06aa9e6ccd80cb063850696a49842ce5dc52748ef486fba24 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -302,7 +302,7 @@ make smoke</code></pre>
 <p>Publish sequence:</p>
 <ol>
 <li>Release any MCPB-readiness changes through <code>make release RELEASE_VERSION=vX.Y.Z</code>; do not tag or create releases manually.</li>
-<li>Publish the open MCP Registry metadata only through <code>make registry-publish RELEASE_VERSION=vX.Y.Z MCP_PUBLISHER=bin/mcp-publisher</code>. If the Registry JWT is expired, the target starts <code>mcp-publisher login github</code>, prints the device-code instructions, waits for authorization, and retries publish automatically. <code>make release</code> also runs <code>make release-auth-preflight</code> before any gate work, so an expired JWT is normally refreshed at the start of the pipeline with the operator present; the in-target retry remains as a backstop.</li>
+<li>Publish the open MCP Registry metadata only through <code>make registry-publish RELEASE_VERSION=vX.Y.Z MCP_PUBLISHER=bin/mcp-publisher</code>. If the Registry JWT is expired, the target starts <code>mcp-publisher login github</code>, prints the device-code instructions, waits for authorization, and retries publish automatically. Registry JWTs live only about 5 minutes, so this in-target login is the normal path on every publish, not a recovery: <code>make release</code> runs <code>make release-auth-preflight</code> before any gate work to verify gh auth and the publish tooling up front, but the device-code login itself always happens at the registry-publish leg — plan to be at a browser near the end of the pipeline.</li>
 <li>Submit to Anthropic&#39;s Desktop extension submission form from the Claude docs, attaching the public GitHub release asset URL and the submission materials above.</li>
 <li>Wait for Anthropic review. Directory approval, listing slug, and in-product availability are controlled by Anthropic; a successful MCP Registry publish is not a Claude Directory publish.</li>
 </ol>

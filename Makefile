@@ -723,8 +723,9 @@ release-registry-server: ## Generate and validate dist/server.json for MCP Regis
 registry-login: ## Refresh MCP Registry auth token (default: GitHub device flow)
 	$(MCP_PUBLISHER) login $(MCP_REGISTRY_LOGIN_METHOD)
 
-release-auth-preflight: ## Fail-fast gh + MCP Registry auth check; refreshes an expired registry JWT interactively
-	./scripts/release-auth-preflight.sh "$(MCP_PUBLISHER)" "$(MCP_REGISTRY_LOGIN_METHOD)"
+release-auth-preflight: ## Fail-fast gh auth + registry-leg precondition check (registry JWTs live ~5m; device-code login happens at the publish leg)
+	MCP_REGISTRY_AUTO_LOGIN=$(MCP_REGISTRY_AUTO_LOGIN) \
+		./scripts/release-auth-preflight.sh "$(MCP_PUBLISHER)" "$(MCP_REGISTRY_LOGIN_METHOD)"
 
 registry-publish: release-registry-server ## Publish dist/server.json, refreshing expired Registry auth when needed
 	MCP_REGISTRY_AUTO_LOGIN=$(MCP_REGISTRY_AUTO_LOGIN) MCP_REGISTRY_LOGIN_METHOD=$(MCP_REGISTRY_LOGIN_METHOD) \
@@ -852,11 +853,12 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 		echo "release: tag $(RELEASE_VERSION) already exists on origin" >&2; \
 		exit 1; \
 	fi
-	@# Auth goes stale between releases: the MCP Registry JWT lives only
-	@# hours and gh auth less often, and both used to surface only at the
-	@# LAST pipeline legs (v2.0.0 stranded twice on registry-publish).
-	@# Check both before any expensive step so the interactive device-code
-	@# refresh happens at minute 0 with the operator present.
+	@# Auth preflight before any expensive step: gh auth goes stale
+	@# between releases and used to surface only at the LAST pipeline
+	@# legs (v2.0.0 stranded twice on registry-publish). Registry JWTs
+	@# live only ~5 minutes, so the real device-code login happens AT the
+	@# registry-publish leg via its auto-login; this checks gh plus that
+	@# backstop and warns the operator to be at a browser near the end.
 	$(MAKE) release-auth-preflight
 	@# Validate the CHANGELOG entry shape before any expensive step. A
 	@# malformed entry (wrong version heading, missing ### What's new, or

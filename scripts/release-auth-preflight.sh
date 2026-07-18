@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 #
 # release-auth-preflight.sh - fail-fast auth checks before the release
-# pipeline spends ~10 minutes on gates. Two credentials go stale between
-# releases and both used to surface only at the last pipeline legs:
-#   - gh CLI auth (release-publish creates the GitHub Release page)
-#   - MCP Registry JWT (registry-publish; expires within hours, and its
-#     GitHub device-code recovery needs a human at a browser)
-# Checking them first means the interactive device-code login happens at
-# minute 0 with the operator present, not after tag+push when a strand
-# leaves the registry leg to heal by hand (v2.0.0 stranded twice there).
+# pipeline spends ~10 minutes on gates. What can actually be verified at
+# minute 0:
+#   - gh CLI auth (release-publish creates the GitHub Release page); goes
+#     stale between releases and used to surface only at the last legs.
+#   - The registry leg's preconditions. MCP Registry JWTs from the GitHub
+#     device-code flow live only ~5 minutes (observed v2.1.0, 2026-07-18;
+#     originally assumed hours), so a stored token is always dead by the
+#     registry-publish leg and gating on residual validity — or refreshing
+#     here — is meaningless. The real credential mint is the device-code
+#     login that registry-publish-with-login.sh runs AT the publish leg;
+#     this preflight verifies that backstop is armed (publisher binary
+#     present, MCP_REGISTRY_AUTO_LOGIN not disabled) and reminds the
+#     operator to be at a browser near the END of the pipeline (v2.0.0
+#     stranded twice when nobody was).
 
 set -euo pipefail
 
 publisher="${1:?usage: release-auth-preflight.sh <mcp-publisher> [login-method]}"
 login_method="${2:-github}"
-min_valid_minutes="${REGISTRY_TOKEN_MIN_VALID_MINUTES:-30}"
+auto_login="${MCP_REGISTRY_AUTO_LOGIN:-1}"
 
 fail() { printf 'release-auth-preflight: %s\n' "$1" >&2; exit 1; }
 note() { printf 'release-auth-preflight: %s\n' "$1"; }
@@ -24,6 +30,13 @@ if ! gh auth status >/dev/null 2>&1; then
     fail "gh auth is invalid or expired — run 'gh auth login', then retry"
 fi
 note "gh auth OK"
+
+command -v "$publisher" >/dev/null 2>&1 \
+    || fail "mcp-publisher not found at '$publisher' — the registry-publish leg would strand"
+
+if [ "$auto_login" != "1" ]; then
+    fail "MCP_REGISTRY_AUTO_LOGIN=0: registry JWTs live only ~5 minutes, so without the publish-leg auto-login every release strands at registry-publish — drop the override"
+fi
 
 token_file="${XDG_CONFIG_HOME:-$HOME/.config}/mcp-publisher/token.json"
 
@@ -45,26 +58,16 @@ print(int((exp - time.time()) // 60))
 PY
 }
 
-remaining="$(registry_jwt_remaining_minutes)" || remaining=""
-if [ -n "$remaining" ] && [ "$remaining" -ge "$min_valid_minutes" ]; then
-    note "registry JWT OK (${remaining}m left, need ${min_valid_minutes}m)"
-    exit 0
-fi
-
-if [ -n "$remaining" ]; then
-    note "registry JWT has ${remaining}m left (need ${min_valid_minutes}m) — refresh required"
+# Stored-token state is informational only: with ~5-minute JWTs no stored
+# token survives to the registry leg, so nothing here gates the release.
+if remaining="$(registry_jwt_remaining_minutes 2>/dev/null)"; then
+    if [ "$remaining" -gt 0 ]; then
+        note "stored registry JWT has ${remaining}m left — it will still be expired by the registry-publish leg"
+    else
+        note "stored registry JWT expired $((-remaining))m ago (normal: registry JWTs live ~5 minutes)"
+    fi
 else
-    note "registry JWT missing or unreadable at $token_file — refresh required"
+    note "no readable registry JWT at $token_file (normal between releases)"
 fi
 
-if [ ! -t 0 ]; then
-    fail "no TTY for the interactive '$login_method' device-code login — run 'make registry-login' first, then retry"
-fi
-
-"$publisher" login "$login_method"
-
-remaining="$(registry_jwt_remaining_minutes)" || fail "login completed but the token at $token_file is still unreadable"
-if [ "$remaining" -lt "$min_valid_minutes" ]; then
-    fail "refreshed token already has only ${remaining}m validity (need ${min_valid_minutes}m)"
-fi
-note "registry JWT refreshed (${remaining}m left)"
+note "REMINDER: registry-publish runs '$(basename "$publisher") login $login_method' near the END of the pipeline — be at a browser then; the device code expires in ~1 minute"
