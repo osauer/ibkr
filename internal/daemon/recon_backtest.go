@@ -70,10 +70,14 @@ func (s *Server) buildReconBacktest() *rpc.ReconBacktestResult {
 
 	ctx := s.riskCapital.ReplayContext()
 	res.GenesisAt = ctx.GenesisAt
+	matchableFlows, baseline := partitionReconBaselineFlows(merged.flows, ctx)
+	baselineByLine := make(map[string]bool, len(baseline))
+	for _, row := range baseline {
+		baselineByLine[row.LineID] = true
+	}
 	events := replayCapitalFlowEvents()
-	matchedExceptions, matched := matchReconFlows(merged.flows, events, rc)
+	matchedExceptions, matched := matchReconFlows(matchableFlows, events, rc)
 	exceptions := append(merged.exceptions, matchedExceptions...)
-	labelPreGenesisExceptions(exceptions, ctx.GenesisAt)
 	applyReconDismissals(exceptions)
 	exceptionByLine := make(map[string]rpc.ReconException, len(exceptions))
 	for _, ex := range exceptions {
@@ -96,18 +100,17 @@ func (s *Server) buildReconBacktest() *rpc.ReconBacktestResult {
 			LineID: flow.id, Type: flow.typ, Description: flow.desc,
 			ValueDate: flow.valueDate, AmountBase: &amount,
 		}
-		if matched[flow.id] {
+		if baselineByLine[flow.id] {
+			row.Status = rpc.ReconBaseline
+		} else if matched[flow.id] {
 			row.Status = "matched"
 		} else if ex, ok := exceptionByLine[flow.id]; ok {
 			row.Status = ex.Category
 			row.Dismissed = ex.Dismissed
 		}
-		row.PreGenesis = !ctx.GenesisAt.IsZero() && utcDateBefore(flow.valueDate, ctx.GenesisAt)
+		row.PreGenesis = baselineByLine[flow.id]
 		res.Flows = append(res.Flows, row)
 		res.FlowCounts[row.Status]++
-		if row.PreGenesis {
-			res.FlowCounts["pre_genesis"]++
-		}
 		if row.Dismissed {
 			res.FlowCounts["dismissed"]++
 		}

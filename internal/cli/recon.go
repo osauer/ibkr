@@ -107,6 +107,21 @@ func runReconShow(ctx context.Context, env *Env, args []string) int {
 			fmt.Fprintf(env.Stdout, "      dismissed: %s\n", ex.DismissReason)
 		}
 	}
+	if len(res.Baseline) > 0 {
+		fmt.Fprintf(env.Stdout, "\n  baseline (pre-genesis, before %s): %d flow(s) — no action needed\n",
+			res.GenesisAt.UTC().Format("2006-01-02"), len(res.Baseline))
+		for _, row := range res.Baseline {
+			amount := "—"
+			if row.AmountBase != nil {
+				amount = fmt.Sprintf("%.2f", *row.AmountBase)
+			}
+			fmt.Fprintf(env.Stdout, "    %s  %s  %s", row.ValueDate.UTC().Format("2006-01-02"), row.Type, amount)
+			if row.Description != "" {
+				fmt.Fprintf(env.Stdout, "  %s", row.Description)
+			}
+			fmt.Fprintln(env.Stdout)
+		}
+	}
 	if res.Equity != nil {
 		fmt.Fprintf(env.Stdout, "\n  equity check: statement %s %.2f", res.Equity.StatementDate.Format("2006-01-02"), res.Equity.StatementTotalBase)
 		if res.Equity.DivergencePct != nil {

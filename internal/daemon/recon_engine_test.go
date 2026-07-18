@@ -68,6 +68,13 @@ func declare(t *testing.T, s *Server, typ string, amount float64, effectiveAt st
 
 func recentGenerated() string { return time.Now().UTC().Format("20060102") + ";060000" }
 
+func seedReconRuntime(s *Server, genesis time.Time) {
+	s.riskCapital.mu.Lock()
+	defer s.riskCapital.mu.Unlock()
+	s.riskCapital.state.GenesisAt = genesis
+	s.riskCapital.state.Seeded = true
+}
+
 func TestReconMatchAndCategories(t *testing.T) {
 	s := newReconTestServer(t)
 	gen := recentGenerated()
@@ -118,6 +125,7 @@ func TestReconMissingCashAmountIsUncategorized(t *testing.T) {
 	s := newReconTestServer(t)
 	writeFlexFixture(t, "flex-missing-amount.xml", recentGenerated(), "20260706", "20260712",
 		`   <CashTransactions><CashTransaction transactionID="missing-amount" type="Deposits/Withdrawals" currency="EUR" fxRateToBase="1" dateTime="20260708;120000" settleDate="20260708" description="FIXTURE" /></CashTransactions>`)
+	seedReconRuntime(s, time.Date(2026, 7, 9, 15, 0, 0, 0, time.UTC))
 
 	rep := s.buildReconReport()
 	if rep.Counts[rpc.ReconUncategorized] != 1 || rep.Unresolved != 1 {
@@ -125,6 +133,9 @@ func TestReconMissingCashAmountIsUncategorized(t *testing.T) {
 	}
 	if len(rep.Exceptions) != 1 || rep.Exceptions[0].AmountBase != nil || rep.Exceptions[0].Note != "flow line without a usable base amount" {
 		t.Fatalf("exception = %+v, want missing-base flow exception", rep.Exceptions)
+	}
+	if len(rep.Baseline) != 0 || rep.Counts[rpc.ReconBaseline] != 0 {
+		t.Fatalf("amountless pre-genesis flow was baselined: baseline=%+v counts=%v", rep.Baseline, rep.Counts)
 	}
 }
 
@@ -197,33 +208,95 @@ func TestReconEquityCheckSameDayOnly(t *testing.T) {
 	}
 }
 
-func TestReconPreGenesisLabeling(t *testing.T) {
+func TestReconPreGenesisBaseline(t *testing.T) {
 	s := newReconTestServer(t)
 	writeFlexFixture(t, "flex-genesis.xml", recentGenerated(), "20260701", "20260705",
 		cashLine("before", "Deposits/Withdrawals", -500, "20260701")+"\n"+
 			cashLine("after", "Deposits/Withdrawals", -600, "20260704"))
 
-	withoutGenesis := s.buildReconReport()
+	unseeded := s.buildReconReport()
+	if len(unseeded.Baseline) != 0 || unseeded.Counts[rpc.ReconMissingFromLedger] != 2 || unseeded.Unresolved != 2 {
+		t.Fatalf("unseeded report baselined flows: baseline=%+v counts=%v unresolved=%d", unseeded.Baseline, unseeded.Counts, unseeded.Unresolved)
+	}
+
+	genesis := time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC)
 	s.riskCapital.mu.Lock()
-	s.riskCapital.state.GenesisAt = time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC)
+	s.riskCapital.state.GenesisAt = genesis
 	s.riskCapital.mu.Unlock()
-	withGenesis := s.buildReconReport()
-	if withGenesis.ReportID != withoutGenesis.ReportID {
-		t.Fatalf("pre-genesis disclosure changed report id: %s vs %s", withoutGenesis.ReportID, withGenesis.ReportID)
+	staleGenesis := s.buildReconReport()
+	if len(staleGenesis.Baseline) != 0 || staleGenesis.Counts[rpc.ReconMissingFromLedger] != 2 {
+		t.Fatalf("unseeded state with genesis baselined flows: baseline=%+v counts=%v", staleGenesis.Baseline, staleGenesis.Counts)
 	}
-	if withGenesis.Counts[rpc.ReconMissingFromLedger] != 2 || withGenesis.Unresolved != 2 {
-		t.Fatalf("label changed exception semantics: counts=%v unresolved=%d", withGenesis.Counts, withGenesis.Unresolved)
+	s.riskCapital.mu.Lock()
+	s.riskCapital.state.GenesisAt = time.Time{}
+	s.riskCapital.state.Seeded = true
+	s.riskCapital.mu.Unlock()
+	seededWithoutGenesis := s.buildReconReport()
+	if len(seededWithoutGenesis.Baseline) != 0 || seededWithoutGenesis.Counts[rpc.ReconMissingFromLedger] != 2 {
+		t.Fatalf("seeded state without genesis baselined flows: baseline=%+v counts=%v", seededWithoutGenesis.Baseline, seededWithoutGenesis.Counts)
 	}
-	byID := make(map[string]rpc.ReconException)
-	for _, ex := range withGenesis.Exceptions {
-		byID[ex.LineID] = ex
+	seedReconRuntime(s, genesis)
+	seeded := s.buildReconReport()
+	if seeded.ReportID == unseeded.ReportID {
+		t.Fatalf("baseline classification did not change report id: %s", seeded.ReportID)
 	}
-	before := byID["cash-before"]
-	if !before.PreGenesis || before.Note != "flow predates runtime state genesis — if it is embedded in the seeded baseline, dismiss it with a reason; otherwise declare it" {
-		t.Fatalf("before-genesis exception = %+v", before)
+	if !seeded.GenesisAt.Equal(genesis) || seeded.Counts[rpc.ReconBaseline] != 1 || seeded.Counts[rpc.ReconMissingFromLedger] != 1 || seeded.Unresolved != 1 {
+		t.Fatalf("seeded report: genesis=%s counts=%v unresolved=%d", seeded.GenesisAt, seeded.Counts, seeded.Unresolved)
 	}
-	if after := byID["cash-after"]; after.PreGenesis {
-		t.Fatalf("after-genesis exception = %+v, want no label", after)
+	if len(seeded.Baseline) != 1 || len(seeded.Exceptions) != 1 || seeded.Exceptions[0].LineID != "cash-after" {
+		t.Fatalf("baseline=%+v exceptions=%+v", seeded.Baseline, seeded.Exceptions)
+	}
+	before := seeded.Baseline[0]
+	if before.LineID != "cash-before" || before.Category != rpc.ReconBaseline || !before.PreGenesis || before.AmountBase == nil || *before.AmountBase != -500 ||
+		before.Note != "embedded in the seeded baseline (pre-genesis); no ledger event belongs here" {
+		t.Fatalf("baseline row = %+v", before)
+	}
+
+	declare(t, s, "withdrawal", 600, "2026-07-04")
+	clean := s.buildReconReport()
+	if clean.Unresolved != 0 || len(clean.Baseline) != 1 || clean.Counts[rpc.ReconBaseline] != 1 || clean.Counts["matched"] != 1 {
+		t.Fatalf("resolved report: baseline=%+v counts=%v unresolved=%d", clean.Baseline, clean.Counts, clean.Unresolved)
+	}
+	if _, err := s.handleRiskPolicyCapitalEvent(context.Background(), rawParams(t, rpc.CapitalEventParams{
+		Type: "reconcile", Report: clean.ReportID, Origin: rpc.OrderOriginHumanTTY,
+	})); err != nil {
+		t.Fatalf("sign-off with baseline rows: %v", err)
+	}
+}
+
+func TestReconPreGenesisRestatementChangesReportID(t *testing.T) {
+	s := newReconTestServer(t)
+	generated := recentGenerated()
+	writeFlexFixture(t, "flex-restated.xml", generated, "20260701", "20260705",
+		cashLine("pre-one", "Deposits/Withdrawals", 500, "20260701"))
+	seedReconRuntime(s, time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC))
+
+	before := s.buildReconReport()
+	writeFlexFixture(t, "flex-restated.xml", generated, "20260701", "20260705",
+		cashLine("pre-one", "Deposits/Withdrawals", 500, "20260701")+"\n"+
+			cashLine("pre-two", "Deposits/Withdrawals", -300, "20260702"))
+	after := s.buildReconReport()
+	if len(before.Baseline) != 1 || len(after.Baseline) != 2 {
+		t.Fatalf("baseline rows before=%+v after=%+v", before.Baseline, after.Baseline)
+	}
+	if after.ReportID == before.ReportID {
+		t.Fatalf("new backdated baseline line did not change report id: %s", after.ReportID)
+	}
+}
+
+func TestReconPreGenesisLedgerEventStaysLoud(t *testing.T) {
+	s := newReconTestServer(t)
+	writeFlexFixture(t, "flex-ledger-only.xml", recentGenerated(), "20260701", "20260705",
+		cashLine("pre", "Deposits/Withdrawals", 700, "20260701")+"\n"+equityRow("20260705", 100000))
+	seedReconRuntime(s, time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC))
+	declare(t, s, "deposit", 700, "2026-07-01")
+
+	rep := s.buildReconReport()
+	if len(rep.Baseline) != 1 || rep.Counts[rpc.ReconBaseline] != 1 || rep.Counts[rpc.ReconLedgerOnly] != 1 || rep.Unresolved != 1 {
+		t.Fatalf("pre-genesis ledger event was not loud: baseline=%+v counts=%v unresolved=%d", rep.Baseline, rep.Counts, rep.Unresolved)
+	}
+	if len(rep.Exceptions) != 1 || rep.Exceptions[0].Category != rpc.ReconLedgerOnly || rep.Exceptions[0].EventAt.Format("2006-01-02") != "2026-07-01" {
+		t.Fatalf("ledger-only exception = %+v", rep.Exceptions)
 	}
 }
 

@@ -41,6 +41,11 @@ const (
 	ReconUncategorized     = "uncategorized"
 )
 
+// ReconBaseline is not an exception category. It identifies pre-genesis
+// statement flows whose one valid treatment is inclusion in the seeded
+// baseline (operator decision 2026-07-18).
+const ReconBaseline = "baseline"
+
 // ReconSnapshotParams tunes one snapshot call.
 type ReconSnapshotParams struct {
 	// Refresh kicks one background statement fetch (single-flight); the
@@ -48,8 +53,8 @@ type ReconSnapshotParams struct {
 	Refresh bool `json:"refresh,omitempty"`
 }
 
-// ReconException is one line the operator must look at (or has resolved
-// by dismissal). Amounts are base-currency and stay on this local surface.
+// ReconException is the shared row shape for an exception or disclosed
+// baseline flow. Amounts are base-currency and stay on this local surface.
 type ReconException struct {
 	LineID      string    `json:"line_id"`
 	Category    string    `json:"category"`
@@ -62,10 +67,8 @@ type ReconException struct {
 	EventAt         time.Time `json:"event_at,omitzero"`
 	EventAmountBase *float64  `json:"event_amount_base,omitempty"`
 	// PreGenesis marks a flow value-dated before the runtime capital
-	// state's genesis: it is already embedded in the seeded baseline and,
-	// once reviewed, resolves by a journaled dismissal — it is disclosed
-	// here, never auto-excluded (a restatement inside an attested window
-	// must still surface).
+	// state's genesis. Such usable statement flows are returned in
+	// ReconResult.Baseline when the runtime state is seeded.
 	PreGenesis    bool   `json:"pre_genesis,omitempty"`
 	Note          string `json:"note,omitempty"`
 	Dismissed     bool   `json:"dismissed,omitempty"`
@@ -95,8 +98,8 @@ type ReconBacktestFlow struct {
 	ValueDate   time.Time `json:"value_date,omitzero"`
 	AmountBase  *float64  `json:"amount_base,omitempty"`
 	PreGenesis  bool      `json:"pre_genesis,omitempty"`
-	// Status is "matched" or the recon exception category the flow
-	// carries on the current report.
+	// Status is "matched", ReconBaseline, or the recon exception category
+	// the flow carries on the current report.
 	Status    string `json:"status"`
 	Dismissed bool   `json:"dismissed,omitempty"`
 }
@@ -161,16 +164,18 @@ type ReconFetchStatus struct {
 type ReconResult struct {
 	AsOf   time.Time `json:"as_of"`
 	Status string    `json:"status"`
-	// ReportID pins the exact exception set; the reconcile verb must
-	// reference it and refuses when unresolved exceptions remain.
+	// ReportID pins the exact exception and baseline sets; the reconcile
+	// verb must reference it and refuses when unresolved exceptions remain.
 	ReportID string `json:"report_id,omitempty"`
 	// StatementAsOf is when the newest ingested statement was generated
 	// by IBKR — the freshness the max_report_age_days policy key bounds.
 	StatementAsOf time.Time         `json:"statement_as_of,omitzero"`
 	CoverageFrom  time.Time         `json:"coverage_from,omitzero"`
 	CoverageTo    time.Time         `json:"coverage_to,omitzero"`
+	GenesisAt     time.Time         `json:"genesis_at,omitzero"`
 	Counts        map[string]int    `json:"counts,omitempty"`
 	Exceptions    []ReconException  `json:"exceptions,omitempty"`
+	Baseline      []ReconException  `json:"baseline,omitempty"`
 	Unresolved    int               `json:"unresolved"`
 	Equity        *ReconEquityCheck `json:"equity,omitempty"`
 	Fetch         ReconFetchStatus  `json:"fetch"`

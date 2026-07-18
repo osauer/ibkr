@@ -19,9 +19,9 @@ import (
 // Reconciliation engine (docs/design/post-trade-truth.md): matches broker
 // statement flows against the declared capital-event ledger under the
 // constitution's [recon] policy keys. Deterministic and regenerated from
-// retained files on every call — the report id pins the exception set a
-// reconcile signs off. Never-false-match: an ambiguous pairing is an
-// exception, never a best-effort pick.
+// retained files on every call — the report id pins the exception and
+// baseline sets a reconcile signs off. Never-false-match: an ambiguous
+// pairing is an exception, never a best-effort pick.
 
 // reconFlow is one statement-side flow candidate after merge.
 type reconFlow struct {
@@ -87,14 +87,16 @@ func (s *Server) buildReconReport() *rpc.ReconResult {
 	res.CoverageFrom = merged.coverageFrom
 	res.CoverageTo = merged.coverageTo
 
+	ctx := s.riskCapital.ReplayContext()
+	res.GenesisAt = ctx.GenesisAt
+	matchableFlows, baseline := partitionReconBaselineFlows(merged.flows, ctx)
 	events := replayCapitalFlowEvents()
-	matchedExceptions, matched := matchReconFlows(merged.flows, events, rc)
+	matchedExceptions, matched := matchReconFlows(matchableFlows, events, rc)
 	exceptions := append(merged.exceptions, matchedExceptions...)
-	genesis := s.riskCapital.ReplayContext().GenesisAt
-	labelPreGenesisExceptions(exceptions, genesis)
 	applyReconDismissals(exceptions)
 
 	sort.Slice(exceptions, func(i, j int) bool { return exceptions[i].LineID < exceptions[j].LineID })
+	sort.Slice(baseline, func(i, j int) bool { return baseline[i].LineID < baseline[j].LineID })
 	for _, ex := range exceptions {
 		res.Counts[ex.Category]++
 		if !ex.Dismissed {
@@ -102,9 +104,11 @@ func (s *Server) buildReconReport() *rpc.ReconResult {
 		}
 	}
 	res.Counts["matched"] = len(matched)
+	res.Counts[rpc.ReconBaseline] = len(baseline)
 	res.Exceptions = exceptions
+	res.Baseline = baseline
 	res.Equity = s.reconEquityCheck(merged.equityByDay)
-	res.ReportID = reconReportID(exceptions, res.CoverageFrom, res.CoverageTo, res.StatementAsOf, pol)
+	res.ReportID = reconReportID(exceptions, baseline, res.CoverageFrom, res.CoverageTo, res.StatementAsOf, pol)
 	res.InputHealth = health
 	return res
 }
@@ -302,17 +306,30 @@ func matchReconFlows(flows []reconFlow, events []capitalEventV1, rc *risk.Consti
 	return out, matched
 }
 
-func labelPreGenesisExceptions(exceptions []rpc.ReconException, genesis time.Time) {
-	if genesis.IsZero() {
-		return
+func partitionReconBaselineFlows(flows []reconFlow, ctx capitalReplayContext) ([]reconFlow, []rpc.ReconException) {
+	if !ctx.Seeded || ctx.GenesisAt.IsZero() {
+		return flows, nil
 	}
-	for i := range exceptions {
-		ex := &exceptions[i]
-		if ex.Category == rpc.ReconMissingFromLedger && utcDateBefore(ex.ValueDate, genesis) {
-			ex.PreGenesis = true
-			ex.Note = "flow predates runtime state genesis — if it is embedded in the seeded baseline, dismiss it with a reason; otherwise declare it"
+	matchable := make([]reconFlow, 0, len(flows))
+	var baseline []rpc.ReconException
+	for _, flow := range flows {
+		if !utcDateBefore(flow.valueDate, ctx.GenesisAt) {
+			matchable = append(matchable, flow)
+			continue
 		}
+		amount := flow.amountBase
+		baseline = append(baseline, rpc.ReconException{
+			LineID:      flow.id,
+			Category:    rpc.ReconBaseline,
+			Type:        flow.typ,
+			Description: flow.desc,
+			ValueDate:   flow.valueDate,
+			AmountBase:  &amount,
+			PreGenesis:  true,
+			Note:        "embedded in the seeded baseline (pre-genesis); no ledger event belongs here",
+		})
 	}
+	return matchable, baseline
 }
 
 func utcDateBefore(a, b time.Time) bool {
@@ -431,9 +448,9 @@ func (s *Server) reconEquityCheck(equityByDay map[string]flexstmt.EquityRow) *rp
 	return check
 }
 
-// reconReportID pins the exception set, coverage, statement freshness, and
-// the policy identity that classified it.
-func reconReportID(exceptions []rpc.ReconException, from, to, stmtAsOf time.Time, pol *risk.Constitution) string {
+// reconReportID pins the exception and baseline sets, coverage, statement
+// freshness, and the policy identity that classified them.
+func reconReportID(exceptions, baseline []rpc.ReconException, from, to, stmtAsOf time.Time, pol *risk.Constitution) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s|%s|%s|", from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), stmtAsOf.UTC().Format(time.RFC3339))
 	if pol != nil {
@@ -441,6 +458,9 @@ func reconReportID(exceptions []rpc.ReconException, from, to, stmtAsOf time.Time
 	}
 	for _, ex := range exceptions {
 		fmt.Fprintf(h, "%s|%s|%t\n", ex.LineID, ex.Category, ex.Dismissed)
+	}
+	for _, row := range baseline {
+		fmt.Fprintf(h, "%s|%s|%t\n", row.LineID, rpc.ReconBaseline, false)
 	}
 	return "recon-" + hex.EncodeToString(h.Sum(nil))[:16]
 }

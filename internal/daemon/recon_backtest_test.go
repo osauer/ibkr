@@ -47,7 +47,7 @@ func TestReconBacktestReplayAndFlows(t *testing.T) {
 	if res.GenesisAt != genesis || res.EquityDays != 5 {
 		t.Fatalf("genesis=%s equity days=%d", res.GenesisAt, res.EquityDays)
 	}
-	if res.FlowCounts["matched"] != 1 || res.FlowCounts[rpc.ReconMissingFromLedger] != 1 || res.FlowCounts["pre_genesis"] != 1 {
+	if res.FlowCounts["matched"] != 1 || res.FlowCounts[rpc.ReconBaseline] != 1 || res.FlowCounts[rpc.ReconMissingFromLedger] != 0 {
 		t.Fatalf("flow counts = %v", res.FlowCounts)
 	}
 	flows := make(map[string]rpc.ReconBacktestFlow)
@@ -60,7 +60,7 @@ func TestReconBacktestReplayAndFlows(t *testing.T) {
 	if got := flows["cash-match"]; got.Status != "matched" || got.PreGenesis {
 		t.Fatalf("matched flow = %+v", got)
 	}
-	if got := flows["cash-pre"]; got.Status != rpc.ReconMissingFromLedger || !got.PreGenesis {
+	if got := flows["cash-pre"]; got.Status != rpc.ReconBaseline || !got.PreGenesis {
 		t.Fatalf("pre-genesis flow = %+v", got)
 	}
 	if res.ClassifiedCounts["Dividends"] != 1 || res.UncategorizedCount != 1 {
