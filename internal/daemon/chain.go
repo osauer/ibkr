@@ -676,7 +676,11 @@ func (s *Server) chainSpotForATM(ctx context.Context, c *ibkrlib.Connector, symb
 
 func (s *Server) chainSnapshotSpot(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) chainSpotSelection {
 	if s == nil || s.subs == nil {
-		bid, ask, last, mark, closePx, dt := briefSnapshotFull(ctx, c, symbol, timeout)
+		var warnf func(string, ...any)
+		if s != nil {
+			warnf = s.warnf
+		}
+		bid, ask, last, mark, closePx, dt := briefSnapshotFull(ctx, c, symbol, timeout, warnf)
 		return chainSpotFromSnapshot(bid, ask, last, mark, closePx, dt, time.Now())
 	}
 	release, err := s.subs.Hold(ctx, symbol)

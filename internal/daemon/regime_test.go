@@ -23,8 +23,8 @@ import (
 // path the fetchers gate on.
 //
 // warnLog accumulates log lines a fetcher emits on partial failure
-// (history error, insufficient bars). Tests assert against it to
-// verify the operator-visible diagnostic landed; nil here means the
+// (snapshot miss, history error, insufficient bars). Tests assert against
+// it to verify the operator-visible diagnostic landed; nil here means the
 // fetcher had no failures worth logging.
 //
 // historyCalls records the days argument the production fetcher
@@ -313,6 +313,63 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 		}
 		if len(got.FieldsMissing) != 0 {
 			t.Errorf("fields_missing=%v, want empty", got.FieldsMissing)
+		}
+	})
+
+	t.Run("spot_miss_serves_official_close_as_stale", func(t *testing.T) {
+		var warns []string
+		deps := (&fakeDeps{
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, prevClose: 525.0, week52High: 540.0, dataType: rpc.MarketDataLive},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+			},
+			warnLog: &warns,
+		}).build()
+
+		got := fetchRegimeHYGSPY(ctx, deps)
+		if got.Status != rpc.RegimeStatusStale {
+			t.Fatalf("status=%q, want stale", got.Status)
+		}
+		if got.HYGPrice == nil || *got.HYGPrice != 79.5 {
+			t.Errorf("HYGPrice=%v, want latest official close 79.5", got.HYGPrice)
+		}
+		if got.HYGDataType != "close" {
+			t.Errorf("HYGDataType=%q, want close", got.HYGDataType)
+		}
+		if got.HYGQuality == nil || !strings.Contains(got.HYGQuality.Source, "official daily close") || !strings.Contains(got.HYGQuality.Source, "spot-miss banding input") {
+			t.Errorf("HYGQuality=%+v, want spot-miss official-close provenance", got.HYGQuality)
+		}
+		if got.HYG50DMA == nil || *got.HYG50DMA != 79.5 {
+			t.Errorf("HYG50DMA=%v, want 79.5", got.HYG50DMA)
+		}
+		if got.SPYPrice == nil || *got.SPYPrice != 530.0 || got.SPYPrevClose == nil || *got.SPYPrevClose != 525.0 || got.SPY52WHigh == nil || *got.SPY52WHigh != 540.0 {
+			t.Errorf("SPY fields not populated: price=%v prev_close=%v 52w_high=%v", got.SPYPrice, got.SPYPrevClose, got.SPY52WHigh)
+		}
+		if !slices.Equal(got.FieldsMissing, []string{"hyg_spot_tick"}) {
+			t.Errorf("fields_missing=%v, want exactly [hyg_spot_tick]", got.FieldsMissing)
+		}
+		if len(warns) != 1 || !slices.ContainsFunc(warns, func(s string) bool {
+			return strings.Contains(s, "HYG spot subscribe delivered no tick") && strings.Contains(s, "official close")
+		}) {
+			t.Errorf("expected exactly one spot-miss fallback warning, got %v", warns)
+		}
+	})
+
+	t.Run("spot_miss_without_history_stays_error", func(t *testing.T) {
+		deps := (&fakeDeps{
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, week52High: 540.0, dataType: rpc.MarketDataLive},
+			},
+		}).build()
+
+		got := fetchRegimeHYGSPY(ctx, deps)
+		if got.Status != rpc.RegimeStatusError {
+			t.Fatalf("status=%q, want error", got.Status)
+		}
+		if got.ErrorMessage != "HYG or SPY spot missing" {
+			t.Errorf("error_message=%q, want existing missing-spot error", got.ErrorMessage)
 		}
 	})
 
@@ -967,12 +1024,13 @@ func TestFetchRegimeUSDJPY(t *testing.T) {
 // the wire shape between two calls — exactly what release-verify.sh's
 // regime-twice step does against a live gateway.
 //
-// The four sub-cases cover the live-gateway risk surface called out by
+// The five sub-cases cover the live-gateway risk surface called out by
 // the senior verification review: VIX3M timing out (RegimeStatusError),
-// USD.JPY FX tick missing (RegimeStatusUnavailable), SPY tick 165
-// missing (row stays ok, field moves into FieldsMissing), and the
-// SPY 52w-high fallback collapsing when history thins (advisory field
-// stays missing rather than holding the prior bar).
+// USD.JPY FX tick missing (history fallback, RegimeStatusStale), HYG spot
+// missing (official-close fallback, RegimeStatusStale), SPY tick 165 missing
+// (row stays ok, field moves into FieldsMissing), and the SPY 52w-high
+// fallback collapsing when history thins (advisory field stays missing
+// rather than holding the prior bar).
 func TestRegime_CallSequence_HonestUnavailable(t *testing.T) {
 	ctx := context.Background()
 
@@ -1031,6 +1089,39 @@ func TestRegime_CallSequence_HonestUnavailable(t *testing.T) {
 		}
 		if second.Last == nil || *second.Last != 149.0 {
 			t.Errorf("call 2 last=%v, want latest midpoint close 149.0 (no carry-over from live tick)", second.Last)
+		}
+	})
+
+	t.Run("hyg_spot_drops_on_call_2_uses_official_close_without_carryover", func(t *testing.T) {
+		deps := &fakeDeps{
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataLive},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 530.0, week52High: 540.0, dataType: rpc.MarketDataLive},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+			},
+		}
+		built := deps.build()
+
+		first := fetchRegimeHYGSPY(ctx, built)
+		if first.Status != rpc.RegimeStatusOK {
+			t.Fatalf("call 1 status=%q, want ok (precondition)", first.Status)
+		}
+
+		delete(deps.snapshots, "HYG")
+
+		second := fetchRegimeHYGSPY(ctx, built)
+		if second.Status != rpc.RegimeStatusStale {
+			t.Errorf("call 2 status=%q, want stale official-close fallback", second.Status)
+		}
+		if second.HYGPrice == nil || *second.HYGPrice != 79.5 {
+			t.Errorf("call 2 HYGPrice=%v, want official close 79.5 (no carry-over from live tick 80.0)", second.HYGPrice)
+		}
+		if second.HYGDataType != "close" {
+			t.Errorf("call 2 HYGDataType=%q, want close", second.HYGDataType)
 		}
 	})
 

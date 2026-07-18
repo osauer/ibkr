@@ -230,7 +230,7 @@ the band thresholds; values live in `internal/rpc/regime_policy.go`):
 | --- | --- | --- | --- | --- | --- |
 | VIX/VIX3M | ratio >= 1.00 | ratio >= 1.05 | 2 | same-session tick | ratio < 0.98 |
 | VVIX | >= 110 | >= 120 | 2 | latest official daily close (<= 4d) | < 105 |
-| HYG/SPY | HYG >= 0.25% below 50DMA | >= 1.0% below | 2 | RTH tick or latest official close (off-hours banding input is the close, never a thin pre/post print) | HYG closes back above 50DMA |
+| HYG/SPY | HYG >= 0.25% below 50DMA | >= 1.0% below | 2 | RTH tick or latest official close (off-hours banding input is the close, never a thin pre/post print; a missing spot tick falls back to the close and marks the row stale) | HYG closes back above 50DMA |
 | HY OAS | band is the gate | n/a | 1 | series <= 7d | < 5.25 and widening < 0.85 pp |
 | Funding | band is the gate | n/a | 1 | series <= 7d | < 65 bp |
 | USD/JPY | band is the gate (speed is depth) | n/a | 1 | same-day tick/close | yen move < 1.5% |

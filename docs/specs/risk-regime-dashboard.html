@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: risk-regime-dashboard.md sha256:db46481ca0e6b73133c8fa5f4613d88fea7748f98fa41f11331c627da28e64ec -->
+<!-- md-source: risk-regime-dashboard.md sha256:ce27f0dda4869e32d9965e325b809e681fb98457d5edfc0e86a570a770202e84 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -282,7 +282,7 @@
 <tbody>
 <tr><td>VIX/VIX3M</td><td>ratio &gt;= 1.00</td><td>ratio &gt;= 1.05</td><td>2</td><td>same-session tick</td><td>ratio &lt; 0.98</td></tr>
 <tr><td>VVIX</td><td>&gt;= 110</td><td>&gt;= 120</td><td>2</td><td>latest official daily close (&lt;= 4d)</td><td>&lt; 105</td></tr>
-<tr><td>HYG/SPY</td><td>HYG &gt;= 0.25% below 50DMA</td><td>&gt;= 1.0% below</td><td>2</td><td>RTH tick or latest official close (off-hours banding input is the close, never a thin pre/post print)</td><td>HYG closes back above 50DMA</td></tr>
+<tr><td>HYG/SPY</td><td>HYG &gt;= 0.25% below 50DMA</td><td>&gt;= 1.0% below</td><td>2</td><td>RTH tick or latest official close (off-hours banding input is the close, never a thin pre/post print; a missing spot tick falls back to the close and marks the row stale)</td><td>HYG closes back above 50DMA</td></tr>
 <tr><td>HY OAS</td><td>band is the gate</td><td>n/a</td><td>1</td><td>series &lt;= 7d</td><td>&lt; 5.25 and widening &lt; 0.85 pp</td></tr>
 <tr><td>Funding</td><td>band is the gate</td><td>n/a</td><td>1</td><td>series &lt;= 7d</td><td>&lt; 65 bp</td></tr>
 <tr><td>USD/JPY</td><td>band is the gate (speed is depth)</td><td>n/a</td><td>1</td><td>same-day tick/close</td><td>yen move &lt; 1.5%</td></tr>

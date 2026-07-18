@@ -15,8 +15,8 @@ import (
 //
 // Used by the regime VIX fetcher so the dashboard header can carry
 // "VIX 18.4 −1.2%" alongside the term-structure ratio.
-func briefSnapshotPriceWithClose(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (price, prevClose float64, dataType string) {
-	bid, ask, last, mark, closePx, dt := briefSnapshotFull(ctx, c, symbol, timeout)
+func briefSnapshotPriceWithClose(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration, warnf func(string, ...any)) (price, prevClose float64, dataType string) {
+	bid, ask, last, mark, closePx, dt := briefSnapshotFull(ctx, c, symbol, timeout, warnf)
 	if dt == "" {
 		dt = "live"
 	}
@@ -61,7 +61,7 @@ func briefSnapshotPriceWithClose(ctx context.Context, c *ibkrlib.Connector, symb
 // PrevClose carries tick 9 (previous regular-session close) when it
 // lands in the same subscribe window — the regime HYG/SPY indicator
 // uses it to populate the dashboard's SPY day-change header.
-func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (price, prevClose, week52High float64, dataType string) {
+func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration, warnf func(string, ...any)) (price, prevClose, week52High float64, dataType string) {
 	if c == nil {
 		return 0, 0, 0, ""
 	}
@@ -69,7 +69,9 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 	// 165 (Misc Stats) is the only addition over briefSnapshotFull's
 	// list; the others are kept for API consistency with the
 	// established subscribe pattern.
-	_ = c.SubscribeMarketData(ctx, sym, []string{"100", "101", "104", "165"})
+	if err := c.SubscribeMarketData(ctx, sym, []string{"100", "101", "104", "165"}); err != nil && warnf != nil {
+		warnf("snapshot: SubscribeMarketData %s failed: %v", sym, err)
+	}
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
 	var bid, ask, last, mark float64
@@ -144,12 +146,14 @@ func briefSnapshotPriceWith52WHigh(ctx context.Context, c *ibkrlib.Connector, sy
 // callers fall back to it as a last resort. The data-type field is
 // populated regardless of which ticks landed so the renderer can
 // truthfully label the row "frozen" instead of pretending it's live.
-func briefSnapshotFull(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration) (bid, ask, last, mark, closePx float64, dataType string) {
+func briefSnapshotFull(ctx context.Context, c *ibkrlib.Connector, symbol string, timeout time.Duration, warnf func(string, ...any)) (bid, ask, last, mark, closePx float64, dataType string) {
 	if c == nil {
 		return 0, 0, 0, 0, 0, ""
 	}
 	sym := normSym(symbol)
-	_ = c.SubscribeMarketData(ctx, sym, []string{"100", "101", "104"})
+	if err := c.SubscribeMarketData(ctx, sym, []string{"100", "101", "104"}); err != nil && warnf != nil {
+		warnf("snapshot: SubscribeMarketData %s failed: %v", sym, err)
+	}
 	defer func() { _ = c.UnsubscribeMarketData(sym) }()
 
 	return briefSnapshotFullHeld(ctx, c, sym, timeout)

@@ -340,11 +340,11 @@ func runRegimeFanout(
 //     without spinning up a real daemon or gateway connection.
 //
 // logWarnf is the operator-visible signal for partial failures:
-// history-bar fetch errors and insufficient-bar truncations land here
-// rather than getting silently swallowed. A null sub-field in the
-// returned envelope only tells the consumer *that* a field is missing;
-// the daemon log tells them *why*. Tests inject a capture closure to
-// assert the right diagnostic landed.
+// snapshot subscribe errors, history-bar fetch errors, insufficient-bar
+// truncations, and history-close fallback use land here rather than getting
+// silently swallowed. A null or degraded field in the returned envelope only
+// tells the consumer *that* live data is missing; the daemon log tells them
+// *why*. Tests inject a capture closure to assert the right diagnostic landed.
 //
 // snapshotWith52WHigh is the SPY-specific seam: the default snapshot
 // path returns on the first price tick, too fast for IBKR's Misc
@@ -388,10 +388,10 @@ func productionRegimeDeps(c *ibkrlib.Connector, logWarnf func(format string, arg
 	}
 	return &regimeDeps{
 		snapshot: func(ctx context.Context, sym string, timeout time.Duration) (float64, float64, string) {
-			return briefSnapshotPriceWithClose(ctx, c, sym, timeout)
+			return briefSnapshotPriceWithClose(ctx, c, sym, timeout, logWarnf)
 		},
 		snapshotWith52WHigh: func(ctx context.Context, sym string, timeout time.Duration) (float64, float64, float64, string) {
-			return briefSnapshotPriceWith52WHigh(ctx, c, sym, timeout)
+			return briefSnapshotPriceWith52WHigh(ctx, c, sym, timeout, logWarnf)
 		},
 		history: func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error) {
 			fetch := func(ctx context.Context, sym string, days int) ([]ibkrlib.HistoricalBar, error) {
@@ -593,7 +593,7 @@ func fetchRegimeVolOfVol(ctx context.Context, deps *regimeDeps) rpc.RegimeVolOfV
 	return out
 }
 
-const hygSpyNotes = "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when HYG is above its 50-day SMA; yellow when HYG breaks below its 50-day SMA; red when HYG is below its 50-day SMA while SPY remains within 3% of its 52-week high. Use the row's streak.sessions to distinguish an early one-session divergence from a sustained 5+ session credit downtrend. Observation window 2-4 weeks; single-day moves are noise. Confirmation gate: a red confirms only when HYG is at least 0.25% below the 50DMA for 2 sessions (or 1.0% below day one); outside regular hours the banding input is the latest official close, never a thin pre/post-market print."
+const hygSpyNotes = "HYG (high-yield corporate bond ETF) vs SPY context. Spec thresholds: green when HYG is above its 50-day SMA; yellow when HYG breaks below its 50-day SMA; red when HYG is below its 50-day SMA while SPY remains within 3% of its 52-week high. Use the row's streak.sessions to distinguish an early one-session divergence from a sustained 5+ session credit downtrend. Observation window 2-4 weeks; single-day moves are noise. Confirmation gate: a red confirms only when HYG is at least 0.25% below the 50DMA for 2 sessions (or 1.0% below day one); outside regular hours the banding input is the latest official close, never a thin pre/post-market print. When the live HYG spot is unavailable, the latest official close serves as the banding input and the row is marked stale."
 
 // HYGLookbackDays is the calendar-day window passed to the HMDS
 // history fetch when computing HYG's 50-day SMA. 50 trading days ≈ 70
@@ -610,14 +610,12 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	now := time.Now()
 
 	hyg, _, hygDT := boundedSnapshot(ctx, deps, "HYG", 5*time.Second)
-	if hyg <= 0 {
-		out.Status = rpc.RegimeStatusError
-		out.ErrorMessage = "HYG: no spot tick"
-		return out
+	hygSpotMissing := hyg <= 0
+	if !hygSpotMissing {
+		out.HYGPrice = new(hyg)
+		out.HYGDataType = hygDT
+		out.HYGQuality = firmTickQuality(now, hygDT, "HYG tick (ARCA)")
 	}
-	out.HYGPrice = new(hyg)
-	out.HYGDataType = hygDT
-	out.HYGQuality = firmTickQuality(now, hygDT, "HYG tick (ARCA)")
 
 	// SPY: pull spot + 52-week high in one combined subscribe so tick
 	// 165 (Misc Stats) has time to land. Either field may still come
@@ -700,15 +698,23 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 	// latest official daily close, never a thin pre/post-market print —
 	// the 2026-06-12 incident classified a credit red off a 7 bps
 	// pre-open wobble. The settled close is the newest cadence-fresh
-	// observation off-hours, so the row stays status ok. SPY keeps its
+	// observation off-hours, so a row with a spot tick stays status ok.
+	// The close also keeps the row bandable when the spot tick is missing
+	// at any hour; that degraded path is marked stale below. SPY keeps its
 	// tick: the 97%-of-52w-high condition carries a 3% buffer that a thin
 	// print cannot meaningfully move, and the SPY day-change tape fields
 	// must keep reflecting the live tape.
-	if !usEquityRTHOpen(now) && len(bars) > 0 {
+	if (out.HYGPrice == nil || !usEquityRTHOpen(now)) && len(bars) > 0 {
 		if c := bars[len(bars)-1].Close; c > 0 {
 			out.HYGPrice = new(c)
 			out.HYGDataType = "close"
-			out.HYGQuality = derivedQuality(historyBarAsOf(bars[len(bars)-1], now), "HYG latest official daily close (off-hours banding input)")
+			qualityLabel := "HYG latest official daily close (off-hours banding input)"
+			if hygSpotMissing {
+				qualityLabel = "HYG latest official daily close (spot-miss banding input)"
+				out.FieldsMissing = append(out.FieldsMissing, "hyg_spot_tick")
+				warnDeps(deps, "regime: HYG spot subscribe delivered no tick; latest official close is serving as banding input")
+			}
+			out.HYGQuality = derivedQuality(historyBarAsOf(bars[len(bars)-1], now), qualityLabel)
 		}
 	}
 
@@ -718,7 +724,7 @@ func fetchRegimeHYGSPY(ctx context.Context, deps *regimeDeps) rpc.RegimeHYGSPYDi
 		return out
 	}
 	out.Status = rpc.RegimeStatusOK
-	if out.HYGDataType != "close" && !rpc.IsLiveDataType(hygDT) {
+	if hygSpotMissing || (out.HYGDataType != "close" && !rpc.IsLiveDataType(hygDT)) {
 		out.Status = rpc.RegimeStatusStale
 	}
 	// Advisory sub-field annotations — the row's primary measurements
