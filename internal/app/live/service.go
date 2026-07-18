@@ -43,6 +43,7 @@ type Snapshot struct {
 	Regime        *rpc.RegimeMonitorResult   `json:"regime,omitempty"`
 	Canary        *rpc.CanaryResult          `json:"canary,omitempty"`
 	Rules         *rpc.RulesResult           `json:"rules,omitempty"`
+	Brief         *rpc.BriefResult           `json:"brief,omitempty"`
 	Trading       *rpc.TradingStatus         `json:"trading,omitempty"`
 	AutoTrade     *rpc.AutoTradeStatus       `json:"auto_trade,omitempty"`
 	Opportunities *rpc.OpportunitySnapshot   `json:"opportunities,omitempty"`
@@ -351,6 +352,18 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 			snap.Sources["rules"] = SourceMeta{UpdatedAt: now}
 			if s.changed("rules", rules) {
 				events = append(events, Event{Type: "rules", Data: rules})
+			}
+		}
+		// The brief composes canary and other daily-discipline inputs, so it
+		// shares this one-minute cadence instead of the five-second app poll.
+		if brief, err := s.client.Brief(ctx); err != nil {
+			errors = append(errors, sourceErr("brief", err, now))
+			snap.Sources["brief"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+		} else {
+			snap.Brief = brief
+			snap.Sources["brief"] = SourceMeta{UpdatedAt: now}
+			if s.changed("brief", brief) {
+				events = append(events, Event{Type: "brief", Data: brief})
 			}
 		}
 		s.mu.Lock()
@@ -921,6 +934,7 @@ func cloneSnapshot(in Snapshot) Snapshot {
 		out.MarketEvents = &events
 	}
 	out.Regime = cloneRegimeMonitor(in.Regime)
+	out.Brief = cloneBriefResult(in.Brief)
 	out.Settings = clonePlatformSettings(in.Settings)
 	if in.AutoTrade != nil {
 		autoTrade := *in.AutoTrade
@@ -940,6 +954,50 @@ func cloneSnapshot(in Snapshot) Snapshot {
 		out.Proposals = &proposals
 	}
 	return out
+}
+
+func cloneBriefResult(in *rpc.BriefResult) *rpc.BriefResult {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Market.Breadth.PctAbove50DMA = cloneValue(in.Market.Breadth.PctAbove50DMA)
+	out.Market.Breadth.PctAbove200DMA = cloneValue(in.Market.Breadth.PctAbove200DMA)
+	out.Market.Breadth.NetNewHighsPct = cloneValue(in.Market.Breadth.NetNewHighsPct)
+	out.Market.Gamma.Spot = cloneValue(in.Market.Gamma.Spot)
+	out.Market.Gamma.ZeroGamma = cloneValue(in.Market.Gamma.ZeroGamma)
+	out.Market.Gamma.GapPct = cloneValue(in.Market.Gamma.GapPct)
+	out.Calendar.MarketEvents = append([]rpc.BriefMarketEventRow(nil), in.Calendar.MarketEvents...)
+	for i := range out.Calendar.MarketEvents {
+		out.Calendar.MarketEvents[i].Symbols = append([]string(nil), in.Calendar.MarketEvents[i].Symbols...)
+	}
+	out.Portfolio.Account.EquityBase = cloneValue(in.Portfolio.Account.EquityBase)
+	out.Portfolio.Account.DailyPnLBase = cloneValue(in.Portfolio.Account.DailyPnLBase)
+	out.Portfolio.Movers.Rows = append([]rpc.BriefMover(nil), in.Portfolio.Movers.Rows...)
+	out.Portfolio.PremiumAtRisk.AmountBase = cloneValue(in.Portfolio.PremiumAtRisk.AmountBase)
+	out.Portfolio.HedgeCost.AmountBase = cloneValue(in.Portfolio.HedgeCost.AmountBase)
+	out.Portfolio.WorkingOrders.Count = cloneValue(in.Portfolio.WorkingOrders.Count)
+	out.RiskLimits.Capital.ConsumedPct = cloneValue(in.RiskLimits.Capital.ConsumedPct)
+	out.RiskLimits.Capital.DrawdownBase = cloneValue(in.RiskLimits.Capital.DrawdownBase)
+	out.RiskLimits.Capital.AdjustedPeakBase = cloneValue(in.RiskLimits.Capital.AdjustedPeakBase)
+	out.RiskLimits.Latch.AgeDays = cloneValue(in.RiskLimits.Latch.AgeDays)
+	out.RiskLimits.Overrides.Rows = append([]rpc.BriefOverride(nil), in.RiskLimits.Overrides.Rows...)
+	out.RiskLimits.PolicyDrift.Rows = append([]rpc.PolicyPinStatus(nil), in.RiskLimits.PolicyDrift.Rows...)
+	out.Process.Reconcile.DaysRemaining = cloneValue(in.Process.Reconcile.DaysRemaining)
+	out.Process.OneTap.Blockers = append([]string(nil), in.Process.OneTap.Blockers...)
+	out.Process.RulesDelta.Transitions = append([]rpc.BriefRuleTransition(nil), in.Process.RulesDelta.Transitions...)
+	out.Process.RulesDelta.Added = append([]string(nil), in.Process.RulesDelta.Added...)
+	out.Process.RulesDelta.Removed = append([]string(nil), in.Process.RulesDelta.Removed...)
+	out.Process.Artefacts.Rows = append([]rpc.BriefArtefact(nil), in.Process.Artefacts.Rows...)
+	return &out
+}
+
+func cloneValue[T any](in *T) *T {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func clonePlatformSettings(in *rpc.PlatformSettings) *rpc.PlatformSettings {

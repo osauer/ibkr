@@ -35,7 +35,6 @@
           "TWS MCP Server",
           "IB Gateway MCP Server",
           "IBKR Claude Desktop MCP",
-          "Best IBKR MCP server for Claude Code",
           "Portfolio review with Claude and IBKR",
           "osauer ibkr",
           "ibkr canary"
@@ -56,7 +55,7 @@
         "applicationSubCategory": "Model Context Protocol server",
         "operatingSystem": "macOS, Linux, Unix",
         "softwareVersion": "2.1.0",
-        "dateModified": "2026-06-20T06:44:00+02:00",
+        "dateModified": "2026-07-18T19:17:00+02:00",
         "offers": {
           "@type": "Offer",
           "price": "0",
@@ -79,6 +78,8 @@
           "Account and positions tools",
           "Stock and ETF quote resources",
           "Options, scanners, breadth, gamma, risk-regime, portfolio stress monitoring, and sizing tools",
+          "Operator-authored risk policy with advisory drawdown reporting (CLI)",
+          "Daily broker-statement ingestion and reconciliation (CLI)",
           "Read-side MCP boundary with no order-entry tools",
           "Experimental Canary remote app beta over HTTPS/WSS relay transport"
         ]
@@ -765,7 +766,7 @@ ibkr setup claude-desktop
         <article class="feature">
           <small>Terminal CLI</small>
           <h3>For fast checks</h3>
-          <p>Run commands such as <code>ibkr status</code>, <code>ibkr positions</code>, <code>ibkr canary</code>, <code>ibkr calendar</code>, <code>ibkr chain SPY</code>, and <code>ibkr regime</code>. Every data command supports JSON; the CLI is useful, but the Claude/MCP path is the main path.</p>
+          <p>Run commands such as <code>ibkr status</code>, <code>ibkr positions</code>, <code>ibkr canary</code>, <code>ibkr calendar</code>, <code>ibkr chain SPY</code>, and <code>ibkr regime</code>. Since v2.1 the CLI also carries the operator risk workflow: <code>ibkr policy show</code> reads the risk policy you declared and <code>ibkr recon</code> checks daily broker statements against it. Both are advisory. Every data command supports JSON; the CLI is useful, but the Claude/MCP path is the main path.</p>
         </article>
         <article class="feature">
           <small>Go library</small>

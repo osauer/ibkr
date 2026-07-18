@@ -1,5 +1,6 @@
 import { clearAlerts, enablePush, renderAlertMode, renderAlerts, renderSelectedAlert } from "./alerts.js";
 import { completePairing } from "./auth.js";
+import { renderBriefCard, setupBriefVisibility } from "./brief.js";
 import { canaryStageLabel, canarySummaryText, firstClause, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderMarketContext, renderRegimePanel, renderRulesCard } from "./canary.js";
 import { ensureRegimeCanaryExpansion, handleAccountPanelTap, handleExpandablePanelTap, handleOpportunitiesPanelTap, handlePortfolioPanelTap, handleProtectionPanelTap, handleUnderlyingPanelTap, renderTabs, resetViewportScroll, setAccountOverviewExpansion, setAccountValueVisible, setOpportunitiesExpansion, setProtectionExpansion, setRegimeCanaryExpansion, setupBottomTabs, syncAccountPrivacyState } from "./chrome.js";
 import { bootstrap, bootstrapWithRetry, refreshBootstrapIfSSEUnavailable, showPairing } from "./lifecycle.js";
@@ -48,6 +49,7 @@ function installSmokeHooks() {
 async function main() {
   resetViewportScroll();
   setupBottomTabs();
+  setupBriefVisibility();
   await navigator.serviceWorker?.register("/service-worker.js");
   const params = new URLSearchParams(location.search);
   const pair = params.get("pair");
@@ -86,6 +88,7 @@ function setupLiveRefreshLoop() {
     const snap = state.snapshot || {};
     renderTopbar(snap);
     renderSyncStrip(snap);
+    renderBriefCard(snap);
     if (state.snapshot) {
       renderAccountPanel(snap.account || {}, snap.positions || {}, snap.canary || {});
       renderUnderlyings(snap.positions || {}, snap.account || {}, snap.market_events || {});
@@ -104,6 +107,7 @@ function renderAll() {
   const canary = snap.canary || {};
   syncAccountPrivacyState();
   ensureRegimeCanaryExpansion(canary);
+  renderBriefCard(snap);
   renderTopbar(snap);
   renderAccountPanel(account, positions, canary);
   renderUnderlyings(positions, account, snap.market_events || {});

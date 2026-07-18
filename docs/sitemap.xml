@@ -2,7 +2,7 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://osauer.dev/ibkr/</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-07-18</lastmod>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>
@@ -20,19 +20,19 @@
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/ibkr-mcp/</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-20</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.95</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/ibkr-mcp-tws/</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-20</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.95</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/interactive-brokers-mcp-server/</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-07-18</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.9</priority>
   </url>
@@ -44,19 +44,19 @@
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/claude-desktop-interactive-brokers/</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-20</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.85</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/best-ibkr-mcp-server-claude-code/</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-20</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.9</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/portfolio-review-with-claude-ibkr/</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-20</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.9</priority>
   </url>
@@ -68,25 +68,25 @@
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/guides/agentic-use.html</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-19</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/guides/marketplace-readiness.html</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-19</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.6</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/guides/updating.html</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-18</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.6</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/reference/mcp-tools.html</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-07-14</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
   </url>
@@ -98,19 +98,19 @@
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/reference/config.html</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-07-14</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.6</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/reference/protocol.html</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-07-18</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.6</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/concepts.html</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-13</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
@@ -122,37 +122,37 @@
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/specs/regime-backtest-plan.html</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-12</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.4</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/specs/risk-regime-dashboard.html</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-06-25</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.4</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/llms.txt</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-07-18</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.6</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/llms-full.txt</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-07-18</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.6</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/.well-known/mcp/server.json</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-07-18</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.6</priority>
   </url>
   <url>
     <loc>https://osauer.dev/ibkr/.well-known/mcp/server-card.json</loc>
-    <lastmod>2026-06-11</lastmod>
+    <lastmod>2026-07-18</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.6</priority>
   </url>
