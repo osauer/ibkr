@@ -133,6 +133,27 @@ type ConstitutionCadence struct {
 	Morning ConstitutionArtefact `toml:"morning" json:"morning"`
 	EOD     ConstitutionArtefact `toml:"eod" json:"eod"`
 	Weekly  ConstitutionArtefact `toml:"weekly" json:"weekly"`
+	// Nudges and Monthly are policy-version-4-only. Pointers preserve the
+	// distinction between an absent table and an explicitly authored one, so
+	// old policies can reject the new keys and v4 can report missing material.
+	Nudges  *ConstitutionNudgeCadence   `toml:"nudges" json:"nudges,omitempty"`
+	Monthly *ConstitutionMonthlyCadence `toml:"monthly" json:"monthly,omitempty"`
+}
+
+// ConstitutionNudgeCadence owns the local clock used by cadence-driven
+// nudges and the rolling warning horizon for reconciliation. Neither field
+// has a code default.
+type ConstitutionNudgeCadence struct {
+	Timezone             *string `toml:"timezone" json:"timezone"`
+	ReconcileWarningDays *int    `toml:"reconcile_warning_days" json:"reconcile_warning_days"`
+}
+
+// ConstitutionMonthlyCadence declares the one standing monthly touchpoint.
+// DayOfMonth is limited to 1..28 so every configured month has the day.
+type ConstitutionMonthlyCadence struct {
+	Class        *string `toml:"class" json:"class"`
+	DayOfMonth   *int    `toml:"day_of_month" json:"day_of_month"`
+	NudgeAtLocal *string `toml:"nudge_at_local" json:"nudge_at_local"`
 }
 
 // ConstitutionArtefact declares one cadence artefact. Class "" means the
@@ -242,6 +263,36 @@ func (c Constitution) Validate() error {
 			return fmt.Errorf("%s.class %q is invalid; only advisory is accepted in v1", a.key, a.class)
 		}
 	}
+	if c.PolicyVersion < 4 {
+		if c.Cadence.Nudges != nil || c.Cadence.Monthly != nil {
+			return fmt.Errorf("cadence v4 key set requires policy_version >= 4")
+		}
+	} else {
+		if cadence := c.Cadence.Nudges; cadence != nil {
+			if cadence.Timezone != nil {
+				if _, err := loadConstitutionLocation(*cadence.Timezone); err != nil {
+					return fmt.Errorf("cadence.nudges.timezone %q is invalid: %w", *cadence.Timezone, err)
+				}
+			}
+			if days := cadence.ReconcileWarningDays; days != nil && *days <= 0 {
+				return fmt.Errorf("cadence.nudges.reconcile_warning_days must be positive")
+			}
+		}
+		if cadence := c.Cadence.Monthly; cadence != nil {
+			if cadence.Class != nil && *cadence.Class != EnforcementAdvisory {
+				return fmt.Errorf("cadence.monthly.class %q is invalid; only advisory is accepted", *cadence.Class)
+			}
+			if day := cadence.DayOfMonth; day != nil && (*day < 1 || *day > 28) {
+				return fmt.Errorf("cadence.monthly.day_of_month must be in [1, 28]")
+			}
+			if local := cadence.NudgeAtLocal; local != nil {
+				parsed, err := time.Parse("15:04", *local)
+				if err != nil || parsed.Format("15:04") != *local {
+					return fmt.Errorf("cadence.monthly.nudge_at_local %q must use HH:MM", *local)
+				}
+			}
+		}
+	}
 	for _, p := range []struct {
 		key string
 		pin *ConstitutionPolicyPin
@@ -255,6 +306,26 @@ func (c Constitution) Validate() error {
 		}
 	}
 	return nil
+}
+
+// loadConstitutionLocation rejects process-local and non-canonical raw input.
+// Validation and cadence evaluation share this helper so accepted behavior and
+// fingerprinted policy text cannot disagree.
+func loadConstitutionLocation(raw string) (*time.Location, error) {
+	if raw == "" {
+		return nil, fmt.Errorf("must be a non-empty IANA timezone")
+	}
+	if raw != strings.TrimSpace(raw) {
+		return nil, fmt.Errorf("must not contain leading or trailing whitespace")
+	}
+	if strings.EqualFold(raw, "Local") {
+		return nil, fmt.Errorf("local is process-dependent")
+	}
+	location, err := time.LoadLocation(raw)
+	if err != nil {
+		return nil, fmt.Errorf("unknown IANA timezone")
+	}
+	return location, nil
 }
 
 // EffectiveBlockEnforcement resolves the block tier's enforcement class;
@@ -310,6 +381,23 @@ func (c Constitution) UnapprovedKeys() []string {
 	if (c.PolicyVersion == 0 || c.PolicyVersion >= 3) && c.Recon.MaxEquityDivergencePct == nil {
 		out = append(out, "recon.max_equity_divergence_pct")
 	}
+	if c.PolicyVersion == 0 || c.PolicyVersion >= 4 {
+		if c.Cadence.Nudges == nil || c.Cadence.Nudges.Timezone == nil {
+			out = append(out, "cadence.nudges.timezone")
+		}
+		if c.Cadence.Nudges == nil || c.Cadence.Nudges.ReconcileWarningDays == nil {
+			out = append(out, "cadence.nudges.reconcile_warning_days")
+		}
+		if c.Cadence.Monthly == nil || c.Cadence.Monthly.Class == nil {
+			out = append(out, "cadence.monthly.class")
+		}
+		if c.Cadence.Monthly == nil || c.Cadence.Monthly.DayOfMonth == nil {
+			out = append(out, "cadence.monthly.day_of_month")
+		}
+		if c.Cadence.Monthly == nil || c.Cadence.Monthly.NudgeAtLocal == nil {
+			out = append(out, "cadence.monthly.nudge_at_local")
+		}
+	}
 	return out
 }
 
@@ -319,21 +407,52 @@ func (c Constitution) UnapprovedKeys() []string {
 // null and are part of the identity: an unapproved gap is policy state.
 func (c Constitution) FingerprintKey() string {
 	type fingerprintBase struct {
-		Kind          string                `json:"kind"`
-		SchemaVersion int                   `json:"schema_version"`
-		PolicyID      string                `json:"policy_id"`
-		PolicyVersion int                   `json:"policy_version"`
-		Capital       ConstitutionCapital   `json:"capital"`
-		Drawdown      ConstitutionDrawdown  `json:"drawdown"`
-		Override      ConstitutionOverride  `json:"override"`
-		Cadence       ConstitutionCadence   `json:"cadence"`
-		Inventory     ConstitutionInventory `json:"inventory"`
+		Kind          string
+		SchemaVersion int
+		PolicyID      string
+		PolicyVersion int
+		Capital       ConstitutionCapital
+		Drawdown      ConstitutionDrawdown
+		Override      ConstitutionOverride
+		Inventory     ConstitutionInventory
 	}
 	base := fingerprintBase{
 		Kind: strings.TrimSpace(c.Kind), SchemaVersion: c.SchemaVersion,
 		PolicyID: strings.TrimSpace(c.PolicyID), PolicyVersion: c.PolicyVersion,
 		Capital: c.Capital, Drawdown: c.Drawdown, Override: c.Override,
-		Cadence: c.Cadence, Inventory: c.Inventory,
+		Inventory: c.Inventory,
+	}
+	legacyCadence := struct {
+		Morning ConstitutionArtefact `json:"morning"`
+		EOD     ConstitutionArtefact `json:"eod"`
+		Weekly  ConstitutionArtefact `json:"weekly"`
+	}{c.Cadence.Morning, c.Cadence.EOD, c.Cadence.Weekly}
+	type v4NudgeCadence struct {
+		Timezone             *string `json:"timezone"`
+		ReconcileWarningDays *int    `json:"reconcile_warning_days"`
+	}
+	type v4MonthlyCadence struct {
+		Class        *string `json:"class"`
+		DayOfMonth   *int    `json:"day_of_month"`
+		NudgeAtLocal *string `json:"nudge_at_local"`
+	}
+	v4Cadence := struct {
+		Morning ConstitutionArtefact `json:"morning"`
+		EOD     ConstitutionArtefact `json:"eod"`
+		Weekly  ConstitutionArtefact `json:"weekly"`
+		Nudges  v4NudgeCadence       `json:"nudges"`
+		Monthly v4MonthlyCadence     `json:"monthly"`
+	}{Morning: c.Cadence.Morning, EOD: c.Cadence.EOD, Weekly: c.Cadence.Weekly}
+	if c.Cadence.Nudges != nil {
+		v4Cadence.Nudges = v4NudgeCadence{
+			Timezone: c.Cadence.Nudges.Timezone, ReconcileWarningDays: c.Cadence.Nudges.ReconcileWarningDays,
+		}
+	}
+	if c.Cadence.Monthly != nil {
+		v4Cadence.Monthly = v4MonthlyCadence{
+			Class: c.Cadence.Monthly.Class, DayOfMonth: c.Cadence.Monthly.DayOfMonth,
+			NudgeAtLocal: c.Cadence.Monthly.NudgeAtLocal,
+		}
 	}
 	var raw []byte
 	if c.PolicyVersion < 3 {
@@ -354,12 +473,37 @@ func (c Constitution) FingerprintKey() string {
 			Drawdown      ConstitutionDrawdown  `json:"drawdown"`
 			Override      ConstitutionOverride  `json:"override"`
 			Recon         any                   `json:"recon"`
-			Cadence       ConstitutionCadence   `json:"cadence"`
+			Cadence       any                   `json:"cadence"`
 			Inventory     ConstitutionInventory `json:"inventory"`
 		}{
 			Kind: base.Kind, SchemaVersion: base.SchemaVersion, PolicyID: base.PolicyID, PolicyVersion: base.PolicyVersion,
 			Capital: base.Capital, Drawdown: base.Drawdown, Override: base.Override, Recon: recon,
-			Cadence: base.Cadence, Inventory: base.Inventory,
+			Cadence: legacyCadence, Inventory: base.Inventory,
+		}
+		raw, _ = json.Marshal(normalized)
+	} else if c.PolicyVersion < 4 {
+		normalized := struct {
+			Kind          string                `json:"kind"`
+			SchemaVersion int                   `json:"schema_version"`
+			PolicyID      string                `json:"policy_id"`
+			PolicyVersion int                   `json:"policy_version"`
+			Capital       ConstitutionCapital   `json:"capital"`
+			Drawdown      ConstitutionDrawdown  `json:"drawdown"`
+			Override      ConstitutionOverride  `json:"override"`
+			Recon         ConstitutionRecon     `json:"recon"`
+			Cadence       any                   `json:"cadence"`
+			Inventory     ConstitutionInventory `json:"inventory"`
+		}{
+			Kind:          strings.TrimSpace(c.Kind),
+			SchemaVersion: c.SchemaVersion,
+			PolicyID:      strings.TrimSpace(c.PolicyID),
+			PolicyVersion: c.PolicyVersion,
+			Capital:       c.Capital,
+			Drawdown:      c.Drawdown,
+			Override:      c.Override,
+			Recon:         c.Recon,
+			Cadence:       legacyCadence,
+			Inventory:     c.Inventory,
 		}
 		raw, _ = json.Marshal(normalized)
 	} else {
@@ -372,19 +516,13 @@ func (c Constitution) FingerprintKey() string {
 			Drawdown      ConstitutionDrawdown  `json:"drawdown"`
 			Override      ConstitutionOverride  `json:"override"`
 			Recon         ConstitutionRecon     `json:"recon"`
-			Cadence       ConstitutionCadence   `json:"cadence"`
+			Cadence       any                   `json:"cadence"`
 			Inventory     ConstitutionInventory `json:"inventory"`
 		}{
-			Kind:          strings.TrimSpace(c.Kind),
-			SchemaVersion: c.SchemaVersion,
-			PolicyID:      strings.TrimSpace(c.PolicyID),
-			PolicyVersion: c.PolicyVersion,
-			Capital:       c.Capital,
-			Drawdown:      c.Drawdown,
-			Override:      c.Override,
-			Recon:         c.Recon,
-			Cadence:       c.Cadence,
-			Inventory:     c.Inventory,
+			Kind: strings.TrimSpace(c.Kind), SchemaVersion: c.SchemaVersion,
+			PolicyID: strings.TrimSpace(c.PolicyID), PolicyVersion: c.PolicyVersion,
+			Capital: c.Capital, Drawdown: c.Drawdown, Override: c.Override,
+			Recon: c.Recon, Cadence: v4Cadence, Inventory: c.Inventory,
 		}
 		raw, _ = json.Marshal(normalized)
 	}

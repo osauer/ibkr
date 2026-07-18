@@ -1,6 +1,10 @@
 package rpc
 
-import "time"
+import (
+	"time"
+
+	"github.com/osauer/ibkr/v2/internal/risk"
+)
 
 const (
 	// MethodBriefSnapshot composes the operator's daily brief. It is a pure
@@ -17,6 +21,16 @@ const (
 
 	BriefKindMorning = "morning"
 	BriefKindEOD     = "eod"
+	BriefKindMonthly = "monthly"
+
+	BriefMonthlyPulseNotDue    = "not_due"
+	BriefMonthlyPulseDue       = "due"
+	BriefMonthlyPulseCompleted = "completed"
+	BriefMonthlyPulseBlocked   = "blocked"
+
+	// Render evidence proves only that a paired surface rendered the brief;
+	// origin alone must never be treated as stronger proof of human attention.
+	BriefAckEvidenceRender = risk.MonthlyPulseEvidenceRender
 )
 
 // BriefSnapshotParams is deliberately empty. In particular it carries no
@@ -27,6 +41,8 @@ type BriefSnapshotParams struct{}
 type BriefAckParams struct {
 	Kind             string `json:"kind"`
 	BriefFingerprint string `json:"brief_fingerprint"`
+	Month            string `json:"month,omitempty"`
+	Evidence         string `json:"evidence,omitempty"`
 	Origin           string `json:"origin,omitempty"`
 }
 
@@ -38,6 +54,8 @@ type BriefAckResult struct {
 	At               time.Time `json:"at"`
 	AlreadyStamped   bool      `json:"already_stamped,omitempty"`
 	BriefFingerprint string    `json:"brief_fingerprint,omitempty"`
+	Month            string    `json:"month,omitempty"`
+	Evidence         string    `json:"evidence,omitempty"`
 	Message          string    `json:"message,omitempty"`
 }
 
@@ -193,11 +211,22 @@ type BriefPolicyDriftRow struct {
 
 type BriefProcessSection struct {
 	BriefRowState
-	Reconcile  BriefReconcileRow  `json:"reconcile"`
-	AutoExtend BriefAutoExtendRow `json:"auto_extend"`
-	OneTap     BriefOneTapRow     `json:"one_tap"`
-	RulesDelta BriefRulesDeltaRow `json:"rules_delta"`
-	Artefacts  BriefArtefactsRow  `json:"artefacts"`
+	Reconcile    BriefReconcileRow     `json:"reconcile"`
+	AutoExtend   BriefAutoExtendRow    `json:"auto_extend"`
+	OneTap       BriefOneTapRow        `json:"one_tap"`
+	RulesDelta   BriefRulesDeltaRow    `json:"rules_delta"`
+	Artefacts    BriefArtefactsRow     `json:"artefacts"`
+	MonthlyPulse *BriefMonthlyPulseRow `json:"monthly_pulse,omitempty"`
+}
+
+// BriefMonthlyPulseRow has its own status vocabulary rather than embedding
+// BriefRowState (whose status is ok|degraded|unavailable). It remains optional
+// until the later daemon composition lands, preserving current brief identity.
+type BriefMonthlyPulseRow struct {
+	Status      string    `json:"status"` // not_due | due | completed | blocked
+	Month       string    `json:"month,omitempty"`
+	DueAt       time.Time `json:"due_at,omitzero"`
+	CompletedAt time.Time `json:"completed_at,omitzero"`
 }
 
 type BriefReconcileRow struct {

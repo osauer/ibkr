@@ -148,6 +148,41 @@ func ConstitutionLimits(c *Constitution) []ConstitutionLimit {
 		rows = append(rows, get(a.key+".class", val, src,
 			"Operating-cadence artefact. Completions are journaled for adherence measurement; missing one is recorded, never blocking, in v1.", "advisory"))
 	}
+	if c == nil || c.PolicyVersion >= 4 {
+		var timezone, monthlyClass, monthlyTime *string
+		var warningDays, monthlyDay *int
+		if c != nil {
+			if c.Cadence.Nudges != nil {
+				timezone = c.Cadence.Nudges.Timezone
+				warningDays = c.Cadence.Nudges.ReconcileWarningDays
+			}
+			if c.Cadence.Monthly != nil {
+				monthlyClass = c.Cadence.Monthly.Class
+				monthlyDay = c.Cadence.Monthly.DayOfMonth
+				monthlyTime = c.Cadence.Monthly.NudgeAtLocal
+			}
+		}
+		stringValue := func(value *string) (string, string) {
+			return str(value != nil, func() string { return *value })
+		}
+		timezoneValue, timezoneSource := stringValue(timezone)
+		warningValue, warningSource := num(warningDays, "days")
+		classValue, classSource := stringValue(monthlyClass)
+		dayValue, daySource := num(monthlyDay, "day of month")
+		timeValue, timeSource := stringValue(monthlyTime)
+		rows = append(rows,
+			get("cadence.nudges.timezone", timezoneValue, timezoneSource,
+				"IANA timezone used to derive local cadence months and scheduled nudge instants. It has no code default.", "structural"),
+			get("cadence.nudges.reconcile_warning_days", warningValue, warningSource,
+				"Rolling 24-hour days before the reconciliation deadline when the due-soon advisory begins. Overdue begins only after the deadline.", "advisory"),
+			get("cadence.monthly.class", classValue, classSource,
+				"Enforcement class of the monthly pulse. Policy version 4 accepts advisory only.", "structural"),
+			get("cadence.monthly.day_of_month", dayValue, daySource,
+				"Local calendar day when the monthly pulse becomes due; limited to days present in every month.", "advisory"),
+			get("cadence.monthly.nudge_at_local", timeValue, timeSource,
+				"Local HH:MM when the monthly pulse becomes due in the configured timezone.", "advisory"),
+		)
+	}
 	return rows
 }
 

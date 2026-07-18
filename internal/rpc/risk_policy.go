@@ -167,6 +167,14 @@ type ArtefactRecord struct {
 	Note             string    `json:"note,omitempty"`
 	Origin           string    `json:"origin,omitempty"`
 	BriefFingerprint string    `json:"brief_fingerprint,omitempty"`
+	// PolicyFingerprint is daemon-authored by later monthly brief.ack handling.
+	// A monthly completion applies only to this policy identity; a changed
+	// policy reopens the local month. The generic policy artefact verb does not
+	// populate monthly metadata.
+	PolicyFingerprint string `json:"policy_fingerprint,omitempty"`
+	// Evidence is render-only monthly metadata populated by later brief.ack
+	// handling. Origin alone is never stronger attention proof.
+	Evidence string `json:"evidence,omitempty"`
 }
 
 // RiskPolicyResult is the policy.snapshot payload.

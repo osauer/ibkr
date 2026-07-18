@@ -5,9 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 func approvedConstitution() Constitution {
@@ -50,6 +54,21 @@ func approvedV3Constitution() Constitution {
 	c := approvedConstitution()
 	c.PolicyVersion = 3
 	c.Recon.MaxEquityDivergencePct = new(1.25)
+	return c
+}
+
+func approvedV4Constitution() Constitution {
+	c := approvedV3Constitution()
+	c.PolicyVersion = 4
+	c.Cadence.Nudges = &ConstitutionNudgeCadence{
+		Timezone:             new("Europe/Berlin"),
+		ReconcileWarningDays: new(2),
+	}
+	c.Cadence.Monthly = &ConstitutionMonthlyCadence{
+		Class:        new(EnforcementAdvisory),
+		DayOfMonth:   new(1),
+		NudgeAtLocal: new("09:00"),
+	}
 	return c
 }
 
@@ -127,6 +146,106 @@ func TestConstitutionV3EquityDivergenceValidation(t *testing.T) {
 	}
 }
 
+func TestConstitutionV4CadenceValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Constitution)
+		wantErr string
+	}{
+		{"valid", func(*Constitution) {}, ""},
+		{"old version rejects v4 cadence", func(c *Constitution) { c.PolicyVersion = 3 }, "requires policy_version >= 4"},
+		{"empty timezone", func(c *Constitution) { c.Cadence.Nudges.Timezone = new("") }, "timezone"},
+		{"host local timezone", func(c *Constitution) { c.Cadence.Nudges.Timezone = new("Local") }, "timezone"},
+		{"host local timezone case insensitive", func(c *Constitution) { c.Cadence.Nudges.Timezone = new("lOcAl") }, "timezone"},
+		{"timezone leading whitespace", func(c *Constitution) { c.Cadence.Nudges.Timezone = new(" Europe/Berlin") }, "whitespace"},
+		{"timezone trailing whitespace", func(c *Constitution) { c.Cadence.Nudges.Timezone = new("Europe/Berlin ") }, "whitespace"},
+		{"unknown timezone", func(c *Constitution) { c.Cadence.Nudges.Timezone = new("Mars/Olympus") }, "timezone"},
+		{"zero warning days", func(c *Constitution) { c.Cadence.Nudges.ReconcileWarningDays = new(0) }, "reconcile_warning_days"},
+		{"bad monthly class", func(c *Constitution) { c.Cadence.Monthly.Class = new("mandatory") }, "only advisory"},
+		{"zero monthly day", func(c *Constitution) { c.Cadence.Monthly.DayOfMonth = new(0) }, "day_of_month"},
+		{"nonexistent monthly day", func(c *Constitution) { c.Cadence.Monthly.DayOfMonth = new(29) }, "day_of_month"},
+		{"non-padded time", func(c *Constitution) { c.Cadence.Monthly.NudgeAtLocal = new("9:00") }, "nudge_at_local"},
+		{"invalid time", func(c *Constitution) { c.Cadence.Monthly.NudgeAtLocal = new("24:00") }, "nudge_at_local"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := approvedV4Constitution()
+			tc.mutate(&c)
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	for _, mutate := range []func(*Constitution){
+		func(c *Constitution) { c.Cadence.Nudges = &ConstitutionNudgeCadence{Timezone: new("Europe/Berlin")} },
+		func(c *Constitution) { c.Cadence.Nudges = &ConstitutionNudgeCadence{ReconcileWarningDays: new(2)} },
+		func(c *Constitution) {
+			c.Cadence.Monthly = &ConstitutionMonthlyCadence{Class: new(EnforcementAdvisory)}
+		},
+		func(c *Constitution) { c.Cadence.Monthly = &ConstitutionMonthlyCadence{DayOfMonth: new(1)} },
+		func(c *Constitution) { c.Cadence.Monthly = &ConstitutionMonthlyCadence{NudgeAtLocal: new("09:00")} },
+	} {
+		c := approvedV3Constitution()
+		mutate(&c)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "requires policy_version >= 4") {
+			t.Fatalf("old-version v4 key error = %v, want targeted version error", err)
+		}
+	}
+}
+
+func TestConstitutionV4CadenceTOMLIsStrictAndVersioned(t *testing.T) {
+	decode := func(t *testing.T, version int, cadence string) Constitution {
+		t.Helper()
+		input := "kind = \"ibkr.risk_policy\"\nschema_version = 1\npolicy_id = \"risk-constitution\"\npolicy_version = " + strconv.Itoa(version) + "\n" + cadence
+		var c Constitution
+		metadata, err := toml.Decode(input, &c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if undecoded := metadata.Undecoded(); len(undecoded) != 0 {
+			t.Fatalf("typed cadence left undecoded keys: %v", undecoded)
+		}
+		return c
+	}
+	fullCadence := `[cadence.nudges]
+timezone = "Europe/Berlin"
+reconcile_warning_days = 2
+
+[cadence.monthly]
+class = "advisory"
+day_of_month = 1
+nudge_at_local = "09:00"
+`
+	v4 := decode(t, 4, fullCadence)
+	if err := v4.Validate(); err != nil {
+		t.Fatalf("v4 authored cadence = %v", err)
+	}
+	for _, key := range v4.UnapprovedKeys() {
+		if strings.HasPrefix(key, "cadence.nudges.") || strings.HasPrefix(key, "cadence.monthly.") {
+			t.Fatalf("authored v4 cadence stayed unapproved: %s", key)
+		}
+	}
+
+	v3 := decode(t, 3, fullCadence)
+	if err := v3.Validate(); err == nil || !strings.Contains(err.Error(), "requires policy_version >= 4") {
+		t.Fatalf("v3 parsed v4 cadence without targeted rejection: %v", err)
+	}
+
+	missing := decode(t, 4, `[cadence.nudges]
+timezone = "Europe/Berlin"
+`)
+	if got := missing.UnapprovedKeys(); !slices.Contains(got, "cadence.nudges.reconcile_warning_days") || !slices.Contains(got, "cadence.monthly.nudge_at_local") {
+		t.Fatalf("missing v4 material keys = %v", got)
+	}
+}
+
 // Material keys never backfill: an empty file section validates but stays
 // unapproved, and a partially approved policy names exactly the gaps.
 func TestConstitutionUnapprovedKeys(t *testing.T) {
@@ -158,12 +277,32 @@ func TestConstitutionUnapprovedKeys(t *testing.T) {
 	if got := v3.UnapprovedKeys(); len(got) == 0 || got[len(got)-1] != "recon.max_equity_divergence_pct" {
 		t.Fatalf("v3 missing divergence key = %v, want unapproved", got)
 	}
+	v4 := approvedV4Constitution()
+	v4.Cadence.Nudges.Timezone = nil
+	v4.Cadence.Monthly.DayOfMonth = nil
+	if got := v4.UnapprovedKeys(); !slices.Equal(got, []string{"cadence.nudges.timezone", "cadence.monthly.day_of_month"}) {
+		t.Fatalf("v4 missing cadence keys = %v, want exact unapproved keys", got)
+	}
 }
 
 // Every material and governance field must move the fingerprint: a
 // threshold outside the fingerprint would be a silent policy change.
 func TestConstitutionFingerprintCoversEveryField(t *testing.T) {
 	base := approvedConstitution().FingerprintKey()
+	v2Regression := approvedConstitution()
+	v2Regression.PolicyVersion = 2
+	for version, regression := range map[string]struct {
+		got  string
+		want string
+	}{
+		"v1": {base, "sha256:d7253847c81bab17eb56f0c053024ee47ebdf4a606f10b2231cb163eba24a716"},
+		"v2": {v2Regression.FingerprintKey(), "sha256:2d6b4e068bdd8c636d46c33d2315be29102a3f455a3dd2268ae14176fa61dba9"},
+		"v3": {approvedV3Constitution().FingerprintKey(), "sha256:eba0420989e74822f360d2db9e824ec74aa0fbea4e4f933f8a2aba2e2708b7cc"},
+	} {
+		if regression.got != regression.want {
+			t.Errorf("%s fingerprint changed: got %s, want %s", version, regression.got, regression.want)
+		}
+	}
 	if legacy := legacyConstitutionFingerprint(approvedConstitution()); base != legacy {
 		t.Fatalf("pre-v3 fingerprint changed: got %s, legacy %s", base, legacy)
 	}
@@ -203,6 +342,33 @@ func TestConstitutionFingerprintCoversEveryField(t *testing.T) {
 	v3.Recon.MaxEquityDivergencePct = new(2.0)
 	if v3.FingerprintKey() == v3Base {
 		t.Fatal("recon.max_equity_divergence_pct did not change the v3 fingerprint")
+	}
+	v4 := approvedV4Constitution()
+	v4Base := v4.FingerprintKey()
+	if want := "sha256:3f390ab250fa37798cc8656b1372843c964004156fbc4d767e5da4ba11268550"; v4Base != want {
+		t.Fatalf("v4 fingerprint changed: got %s, want %s", v4Base, want)
+	}
+	for name, mutate := range map[string]func(*Constitution){
+		"cadence.nudges.timezone":               func(c *Constitution) { c.Cadence.Nudges.Timezone = new("Europe/Paris") },
+		"cadence.nudges.reconcile_warning_days": func(c *Constitution) { c.Cadence.Nudges.ReconcileWarningDays = new(3) },
+		"cadence.monthly.class":                 func(c *Constitution) { c.Cadence.Monthly.Class = nil },
+		"cadence.monthly.day_of_month":          func(c *Constitution) { c.Cadence.Monthly.DayOfMonth = new(2) },
+		"cadence.monthly.nudge_at_local":        func(c *Constitution) { c.Cadence.Monthly.NudgeAtLocal = new("10:00") },
+	} {
+		c := approvedV4Constitution()
+		mutate(&c)
+		if c.FingerprintKey() == v4Base {
+			t.Errorf("v4 mutation %q did not change the fingerprint", name)
+		}
+	}
+	missingTables := approvedV4Constitution()
+	missingTables.Cadence.Nudges = nil
+	missingTables.Cadence.Monthly = nil
+	emptyTables := missingTables
+	emptyTables.Cadence.Nudges = &ConstitutionNudgeCadence{}
+	emptyTables.Cadence.Monthly = &ConstitutionMonthlyCadence{}
+	if missingTables.FingerprintKey() != emptyTables.FingerprintKey() {
+		t.Fatal("v4 fingerprint must project missing material keys as null, independent of empty table presence")
 	}
 }
 
@@ -400,6 +566,9 @@ func TestConstitutionLimitsAreVersionAware(t *testing.T) {
 		if row.Key == "recon.max_equity_divergence_pct" {
 			t.Fatal("v2 explain unexpectedly renders the v3-only divergence key")
 		}
+		if strings.HasPrefix(row.Key, "cadence.nudges.") || strings.HasPrefix(row.Key, "cadence.monthly.") {
+			t.Fatalf("v2 explain unexpectedly renders v4-only key %s", row.Key)
+		}
 		if row.Key == "capital.max_unreconciled_days" {
 			v2Meaning = row.Meaning
 		}
@@ -411,6 +580,9 @@ func TestConstitutionLimitsAreVersionAware(t *testing.T) {
 	var v3Meaning string
 	var divergence ConstitutionLimit
 	for _, row := range ConstitutionLimits(&v3) {
+		if strings.HasPrefix(row.Key, "cadence.nudges.") || strings.HasPrefix(row.Key, "cadence.monthly.") {
+			t.Fatalf("v3 explain unexpectedly renders v4-only key %s", row.Key)
+		}
 		switch row.Key {
 		case "capital.max_unreconciled_days":
 			v3Meaning = row.Meaning
@@ -423,5 +595,21 @@ func TestConstitutionLimitsAreVersionAware(t *testing.T) {
 	}
 	if divergence.Source != "file" || divergence.Value != "1.25%" {
 		t.Fatalf("v3 divergence explain = %+v", divergence)
+	}
+	v4 := approvedV4Constitution()
+	v4Rows := make(map[string]ConstitutionLimit)
+	for _, row := range ConstitutionLimits(&v4) {
+		v4Rows[row.Key] = row
+	}
+	for key, value := range map[string]string{
+		"cadence.nudges.timezone":               "Europe/Berlin",
+		"cadence.nudges.reconcile_warning_days": "2 days",
+		"cadence.monthly.class":                 "advisory",
+		"cadence.monthly.day_of_month":          "1 day of month",
+		"cadence.monthly.nudge_at_local":        "09:00",
+	} {
+		if row := v4Rows[key]; row.Source != "file" || row.Value != value {
+			t.Errorf("v4 explain %s = %+v, want file/%s", key, row, value)
+		}
 	}
 }

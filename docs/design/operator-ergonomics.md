@@ -6,9 +6,9 @@ greenlight 2026-07-18). Implemented same day: the backfill backtest (decision
 4/5 mechanics), risk-policy v3 (auto-extend, R3/R4, divergence gate), and the
 L1 brief surface (decisions 1+3 — daemon brief, `ibkr brief`, PWA card,
 render-stamps, one-tap sign-off; see the implementation records at the end).
-Still open: push nudges (L2), cadence re-declaration and nudge times
-(deferred to a later revision by operator decision 2026-07-18 because they
-depended on L1, which now exists), monthly pulse, R5 cleanup. This document is the approval record and the
+L2 push nudges, cadence re-declaration, and the monthly pulse were approved for
+implementation later on 2026-07-18; live v4 activation remains gated on the
+first automatic same-day reconciliation proof. R5 cleanup remains open. This document is the approval record and the
 implementation authority for the ergonomics build, the accelerated R3/R4
 cutover, and the risk-policy v3 revision scope. It amends
 docs/design/risk-policy.md (deferred list) and docs/design/post-trade-truth.md
@@ -397,3 +397,25 @@ worktree `make app-check`+`make check`+race tests, primary `make test`,
 `make app-refresh`, full `make smoke` PASS zero skips; rendered
 verification on both an isolated paper-connected stack and the
 real-daemon preview.
+
+## Implementation approval — L2 nudges and monthly pulse (2026-07-18)
+
+The operator approved the implementation contract in
+[`risk-governance-nudges.md`](risk-governance-nudges.md). Code may land behind
+the active v3 policy; the live policy stays v3 until the automatic same-day
+clean-report extension is observed.
+
+The approved v4 cadence is `Europe/Berlin`, monthly day 1 at 09:00, with the
+already-approved two-day rolling reconcile warning horizon. Monthly completion
+means an authenticated paired-device foreground render with readable matching
+sibling pins; it is adherence evidence, not proof of human attention. Push is
+once per stable occurrence per active subscription/device; `none` disables all
+push; resolved delivery detail retains 90 days while active, unseen, and
+retry-suppressing records never evict. The first qualifying shadow would-block
+preview in a latch episode notifies and later previews increment internal
+episode state without widening the notification payload. Confirmed-flow
+activation records a broker-backed coverage watermark,
+requires one cutover review, never expires unseen events, and revalidates them
+against current statement truth. Source failures stay persistently visible but
+do not emit a separate push in the first implementation. A policy fingerprint
+change reopens that month's pulse.

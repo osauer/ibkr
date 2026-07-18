@@ -1,0 +1,513 @@
+package risk
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"sort"
+	"strings"
+	"time"
+)
+
+const (
+	NudgeKindReconcileDue       = "reconcile_due"
+	NudgeKindReconcileException = "reconcile_exception"
+	NudgeKindShadowWouldBlock   = "shadow_would_block"
+	NudgeKindDrawdownLatched    = "drawdown_latched"
+	NudgeKindPolicyDrift        = "policy_drift"
+	NudgeKindConfirmedFlow      = "confirmed_flow"
+	NudgeKindMonthlyPulse       = "monthly_pulse"
+
+	NudgeStateDueSoon  = "due_soon"
+	NudgeStateOverdue  = "overdue"
+	NudgeStateOpen     = "open"
+	NudgeStateObserved = "observed"
+	NudgeStateDue      = "due"
+
+	NudgeSeverityWatch = "watch"
+	NudgeSeverityAct   = "act"
+
+	NudgeDestinationMonitor = "monitor"
+	NudgeDestinationAlerts  = "alerts"
+
+	MonthlyPulseStatusNotDue    = "not_due"
+	MonthlyPulseStatusDue       = "due"
+	MonthlyPulseStatusCompleted = "completed"
+	MonthlyPulseStatusBlocked   = "blocked"
+
+	MonthlyPulseEvidenceRender = "render"
+)
+
+// NudgeCandidate is the pure semantic result consumed by a future daemon
+// adapter. It deliberately has no details, URL, raw source identity, money,
+// symbol, account, or order fields. Title and Body are selected only by
+// candidate kind/state in candidateTemplate.
+type NudgeCandidate struct {
+	Fingerprint string    `json:"fingerprint"`
+	Kind        string    `json:"kind"`
+	State       string    `json:"state"`
+	Severity    string    `json:"severity"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body"`
+	OccurredAt  time.Time `json:"occurred_at,omitzero"`
+	DueAt       time.Time `json:"due_at,omitzero"`
+	ExpiresAt   time.Time `json:"expires_at,omitzero"`
+	Destination string    `json:"destination"`
+}
+
+type ReconcileDueInput struct {
+	Now         time.Time
+	Deadline    time.Time
+	WarningDays *int
+}
+
+// EvaluateReconcileDue uses an exact rolling duration. Equality at the
+// deadline remains due-soon; overdue begins only when Now.After(Deadline).
+func EvaluateReconcileDue(input ReconcileDueInput) *NudgeCandidate {
+	if input.Now.IsZero() || input.Deadline.IsZero() || input.WarningDays == nil || *input.WarningDays <= 0 {
+		return nil
+	}
+	warningHorizon := reconcileWarningHorizon(*input.WarningDays)
+	state := ""
+	if input.Now.After(input.Deadline) {
+		state = NudgeStateOverdue
+	} else if input.Deadline.Sub(input.Now) <= warningHorizon {
+		state = NudgeStateDueSoon
+	}
+	if state == "" {
+		return nil
+	}
+	occurredAt := input.Deadline.Add(-warningHorizon)
+	if state == NudgeStateOverdue {
+		occurredAt = input.Deadline
+	}
+	return newNudgeCandidate(NudgeKindReconcileDue, state, occurredAt, input.Deadline, time.Time{}, struct {
+		DeadlineUTC string `json:"deadline_utc"`
+		WarningDays int    `json:"warning_days"`
+		State       string `json:"state"`
+	}{input.Deadline.UTC().Format(time.RFC3339Nano), *input.WarningDays, state})
+}
+
+func reconcileWarningHorizon(days int) time.Duration {
+	const maxDuration = time.Duration(1<<63 - 1)
+	if days > int(maxDuration/(24*time.Hour)) {
+		return maxDuration
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+// ReconcileExceptionIdentity contains only the identity/material fields the
+// daemon has already allowlisted for semantic dedupe. They are normalized and
+// hashed; none is copied into the candidate.
+type ReconcileExceptionIdentity struct {
+	Kind     string
+	Identity string
+	Material []string
+}
+
+func EvaluateReconcileException(unresolved []ReconcileExceptionIdentity, occurredAt time.Time) *NudgeCandidate {
+	type normalizedException struct {
+		Kind     string   `json:"kind"`
+		Identity string   `json:"identity"`
+		Material []string `json:"material"`
+	}
+	rows := make([]normalizedException, 0, len(unresolved))
+	for _, unresolved := range unresolved {
+		identity := strings.TrimSpace(unresolved.Identity)
+		if identity == "" {
+			continue
+		}
+		material := normalizeStrings(unresolved.Material, false)
+		rows = append(rows, normalizedException{
+			Kind: strings.ToLower(strings.TrimSpace(unresolved.Kind)), Identity: identity, Material: material,
+		})
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		left, _ := json.Marshal(rows[i])
+		right, _ := json.Marshal(rows[j])
+		return string(left) < string(right)
+	})
+	rows = dedupeComparableJSON(rows)
+	return newNudgeCandidate(NudgeKindReconcileException, NudgeStateOpen, occurredAt, time.Time{}, time.Time{}, rows)
+}
+
+type ShadowWouldBlockInput struct {
+	PolicyFingerprint string
+	LatchEpisode      string
+	RiskIncreasing    bool
+	Exempt            bool
+	WouldBlock        bool
+	PriorCount        int
+	OccurredAt        time.Time
+}
+
+type ShadowWouldBlockEvaluation struct {
+	Candidate *NudgeCandidate
+	Count     int
+}
+
+// EvaluateShadowWouldBlock emits one candidate for the first qualifying
+// preview in a policy/latch episode. Later qualifying previews increment the
+// episode count without repeating the candidate.
+func EvaluateShadowWouldBlock(input ShadowWouldBlockInput) ShadowWouldBlockEvaluation {
+	count := max(input.PriorCount, 0)
+	if !input.RiskIncreasing || input.Exempt || !input.WouldBlock || strings.TrimSpace(input.PolicyFingerprint) == "" || strings.TrimSpace(input.LatchEpisode) == "" {
+		return ShadowWouldBlockEvaluation{Count: count}
+	}
+	count++
+	result := ShadowWouldBlockEvaluation{Count: count}
+	if count == 1 {
+		result.Candidate = newNudgeCandidate(NudgeKindShadowWouldBlock, NudgeStateObserved, input.OccurredAt, time.Time{}, time.Time{}, struct {
+			PolicyFingerprint string `json:"policy_fingerprint"`
+			LatchEpisode      string `json:"latch_episode"`
+		}{strings.TrimSpace(input.PolicyFingerprint), strings.TrimSpace(input.LatchEpisode)})
+	}
+	return result
+}
+
+func EvaluateDrawdownLatched(latchEpisode string, open bool, occurredAt time.Time) *NudgeCandidate {
+	episode := strings.TrimSpace(latchEpisode)
+	if !open || episode == "" {
+		return nil
+	}
+	return newNudgeCandidate(NudgeKindDrawdownLatched, NudgeStateOpen, occurredAt, time.Time{}, time.Time{}, episode)
+}
+
+type NudgePinMismatch struct {
+	Policy        string
+	PinnedID      string
+	PinnedVersion string
+	LiveID        string
+	LiveVersion   string
+}
+
+func EvaluatePolicyDrift(mismatches []NudgePinMismatch, occurredAt time.Time) *NudgeCandidate {
+	type normalizedMismatch struct {
+		Policy        string `json:"policy"`
+		PinnedID      string `json:"pinned_id"`
+		PinnedVersion string `json:"pinned_version"`
+		LiveID        string `json:"live_id"`
+		LiveVersion   string `json:"live_version"`
+	}
+	rows := make([]normalizedMismatch, 0, len(mismatches))
+	for _, mismatch := range mismatches {
+		row := normalizedMismatch{
+			Policy:   strings.ToLower(strings.TrimSpace(mismatch.Policy)),
+			PinnedID: strings.TrimSpace(mismatch.PinnedID), PinnedVersion: strings.TrimSpace(mismatch.PinnedVersion),
+			LiveID: strings.TrimSpace(mismatch.LiveID), LiveVersion: strings.TrimSpace(mismatch.LiveVersion),
+		}
+		if row.Policy == "" || row.PinnedID == "" || row.PinnedVersion == "" || row.LiveID == "" || row.LiveVersion == "" {
+			continue
+		}
+		if row.PinnedID == row.LiveID && row.PinnedVersion == row.LiveVersion {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		left, _ := json.Marshal(rows[i])
+		right, _ := json.Marshal(rows[j])
+		return string(left) < string(right)
+	})
+	rows = dedupeComparableJSON(rows)
+	return newNudgeCandidate(NudgeKindPolicyDrift, NudgeStateOpen, occurredAt, time.Time{}, time.Time{}, rows)
+}
+
+func EvaluateConfirmedFlow(statementRowIdentity string, occurredAt time.Time) *NudgeCandidate {
+	identity := strings.TrimSpace(statementRowIdentity)
+	if identity == "" {
+		return nil
+	}
+	return newNudgeCandidate(NudgeKindConfirmedFlow, NudgeStateObserved, occurredAt, time.Time{}, time.Time{}, identity)
+}
+
+type MonthlyPulseCompletion struct {
+	Month             string
+	PolicyFingerprint string
+	// CompletedAt and Evidence are daemon-authored from paired brief render
+	// evidence. Origin enforcement remains outside this pure evaluator.
+	CompletedAt time.Time
+	Evidence    string
+}
+
+type MonthlyPulseInput struct {
+	Now               time.Time
+	Cadence           ConstitutionCadence
+	PolicyFingerprint string
+	// PolicyEvidenceReady means current readable policy pins all match. Before
+	// due it is ignored; from due onward false blocks both due and completion.
+	PolicyEvidenceReady bool
+	Completion          *MonthlyPulseCompletion
+}
+
+type MonthlyPulseEvaluation struct {
+	Status    string
+	Month     string
+	DueAt     time.Time
+	Candidate *NudgeCandidate
+}
+
+func EvaluateMonthlyPulse(input MonthlyPulseInput) MonthlyPulseEvaluation {
+	zone, day, hour, minute, ok := monthlySchedule(input.Cadence)
+	policyFingerprint := strings.TrimSpace(input.PolicyFingerprint)
+	if !ok || input.Now.IsZero() || policyFingerprint == "" {
+		return MonthlyPulseEvaluation{Status: MonthlyPulseStatusBlocked}
+	}
+	localNow := input.Now.In(zone)
+	month := localNow.Format("2006-01")
+	dueAt, unique := resolveUniqueLocalInstant(zone, localNow.Year(), localNow.Month(), day, hour, minute)
+	if !unique {
+		return MonthlyPulseEvaluation{Status: MonthlyPulseStatusBlocked, Month: month}
+	}
+	result := MonthlyPulseEvaluation{Month: month, DueAt: dueAt}
+	if input.Now.Before(dueAt) {
+		result.Status = MonthlyPulseStatusNotDue
+		return result
+	}
+	if !input.PolicyEvidenceReady {
+		result.Status = MonthlyPulseStatusBlocked
+		return result
+	}
+	if monthlyCompletionQualifies(input.Completion, month, policyFingerprint, dueAt, input.Now) {
+		result.Status = MonthlyPulseStatusCompleted
+		return result
+	}
+	result.Status = MonthlyPulseStatusDue
+	result.Candidate = newNudgeCandidate(NudgeKindMonthlyPulse, NudgeStateDue, dueAt, dueAt, time.Time{}, struct {
+		Month             string `json:"month"`
+		PolicyFingerprint string `json:"policy_fingerprint"`
+	}{month, policyFingerprint})
+	return result
+}
+
+func monthlySchedule(cadence ConstitutionCadence) (*time.Location, int, int, int, bool) {
+	if cadence.Nudges == nil || cadence.Monthly == nil || cadence.Nudges.Timezone == nil || cadence.Monthly.Class == nil || cadence.Monthly.DayOfMonth == nil || cadence.Monthly.NudgeAtLocal == nil {
+		return nil, 0, 0, 0, false
+	}
+	if *cadence.Monthly.Class != EnforcementAdvisory || *cadence.Monthly.DayOfMonth < 1 || *cadence.Monthly.DayOfMonth > 28 {
+		return nil, 0, 0, 0, false
+	}
+	zone, err := loadConstitutionLocation(*cadence.Nudges.Timezone)
+	if err != nil {
+		return nil, 0, 0, 0, false
+	}
+	parsed, err := time.Parse("15:04", *cadence.Monthly.NudgeAtLocal)
+	if err != nil || parsed.Format("15:04") != *cadence.Monthly.NudgeAtLocal {
+		return nil, 0, 0, 0, false
+	}
+	return zone, *cadence.Monthly.DayOfMonth, parsed.Hour(), parsed.Minute(), true
+}
+
+func monthlyCompletionQualifies(completion *MonthlyPulseCompletion, month, policyFingerprint string, dueAt, now time.Time) bool {
+	return completion != nil &&
+		completion.Month == month &&
+		completion.PolicyFingerprint == policyFingerprint &&
+		completion.Evidence == MonthlyPulseEvidenceRender &&
+		!completion.CompletedAt.IsZero() &&
+		!completion.CompletedAt.Before(dueAt) &&
+		!completion.CompletedAt.After(now)
+}
+
+// resolveUniqueLocalInstant maps a local wall clock to exactly one instant.
+// Candidate instants are reconstructed from every offset observed around the
+// target, then round-tripped through the location. Gaps have zero matches and
+// fall-back folds have multiple matches; both fail closed.
+func resolveUniqueLocalInstant(location *time.Location, year int, month time.Month, day, hour, minute int) (time.Time, bool) {
+	wall := time.Date(year, month, day, hour, minute, 0, 0, time.UTC)
+	offsets := make(map[int]struct{})
+	for delta := -48 * time.Hour; delta <= 48*time.Hour; delta += 30 * time.Minute {
+		_, offset := wall.Add(delta).In(location).Zone()
+		offsets[offset] = struct{}{}
+	}
+	matches := make([]time.Time, 0, len(offsets))
+	for offset := range offsets {
+		candidate := wall.Add(-time.Duration(offset) * time.Second)
+		local := candidate.In(location)
+		if local.Year() != year || local.Month() != month || local.Day() != day || local.Hour() != hour || local.Minute() != minute || local.Second() != 0 || local.Nanosecond() != 0 {
+			continue
+		}
+		duplicate := false
+		for _, match := range matches {
+			if match.Equal(candidate) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			matches = append(matches, candidate)
+		}
+	}
+	if len(matches) != 1 {
+		return time.Time{}, false
+	}
+	return matches[0], true
+}
+
+func newNudgeCandidate(kind, state string, occurredAt, dueAt, expiresAt time.Time, identity any) *NudgeCandidate {
+	title, body, severity := candidateTemplate(kind, state)
+	if title == "" {
+		return nil
+	}
+	destination := NudgeDestinationMonitor
+	if severity == NudgeSeverityAct {
+		destination = NudgeDestinationAlerts
+	}
+	return &NudgeCandidate{
+		Fingerprint: semanticNudgeFingerprint(kind, identity), Kind: kind, State: state,
+		Severity: severity, Title: title, Body: body, OccurredAt: occurredAt,
+		DueAt: dueAt, ExpiresAt: expiresAt, Destination: destination,
+	}
+}
+
+func candidateTemplate(kind, state string) (title, body, severity string) {
+	switch kind {
+	case NudgeKindReconcileDue:
+		if state == NudgeStateDueSoon {
+			return "Reconciliation due soon", "Review the reconciliation clock.", NudgeSeverityWatch
+		}
+		if state == NudgeStateOverdue {
+			return "Reconciliation overdue", "Reconciliation evidence needs attention.", NudgeSeverityAct
+		}
+	case NudgeKindReconcileException:
+		if state == NudgeStateOpen {
+			return "Reconciliation exception", "Review unresolved reconciliation evidence.", NudgeSeverityAct
+		}
+	case NudgeKindShadowWouldBlock:
+		if state == NudgeStateObserved {
+			return "Shadow control triggered", "A risk-increasing preview met the shadow block condition.", NudgeSeverityAct
+		}
+	case NudgeKindDrawdownLatched:
+		if state == NudgeStateOpen {
+			return "Drawdown latch open", "The drawdown latch remains open.", NudgeSeverityAct
+		}
+	case NudgeKindPolicyDrift:
+		if state == NudgeStateOpen {
+			return "Policy pins need review", "Review the policy pin status.", NudgeSeverityAct
+		}
+	case NudgeKindConfirmedFlow:
+		if state == NudgeStateObserved {
+			return "Confirmed account flow", "A new confirmed statement flow is available for review.", NudgeSeverityWatch
+		}
+	case NudgeKindMonthlyPulse:
+		if state == NudgeStateDue {
+			return "Monthly risk pulse due", "Review the monthly risk brief and policy pins.", NudgeSeverityWatch
+		}
+	}
+	return "", "", ""
+}
+
+// CanonicalizeNudgeCandidate validates the narrow candidate contract and
+// replaces all caller-authored display fields with approved template copy.
+// It is pure so RPC and future adapters share the same semantic boundary.
+func CanonicalizeNudgeCandidate(candidate NudgeCandidate) (NudgeCandidate, error) {
+	title, body, severity := candidateTemplate(candidate.Kind, candidate.State)
+	if title == "" {
+		return NudgeCandidate{}, errors.New("invalid nudge candidate kind or state")
+	}
+	if !validNudgeFingerprint(candidate.Fingerprint) {
+		return NudgeCandidate{}, errors.New("invalid nudge candidate fingerprint")
+	}
+	if candidate.OccurredAt.IsZero() {
+		return NudgeCandidate{}, errors.New("invalid nudge candidate occurrence time")
+	}
+	if !candidate.ExpiresAt.IsZero() {
+		return NudgeCandidate{}, errors.New("invalid nudge candidate expiry time")
+	}
+
+	switch {
+	case candidate.Kind == NudgeKindReconcileDue && candidate.State == NudgeStateDueSoon:
+		if candidate.DueAt.IsZero() || candidate.OccurredAt.After(candidate.DueAt) {
+			return NudgeCandidate{}, errors.New("invalid reconcile due-soon timestamps")
+		}
+	case candidate.Kind == NudgeKindReconcileDue && candidate.State == NudgeStateOverdue:
+		if candidate.DueAt.IsZero() || !candidate.OccurredAt.Equal(candidate.DueAt) {
+			return NudgeCandidate{}, errors.New("invalid reconcile overdue timestamps")
+		}
+	case candidate.Kind == NudgeKindMonthlyPulse:
+		if candidate.DueAt.IsZero() || !candidate.OccurredAt.Equal(candidate.DueAt) {
+			return NudgeCandidate{}, errors.New("invalid monthly pulse timestamps")
+		}
+	default:
+		if !candidate.DueAt.IsZero() {
+			return NudgeCandidate{}, errors.New("invalid nudge candidate due time")
+		}
+	}
+
+	candidate.Title = title
+	candidate.Body = body
+	candidate.Severity = severity
+	candidate.Destination = NudgeDestinationMonitor
+	if severity == NudgeSeverityAct {
+		candidate.Destination = NudgeDestinationAlerts
+	}
+	return candidate, nil
+}
+
+func validNudgeFingerprint(fingerprint string) bool {
+	const prefix = "sha256:"
+	if len(fingerprint) != len(prefix)+sha256.Size*2 || !strings.HasPrefix(fingerprint, prefix) {
+		return false
+	}
+	for i := len(prefix); i < len(fingerprint); i++ {
+		if (fingerprint[i] < '0' || fingerprint[i] > '9') && (fingerprint[i] < 'a' || fingerprint[i] > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func semanticNudgeFingerprint(kind string, identity any) string {
+	raw, _ := json.Marshal(struct {
+		Kind     string `json:"kind"`
+		Identity any    `json:"identity"`
+	}{kind, identity})
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func normalizeStrings(values []string, lower bool) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if lower {
+			value = strings.ToLower(value)
+		}
+		if value != "" {
+			normalized = append(normalized, value)
+		}
+	}
+	sort.Strings(normalized)
+	if len(normalized) < 2 {
+		return normalized
+	}
+	out := normalized[:1]
+	for _, value := range normalized[1:] {
+		if value != out[len(out)-1] {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func dedupeComparableJSON[T any](values []T) []T {
+	if len(values) < 2 {
+		return values
+	}
+	out := values[:1]
+	previous, _ := json.Marshal(values[0])
+	for _, value := range values[1:] {
+		current, _ := json.Marshal(value)
+		if string(current) != string(previous) {
+			out = append(out, value)
+			previous = current
+		}
+	}
+	return out
+}
