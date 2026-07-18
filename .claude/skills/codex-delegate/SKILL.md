@@ -3,7 +3,7 @@ name: codex-delegate
 description: Delegate implementation to headless Codex (gpt-5.6-sol) in a sibling worktree while this session keeps planning, review, judgement, and integration. This is the ONLY coding lane in this repo (root AGENTS.md, ibkr pilot) — the implementation-lane hook deterministically blocks inline code edits by Claude sessions and subagents; docs and config stay direct. Delegate directly or via the coder agent; inline code edits need the human-approved break-glass scripts/waive-inline.sh. Never for broker writes, guardrail changes, or releases.
 ---
 
-Updated: 2026-07-18 16:02 CEST
+Updated: 2026-07-18 16:16 CEST
 
 # Codex delegation loop
 
@@ -53,7 +53,11 @@ user, per root `AGENTS.md`.
    boundary, evidence to use, and what done means. State invariants to
    preserve and the required test evidence. State that ibkr usage is
    read-only and new dependencies are out of scope unless the brief says
-   otherwise. Do not prescribe every step.
+   otherwise. State that gates are offline only — build, package tests,
+   `make check`; never `make install`, `make restart-daemon`, or any
+   smoke target (execpolicy classifies those prompt, which fails closed
+   headless; live verification is the orchestrator's, post-integration).
+   Do not prescribe every step.
 
 2. **Run** —
 

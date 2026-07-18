@@ -314,8 +314,12 @@ agent-config-check: hook-behavior-check ## Validate project agent config, hooks,
 		read_decision=$$(codex execpolicy check --rules .codex/rules/ibkr.rules -- ibkr status --json | jq -r .decision); \
 		write_decision=$$(codex execpolicy check --rules .codex/rules/ibkr.rules -- ibkr order place --preview-token TOKEN --json | jq -r .decision); \
 		human_only_decision=$$(codex execpolicy check --rules .codex/rules/ibkr.rules -- ibkr settings set trading.freeze=true | jq -r .decision); \
-		[ "$$read_decision" = allow ] && [ "$$write_decision" = prompt ] && [ "$$human_only_decision" = forbidden ] || { \
-			echo "execpolicy decisions: read=$$read_decision write=$$write_decision human-only=$$human_only_decision" >&2; exit 1; \
+		offline_gate_decision=$$(codex execpolicy check --rules .codex/rules/ibkr.rules -- make check | jq -r .decision); \
+		live_gate_decision=$$(codex execpolicy check --rules .codex/rules/ibkr.rules -- make restart-daemon | jq -r .decision); \
+		smoke_decision=$$(codex execpolicy check --rules .codex/rules/ibkr.rules -- make smoke | jq -r .decision); \
+		[ "$$read_decision" = allow ] && [ "$$write_decision" = prompt ] && [ "$$human_only_decision" = forbidden ] \
+			&& [ "$$offline_gate_decision" = allow ] && [ "$$live_gate_decision" = prompt ] && [ "$$smoke_decision" = prompt ] || { \
+			echo "execpolicy decisions: read=$$read_decision write=$$write_decision human-only=$$human_only_decision offline-gate=$$offline_gate_decision live-gate=$$live_gate_decision smoke=$$smoke_decision" >&2; exit 1; \
 		}; \
 	fi
 

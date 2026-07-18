@@ -106,17 +106,27 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["make", ["help", "check", "smoke", "smoke-fast", "install", "restart-daemon", "app-check", "app-refresh", "app-refresh-smoke", "app-smoke", "app-lifecycle-smoke", "docs-check", "docs-regen", "test"]],
+    pattern = ["make", ["help", "check", "app-check", "app-refresh", "app-refresh-smoke", "app-smoke", "app-lifecycle-smoke", "docs-check", "docs-regen", "test"]],
     decision = "allow",
-    justification = "Standard project verification and local refresh commands.",
+    justification = "Offline verification and local app refresh commands.",
     match = [
         "make help",
         "make check",
+        "make test",
         "make docs-check",
+        "make app-refresh-smoke APP_SMOKE_BROWSER=webkit",
+    ],
+)
+
+prefix_rule(
+    pattern = ["make", ["install", "restart-daemon", "smoke", "smoke-fast"]],
+    decision = "prompt",
+    justification = "Installed-daemon and live-gateway targets need a current-turn human decision; headless delegates fail closed and run offline gates only (root AGENTS.md).",
+    match = [
+        "make install",
+        "make restart-daemon",
         "make smoke",
         "make smoke-fast",
-        "make restart-daemon",
-        "make app-refresh-smoke APP_SMOKE_BROWSER=webkit",
     ],
 )
 

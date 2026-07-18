@@ -82,10 +82,14 @@ includes `check`. `make smoke-fast` is the default live-gateway gate; full
 Gateway tests serialize through `scripts/with-gateway-lock.sh`; a busy gateway
 is a wait, not a flake. Report skips and first failures explicitly.
 
-After daemon or CLI edits, run `make restart-daemon`, then capture redacted
-`ibkr status --json` evidence plus a command exercising the change. Do not use
-`pkill` for normal restarts. `make smoke` uses an isolated daemon and does not
-refresh the installed one.
+After daemon or CLI edits, orchestrating sessions on the primary tree run
+`make restart-daemon`, then capture redacted `ibkr status --json` evidence
+plus a command exercising the change. Do not use `pkill` for normal restarts.
+`make smoke` uses an isolated daemon and does not refresh the installed one.
+Delegated worktree sessions run offline gates only — builds, package tests,
+`make check`; `make install`, `make restart-daemon`, and all smoke targets
+are post-integration primary-tree steps (execpolicy classifies them prompt,
+which fails closed headless).
 
 `make test` already runs `check`; run it once, backgrounded or logged, rather
 than as a foreground pipe. For long sessions, compact or hand off at phase
