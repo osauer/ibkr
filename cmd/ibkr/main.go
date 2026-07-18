@@ -198,7 +198,7 @@ func main() {
 }
 
 func unaryInvocationBudget(cmd string, rest []string) time.Duration {
-	if cmd == "scan" || cmd == "technical" || cmd == "canary" || (cmd == "backtest" && isBacktestDaemonInvocation(rest)) {
+	if cmd == "scan" || cmd == "technical" || cmd == "canary" || cmd == "brief" || (cmd == "backtest" && isBacktestDaemonInvocation(rest)) {
 		return parseDurationOr(cliLongUnaryTimeout, 90*time.Second)
 	}
 	// The daemon-side MethodTradingPaperSmoke deadline is 100 s (preview,

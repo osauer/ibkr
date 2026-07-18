@@ -592,7 +592,10 @@ func (st *riskCapitalStore) RecordArtefact(p rpc.ArtefactParams, c *risk.Constit
 	defer st.mu.Unlock()
 	st.loadLocked()
 	now := st.now().UTC()
-	rec := rpc.ArtefactRecord{Artefact: name, Class: class, CompletedAt: now, Note: strings.TrimSpace(p.Note)}
+	rec := rpc.ArtefactRecord{
+		Artefact: name, Class: class, CompletedAt: now, Note: strings.TrimSpace(p.Note),
+		Origin: strings.TrimSpace(p.Origin), BriefFingerprint: strings.TrimSpace(p.BriefFingerprint),
+	}
 	kept := st.state.Artefacts[:0:0]
 	for _, a := range st.state.Artefacts {
 		if a.Artefact != name {
@@ -600,10 +603,17 @@ func (st *riskCapitalStore) RecordArtefact(p rpc.ArtefactParams, c *risk.Constit
 		}
 	}
 	st.state.Artefacts = append(kept, rec)
-	appendRiskPolicyJournal(map[string]any{
+	journal := map[string]any{
 		"version": 1, "at": now, "kind": "artefact_completed", "artefact": name,
 		"note": rec.Note, "policy_fingerprint": constitutionFingerprint(c),
-	})
+	}
+	if rec.Origin != "" {
+		journal["origin"] = rec.Origin
+	}
+	if rec.BriefFingerprint != "" {
+		journal["brief_fingerprint"] = rec.BriefFingerprint
+	}
+	appendRiskPolicyJournal(journal)
 	st.persistLocked(true)
 	return rec, nil
 }
@@ -698,6 +708,32 @@ func (st *riskCapitalStore) Artefacts() []rpc.ArtefactRecord {
 	out := make([]rpc.ArtefactRecord, len(st.state.Artefacts))
 	copy(out, st.state.Artefacts)
 	return out
+}
+
+// OverridesSnapshot returns the persisted override rows without expiring or
+// journaling them. Read-only compositions use this instead of ActiveOverrides,
+// whose expiry maintenance is intentionally write-bearing.
+func (st *riskCapitalStore) OverridesSnapshot() []rpc.OverrideRecord {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	out := make([]rpc.OverrideRecord, len(st.state.Overrides))
+	copy(out, st.state.Overrides)
+	return out
+}
+
+// UnreconciledClock returns the evaluator's exact deadline projection without
+// mutating runtime state.
+func (st *riskCapitalStore) UnreconciledClock(c *risk.Constitution, now time.Time) risk.UnreconciledClock {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	var maxDays *int
+	if c != nil {
+		maxDays = c.Capital.MaxUnreconciledDays
+	}
+	rt := st.runtimeLocked(c, now)
+	return risk.EvaluateUnreconciledClock(maxDays, rt.LastReconciledAt, rt.UnreconciledOverrideUntil, now)
 }
 
 // LastEquity returns the persisted last equity observation for the recon

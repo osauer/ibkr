@@ -14,7 +14,7 @@ import (
 // (docs/design/post-trade-truth.md): broker statement flows vs. the
 // declared capital-event ledger. show is read-only; dismiss is a human-only
 // governance write the daemon refuses from agent origins. The report id
-// printed here is what `ibkr policy capital-event reconcile --report <id>`
+// printed here is what `ibkr policy capital-event reconcile`
 // signs off.
 func runRecon(ctx context.Context, env *Env, args []string) int {
 	sub := "show"
@@ -147,7 +147,7 @@ func runReconShow(ctx context.Context, env *Env, args []string) int {
 		if res.StatementCumFlowsBase != nil {
 			fmt.Fprintln(env.Stdout, reconCleanEvidenceMessage(res))
 		} else {
-			fmt.Fprintf(env.Stdout, "\nClean. Sign off with: ibkr policy capital-event reconcile --report %s\n", res.ReportID)
+			fmt.Fprintln(env.Stdout, "\nClean. Sign off with: ibkr policy capital-event reconcile")
 		}
 	}
 	return 0

@@ -1047,6 +1047,7 @@ var ExcludedCLI = map[string]string{
 	"purge":    "emergency local-terminal purge-book workflow; deliberately withheld from MCP until execution/review safety is proven",
 	"policy":   "risk-constitution surface deferred from MCP in phase 1 (docs/design/risk-policy.md): its writes are human-only governance acts the daemon rejects from agents, and the read view ships CLI-first; revisit after the phase-2 manual cadence",
 	"recon":    "post-trade reconciliation surface deferred from MCP in phase 3a (docs/design/post-trade-truth.md): dismiss/sign-off are human-only governance acts and the read view ships CLI-first, same posture as `policy`; revisit together with it",
+	"brief":    "daily brief MCP exposure is explicitly deferred until after phase 2; agent CLI renders are read-only and never stamp",
 }
 
 func schemaObject(props map[string]json.RawMessage, required []string) json.RawMessage {

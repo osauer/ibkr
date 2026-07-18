@@ -349,6 +349,9 @@ type Server struct {
 	// authorization.
 	riskPolicies *riskPolicyManager
 	riskCapital  *riskCapitalStore
+	// briefState persists only human render-stamps and their rulebook delta
+	// baselines. brief.snapshot reads it but never writes it.
+	briefState *briefStateStore
 	// reconMu serializes report-content mutations with report-backed human
 	// and automatic reconcile appends so a report id cannot race a new
 	// declaration or dismissal.
@@ -418,6 +421,11 @@ type Server struct {
 	// staying a cheap health call.
 	lastRegimeQualityMu sync.Mutex
 	lastRegimeQuality   []rpc.DataQualityHealth
+	// lastRegimeSnapshot is the most recent fully composed regime result.
+	// brief.snapshot reads this cache so it cannot tick streaks, persist the
+	// rulebook stage, journal a regime decision, or kick gamma work.
+	lastRegimeSnapshotMu sync.Mutex
+	lastRegimeSnapshot   *rpc.RegimeSnapshotResult
 	// postConnectSetupDone latches true at the end of the first
 	// successful postConnectSetup. Gates the Connected field of
 	// handleStatusHealth so an `ibkr status` that lands between
@@ -497,6 +505,7 @@ func New(opts Options) *Server {
 	s.installProtectionPolicyManager()
 	s.installRiskPolicyManager()
 	s.installRiskCapitalStore()
+	s.installBriefStateStore()
 	s.installProposalEngine()
 	s.installOpportunityPolicyManager()
 	s.installOpportunityEngine()
@@ -2385,6 +2394,10 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleAutoTradeStatus(), nil })
 	case rpc.MethodRulesSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleRulesSnapshot(ctx, req) })
+	case rpc.MethodBriefSnapshot:
+		s.unary(req, enc, func() (any, error) { return s.handleBriefSnapshot(ctx, req) })
+	case rpc.MethodBriefAck:
+		s.unary(req, enc, func() (any, error) { return s.handleBriefAck(ctx, req) })
 	case rpc.MethodRiskPolicySnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicySnapshot(ctx, req) })
 	case rpc.MethodRiskPolicyCapitalEvent:
@@ -2539,6 +2552,10 @@ func unaryDeadline(method string) time.Duration {
 		// instantly after the first call of the day. 45 s leaves slack
 		// for the historical-bars worst-case on first call.
 		return 45 * time.Second
+	case rpc.MethodBriefSnapshot, rpc.MethodBriefAck:
+		// Brief composition fans out across the same gateway-heavy account,
+		// positions, regime, market-event, and rulebook reads as canary.
+		return 75 * time.Second
 	case rpc.MethodMarketEventsSnapshot:
 		return 20 * time.Second
 	case rpc.MethodScanRun:

@@ -32,6 +32,13 @@ import (
 const dailyPnLStaleGrace = 90 * time.Second
 
 func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, error) {
+	return s.buildAccountSummary(ctx, true)
+}
+
+// buildAccountSummary shares the account wire builder with read-only daemon
+// compositions. observe=false suppresses the risk-capital observation write;
+// the returned typed account result is otherwise identical.
+func (s *Server) buildAccountSummary(ctx context.Context, observe bool) (*rpc.AccountResult, error) {
 	c := s.gatewayConnector()
 	if c == nil {
 		return nil, s.gatewayUnavailableError()
@@ -146,7 +153,7 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 	// adjusted peak and drawdown tier; there is deliberately no scheduler
 	// in v1. Skipped on a base-currency mismatch: capital math in the
 	// wrong currency is worse than none.
-	if s.riskCapital != nil && res.NetLiquidation > 0 {
+	if observe && s.riskCapital != nil && res.NetLiquidation > 0 {
 		var pol *risk.Constitution
 		if s.riskPolicies != nil {
 			pol = s.riskPolicies.snapshot().policy
@@ -3929,6 +3936,10 @@ func normalizeHistoryWhatToShowParam(value string) (string, error) {
 // the daemon stays out of policy and the renderer applies whatever
 // cuts the user has configured.
 func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.BreadthSPXResult, error) {
+	return s.buildBreadthSPX(req, true)
+}
+
+func (s *Server) buildBreadthSPX(req *rpc.Request, allowRefresh bool) (*rpc.BreadthSPXResult, error) {
 	var p rpc.BreadthSPXParams
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
@@ -3956,7 +3967,7 @@ func (s *Server) handleBreadthSPX(_ context.Context, req *rpc.Request) (*rpc.Bre
 	// the refresher is pinned off, or when the loaded file is
 	// already from today, or when a fetch is already in flight
 	// (singleflighted by the refresher).
-	if s.membersRefresher != nil && s.serverCtx != nil {
+	if allowRefresh && s.membersRefresher != nil && s.serverCtx != nil {
 		s.membersRefresher.TriggerIfRolledOver(s.serverCtx)
 	}
 

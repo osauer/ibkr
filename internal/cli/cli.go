@@ -17,10 +17,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/v2/internal/dial"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	"golang.org/x/sys/unix"
 )
+
+// DaemonConn is the CLI's typed daemon-call surface. *dial.Conn implements
+// it in production; the interface keeps command-flow tests transport-free.
+type DaemonConn interface {
+	Call(context.Context, string, any, any) error
+	Stream(context.Context, string, any, func(json.RawMessage) error) error
+}
 
 // Env is the per-invocation context shared by every subcommand.
 type Env struct {
@@ -29,7 +35,7 @@ type Env struct {
 	// Stdin is the interactive input used for live-write confirmation
 	// prompts. Nil in tests and non-interactive helper paths.
 	Stdin io.Reader
-	Conn  *dial.Conn
+	Conn  DaemonConn
 	// Origin is this process's broker-write origin classification
 	// (rpc.OrderOrigin*), resolved once in cmd/ibkr via DetectWriteOrigin.
 	// Empty classifies as agent at the daemon (fail closed).
@@ -188,8 +194,9 @@ func init() {
 		{"gamma", "SPX-canonical dealer zero-gamma estimate with SPY context (default; --only spy|spx to narrow; heavy compute, once per NY trading day)", "ibkr gamma [--no-wait] [--force] [--only spy|spx] [--explain] [--diagnostics] [--json]", runGamma},
 		{"regime", "Broad-market stress lifecycle across vol, credit, funding, FX, gamma, and breadth", "ibkr regime [--explain [--diagnostics]] [--watch --rate 5m] [--log PATH] [--json]", runRegime},
 		{"canary", "Stateless market-regime × portfolio-shape canary with action, evidence, and source health", "ibkr canary [--details] [--view full|alert] [--json]", runCanary},
+		{"brief", "Typed morning/EOD operator brief with disclosed source degradation", "ibkr brief [--json] [--kind morning|eod]", runBrief},
 		{"rules", "Advisory 14-rule daily trading checklist, hardest breach first", "ibkr rules [--all] [--symbol SYM] [--json]", runRules},
-		{"policy", "Risk constitution: effective limits, capital/drawdown state, overrides (human-only writes)", "ibkr policy show [--explain] [--json] | ibkr policy capital-event deposit|withdrawal [--amount F] [--effective-at TIME] [--note S] | ibkr policy capital-event reconcile --report ID | ibkr policy override --control KEY --reason S --hours N | ibkr policy reset-drawdown --reason S | ibkr policy artefact morning|eod|weekly [--note S]", runPolicy},
+		{"policy", "Risk constitution: effective limits, capital/drawdown state, overrides (human-only writes)", "ibkr policy show [--explain] [--json] | ibkr policy capital-event deposit|withdrawal [--amount F] [--effective-at TIME] [--note S] | ibkr policy capital-event reconcile [--report ID] | ibkr policy override --control KEY --reason S --hours N | ibkr policy reset-drawdown --reason S | ibkr policy artefact morning|eod|weekly [--note S]", runPolicy},
 		{"recon", "Post-trade reconciliation: broker statement flows vs the declared capital ledger", "ibkr recon show [--refresh] [--json] | ibkr recon backtest [--refresh] [--json] | ibkr recon dismiss --line ID --reason S", runRecon},
 		{"proposals", "Daemon-owned close/reduce-only protection proposals", "ibkr proposals status|refresh|list|preview|submit|reduce|ignore [--json]", runProposals},
 		{"opportunities", "Daemon-owned option exercise opportunities", "ibkr opportunities status|refresh|list|preview|exercise|ignore [--json]", runOpportunities},

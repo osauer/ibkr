@@ -442,6 +442,39 @@ type CapitalVerdict struct {
 	Reasons        []string
 }
 
+// UnreconciledClock is the shared pure projection of the constitution's
+// unreconciled horizon. Approved is false when the operator has not declared
+// capital.max_unreconciled_days. A zero LastReconciledAt is stale with no
+// fabricated year-one deadline.
+type UnreconciledClock struct {
+	Approved      bool
+	Deadline      time.Time
+	DaysRemaining *int
+	Stale         bool
+}
+
+// EvaluateUnreconciledClock computes the deadline used by both capital
+// evaluation and reporting. The one-shot outage override may only extend the
+// ordinary deadline; it can never shorten it.
+func EvaluateUnreconciledClock(maxDays *int, lastReconciledAt, overrideUntil, now time.Time) UnreconciledClock {
+	if maxDays == nil {
+		return UnreconciledClock{}
+	}
+	out := UnreconciledClock{Approved: true}
+	if lastReconciledAt.IsZero() {
+		out.Stale = true
+		return out
+	}
+	out.Deadline = lastReconciledAt.Add(time.Duration(*maxDays) * 24 * time.Hour)
+	if overrideUntil.After(out.Deadline) {
+		out.Deadline = overrideUntil
+	}
+	remaining := int(math.Ceil(out.Deadline.Sub(now).Hours() / 24))
+	out.DaysRemaining = &remaining
+	out.Stale = now.After(out.Deadline)
+	return out
+}
+
 // EvaluateCapital applies the constitution to the runtime state and the
 // latest observation. Invariants: absence of data or of approved numbers
 // never yields ok; the latch dominates everything except unapproved
@@ -457,13 +490,8 @@ func EvaluateCapital(c *Constitution, rt CapitalRuntime, obs *CapitalObservation
 	v.Unapproved = c.UnapprovedKeys()
 
 	// Reconciliation recency is reportable whenever its horizon exists.
-	if c.Capital.MaxUnreconciledDays != nil {
-		maxAge := time.Duration(*c.Capital.MaxUnreconciledDays) * 24 * time.Hour
-		deadline := rt.LastReconciledAt.Add(maxAge)
-		if rt.UnreconciledOverrideUntil.After(deadline) {
-			deadline = rt.UnreconciledOverrideUntil
-		}
-		if deadline.IsZero() || now.After(deadline) {
+	if clock := EvaluateUnreconciledClock(c.Capital.MaxUnreconciledDays, rt.LastReconciledAt, rt.UnreconciledOverrideUntil, now); clock.Approved {
+		if clock.Stale {
 			v.ReconcileStale = true
 			reason := "capital ledger is past its reconcile horizon; declared events are unattested"
 			if c.PolicyVersion >= 3 {

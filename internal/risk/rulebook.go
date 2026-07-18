@@ -1082,6 +1082,14 @@ func (c *ruleContext) greenDayAction(rows []RuleRow) RuleRow {
 // classifies a hedge: pairing a greeks-tick delta with a different-source
 // spot is the apples-and-oranges sizing the join exists to avoid.
 func rule12HedgeLeg(l LegInput) bool {
+	return RulebookHedgeLeg(l)
+}
+
+// RulebookHedgeLeg exposes the policy-owned hedge classification to daemon
+// composition without duplicating rule 12's predicate. Callers map their
+// typed position row into LegInput and receive the exact classification used
+// by rules 1, 2, 4, 5, 12, and 13.
+func RulebookHedgeLeg(l LegInput) bool {
 	return l.HedgeListed && isPut(l.Right) && l.Quantity > 0 && l.Delta != nil && l.Underlying != nil &&
 		l.UnderlyingSource != UnderlyingSourceStockLegMark
 }

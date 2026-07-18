@@ -133,6 +133,11 @@ func (s *Server) handleRiskPolicyCapitalEvent(_ context.Context, req *rpc.Reques
 	defer s.reconMu.Unlock()
 	var recon *capitalReconRef
 	if strings.EqualFold(strings.TrimSpace(p.Type), "reconcile") {
+		if strings.TrimSpace(p.Report) == "" {
+			// One-tap default: resolve the current report daemon-side, then
+			// pass its id through the exact same gate as an explicit id.
+			p.Report = s.buildReconReport().ReportID
+		}
 		rep, err := s.reconcileReportGate(p.Report)
 		if err != nil {
 			return nil, err
@@ -158,33 +163,46 @@ func (s *Server) handleRiskPolicyCapitalEvent(_ context.Context, req *rpc.Reques
 // outages is a one-shot override on capital.max_unreconciled_days, not a
 // soft mode here.
 func (s *Server) reconcileReportGate(reportID string) (*rpc.ReconResult, error) {
+	rep, blockers := s.reconcileReportAssessment(reportID)
+	if len(blockers) > 0 {
+		return nil, errBadRequest(blockers[0])
+	}
+	return rep, nil
+}
+
+// reconcileReportAssessment is the single source of truth for report
+// signability. The write gate returns its first blocker verbatim; the daily
+// brief exposes the full ordered list. No caller may infer signability from a
+// second set of conditions.
+func (s *Server) reconcileReportAssessment(reportID string) (*rpc.ReconResult, []string) {
 	reportID = strings.TrimSpace(reportID)
 	if reportID == "" {
-		return nil, errBadRequest("reconcile requires --report <id> from `ibkr recon` (bare attestation retired in phase 3a)")
+		return nil, []string{"reconcile requires --report <id> from `ibkr recon` (bare attestation retired in phase 3a)"}
 	}
 	rep := s.buildReconReport()
 	switch rep.Status {
 	case rpc.ReconStatusActive, rpc.ReconStatusDegraded:
 	case rpc.ReconStatusUnapproved:
-		return nil, errBadRequest("recon.* policy keys are unapproved; reconcile is unavailable until they exist in the risk policy")
+		return rep, []string{"recon.* policy keys are unapproved; reconcile is unavailable until they exist in the risk policy"}
 	default:
-		return nil, errBadRequest("no recon report can be built: " + nonEmptyString(rep.Message, rep.Status))
+		return rep, []string{"no recon report can be built: " + nonEmptyString(rep.Message, rep.Status)}
 	}
 	if rep.ReportID != reportID {
-		return nil, errBadRequest(fmt.Sprintf("report %s is superseded; review the current report %s (`ibkr recon`) and sign that off", reportID, rep.ReportID))
+		return rep, []string{fmt.Sprintf("report %s is superseded; review the current report %s (`ibkr recon`) and sign that off", reportID, rep.ReportID)}
 	}
 	pol := s.riskPolicies.snapshot().policy
 	rc := reconPolicyOf(pol)
 	if rc == nil {
-		return nil, errBadRequest("recon.* policy keys are unapproved; reconcile is unavailable until they exist in the risk policy")
+		return rep, []string{"recon.* policy keys are unapproved; reconcile is unavailable until they exist in the risk policy"}
 	}
+	var blockers []string
 	if age := time.Since(rep.StatementAsOf); age > time.Duration(*rc.MaxReportAgeDays)*24*time.Hour {
-		return nil, errBadRequest(fmt.Sprintf("newest ingested statement is %.0f days old, past recon.max_report_age_days=%d; fetch fresher statements first (or, during an outage, grant a one-shot override on capital.max_unreconciled_days)", age.Hours()/24, *rc.MaxReportAgeDays))
+		blockers = append(blockers, fmt.Sprintf("newest ingested statement is %.0f days old, past recon.max_report_age_days=%d; fetch fresher statements first (or, during an outage, grant a one-shot override on capital.max_unreconciled_days)", age.Hours()/24, *rc.MaxReportAgeDays))
 	}
 	if rep.Unresolved > 0 {
-		return nil, errBadRequest(fmt.Sprintf("report %s carries %d unresolved exception(s); declare the missing events or dismiss each with a reason, then reconcile", reportID, rep.Unresolved))
+		blockers = append(blockers, fmt.Sprintf("report %s carries %d unresolved exception(s); declare the missing events or dismiss each with a reason, then reconcile", reportID, rep.Unresolved))
 	}
-	return rep, nil
+	return rep, blockers
 }
 
 func (s *Server) handleReconSnapshot(ctx context.Context, req *rpc.Request) (*rpc.ReconResult, error) {

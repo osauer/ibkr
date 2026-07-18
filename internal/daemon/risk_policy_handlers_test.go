@@ -15,10 +15,13 @@ func newRiskPolicyTestServer(t *testing.T, policyTOML string) *Server {
 	t.Helper()
 	m, _ := newTestRiskPolicyManager(t, policyTOML)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	return &Server{
+	s := &Server{
+		now:          time.Now,
 		riskPolicies: m,
 		riskCapital:  &riskCapitalStore{now: time.Now},
 	}
+	s.installBriefStateStore()
+	return s
 }
 
 func rawParams(t *testing.T, v any) *rpc.Request {

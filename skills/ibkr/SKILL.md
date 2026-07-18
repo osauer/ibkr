@@ -12,7 +12,7 @@ description: Query Interactive Brokers via the local `ibkr` CLI. Use when the us
 allowed-tools: Bash(ibkr account*) Bash(ibkr positions*) Bash(ibkr quote*)
   Bash(ibkr calendar*) Bash(ibkr watch --json*) Bash(ibkr watch --list*) Bash(ibkr watch --quotes*) Bash(ibkr watch --watch*) Bash(ibkr watch --timeout*) Bash(ibkr chain*) Bash(ibkr history*) Bash(ibkr scan*) Bash(ibkr size*)
   Bash(ibkr technical*) Bash(ibkr breadth*) Bash(ibkr gamma*) Bash(ibkr regime*)
-  Bash(ibkr canary*) Bash(ibkr rules*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr opportunities status*) Bash(ibkr opportunities list*) Bash(ibkr opportunities refresh*) Bash(ibkr backtest research-opportunity*) Bash(ibkr settings show*) Bash(ibkr policy show*) Bash(ibkr recon show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr orders history*) Bash(ibkr order status*) Bash(ibkr order preview*)
+  Bash(ibkr canary*) Bash(ibkr brief*) Bash(ibkr rules*) Bash(ibkr market-events*) Bash(ibkr proposals status*) Bash(ibkr proposals list*) Bash(ibkr proposals refresh*) Bash(ibkr opportunities status*) Bash(ibkr opportunities list*) Bash(ibkr opportunities refresh*) Bash(ibkr backtest research-opportunity*) Bash(ibkr settings show*) Bash(ibkr policy show*) Bash(ibkr recon show*) Bash(ibkr trading status*) Bash(ibkr orders open*) Bash(ibkr orders history*) Bash(ibkr order status*) Bash(ibkr order preview*)
   Bash(ibkr status*) Bash(ibkr version*)
 ---
 
@@ -38,6 +38,11 @@ quality state, run `ibkr canary --json`. Canary answers with top-level
 `action`, `market_confirmation`, `portfolio_fit`, `input_health`,
 planner readiness, and evidence rows. It does not choose hedges, size trades,
 preview orders, or execute.
+
+If the user asks for the daily operator overview across market, calendar,
+portfolio, risk limits, and process clocks, run `ibkr brief --json`. The brief
+is a read surface for agents: agent-origin text renders never stamp the
+morning/EOD artefact, and JSON mode never stamps for any origin.
 
 If the user asks "what should I fix today", which of their own trading rules
 they are breaking, or wants the daily discipline checklist, run
@@ -154,6 +159,7 @@ simulate trade execution.
 | `ibkr gamma` | SPX-canonical dealer zero-gamma estimate with SPY context when usable (heavy compute; first call per NY trading day kicks a background job) | [schemas.md#gamma](schemas.md#gamma) |
 | `ibkr regime` | Broad-market stress lifecycle: equity vol, credit, funding, FX carry, SPX gamma with SPY context, and SPX breadth in one call | [schemas.md#regime](schemas.md#regime) |
 | `ibkr canary` | Portfolio-aware action/readiness snapshot, source health, fingerprints, and planner readiness | [schemas.md#canary](schemas.md#canary) |
+| `ibkr brief` | Typed five-section daily operator brief; agent renders and all JSON reads never stamp | — |
 | `ibkr market-events` | Held or requested stock/ETF market-event flags: borrow inventory, extreme borrow fee, Nasdaq Reg SHO, LULD, and halt context | [schemas.md#market-events](schemas.md#market-events) |
 | `ibkr proposals status\|list\|refresh` | Daemon-owned protection proposals, read paths only (`preview`/`submit`/`ignore` are gated verbs outside this skill allowlist) | [schemas.md#proposals-status](schemas.md#proposals-status), [schemas.md#proposals-list](schemas.md#proposals-list) |
 | `ibkr backtest research-opportunity` | Offline scored opportunity research diagnostics; not a daemon opportunity feed or broker-action surface | — |

@@ -102,6 +102,9 @@ type ArtefactParams struct {
 	Artefact string `json:"artefact"`
 	Note     string `json:"note,omitempty"`
 	Origin   string `json:"origin,omitempty"`
+	// BriefFingerprint is set only by brief.ack. The existing policy
+	// artefact verb leaves it empty and remains wire-compatible.
+	BriefFingerprint string `json:"brief_fingerprint,omitempty"`
 }
 
 // OverrideRecord is one override, active or expired, as journaled.
@@ -158,10 +161,12 @@ type PolicyPinStatus struct {
 // ArtefactRecord is the latest journaled completion of one cadence
 // artefact.
 type ArtefactRecord struct {
-	Artefact    string    `json:"artefact"`
-	Class       string    `json:"class,omitempty"`
-	CompletedAt time.Time `json:"completed_at,omitzero"`
-	Note        string    `json:"note,omitempty"`
+	Artefact         string    `json:"artefact"`
+	Class            string    `json:"class,omitempty"`
+	CompletedAt      time.Time `json:"completed_at,omitzero"`
+	Note             string    `json:"note,omitempty"`
+	Origin           string    `json:"origin,omitempty"`
+	BriefFingerprint string    `json:"brief_fingerprint,omitempty"`
 }
 
 // RiskPolicyResult is the policy.snapshot payload.

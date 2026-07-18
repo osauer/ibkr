@@ -495,7 +495,7 @@ func TestReconcileReportGate(t *testing.T) {
 	}
 }
 
-func TestReconcileEventRecordsReport(t *testing.T) {
+func TestReconcileEventDefaultsToCurrentReportAndRecordsIt(t *testing.T) {
 	s := newReconTestServer(t)
 	writeFlexFixture(t, "flex-audit.xml", recentGenerated(), "20260706", "20260712", equityRow("20260712", 250000))
 	rep := s.buildReconReport()
@@ -503,7 +503,7 @@ func TestReconcileEventRecordsReport(t *testing.T) {
 		t.Fatalf("fixture report = %+v", rep)
 	}
 	if _, err := s.handleRiskPolicyCapitalEvent(context.Background(), rawParams(t, rpc.CapitalEventParams{
-		Type: "reconcile", Report: rep.ReportID, Origin: rpc.OrderOriginHumanTTY,
+		Type: "reconcile", Origin: rpc.OrderOriginHumanTTY,
 	})); err != nil {
 		t.Fatal(err)
 	}

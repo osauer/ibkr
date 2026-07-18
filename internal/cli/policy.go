@@ -268,7 +268,7 @@ func runPolicyCapitalEvent(ctx context.Context, env *Env, args []string) int {
 	amount := fs.Float64("amount", 0, "amount in the policy base currency (deposit/withdrawal)")
 	effectiveAt := fs.String("effective-at", "", "when the flow hit the account (YYYY-MM-DD or RFC3339; default now)")
 	note := fs.String("note", "", "free-text note for the journal")
-	report := fs.String("report", "", "recon report id being signed off (required for reconcile; from `ibkr recon`)")
+	report := fs.String("report", "", "recon report id being signed off (default: current report)")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)

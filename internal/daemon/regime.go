@@ -76,6 +76,10 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	s.updateRegimeStatusQuality(res)
 	s.latchRulesRegimeStage(res)
 	s.journalRegimeDecision(res)
+	s.lastRegimeSnapshotMu.Lock()
+	copyResult := *res
+	s.lastRegimeSnapshot = &copyResult
+	s.lastRegimeSnapshotMu.Unlock()
 	return res, nil
 }
 

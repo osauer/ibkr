@@ -101,6 +101,14 @@ func (s *Server) rulesForPreview(ctx context.Context) *rpc.RulesResult {
 }
 
 func (s *Server) evaluateRules(ctx context.Context, includeTape bool) *rpc.RulesResult {
+	return s.evaluateRulesMode(ctx, includeTape, true)
+}
+
+// evaluateRulesMode lets read-only daemon composition reuse the exact rule
+// mapper/evaluator without turning its account fetch into a capital-state
+// observation. Transition journaling remains exclusively in
+// handleRulesSnapshot.
+func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMaintenance bool) *rpc.RulesResult {
 	now := time.Now()
 	pol := risk.DefaultRulebookPolicy()
 	fp := rpc.Fingerprint{Version: rpc.RulebookPolicyFingerprintVersion, Key: pol.FingerprintKey()}
@@ -120,7 +128,7 @@ func (s *Server) evaluateRules(ctx context.Context, includeTape bool) *rpc.Rules
 	in := risk.RuleInputs{AsOf: now}
 	var health []rpc.SourceHealth
 
-	acct, acctErr := s.handleAccountSummary(ctx)
+	acct, acctErr := s.buildAccountSummary(ctx, allowMaintenance)
 	if acctErr != nil || acct == nil {
 		in.Account = risk.SourceState{Healthy: false, Reason: "account_unavailable"}
 		health = append(health, rpc.SourceHealth{Source: "account", Status: "unavailable", Notes: []string{errText(acctErr)}})
@@ -190,7 +198,7 @@ func (s *Server) evaluateRules(ctx context.Context, includeTape bool) *rpc.Rules
 
 	if in.Positions.Healthy && pos != nil {
 		in.Names = mapRuleNames(pos, pol, in.BaseCurrency)
-		earnings, infos := s.assembleEarnings(ctx, in.Names, pol, cal, now)
+		earnings, infos := s.assembleEarnings(ctx, in.Names, pol, cal, now, allowMaintenance)
 		in.Earnings = earnings
 		res.Earnings = infos
 		earningsStatus := "ok"
@@ -399,7 +407,7 @@ func trimFloat(v float64) string {
 
 // assembleEarnings merges manual overrides (authoritative) with the cache,
 // kicks the async refresher for gaps, and computes ET session distances.
-func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, pol risk.RulebookPolicy, cal *marketcal.Calendar, now time.Time) (map[string]risk.EarningsInput, []rpc.EarningsInfo) {
+func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, pol risk.RulebookPolicy, cal *marketcal.Calendar, now time.Time, allowRefresh bool) (map[string]risk.EarningsInput, []rpc.EarningsInfo) {
 	loc, _ := time.LoadLocation("America/New_York")
 	overrides := s.rulebookEarningsOverrides()
 	earnings := make(map[string]risk.EarningsInput, len(names))
@@ -423,18 +431,21 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 				continue
 			}
 		}
-		if entry, stale, ok := s.earnings.get(sym); ok {
-			if d, err := time.ParseInLocation("2006-01-02", entry.Date, loc); err == nil {
-				e := risk.EarningsInput{Known: true, Date: d, TimeOfDay: entry.TimeOfDay,
-					Estimated: entry.Estimated, Stale: stale, Source: "fetched"}
-				e.SessionsUntil = sessionsUntil(cal, now.In(loc), d)
-				earnings[sym] = e
-				info.Source = "fetched"
-				info.Date = entry.Date
-				info.TimeOfDay = entry.TimeOfDay
-				info.Estimated = entry.Estimated
-				info.ObservedAt = entry.ObservedAt
-				info.Stale = stale
+		if s.earnings != nil {
+			entry, stale, ok := s.earnings.get(sym)
+			if ok {
+				if d, err := time.ParseInLocation("2006-01-02", entry.Date, loc); err == nil {
+					e := risk.EarningsInput{Known: true, Date: d, TimeOfDay: entry.TimeOfDay,
+						Estimated: entry.Estimated, Stale: stale, Source: "fetched"}
+					e.SessionsUntil = sessionsUntil(cal, now.In(loc), d)
+					earnings[sym] = e
+					info.Source = "fetched"
+					info.Date = entry.Date
+					info.TimeOfDay = entry.TimeOfDay
+					info.Estimated = entry.Estimated
+					info.ObservedAt = entry.ObservedAt
+					info.Stale = stale
+				}
 			}
 		}
 		if info.Source != "override" && (info.Source == "unknown" || info.Stale) {
@@ -443,7 +454,9 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 		infos = append(infos, info)
 	}
 	// Async, bounded, off the snapshot path — this call returns immediately.
-	s.earnings.kickRefresh(context.WithoutCancel(ctx), toFetch)
+	if allowRefresh && s.earnings != nil {
+		s.earnings.kickRefresh(context.WithoutCancel(ctx), toFetch)
+	}
 	return earnings, infos
 }
 
