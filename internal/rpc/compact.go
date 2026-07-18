@@ -400,9 +400,9 @@ func optionDTE(raw string, asOf time.Time) (int, bool) {
 		base = time.Now()
 	}
 	loc := asOfLocation(base)
-	today := time.Date(base.In(loc).Year(), base.In(loc).Month(), base.In(loc).Day(), 0, 0, 0, 0, loc)
-	expiryDay := time.Date(expiry.Year(), expiry.Month(), expiry.Day(), 0, 0, 0, 0, loc)
-	return int(expiryDay.Sub(today).Hours() / 24), true
+	today := time.Date(base.In(loc).Year(), base.In(loc).Month(), base.In(loc).Day(), 0, 0, 0, 0, time.UTC)
+	expiryDay := time.Date(expiry.Year(), expiry.Month(), expiry.Day(), 0, 0, 0, 0, time.UTC)
+	return int(expiryDay.Sub(today) / (24 * time.Hour)), true
 }
 
 func asOfLocation(t time.Time) *time.Location {

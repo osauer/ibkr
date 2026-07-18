@@ -2410,9 +2410,9 @@ func optionDTE(expiry string, now time.Time) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	exp := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, now.Location())
-	return int(exp.Sub(today).Hours() / 24), true
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	expiryDay := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	return int(expiryDay.Sub(today) / (24 * time.Hour)), true
 }
 
 func groupMarketValueOrderValue(g rpc.PositionGroup) float64 {

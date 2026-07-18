@@ -11,6 +11,77 @@ import (
 	"github.com/osauer/ibkr/v2/internal/risk"
 )
 
+func TestOptionDTECalendarDays(t *testing.T) {
+	t.Parallel()
+
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skipf("load Europe/Berlin: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		raw    string
+		asOf   time.Time
+		want   int
+		wantOK bool
+	}{
+		{
+			name:   "positive span across spring-forward compact layout",
+			raw:    "20260331",
+			asOf:   time.Date(2026, time.March, 25, 12, 0, 0, 0, berlin),
+			want:   6,
+			wantOK: true,
+		},
+		{
+			name:   "negative span across spring-forward dashed layout",
+			raw:    "2026-03-25",
+			asOf:   time.Date(2026, time.March, 31, 12, 0, 0, 0, berlin),
+			want:   -6,
+			wantOK: true,
+		},
+		{
+			name:   "positive span across fall-back",
+			raw:    "20261027",
+			asOf:   time.Date(2026, time.October, 21, 12, 0, 0, 0, berlin),
+			want:   6,
+			wantOK: true,
+		},
+		{
+			name:   "same day",
+			raw:    "2026-07-15",
+			asOf:   time.Date(2026, time.July, 15, 23, 59, 0, 0, berlin),
+			want:   0,
+			wantOK: true,
+		},
+		{
+			name:   "mid-summer span without transition",
+			raw:    "20260710",
+			asOf:   time.Date(2026, time.July, 1, 8, 30, 0, 0, berlin),
+			want:   9,
+			wantOK: true,
+		},
+		{
+			name:   "invalid raw",
+			raw:    "not-a-date",
+			asOf:   time.Date(2026, time.July, 1, 8, 30, 0, 0, berlin),
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := optionDTE(tt.raw, tt.asOf)
+			if ok != tt.wantOK {
+				t.Fatalf("optionDTE(%q, %v) ok = %v, want %v", tt.raw, tt.asOf, ok, tt.wantOK)
+			}
+			if ok && got != tt.want {
+				t.Fatalf("optionDTE(%q, %v) = %d, want %d", tt.raw, tt.asOf, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCompactPositionsRiskOptionHealthAndHedge(t *testing.T) {
 	t.Parallel()
 
