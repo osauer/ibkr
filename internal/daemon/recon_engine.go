@@ -32,6 +32,16 @@ type reconFlow struct {
 	amountBase float64
 }
 
+type retainedStatementMerge struct {
+	flows            []reconFlow
+	exceptions       []rpc.ReconException
+	equityByDay      map[string]flexstmt.EquityRow
+	classifiedCounts map[string]int
+	statementAsOf    time.Time
+	coverageFrom     time.Time
+	coverageTo       time.Time
+}
+
 // buildReconReport regenerates the report. It is cheap (local files only)
 // and side-effect free apart from reading journals.
 func (s *Server) buildReconReport() *rpc.ReconResult {
@@ -72,68 +82,16 @@ func (s *Server) buildReconReport() *rpc.ReconResult {
 		health = append(health, rpc.SourceHealth{Source: "statements", Status: "ok"})
 	}
 
-	// Merge: files arrive newest-first, so the first occurrence of a line
-	// id wins (restatement supersede-by-id) and the first equity row per
-	// report date wins.
-	var (
-		flows       []reconFlow
-		exceptions  []rpc.ReconException
-		seenLine    = map[string]bool{}
-		equityByDay = map[string]flexstmt.EquityRow{}
-	)
-	for _, st := range statements {
-		if st.WhenGenerated.After(res.StatementAsOf) {
-			res.StatementAsOf = st.WhenGenerated
-		}
-		if res.CoverageFrom.IsZero() || st.FromDate.Before(res.CoverageFrom) {
-			res.CoverageFrom = st.FromDate
-		}
-		if st.ToDate.After(res.CoverageTo) {
-			res.CoverageTo = st.ToDate
-		}
-		for _, c := range st.Cash {
-			if seenLine[c.ID] {
-				continue
-			}
-			seenLine[c.ID] = true
-			switch {
-			case c.Category == flexstmt.CategoryFlow && c.AmountBase != nil:
-				flows = append(flows, reconFlow{id: c.ID, typ: c.Type, desc: c.Description, valueDate: c.ValueDate, amountBase: *c.AmountBase})
-			case c.Category == flexstmt.CategoryFlow: // flow with no usable base amount
-				exceptions = append(exceptions, rpc.ReconException{LineID: c.ID, Category: rpc.ReconUncategorized, Type: c.Type,
-					Description: c.Description, ValueDate: c.ValueDate, Note: "flow line without a usable base amount"})
-			case c.Category == flexstmt.CategoryUncategorized:
-				amt := c.AmountBase
-				exceptions = append(exceptions, rpc.ReconException{LineID: c.ID, Category: rpc.ReconUncategorized, Type: c.Type,
-					Description: c.Description, ValueDate: c.ValueDate, AmountBase: amt, Note: "unknown statement line type; classify or dismiss"})
-			}
-		}
-		for _, t := range st.Transfers {
-			if seenLine[t.ID] {
-				continue
-			}
-			seenLine[t.ID] = true
-			if t.AmountBase == nil {
-				exceptions = append(exceptions, rpc.ReconException{LineID: t.ID, Category: rpc.ReconUncategorized, Type: "Transfer " + t.Direction,
-					Description: t.Description, ValueDate: t.Date, Note: "transfer without a computable base value"})
-				continue
-			}
-			amount := *t.AmountBase
-			if t.Direction == "OUT" && amount > 0 {
-				amount = -amount
-			}
-			flows = append(flows, reconFlow{id: t.ID, typ: "Transfer " + t.Direction, desc: t.Description, valueDate: t.Date, amountBase: amount})
-		}
-		for _, e := range st.Equity {
-			key := e.ReportDate.Format("2006-01-02")
-			if _, ok := equityByDay[key]; !ok {
-				equityByDay[key] = e
-			}
-		}
-	}
+	merged := mergeRetainedStatements(statements)
+	res.StatementAsOf = merged.statementAsOf
+	res.CoverageFrom = merged.coverageFrom
+	res.CoverageTo = merged.coverageTo
 
 	events := replayCapitalFlowEvents()
-	exceptions = append(exceptions, matchReconFlows(flows, events, rc)...)
+	matchedExceptions, matched := matchReconFlows(merged.flows, events, rc)
+	exceptions := append(merged.exceptions, matchedExceptions...)
+	genesis := s.riskCapital.ReplayContext().GenesisAt
+	labelPreGenesisExceptions(exceptions, genesis)
 	applyReconDismissals(exceptions)
 
 	sort.Slice(exceptions, func(i, j int) bool { return exceptions[i].LineID < exceptions[j].LineID })
@@ -143,12 +101,77 @@ func (s *Server) buildReconReport() *rpc.ReconResult {
 			res.Unresolved++
 		}
 	}
-	res.Counts["matched"] = len(flows) - countFlowExceptions(exceptions)
+	res.Counts["matched"] = len(matched)
 	res.Exceptions = exceptions
-	res.Equity = s.reconEquityCheck(equityByDay)
+	res.Equity = s.reconEquityCheck(merged.equityByDay)
 	res.ReportID = reconReportID(exceptions, res.CoverageFrom, res.CoverageTo, res.StatementAsOf, pol)
 	res.InputHealth = health
 	return res
+}
+
+// mergeRetainedStatements folds all retained Flex statements into the
+// restatement-aware flow, exception, and equity inputs shared by the live
+// recon report and the full-window backtest. Files arrive newest-first, so
+// the first occurrence of a line id and equity day wins.
+func mergeRetainedStatements(statements []flexstmt.Statement) retainedStatementMerge {
+	merged := retainedStatementMerge{
+		equityByDay:      make(map[string]flexstmt.EquityRow),
+		classifiedCounts: make(map[string]int),
+	}
+	seenLine := make(map[string]bool)
+	for _, st := range statements {
+		if st.WhenGenerated.After(merged.statementAsOf) {
+			merged.statementAsOf = st.WhenGenerated
+		}
+		if merged.coverageFrom.IsZero() || st.FromDate.Before(merged.coverageFrom) {
+			merged.coverageFrom = st.FromDate
+		}
+		if st.ToDate.After(merged.coverageTo) {
+			merged.coverageTo = st.ToDate
+		}
+		for _, c := range st.Cash {
+			if seenLine[c.ID] {
+				continue
+			}
+			seenLine[c.ID] = true
+			switch {
+			case c.Category == flexstmt.CategoryFlow && c.AmountBase != nil:
+				merged.flows = append(merged.flows, reconFlow{id: c.ID, typ: c.Type, desc: c.Description, valueDate: c.ValueDate, amountBase: *c.AmountBase})
+			case c.Category == flexstmt.CategoryFlow:
+				merged.exceptions = append(merged.exceptions, rpc.ReconException{LineID: c.ID, Category: rpc.ReconUncategorized, Type: c.Type,
+					Description: c.Description, ValueDate: c.ValueDate, Note: "flow line without a usable base amount"})
+			case c.Category == flexstmt.CategoryClassified:
+				merged.classifiedCounts[c.Type]++
+			case c.Category == flexstmt.CategoryUncategorized:
+				amt := c.AmountBase
+				merged.exceptions = append(merged.exceptions, rpc.ReconException{LineID: c.ID, Category: rpc.ReconUncategorized, Type: c.Type,
+					Description: c.Description, ValueDate: c.ValueDate, AmountBase: amt, Note: "unknown statement line type; classify or dismiss"})
+			}
+		}
+		for _, t := range st.Transfers {
+			if seenLine[t.ID] {
+				continue
+			}
+			seenLine[t.ID] = true
+			if t.AmountBase == nil {
+				merged.exceptions = append(merged.exceptions, rpc.ReconException{LineID: t.ID, Category: rpc.ReconUncategorized, Type: "Transfer " + t.Direction,
+					Description: t.Description, ValueDate: t.Date, Note: "transfer without a computable base value"})
+				continue
+			}
+			amount := *t.AmountBase
+			if t.Direction == "OUT" && amount > 0 {
+				amount = -amount
+			}
+			merged.flows = append(merged.flows, reconFlow{id: t.ID, typ: "Transfer " + t.Direction, desc: t.Description, valueDate: t.Date, amountBase: amount})
+		}
+		for _, e := range st.Equity {
+			key := e.ReportDate.Format("2006-01-02")
+			if _, ok := merged.equityByDay[key]; !ok {
+				merged.equityByDay[key] = e
+			}
+		}
+	}
+	return merged
 }
 
 func reconPolicyOf(c *risk.Constitution) *risk.ConstitutionRecon {
@@ -165,7 +188,7 @@ func reconPolicyOf(c *risk.Constitution) *risk.ConstitutionRecon {
 // matchReconFlows pairs statement flows with declared events. Bijective
 // matches only: a flow or event with more than one candidate is ambiguous
 // and surfaces as an exception (never-false-match).
-func matchReconFlows(flows []reconFlow, events []capitalEventV1, rc *risk.ConstitutionRecon) []rpc.ReconException {
+func matchReconFlows(flows []reconFlow, events []capitalEventV1, rc *risk.ConstitutionRecon) ([]rpc.ReconException, map[string]bool) {
 	tolerance := func(stmtAmount float64) float64 {
 		return max(math.Abs(stmtAmount)**rc.AmountTolerancePct/100, *rc.AmountToleranceMin)
 	}
@@ -194,6 +217,7 @@ func matchReconFlows(flows []reconFlow, events []capitalEventV1, rc *risk.Consti
 	}
 
 	var out []rpc.ReconException
+	matched := make(map[string]bool)
 	flowDone := make([]bool, len(flows))
 	eventDone := make([]bool, len(events))
 	for fi, cands := range flowCands {
@@ -201,6 +225,7 @@ func matchReconFlows(flows []reconFlow, events []capitalEventV1, rc *risk.Consti
 		case len(cands) == 1 && len(eventCands[cands[0]]) == 1:
 			flowDone[fi] = true
 			eventDone[cands[0]] = true // matched
+			matched[flows[fi].id] = true
 		case len(cands) > 1:
 			f := flows[fi]
 			amt := f.amountBase
@@ -274,18 +299,28 @@ func matchReconFlows(flows []reconFlow, events []capitalEventV1, rc *risk.Consti
 			Note:            "declared event with no statement flow; a loss dressed as a withdrawal would land here",
 		})
 	}
-	return out
+	return out, matched
 }
 
-func countFlowExceptions(exceptions []rpc.ReconException) int {
-	n := 0
-	for _, ex := range exceptions {
-		switch ex.Category {
-		case rpc.ReconMissingFromLedger, rpc.ReconAmountMismatch, rpc.ReconDateMismatch, rpc.ReconAmbiguous:
-			n++
+func labelPreGenesisExceptions(exceptions []rpc.ReconException, genesis time.Time) {
+	if genesis.IsZero() {
+		return
+	}
+	for i := range exceptions {
+		ex := &exceptions[i]
+		if ex.Category == rpc.ReconMissingFromLedger && utcDateBefore(ex.ValueDate, genesis) {
+			ex.PreGenesis = true
+			ex.Note = "flow predates runtime state genesis — if it is embedded in the seeded baseline, dismiss it with a reason; otherwise declare it"
 		}
 	}
-	return n
+}
+
+func utcDateBefore(a, b time.Time) bool {
+	a = a.UTC()
+	b = b.UTC()
+	ad := time.Date(a.Year(), a.Month(), a.Day(), 0, 0, 0, 0, time.UTC)
+	bd := time.Date(b.Year(), b.Month(), b.Day(), 0, 0, 0, 0, time.UTC)
+	return ad.Before(bd)
 }
 
 // businessDaysApart counts weekdays strictly between the earlier and later
@@ -380,13 +415,17 @@ func (s *Server) reconEquityCheck(equityByDay map[string]flexstmt.EquityRow) *rp
 	}
 	check := &rpc.ReconEquityCheck{StatementDate: newest.ReportDate, StatementTotalBase: newest.TotalBase}
 	if s.riskCapital != nil {
-		if equity, asOf := s.riskCapital.LastEquity(); equity > 0 {
+		day := newest.ReportDate.UTC().Format("2006-01-02")
+		if equity, ok := s.riskCapital.DailySample(day); ok {
 			check.RuntimeEquityBase = &equity
-			check.RuntimeAsOf = asOf
+			check.SameDay = true
 			if newest.TotalBase != 0 {
 				div := (equity - newest.TotalBase) / math.Abs(newest.TotalBase) * 100
 				check.DivergencePct = &div
 			}
+		} else if equity, asOf := s.riskCapital.LastEquity(); equity > 0 {
+			check.RuntimeEquityBase = &equity
+			check.RuntimeAsOf = asOf
 		}
 	}
 	return check

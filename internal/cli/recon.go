@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -23,6 +25,8 @@ func runRecon(ctx context.Context, env *Env, args []string) int {
 	switch sub {
 	case "show":
 		return runReconShow(ctx, env, args)
+	case "backtest":
+		return runReconBacktest(ctx, env, args)
 	case "dismiss":
 		return runReconDismiss(ctx, env, args)
 	default:
@@ -81,7 +85,11 @@ func runReconShow(ctx context.Context, env *Env, args []string) int {
 		if ex.Dismissed {
 			mark = "✓"
 		}
-		fmt.Fprintf(env.Stdout, "  %s %-19s %s", mark, ex.Category, ex.LineID)
+		category := ex.Category
+		if ex.PreGenesis {
+			category += " [pre-genesis]"
+		}
+		fmt.Fprintf(env.Stdout, "  %s %-19s %s", mark, category, ex.LineID)
 		if ex.AmountBase != nil {
 			fmt.Fprintf(env.Stdout, "  %.2f", *ex.AmountBase)
 		}
@@ -103,6 +111,8 @@ func runReconShow(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintf(env.Stdout, "\n  equity check: statement %s %.2f", res.Equity.StatementDate.Format("2006-01-02"), res.Equity.StatementTotalBase)
 		if res.Equity.DivergencePct != nil {
 			fmt.Fprintf(env.Stdout, "  vs runtime %+.2f%%", *res.Equity.DivergencePct)
+		} else if !res.Equity.SameDay {
+			fmt.Fprint(env.Stdout, "  same-day runtime sample unavailable")
 		}
 		fmt.Fprintln(env.Stdout)
 	}
@@ -110,6 +120,168 @@ func runReconShow(ctx context.Context, env *Env, args []string) int {
 		fmt.Fprintf(env.Stdout, "\nClean. Sign off with: ibkr policy capital-event reconcile --report %s\n", res.ReportID)
 	}
 	return 0
+}
+
+func runReconBacktest(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "recon backtest")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	refresh := fs.Bool("refresh", false, "kick one background Flex statement fetch before reporting")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	var res rpc.ReconBacktestResult
+	if err := env.Conn.Call(ctx, rpc.MethodReconBacktest, rpc.ReconSnapshotParams{Refresh: *refresh}, &res); err != nil {
+		return fail(env, "recon backtest: %v", err)
+	}
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+
+	fmt.Fprintf(env.Stdout, "Recon backtest — %s  status %s\n", res.AsOf.Local().Format("2006-01-02 15:04 MST"), res.Status)
+	if res.ReportID != "" {
+		fmt.Fprintf(env.Stdout, "  report %s  statements as of %s  coverage %s → %s\n",
+			res.ReportID, res.StatementAsOf.Local().Format("2006-01-02 15:04"),
+			res.CoverageFrom.Format("2006-01-02"), res.CoverageTo.Format("2006-01-02"))
+	}
+	if !res.GenesisAt.IsZero() || res.PolicyFingerprint != nil {
+		fmt.Fprint(env.Stdout, "  runtime genesis ")
+		if res.GenesisAt.IsZero() {
+			fmt.Fprint(env.Stdout, "not recorded")
+		} else {
+			fmt.Fprint(env.Stdout, res.GenesisAt.Format("2006-01-02"))
+		}
+		if res.PolicyFingerprint != nil {
+			fmt.Fprintf(env.Stdout, "  policy %s…", truncate(res.PolicyFingerprint.Key, 12))
+		}
+		fmt.Fprintln(env.Stdout)
+	}
+	if res.Message != "" {
+		fmt.Fprintf(env.Stdout, "  note: %s\n", res.Message)
+	}
+	for _, h := range res.InputHealth {
+		if h.Status != "ok" {
+			fmt.Fprintf(env.Stdout, "  input %-11s %s %s\n", h.Source, h.Status, strings.Join(h.Notes, "; "))
+		}
+	}
+	if res.Status != rpc.ReconStatusActive && res.Status != rpc.ReconStatusDegraded {
+		return 0
+	}
+
+	fmt.Fprintln(env.Stdout, "\n  Flows over the window (review this list against memory — the R3 gate):")
+	if len(res.Flows) == 0 {
+		fmt.Fprintln(env.Stdout, "    none — the window contains no external flows")
+	}
+	for _, flow := range res.Flows {
+		status := flow.Status
+		if flow.PreGenesis {
+			status += " [pre-genesis]"
+		}
+		if flow.Dismissed {
+			status += " [dismissed]"
+		}
+		amount := "—"
+		if flow.AmountBase != nil {
+			amount = fmt.Sprintf("%.2f", *flow.AmountBase)
+		}
+		fmt.Fprintf(env.Stdout, "    %s  %s  %s  %s",
+			flow.ValueDate.Format("2006-01-02"), flow.Type, amount, status)
+		if flow.Description != "" {
+			fmt.Fprintf(env.Stdout, "  %s", flow.Description)
+		}
+		fmt.Fprintln(env.Stdout)
+	}
+	if len(res.FlowCounts) > 0 {
+		fmt.Fprint(env.Stdout, "  flow counts:")
+		for _, key := range sortedCountKeys(res.FlowCounts) {
+			fmt.Fprintf(env.Stdout, " %s %d", key, res.FlowCounts[key])
+		}
+		fmt.Fprintln(env.Stdout)
+	}
+	if len(res.ClassifiedCounts) > 0 {
+		fmt.Fprint(env.Stdout, "  classified lines: ")
+		for i, key := range sortedCountKeys(res.ClassifiedCounts) {
+			if i > 0 {
+				fmt.Fprint(env.Stdout, ", ")
+			}
+			fmt.Fprintf(env.Stdout, "%s %d", key, res.ClassifiedCounts[key])
+		}
+		fmt.Fprintf(env.Stdout, "   uncategorized: %d\n", res.UncategorizedCount)
+	} else {
+		fmt.Fprintf(env.Stdout, "  classified lines: none   uncategorized: %d\n", res.UncategorizedCount)
+	}
+	fmt.Fprintf(env.Stdout, "  equity days: %d\n", res.EquityDays)
+
+	if res.Replay == nil {
+		if res.Message != "" {
+			fmt.Fprintf(env.Stdout, "\n  Equity replay unavailable: %s\n", res.Message)
+		}
+		return 0
+	}
+	replay := res.Replay
+	fmt.Fprintln(env.Stdout, "\n  Equity replay (statement EOD vs runtime intraday):")
+	fmt.Fprintf(env.Stdout, "    days %d  %s → %s\n", replay.Days, formatDateOrUnavailable(replay.FirstDay), formatDateOrUnavailable(replay.LastDay))
+	fmt.Fprintf(env.Stdout, "    replayed peak %.2f on %s", replay.ReplayedPeakBase, formatDateOrUnavailable(replay.ReplayedPeakAt))
+	if replay.RuntimePeakBase != nil {
+		fmt.Fprintf(env.Stdout, "   runtime %.2f on %s", *replay.RuntimePeakBase, formatDateOrUnavailable(replay.RuntimePeakAt))
+	} else {
+		fmt.Fprint(env.Stdout, "   runtime unavailable")
+	}
+	if replay.PeakDivergencePct != nil {
+		fmt.Fprintf(env.Stdout, "  (%+.2f%%)", *replay.PeakDivergencePct)
+	}
+	fmt.Fprintln(env.Stdout)
+	renderBacktestCrossing(env, "warn", replay.Crossings)
+	renderBacktestCrossing(env, "block", replay.Crossings)
+	fmt.Fprintf(env.Stdout, "    same-day checks %d", replay.SameDayComparisons)
+	if replay.MaxSameDayDivergencePct != nil {
+		fmt.Fprintf(env.Stdout, "  max divergence %+.2f%%", *replay.MaxSameDayDivergencePct)
+	} else {
+		fmt.Fprint(env.Stdout, "  max divergence unavailable")
+	}
+	fmt.Fprintln(env.Stdout)
+	for _, note := range replay.Notes {
+		fmt.Fprintf(env.Stdout, "    note: %s\n", note)
+	}
+	return 0
+}
+
+func renderBacktestCrossing(env *Env, tier string, crossings []rpc.ReconBacktestCrossing) {
+	for _, crossing := range crossings {
+		if crossing.Tier != tier {
+			continue
+		}
+		runtimeAt := "not recorded"
+		if !crossing.RuntimeAt.IsZero() {
+			runtimeAt = crossing.RuntimeAt.Local().Format("2006-01-02 15:04 MST")
+		}
+		fmt.Fprintf(env.Stdout, "    %-5s crossed %s (replayed %.2f%%)   runtime %s\n",
+			tier, formatDateOrUnavailable(crossing.ReplayedAt), crossing.ReplayedConsumedPct, runtimeAt)
+		return
+	}
+	fmt.Fprintf(env.Stdout, "    %-5s not crossed   runtime not recorded\n", tier)
+}
+
+func sortedCountKeys(counts map[string]int) []string {
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func formatDateOrUnavailable(v time.Time) string {
+	if v.IsZero() {
+		return "unavailable"
+	}
+	return v.Format("2006-01-02")
 }
 
 func runReconDismiss(ctx context.Context, env *Env, args []string) int {

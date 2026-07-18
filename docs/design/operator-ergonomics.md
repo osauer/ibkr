@@ -1,0 +1,214 @@
+# Operator Ergonomics and Exception-Driven Governance (Phase 2.1)
+
+Updated: 2026-07-18 14:30 CEST
+Status: design approved by the operator (interviews 2026-07-16, consolidated
+greenlight 2026-07-18); nothing implemented yet. This document is the approval
+record and the implementation authority for the ergonomics build, the
+accelerated R3/R4 cutover, and the risk-policy v3 revision scope. It amends
+docs/design/risk-policy.md (deferred list) and docs/design/post-trade-truth.md
+(Rückbau table) on implementation; it does not duplicate their numbers.
+
+## Diagnosis
+
+The constitution needs about four human signatures; everything else was
+paperwork and memory. The daemon knows every clock, latch, and due state but
+pushes nothing — phase 1 deliberately deferred push alerts, the SPA card, and
+automated reports, and Phase 2 surfaced that deferral as the dominant
+operating cost immediately: artefacts stopped after day 1 (morning 2026-07-16
+was the only completion as of 2026-07-18), while a real shadow-block latch ran
+from 2026-07-15. A control that is correct in code but too heavy to operate is
+not effective risk management (harness guide, step 7).
+
+Principles (approved):
+
+1. Automate evidence assembly and memory, never signatures.
+2. Push, not pull: anything with a clock or a due state notifies the operator.
+3. Attestation-by-review: the stamp is the act of looking, not a second act.
+4. The machine owns the empty case; the human owns the exceptional case.
+
+## Approved decisions (2026-07-16 → 2026-07-18)
+
+1. **Brief surface.** The daemon composes a typed morning/EOD brief from
+   existing results (policy tier + latch, recon clock, rules deltas since the
+   last brief, canary state, Phase-2 day counter, artefacts due). Rendered by
+   `ibkr brief` and a card in the paired PWA. Rendering on a human-origin
+   surface journals the artefact completion; agent-origin renders never stamp.
+2. **Push nudges** over the existing relay/PWA pairing: artefact not done by
+   the operator's chosen time, recon clock inside 2 days, recon exception,
+   shadow would-block event journaled, latch open, sibling-policy drift.
+   Advisory only. Payloads carry states, tiers, and percentages — never
+   balances, ids, or tokens (lockscreen-safe). Nudge times: `unapproved`
+   (operator sets them in the v3 TOML).
+3. **One-tap reconcile.** The sign-off verb defaults to the latest clean
+   report; the brief presents it as a single confirm. Semantics unchanged.
+4. **Accelerated R3/R4 via backfill backtest.** The "two future fetch cycles
+   with all declarations auto-matched" trigger is retired: flows are rare in
+   this account, so the gate could stall for months while months of broker
+   history sit unfetched, and empty windows satisfy it vacuously. Replacement
+   gate: one backfill backtest review (below).
+5. **Backtest before reset.** The drawdown latch (engaged 2026-07-15, 51.9%
+   of declared risk consumed as of 2026-07-18) stays until the equity replay
+   has validated the runtime-observed peak and crossing dates against
+   statement truth. The reset itself remains the operator's journaled act.
+6. **Signatures only on drift.** Standing sign-off duties are retired; every
+   human act is triggered by an exception, a breach, drift, or the operator's
+   own intent — plus exactly one standing touchpoint, a **monthly** pulse
+   (read the brief, glance at the drift table, confirm the pins). Approved as
+   monthly; revisitable.
+7. **Policy v3 bundle** (one fingerprinted revision, operator-written):
+   statement-authoritative flows (R3), clean-report auto-extend of the
+   reconcile clock, cadence re-declaration (stamp duties retired, weekly
+   folded into exception-driven recon + the monthly pulse), nudge times, and
+   an equity-divergence bound key. No value defaults in code; every number is
+   `unapproved` until the operator writes it into the TOML.
+8. **Build during Phase 2**, journaled as a Phase-2 event: the window
+   measures the operator's process, and its first finding was that the
+   process is too heavy to keep.
+9. **Equity-check metric fix.** The recon equity comparison becomes same-day
+   (statement EOD vs the runtime observation for that day); the current
+   latest-vs-latest form conflates market movement with sampler error and
+   reads worst exactly when trust matters most.
+
+## The backfill backtest (R3/R4 gate)
+
+**Mechanics.** The daily pipeline reaches back days; a Flex query period
+reaches back up to a year. The operator adjusts the saved query's period at
+IBKR (or creates a second backfill query id) — a one-time human act, same
+standing as the token; agents never touch it. One fetch flows through the
+existing immutable-raw-XML → `internal/flexstmt` → recon path.
+
+**What it validates:**
+
+- *Parser classification at scale*: months of real dividends, withholding,
+  interest, fees, FX, corporate actions. Unknown lines land in
+  `uncategorized` as exceptions now, in a review, not live later — retiring
+  most of 3a's accepted parser-gap risk.
+- *Equity replay* (the prize): the daily `EquitySummaryInBase` series replays
+  the constitution against broker-true equity — does it reproduce the
+  recorded high-water mark, the 2026-07-14 warn crossing, the 2026-07-15
+  block crossing? This lands before the reset decision (decision 5).
+- *Flow classification* on the real flows in the window.
+
+**What it cannot validate, honestly:** statement↔ledger matching, because the
+declared ledger is days old and empty of flows. Post-flip the ledger stops
+being load-bearing, so this is acceptable; the meaningful check is the
+operator reading the backtest's complete flow list against memory.
+
+**Operator prior (recorded 2026-07-18):** roughly one, at most two flow
+events expected in the backfill window — one known withdrawal in the last
+several weeks. A backtest that finds materially more or fewer flows than the
+operator remembers is itself an exception to resolve, not a pass.
+
+**Gate:** the flip happens when the backtest report is clean or every
+exception is explained, and the operator has signed the flow-list review —
+the last clean-case signature of the old regime. R4 (statement value dates
+replace the late-deposit heuristic) rides in the same flip. For the first
+weeks the declared-flow number is still computed and displayed as a shadow
+comparison, then removed (R5).
+
+*Amended 2026-07-18 (implementation):* the originally approved anchor
+("flows before the signed 2026-07-14 baseline are baked in, not
+re-litigated") is **not** implemented as an automatic exclusion — an
+auto-anchor would also swallow a *restated* flow inside an already-attested
+window, a never-false-pass violation the existing reconcile-gate tests
+expose. Instead, historical flows surface carrying a `pre_genesis`
+disclosure label (value-dated before the runtime state's genesis).
+
+*Amended again 2026-07-18 (operator decision, second interview):* per-line
+dismissal of pre-genesis flows is retired before it ever ran. For a flow
+dated before the runtime state existed there is exactly one valid
+treatment — it is embedded in the seeded baseline; declaring it would
+double-count — and a decision with one valid answer is ritual, not
+judgment. Pre-genesis statement flows therefore auto-classify as
+**baseline**: listed with amounts, counted, and folded into the report id
+(a newly restated backdated line still changes the report id and is seen
+at the next sign-off), but never an exception and never signature-gated.
+The partition happens only when the runtime state is seeded (an unseeded
+install baselines nothing), and a *ledger* event dated pre-genesis still
+surfaces loudly as `ledger_only`. Human signatures on flows now exist only
+where a real decision exists: post-genesis flows until the R3 authority
+flip, anomalies always.
+
+## Signature inventory (before → after)
+
+| Human act | Trigger today | Trigger after |
+|---|---|---|
+| Reconcile sign-off | Weekly, even when clean | Exception only; clean + fresh statements + divergence in bound ⇒ clock auto-extends |
+| Flow declarations | Every deposit/withdrawal | Retired (optional same-day bridge; superseded by statements) |
+| Artefact stamps | Twice daily + weekly | Retired as duties; brief render stamps passively; adherence measured from behavior (3b) |
+| Drawdown reset | Only when latched | Unchanged — intrinsically judgment |
+| Policy revisions, overrides, freeze | Self-initiated | Unchanged |
+| Earnings overrides | Whenever the feed degrades | Fallback source; ask only when no source knows and the position is oversized |
+| Sibling-policy drift re-approval | Passive display in `policy show` | Push + explicit re-approval act (new ask, deliberately) |
+| Monthly pulse | — | The one standing touchpoint |
+
+**Anti-complacency backstop:** auto-extend fires only on positive fresh
+evidence. No statement ⇒ no clean report ⇒ no extend ⇒ the clock expires ⇒
+tier degrades ⇒ push. Silence is structurally self-limiting at
+`capital.max_unreconciled_days`; never-false-pass is preserved.
+
+## Authority
+
+| Concept | Authoritative source | Typed contract | Renderer/tool | Fallback / unavailable |
+|---|---|---|---|---|
+| Brief content | daemon composition of existing typed results | new `rpc` brief result | `ibkr brief`, PWA card, push summary | degraded inputs disclosed per row, never omitted silently |
+| Artefact completion | human-origin brief render | journal entry with origin + brief fingerprint | `policy show`, 3b replay | agent-origin render ⇒ no stamp |
+| Nudge schedule | v3 TOML cadence keys (times `unapproved`) | `risk.Constitution` | daemon scheduler → relay push | relay down ⇒ missed nudge journaled, never blocks |
+| Backfill statements | one-off long-period Flex query (operator-configured at IBKR) | existing `flexstmt` records | backtest report | fetch failure ⇒ no backtest, no flip |
+| Backtest verdict | recon engine over full window + equity replay | new `rpc` backtest report (id, window, flow list, replay result) | `ibkr recon` (backtest view) | exceptions block the flip |
+| cumFlows after flip | statement-confirmed flows | flows/equity store | `policy show` | statements stale ⇒ existing staleness posture, clocks unchanged |
+| Auto-extend evidence | clean fresh report | auto-entry in reconcile journal carrying report id | `ibkr recon`, `policy show` | any exception or staleness ⇒ no extend, clock runs, push |
+
+## Safety invariants
+
+- No enforcement change anywhere in this phase: the block stays shadow, no
+  submit path, blocker, pin, token, or freeze semantics are touched.
+- All policy write verbs, recon resolutions, and the reset stay
+  human-origin-only; origin gating is **extended** to attestation stamps.
+- Auto-extend requires positive fresh evidence; data absence still degrades
+  loudly (never-false-pass). A dead fetcher cannot extend anything.
+- Push payloads and brief pushes never carry balances, account ids, order
+  references, or tokens.
+- The Flex token rules are unchanged; the backfill uses the same token and
+  stays unreadable to agents. Statement content remains untrusted typed data;
+  unknown lines become exceptions, never actions.
+- Briefs and nudges are advisory; a dead relay or missed nudge never blocks
+  anything and is journaled.
+
+## Sequencing
+
+1. **Operator (blocking):** adjust the Flex query period at IBKR (or second
+   query id) for the backfill.
+2. **Backtest:** backfill ingest + backtest report; operator reviews the flow
+   list against memory and the equity replay against the recorded crossings;
+   then makes the reset decision on broker-true numbers.
+3. **v3 revision (operator-written TOML)** → authority flip (R3/R4),
+   auto-extend live, cadence re-declared. In parallel: **ergonomics build**
+   (brief + render-stamps, pushes, one-tap sign-off, earnings fallback,
+   same-day metric, Phase-2 day counter) — briefs do not depend on v3.
+4. **R5 cleanup:** remove the dual-compute display and attestation-era prose;
+   amend post-trade-truth.md R3/R4 rows and the risk-policy.md deferred list.
+
+## Verification (at implementation)
+
+Backfill fixtures (long-window anonymized XML incl. a real-shaped withdrawal,
+restatement, unknown line); equity-replay test against known crossing dates;
+auto-extend refusal cases (exception present, stale statements, no report);
+stamp-origin tests (agent render produces no journal entry); push-payload
+redaction test (no money fields in any marshaled payload); `make check` +
+`make test` binding; daemon/CLI wire changes take full `make smoke`; redacted
+before/after artifacts per docs/templates/daemon-cli-trading-contract.md.
+
+## Rollback
+
+Each phase reverts independently. Auto-extend and the authority flip retire by
+policy revision (the declared ledger stays intact through the dual-compute
+window, so flipping back is a revert, not a reconstruction). Briefs, pushes,
+and stamps remove without any trading-path change.
+
+## Out of scope
+
+3b measurement content (still gated on Phase 2 data), promotion of any control
+to hard, MCP exposure of `policy`/`recon` (queued for after Phase 2), relay
+deployment changes (separate go/no-go), and every threshold value — numbers
+exist only in the operator's TOML.

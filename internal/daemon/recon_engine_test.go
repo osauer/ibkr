@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +41,10 @@ func cashLine(id, typ string, amount float64, date string) string {
 	return fmt.Sprintf(`   <CashTransactions><CashTransaction transactionID=%q type=%q currency="EUR" fxRateToBase="1" amount="%f" dateTime="%s;120000" settleDate=%q description="FIXTURE" /></CashTransactions>`, id, typ, amount, date, date)
 }
 
+func equityRow(date string, total float64) string {
+	return fmt.Sprintf(`   <EquitySummaryInBase><EquitySummaryByReportDateInBase reportDate=%q total="%f" /></EquitySummaryInBase>`, date, total)
+}
+
 // newReconTestServer builds a server with an active policy (recon keys
 // approved), an isolated state dir, and no gateway.
 func newReconTestServer(t *testing.T) *Server {
@@ -55,7 +61,7 @@ func declare(t *testing.T, s *Server, typ string, amount float64, effectiveAt st
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.riskCapital.ApplyCapitalEvent(rpc.CapitalEventParams{Type: typ, AmountBase: amount, EffectiveAt: eff}, rpc.OrderOriginHumanTTY); err != nil {
+	if _, err := s.riskCapital.ApplyCapitalEvent(rpc.CapitalEventParams{Type: typ, AmountBase: amount, EffectiveAt: eff}, rpc.OrderOriginHumanTTY, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -108,6 +114,20 @@ func TestReconMatchAndCategories(t *testing.T) {
 	}
 }
 
+func TestReconMissingCashAmountIsUncategorized(t *testing.T) {
+	s := newReconTestServer(t)
+	writeFlexFixture(t, "flex-missing-amount.xml", recentGenerated(), "20260706", "20260712",
+		`   <CashTransactions><CashTransaction transactionID="missing-amount" type="Deposits/Withdrawals" currency="EUR" fxRateToBase="1" dateTime="20260708;120000" settleDate="20260708" description="FIXTURE" /></CashTransactions>`)
+
+	rep := s.buildReconReport()
+	if rep.Counts[rpc.ReconUncategorized] != 1 || rep.Unresolved != 1 {
+		t.Fatalf("counts = %v unresolved = %d, want one unresolved uncategorized exception", rep.Counts, rep.Unresolved)
+	}
+	if len(rep.Exceptions) != 1 || rep.Exceptions[0].AmountBase != nil || rep.Exceptions[0].Note != "flow line without a usable base amount" {
+		t.Fatalf("exception = %+v, want missing-base flow exception", rep.Exceptions)
+	}
+}
+
 // Two declared events qualifying for one statement line is ambiguous —
 // never a best-effort pick (never-false-match).
 func TestReconAmbiguityNeverAutoResolves(t *testing.T) {
@@ -138,6 +158,72 @@ func TestReconRestatementSupersedesByLineID(t *testing.T) {
 	rep := s.buildReconReport()
 	if rep.Counts["matched"] != 1 || rep.Unresolved != 0 {
 		t.Fatalf("restated line must match once cleanly: counts %v unresolved %d", rep.Counts, rep.Unresolved)
+	}
+}
+
+func TestReconEquityCheckSameDayOnly(t *testing.T) {
+	s := newReconTestServer(t)
+	writeFlexFixture(t, "flex-equity.xml", recentGenerated(), "20260710", "20260710", equityRow("20260710", 100))
+
+	s.riskCapital.mu.Lock()
+	s.riskCapital.loadLocked()
+	s.riskCapital.state.LastEquityBase = 150
+	s.riskCapital.state.LastEquityAsOf = time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	s.riskCapital.mu.Unlock()
+
+	rep := s.buildReconReport()
+	if rep.Equity == nil {
+		t.Fatal("equity check is nil")
+	}
+	if rep.Equity.SameDay || rep.Equity.DivergencePct != nil {
+		t.Fatalf("without same-day sample: %+v, want unknown divergence", rep.Equity)
+	}
+	if rep.Equity.RuntimeEquityBase == nil || *rep.Equity.RuntimeEquityBase != 150 {
+		t.Fatalf("runtime context = %v, want latest observation 150", rep.Equity.RuntimeEquityBase)
+	}
+
+	s.riskCapital.mu.Lock()
+	s.riskCapital.state.DailyEquity = map[string]float64{"2026-07-10": 110}
+	s.riskCapital.mu.Unlock()
+	rep = s.buildReconReport()
+	if rep.Equity == nil || !rep.Equity.SameDay || rep.Equity.DivergencePct == nil {
+		t.Fatalf("with same-day sample: %+v", rep.Equity)
+	}
+	if *rep.Equity.RuntimeEquityBase != 110 || math.Abs(*rep.Equity.DivergencePct-10) > 1e-9 {
+		t.Fatalf("same-day equity = %v divergence = %v, want 110 and 10%%", rep.Equity.RuntimeEquityBase, rep.Equity.DivergencePct)
+	}
+	if !rep.Equity.RuntimeAsOf.IsZero() {
+		t.Fatalf("same-day runtime as-of = %s, want zero (day-key sample)", rep.Equity.RuntimeAsOf)
+	}
+}
+
+func TestReconPreGenesisLabeling(t *testing.T) {
+	s := newReconTestServer(t)
+	writeFlexFixture(t, "flex-genesis.xml", recentGenerated(), "20260701", "20260705",
+		cashLine("before", "Deposits/Withdrawals", -500, "20260701")+"\n"+
+			cashLine("after", "Deposits/Withdrawals", -600, "20260704"))
+
+	withoutGenesis := s.buildReconReport()
+	s.riskCapital.mu.Lock()
+	s.riskCapital.state.GenesisAt = time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC)
+	s.riskCapital.mu.Unlock()
+	withGenesis := s.buildReconReport()
+	if withGenesis.ReportID != withoutGenesis.ReportID {
+		t.Fatalf("pre-genesis disclosure changed report id: %s vs %s", withoutGenesis.ReportID, withGenesis.ReportID)
+	}
+	if withGenesis.Counts[rpc.ReconMissingFromLedger] != 2 || withGenesis.Unresolved != 2 {
+		t.Fatalf("label changed exception semantics: counts=%v unresolved=%d", withGenesis.Counts, withGenesis.Unresolved)
+	}
+	byID := make(map[string]rpc.ReconException)
+	for _, ex := range withGenesis.Exceptions {
+		byID[ex.LineID] = ex
+	}
+	before := byID["cash-before"]
+	if !before.PreGenesis || before.Note != "flow predates runtime state genesis — if it is embedded in the seeded baseline, dismiss it with a reason; otherwise declare it" {
+		t.Fatalf("before-genesis exception = %+v", before)
+	}
+	if after := byID["cash-after"]; after.PreGenesis {
+		t.Fatalf("after-genesis exception = %+v, want no label", after)
 	}
 }
 
@@ -193,7 +279,7 @@ policy_version = 1
 	if rep.Status != rpc.ReconStatusUnapproved {
 		t.Fatalf("status = %s, want unapproved", rep.Status)
 	}
-	if err := s.reconcileReportGate("recon-whatever"); err == nil || !strings.Contains(err.Error(), "unapproved") {
+	if _, err := s.reconcileReportGate("recon-whatever"); err == nil || !strings.Contains(err.Error(), "unapproved") {
 		t.Fatalf("gate err = %v, want unapproved refusal", err)
 	}
 
@@ -203,7 +289,7 @@ policy_version = 1
 	if rep2.Status != rpc.ReconStatusUnavailable {
 		t.Fatalf("status = %s, want unavailable", rep2.Status)
 	}
-	if err := s2.reconcileReportGate("recon-whatever"); err == nil || !strings.Contains(err.Error(), "no recon report") {
+	if _, err := s2.reconcileReportGate("recon-whatever"); err == nil || !strings.Contains(err.Error(), "no recon report") {
 		t.Fatalf("gate err = %v, want unavailable refusal", err)
 	}
 }
@@ -221,11 +307,11 @@ func TestReconcileReportGate(t *testing.T) {
 	}
 
 	// Bare attestation is retired.
-	if err := s.reconcileReportGate(""); err == nil || !strings.Contains(err.Error(), "requires --report") {
+	if _, err := s.reconcileReportGate(""); err == nil || !strings.Contains(err.Error(), "requires --report") {
 		t.Fatalf("err = %v, want report requirement", err)
 	}
 	// Superseded/wrong ids are refused, and the error names the current one.
-	if err := s.reconcileReportGate("recon-stale123"); err == nil || !strings.Contains(err.Error(), rep.ReportID) {
+	if _, err := s.reconcileReportGate("recon-stale123"); err == nil || !strings.Contains(err.Error(), rep.ReportID) {
 		t.Fatalf("err = %v, want supersession pointing at %s", err, rep.ReportID)
 	}
 	// The real id passes end to end through the handler.
@@ -239,8 +325,40 @@ func TestReconcileReportGate(t *testing.T) {
 	writeFlexFixture(t, "flex-20260711-000002.xml", recentGenerated(), "20260706", "20260712",
 		cashLine("g2", "Deposits/Withdrawals", -400, "20260709"))
 	rep2 := s.buildReconReport()
-	if err := s.reconcileReportGate(rep2.ReportID); err == nil || !strings.Contains(err.Error(), "unresolved exception") {
+	if _, err := s.reconcileReportGate(rep2.ReportID); err == nil || !strings.Contains(err.Error(), "unresolved exception") {
 		t.Fatalf("err = %v, want unresolved refusal", err)
+	}
+}
+
+func TestReconcileEventRecordsReport(t *testing.T) {
+	s := newReconTestServer(t)
+	writeFlexFixture(t, "flex-audit.xml", recentGenerated(), "20260706", "20260712", equityRow("20260712", 250000))
+	rep := s.buildReconReport()
+	if rep.Unresolved != 0 || rep.ReportID == "" {
+		t.Fatalf("fixture report = %+v", rep)
+	}
+	if _, err := s.handleRiskPolicyCapitalEvent(context.Background(), rawParams(t, rpc.CapitalEventParams{
+		Type: "reconcile", Report: rep.ReportID, Origin: rpc.OrderOriginHumanTTY,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	path, err := defaultTradingStatePath(capitalEventsJournalFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got capitalEventV1
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		var ev capitalEventV1
+		if json.Unmarshal([]byte(line), &ev) == nil && ev.Type == "reconcile" {
+			got = ev
+		}
+	}
+	if got.ReportID != rep.ReportID || got.CoverageTo.IsZero() || !got.CoverageTo.Equal(rep.CoverageTo) {
+		t.Fatalf("journaled reconcile = %+v, want report %s coverage %s", got, rep.ReportID, rep.CoverageTo)
 	}
 }
 
@@ -257,7 +375,7 @@ func TestReconcileReportGateRejectsStaleStatements(t *testing.T) {
 	if rep.Unresolved != 0 {
 		t.Fatalf("fixture not clean: %+v", rep.Counts)
 	}
-	if err := s.reconcileReportGate(rep.ReportID); err == nil || !strings.Contains(err.Error(), "max_report_age_days") {
+	if _, err := s.reconcileReportGate(rep.ReportID); err == nil || !strings.Contains(err.Error(), "max_report_age_days") {
 		t.Fatalf("err = %v, want staleness refusal", err)
 	}
 }

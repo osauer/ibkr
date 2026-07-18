@@ -129,12 +129,15 @@ func (s *Server) handleRiskPolicyCapitalEvent(_ context.Context, req *rpc.Reques
 	if err := requireHumanRiskPolicyOrigin(p.Origin); err != nil {
 		return nil, err
 	}
+	var recon *capitalReconRef
 	if strings.EqualFold(strings.TrimSpace(p.Type), "reconcile") {
-		if err := s.reconcileReportGate(p.Report); err != nil {
+		rep, err := s.reconcileReportGate(p.Report)
+		if err != nil {
 			return nil, err
 		}
+		recon = &capitalReconRef{ReportID: rep.ReportID, CoverageTo: rep.CoverageTo}
 	}
-	ev, err := s.riskCapital.ApplyCapitalEvent(p, normalizedWriteOrigin(p.Origin))
+	ev, err := s.riskCapital.ApplyCapitalEvent(p, normalizedWriteOrigin(p.Origin), recon)
 	if err != nil {
 		return nil, errBadRequest(err.Error())
 	}
@@ -151,34 +154,34 @@ func (s *Server) handleRiskPolicyCapitalEvent(_ context.Context, req *rpc.Reques
 // 2026-07-13, no shadow period). The sanctioned escape during statement
 // outages is a one-shot override on capital.max_unreconciled_days, not a
 // soft mode here.
-func (s *Server) reconcileReportGate(reportID string) error {
+func (s *Server) reconcileReportGate(reportID string) (*rpc.ReconResult, error) {
 	reportID = strings.TrimSpace(reportID)
 	if reportID == "" {
-		return errBadRequest("reconcile requires --report <id> from `ibkr recon` (bare attestation retired in phase 3a)")
+		return nil, errBadRequest("reconcile requires --report <id> from `ibkr recon` (bare attestation retired in phase 3a)")
 	}
 	rep := s.buildReconReport()
 	switch rep.Status {
 	case rpc.ReconStatusActive, rpc.ReconStatusDegraded:
 	case rpc.ReconStatusUnapproved:
-		return errBadRequest("recon.* policy keys are unapproved; reconcile is unavailable until they exist in the risk policy")
+		return nil, errBadRequest("recon.* policy keys are unapproved; reconcile is unavailable until they exist in the risk policy")
 	default:
-		return errBadRequest("no recon report can be built: " + nonEmptyString(rep.Message, rep.Status))
+		return nil, errBadRequest("no recon report can be built: " + nonEmptyString(rep.Message, rep.Status))
 	}
 	if rep.ReportID != reportID {
-		return errBadRequest(fmt.Sprintf("report %s is superseded; review the current report %s (`ibkr recon`) and sign that off", reportID, rep.ReportID))
+		return nil, errBadRequest(fmt.Sprintf("report %s is superseded; review the current report %s (`ibkr recon`) and sign that off", reportID, rep.ReportID))
 	}
 	pol := s.riskPolicies.snapshot().policy
 	rc := reconPolicyOf(pol)
 	if rc == nil {
-		return errBadRequest("recon.* policy keys are unapproved; reconcile is unavailable until they exist in the risk policy")
+		return nil, errBadRequest("recon.* policy keys are unapproved; reconcile is unavailable until they exist in the risk policy")
 	}
 	if age := time.Since(rep.StatementAsOf); age > time.Duration(*rc.MaxReportAgeDays)*24*time.Hour {
-		return errBadRequest(fmt.Sprintf("newest ingested statement is %.0f days old, past recon.max_report_age_days=%d; fetch fresher statements first (or, during an outage, grant a one-shot override on capital.max_unreconciled_days)", age.Hours()/24, *rc.MaxReportAgeDays))
+		return nil, errBadRequest(fmt.Sprintf("newest ingested statement is %.0f days old, past recon.max_report_age_days=%d; fetch fresher statements first (or, during an outage, grant a one-shot override on capital.max_unreconciled_days)", age.Hours()/24, *rc.MaxReportAgeDays))
 	}
 	if rep.Unresolved > 0 {
-		return errBadRequest(fmt.Sprintf("report %s carries %d unresolved exception(s); declare the missing events or dismiss each with a reason, then reconcile", reportID, rep.Unresolved))
+		return nil, errBadRequest(fmt.Sprintf("report %s carries %d unresolved exception(s); declare the missing events or dismiss each with a reason, then reconcile", reportID, rep.Unresolved))
 	}
-	return nil
+	return rep, nil
 }
 
 func (s *Server) handleReconSnapshot(ctx context.Context, req *rpc.Request) (*rpc.ReconResult, error) {
@@ -192,6 +195,19 @@ func (s *Server) handleReconSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		s.kickFlexFetch(ctx)
 	}
 	return s.buildReconReport(), nil
+}
+
+func (s *Server) handleReconBacktest(ctx context.Context, req *rpc.Request) (*rpc.ReconBacktestResult, error) {
+	var p rpc.ReconSnapshotParams
+	if len(req.Params) > 0 {
+		if err := decodeParams(req.Params, &p); err != nil {
+			return nil, err
+		}
+	}
+	if p.Refresh {
+		s.kickFlexFetch(ctx)
+	}
+	return s.buildReconBacktest(), nil
 }
 
 func (s *Server) handleReconDismiss(_ context.Context, req *rpc.Request) (*rpc.RiskPolicyWriteResult, error) {

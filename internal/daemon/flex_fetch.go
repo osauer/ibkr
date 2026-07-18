@@ -29,8 +29,10 @@ const (
 	flexGetStatementURL = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.GetStatement"
 	flexStatementsDir   = "statements"
 	// Engineering constants (operator decision 2026-07-13: code-owned).
+	// The longer poll budget accommodates server-side generation of the
+	// one-year backfill while the daily statement usually completes sooner.
 	flexPollInterval   = 10 * time.Second
-	flexPollAttempts   = 12
+	flexPollAttempts   = 30
 	flexHTTPTimeout    = 30 * time.Second
 	flexFetchEvery     = 20 * time.Hour // daily cadence with slack
 	flexRetryAfterFail = time.Hour

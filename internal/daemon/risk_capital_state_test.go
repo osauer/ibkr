@@ -49,7 +49,7 @@ func newTestRiskCapitalStore(t *testing.T) *riskCapitalStore {
 
 func reconcileNow(t *testing.T, st *riskCapitalStore) {
 	t.Helper()
-	if _, err := st.ApplyCapitalEvent(rpc.CapitalEventParams{Type: "reconcile"}, rpc.OrderOriginHumanTTY); err != nil {
+	if _, err := st.ApplyCapitalEvent(rpc.CapitalEventParams{Type: "reconcile"}, rpc.OrderOriginHumanTTY, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -84,6 +84,48 @@ func TestRiskCapitalObserveSeedsAndTracksPeak(t *testing.T) {
 	}
 }
 
+func TestRiskCapitalDailySamplesBounded(t *testing.T) {
+	st := newTestRiskCapitalStore(t)
+	c := testConstitution()
+	now := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
+	st.now = func() time.Time { return now }
+	st.Observe(250000, now, c)
+
+	now = time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	st.Observe(251000, now, c)
+	st.mu.Lock()
+	st.state.DailyEquity["2026-05-01"] = 240000
+	st.state.DailyEquity["not-a-day"] = 1
+	st.mu.Unlock()
+
+	now = time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	st.Observe(252000, now, c)
+	for day, want := range map[string]float64{
+		"2026-06-10": 250000,
+		"2026-07-01": 251000,
+		"2026-07-18": 252000,
+	} {
+		if got, ok := st.DailySample(day); !ok || got != want {
+			t.Fatalf("sample[%s] = %v, %v; want %v, true", day, got, ok, want)
+		}
+	}
+	for _, day := range []string{"2026-05-01", "not-a-day"} {
+		if _, ok := st.DailySample(day); ok {
+			t.Fatalf("expired or malformed sample %q was not pruned", day)
+		}
+	}
+
+	reloaded := &riskCapitalStore{now: func() time.Time { return now }}
+	ctx := reloaded.ReplayContext()
+	if len(ctx.DailyEquity) != 3 || ctx.DailyEquity["2026-06-10"] != 250000 || ctx.DailyEquity["2026-07-18"] != 252000 {
+		t.Fatalf("reloaded daily samples = %#v", ctx.DailyEquity)
+	}
+	ctx.DailyEquity["2026-07-18"] = 1
+	if got, _ := reloaded.DailySample("2026-07-18"); got != 252000 {
+		t.Fatalf("ReplayContext returned aliased map; stored sample changed to %v", got)
+	}
+}
+
 // A declared deposit must not read as a new peak, and a declared withdrawal
 // must not read as drawdown (cash-flow-adjusted HWM, decision 4).
 func TestRiskCapitalExternalFlowsDoNotMoveDrawdown(t *testing.T) {
@@ -93,7 +135,7 @@ func TestRiskCapitalExternalFlowsDoNotMoveDrawdown(t *testing.T) {
 	now := time.Now()
 
 	st.Observe(260000, now.Add(-3*time.Minute), c)
-	if _, err := st.ApplyCapitalEvent(rpc.CapitalEventParams{Type: "deposit", AmountBase: 20000}, rpc.OrderOriginHumanTTY); err != nil {
+	if _, err := st.ApplyCapitalEvent(rpc.CapitalEventParams{Type: "deposit", AmountBase: 20000}, rpc.OrderOriginHumanTTY, nil); err != nil {
 		t.Fatal(err)
 	}
 	st.Observe(280000, now.Add(-2*time.Minute), c)
@@ -105,7 +147,7 @@ func TestRiskCapitalExternalFlowsDoNotMoveDrawdown(t *testing.T) {
 		t.Fatalf("tier = %s consumed = %v, deposit must be flow-neutral", rep.Tier, rep.ConsumedPct)
 	}
 
-	if _, err := st.ApplyCapitalEvent(rpc.CapitalEventParams{Type: "withdrawal", AmountBase: 30000}, rpc.OrderOriginHumanTTY); err != nil {
+	if _, err := st.ApplyCapitalEvent(rpc.CapitalEventParams{Type: "withdrawal", AmountBase: 30000}, rpc.OrderOriginHumanTTY, nil); err != nil {
 		t.Fatal(err)
 	}
 	st.Observe(250000, now.Add(-time.Minute), c)
@@ -126,7 +168,7 @@ func TestRiskCapitalLateDepositCorrectsPeak(t *testing.T) {
 	st.Observe(280000, now.Add(-time.Hour), c) // peak includes an undeclared 20k deposit
 	if _, err := st.ApplyCapitalEvent(rpc.CapitalEventParams{
 		Type: "deposit", AmountBase: 20000, EffectiveAt: now.Add(-2 * time.Hour),
-	}, rpc.OrderOriginHumanTTY); err != nil {
+	}, rpc.OrderOriginHumanTTY, nil); err != nil {
 		t.Fatal(err)
 	}
 	rep := st.Report(c, nil)

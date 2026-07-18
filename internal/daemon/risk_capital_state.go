@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -21,7 +22,8 @@ import (
 // can be re-derived from the capital-events journal (cumulative flows, last
 // reconcile attestation) are re-derived on every load — the journal is the
 // source of truth, the state file is a cache of what journals cannot rebuild
-// (peak, latch, overrides; regime-latch never-trust-stored-bytes precedent).
+// (peak, latch, daily equity samples, overrides; regime-latch
+// never-trust-stored-bytes precedent).
 //
 // Nothing in this file may influence submit eligibility, blockers, freeze,
 // pins, or tokens: v1 is advisory/shadow end to end.
@@ -31,6 +33,9 @@ const (
 	capitalEventsJournalFile = "capital-events.jsonl"
 	riskPolicyJournalFile    = "risk-policy-journal.jsonl"
 	riskCapitalStateVer      = 1
+	// riskCapitalDailySampleKeep bounds the per-day equity sample cache
+	// feeding the same-day recon equity check and the backtest replay.
+	riskCapitalDailySampleKeep = 45 * 24 * time.Hour
 	// riskCapitalPersistEvery throttles equity-cache persistence; latch,
 	// peak, and event writes always persist immediately.
 	riskCapitalPersistEvery = time.Minute
@@ -44,6 +49,7 @@ type riskCapitalStateFileV1 struct {
 	PeakAsOf         time.Time            `json:"peak_as_of,omitzero"`
 	LastEquityBase   float64              `json:"last_equity_base"`
 	LastEquityAsOf   time.Time            `json:"last_equity_as_of,omitzero"`
+	DailyEquity      map[string]float64   `json:"daily_equity,omitempty"`
 	LastTier         string               `json:"last_tier,omitempty"`
 	BlockLatched     bool                 `json:"block_latched"`
 	LatchedAt        time.Time            `json:"latched_at,omitzero"`
@@ -60,6 +66,15 @@ type capitalEventV1 struct {
 	EffectiveAt time.Time `json:"effective_at,omitzero"`
 	Note        string    `json:"note,omitempty"`
 	Origin      string    `json:"origin,omitempty"`
+	// ReportID and CoverageTo record which recon report a reconcile signed
+	// off: an audit fact previously preserved only in the human message.
+	ReportID   string    `json:"report_id,omitempty"`
+	CoverageTo time.Time `json:"coverage_to,omitzero"`
+}
+
+type capitalReconRef struct {
+	ReportID   string
+	CoverageTo time.Time
 }
 
 type riskCapitalStore struct {
@@ -178,6 +193,18 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 	}
 	st.state.LastEquityBase = equityBase
 	st.state.LastEquityAsOf = asOf
+	if st.state.DailyEquity == nil {
+		st.state.DailyEquity = make(map[string]float64)
+	}
+	st.state.DailyEquity[asOf.UTC().Format("2006-01-02")] = equityBase
+	cutoff := now.UTC().Add(-riskCapitalDailySampleKeep)
+	cutoff = time.Date(cutoff.Year(), cutoff.Month(), cutoff.Day(), 0, 0, 0, 0, time.UTC)
+	for day := range st.state.DailyEquity {
+		parsed, err := time.Parse("2006-01-02", day)
+		if err != nil || parsed.Before(cutoff) {
+			delete(st.state.DailyEquity, day)
+		}
+	}
 
 	adjusted := equityBase - st.cumFlowsBase
 	if !st.state.Seeded || adjusted > st.state.AdjustedPeakBase {
@@ -217,7 +244,7 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 // already in equity, and an inflated peak would overstate drawdown against
 // money that was never earned (never-inflate discipline; the symmetric
 // withdrawal case cannot inflate the peak, so no correction is needed).
-func (st *riskCapitalStore) ApplyCapitalEvent(p rpc.CapitalEventParams, origin string) (capitalEventV1, error) {
+func (st *riskCapitalStore) ApplyCapitalEvent(p rpc.CapitalEventParams, origin string, refs ...*capitalReconRef) (capitalEventV1, error) {
 	typ := strings.ToLower(strings.TrimSpace(p.Type))
 	switch typ {
 	case "deposit", "withdrawal":
@@ -242,6 +269,10 @@ func (st *riskCapitalStore) ApplyCapitalEvent(p rpc.CapitalEventParams, origin s
 	}
 	if ev.Type == "reconcile" {
 		ev.AmountBase = 0
+		if len(refs) > 0 && refs[0] != nil {
+			ev.ReportID = strings.TrimSpace(refs[0].ReportID)
+			ev.CoverageTo = refs[0].CoverageTo
+		}
 	}
 	if err := appendCapitalEvent(ev); err != nil {
 		return capitalEventV1{}, err
@@ -468,6 +499,54 @@ func (st *riskCapitalStore) LastEquity() (float64, time.Time) {
 	defer st.mu.Unlock()
 	st.loadLocked()
 	return st.state.LastEquityBase, st.state.LastEquityAsOf
+}
+
+// DailySample returns the runtime equity sample for one UTC day key.
+func (st *riskCapitalStore) DailySample(day string) (float64, bool) {
+	if st == nil {
+		return 0, false
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	equity, ok := st.state.DailyEquity[day]
+	return equity, ok
+}
+
+// capitalReplayContext is the read-only snapshot the backtest replay
+// consumes.
+type capitalReplayContext struct {
+	GenesisAt        time.Time
+	Seeded           bool
+	AdjustedPeakBase float64
+	PeakAsOf         time.Time
+	LatchedAt        time.Time
+	CumFlowsBase     float64
+	DailyEquity      map[string]float64 // copy
+}
+
+// ReplayContext returns an isolated copy of the runtime facts used by the
+// capital-ladder backtest.
+func (st *riskCapitalStore) ReplayContext() capitalReplayContext {
+	if st == nil {
+		return capitalReplayContext{}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	ctx := capitalReplayContext{
+		GenesisAt:        st.state.GenesisAt,
+		Seeded:           st.state.Seeded,
+		AdjustedPeakBase: st.state.AdjustedPeakBase,
+		PeakAsOf:         st.state.PeakAsOf,
+		LatchedAt:        st.state.LatchedAt,
+		CumFlowsBase:     st.cumFlowsBase,
+	}
+	if len(st.state.DailyEquity) > 0 {
+		ctx.DailyEquity = make(map[string]float64, len(st.state.DailyEquity))
+		maps.Copy(ctx.DailyEquity, st.state.DailyEquity)
+	}
+	return ctx
 }
 
 // PreviewVerdict is the cheap in-memory evaluation for advisory preview

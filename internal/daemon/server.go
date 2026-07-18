@@ -2392,6 +2392,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyArtefact(ctx, req) })
 	case rpc.MethodReconSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleReconSnapshot(ctx, req) })
+	case rpc.MethodReconBacktest:
+		s.unary(req, enc, func() (any, error) { return s.handleReconBacktest(ctx, req) })
 	case rpc.MethodReconDismiss:
 		s.unary(req, enc, func() (any, error) { return s.handleReconDismiss(ctx, req) })
 	case rpc.MethodTradeProposalsSnapshot:
