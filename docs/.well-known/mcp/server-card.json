@@ -3,7 +3,7 @@
     "name": "ibkr",
     "title": "IBKR MCP Server",
     "version": "2.1.0",
-    "description": "Local Interactive Brokers MCP server for agentic portfolio analysis, trading research, risk checks, and market workflows through IB Gateway or TWS.",
+    "description": "Local Interactive Brokers MCP server for agentic trading desks: full market data for agents (real-time per the user's IBKR market-data subscriptions), portfolio context, and advisory risk checks through IB Gateway or TWS.",
     "homepage": "https://osauer.dev/ibkr/",
     "repository": "https://github.com/osauer/ibkr",
     "license": "MIT"

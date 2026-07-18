@@ -1,7 +1,7 @@
 {
   "name": "ibkr",
   "title": "IBKR MCP Server",
-  "description": "Local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API for agentic portfolio analysis, trading research, risk checks, and market workflows through IB Gateway or TWS.",
+  "description": "Local Interactive Brokers (IBKR) MCP server, CLI, and Go TWS API — the read-side core of an agentic trading desk for individual traders: full market data for agents, portfolio context, and advisory risk checks through IB Gateway or TWS.",
   "homepage": "https://osauer.dev/ibkr/",
   "repository": "https://github.com/osauer/ibkr",
   "license": "MIT",

@@ -1,14 +1,14 @@
 # Marketplace readiness
 
-Last reviewed: 2026-06-05 08:18 CEST
+Last reviewed: 2026-07-18 21:20 CEST
 
 This page is the maintainer checklist for presenting `ibkr` in AI tool marketplaces and app directories. It is intentionally about packaging, trust, and user expectations; feature details live in the README and reference docs.
 
 ## Positioning
 
-`ibkr` is a local Interactive Brokers integration for traders who already run IB Gateway or TWS and want agentic portfolio analysis, trading research, risk checks, and market workflow support on live broker data. The clearest marketplace description is:
+`ibkr` is a local platform for running an agentic trading desk on Interactive Brokers, aimed at individual traders who already run IB Gateway or TWS: agents get the full market-data surface (real-time per the user's IBKR market-data subscriptions) and portfolio context, while regime, canary, and rulebook checks stay advisory and risk policy plus statement reconciliation stay operator-owned in the terminal. The clearest marketplace description is:
 
-> Interactive Brokers workflows for agents: account, positions, quotes, official market calendars, option chains, history, technical/relative-strength screens, scans, fixed-fractional sizing, S&P 500 breadth, SPY+SPX dealer gamma, a broad-market stress-lifecycle regime dashboard, and a stateless portfolio canary through a local CLI/MCP server connected to IB Gateway or TWS.
+> An agentic trading desk for Interactive Brokers: account, positions, real-time and streaming quotes (per your IBKR market-data subscriptions), official market calendars, option chains, history, technical/relative-strength screens, scans, fixed-fractional sizing, S&P 500 breadth, SPY+SPX dealer gamma, a broad-market stress-lifecycle regime dashboard, a 14-rule advisory trading rulebook, and a stateless portfolio canary through a local CLI/MCP server connected to IB Gateway or TWS.
 
 Always include these qualifiers:
 

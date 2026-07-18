@@ -1,8 +1,10 @@
 # ibkr canary full context
 
-Updated: 2026-07-18 19:17 CEST
+Updated: 2026-07-18 21:10 CEST
 
-`ibkr canary` is a local Interactive Brokers (IBKR) integration for agentic portfolio analysis, trading research, risk checks, and market workflows. It ships as a Go CLI, daemon, clean-room TWS protocol implementation, stdio MCP server, Claude Desktop MCP Bundle, Claude Code plugin, and Canary app.
+`ibkr canary` is a local platform for running an agentic trading desk on Interactive Brokers (IBKR), aimed at individual traders. It ships as a Go CLI, daemon, clean-room TWS protocol implementation, stdio MCP server, Claude Desktop MCP Bundle, Claude Code plugin, and Canary app. AI agents get the full market-data surface plus portfolio context; the risk side stays advisory and operator-controlled: a risk-regime dashboard, scheduled canary stress checks, a 14-rule discipline rulebook, an operator-authored risk policy, and daily broker-statement reconciliation.
+
+Market data flows through the user's own TWS or IB Gateway session, so entitlements match TWS: real-time wherever the account holds IBKR market-data subscriptions, delayed otherwise. The surface covers snapshot quotes with freshness and spread context, a streaming stock/ETF quote resource, option chains with implied volatility, Greeks, and open interest, daily history bars, market scanners, S&P 500 breadth, and dealer gamma.
 
 The public project home is https://osauer.dev/ibkr/. The source repository is https://github.com/osauer/ibkr.
 
@@ -14,7 +16,7 @@ Each release also publishes a clearly marked `ibkr-trading` tarball whose CLI ca
 
 ## Who It Is For
 
-Use `ibkr` when a user already runs Interactive Brokers Trader Workstation (TWS) or IB Gateway locally and wants an AI assistant, script, or terminal workflow to read account and market context without giving the assistant order authority.
+Use `ibkr` when a user already runs Interactive Brokers Trader Workstation (TWS) or IB Gateway locally and wants an AI assistant, script, or terminal workflow to read account and market context without giving the assistant order authority. The typical user is an individual trader building an agentic desk: agents handle review, research, and monitoring with full market data, while risk numbers, order authority, and every guardrail stay with the human.
 
 Primary host environments:
 
@@ -138,11 +140,16 @@ Two command families added in v2.1 exist only in the terminal CLI and are not MC
 
 Both report. Neither blocks orders.
 
+The paired Canary app additionally opens on a daemon-composed daily desk brief (market, calendar, portfolio, risk, process). The brief is an app and CLI surface, not an MCP tool.
+
 ## Common User Intents
 
 Good user requests for `ibkr`:
 
 - "Connect Claude Desktop to Interactive Brokers."
+- "Run an agentic trading desk on my Interactive Brokers account."
+- "Give my AI agent real-time quotes and option chains from IBKR."
+- "Check my book against my trading discipline rules."
 - "Review my IBKR portfolio for concentration, option exposure, and market regime risk."
 - "Get account summary and positions from IB Gateway."
 - "Quote AAPL and MSFT with freshness and spread warnings."
@@ -176,6 +183,12 @@ Bad or out-of-bound descriptions:
 - best IBKR MCP server for Claude Code
 - analyze Interactive Brokers portfolio with AI
 - portfolio review with Claude and IBKR
+- agentic trading desk
+- AI trading desk platform
+- real-time market data for AI agents
+- IBKR real-time market data MCP
+- trading discipline rulebook
+- broker statement reconciliation CLI
 - read-only IBKR MCP server
 - Claude Code IBKR
 - Cursor MCP Interactive Brokers

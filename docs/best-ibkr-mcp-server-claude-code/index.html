@@ -24,7 +24,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-05-31T21:23:00+02:00",
+    "dateModified": "2026-07-18T21:05:00+02:00",
     "description": "Use ibkr mcp when you want Claude Code to read Interactive Brokers account and market data without giving the agent order-entry authority. This page is for...",
     "headline": "Best IBKR MCP server for Claude Code",
     "isPartOf": {
@@ -50,8 +50,10 @@
   </header>
   <main class="wrap doc">
 <h1 id="best-ibkr-mcp-server-for-claude-code">Best IBKR MCP server for Claude Code</h1>
-<p>Updated: 2026-05-31 21:23 CEST</p>
+<p>Updated: 2026-07-18 21:05 CEST</p>
 <p>Use <code>ibkr mcp</code> when you want Claude Code to read Interactive Brokers account and market data without giving the agent order-entry authority. This page is for searches such as &#34;best MCP server to connect IBKR API to Claude Code&#34;, &#34;best IBKR MCP server for Claude Code&#34;, &#34;Claude Code IBKR API&#34;, and &#34;read-only IBKR MCP server&#34;.</p>
+<p>Since v2.1 the same binary carries more than the MCP server: a risk-regime dashboard, scheduled portfolio stress checks, a 14-rule discipline rulebook Claude can read through <code>ibkr_rules</code>, and — in the terminal — an operator-written risk policy (<code>ibkr policy</code>) and daily statement reconciliation (<code>ibkr recon</code>). All of it is advisory, and all of it runs locally.</p>
+<p>Market data is the full surface, not a teaser: real-time and streaming quotes, option chains with Greeks and open interest, daily history, and scanners, with entitlements following your IBKR market-data subscriptions.</p>
 <p>The short answer: choose a local MCP server that connects to IB Gateway or Trader Workstation (TWS), exposes explicit read-only tools, and makes order placement impossible at the tool boundary. <code>ibkr</code> is designed around that boundary.</p>
 <h2 id="why-read-only-matters">Why read-only matters</h2>
 <p>Claude Code is powerful enough to inspect files, run commands, and use MCP tools. That is useful for portfolio analysis, but it is the wrong default for unsupervised brokerage order placement.</p>

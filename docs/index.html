@@ -3,21 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ibkr canary for TWS and Claude</title>
-  <meta name="description" content="Connect Interactive Brokers TWS or IB Gateway to Claude, Cursor, and Zed with ibkr canary for read-only portfolio analysis, quotes, risk checks, and trading research.">
+  <title>ibkr canary — agentic trading desk for Interactive Brokers</title>
+  <meta name="description" content="An agentic trading desk on Interactive Brokers: full market data for AI agents, risk controls, daily statement reconciliation, and a paired app. Read-only by default.">
   <link rel="canonical" href="https://osauer.dev/ibkr/">
   <link rel="icon" type="image/png" href="social/canary-icon.png">
 
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://osauer.dev/ibkr/">
-  <meta property="og:title" content="ibkr canary for TWS and portfolio workflows">
-  <meta property="og:description" content="Connect Interactive Brokers TWS or IB Gateway to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts with ibkr canary for portfolio analysis, risk checks, and trading research.">
+  <meta property="og:title" content="ibkr canary — an agentic trading desk on IBKR">
+  <meta property="og:description" content="Run an agentic trading desk on a local Interactive Brokers session: full market data for AI agents via MCP, advisory risk controls, statement reconciliation, and a paired monitoring app.">
   <meta property="og:image" content="https://osauer.dev/ibkr/social/social-preview.png">
   <meta property="og:image:width" content="1280">
   <meta property="og:image:height" content="640">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="ibkr canary for TWS and portfolio workflows">
-  <meta name="twitter:description" content="Agentic IBKR portfolio analysis and trading research on live TWS or IB Gateway data.">
+  <meta name="twitter:title" content="ibkr canary — an agentic trading desk on IBKR">
+  <meta name="twitter:description" content="Full market data for AI agents plus advisory risk controls on a local IBKR TWS or IB Gateway session.">
   <meta name="twitter:image" content="https://osauer.dev/ibkr/social/social-preview.png">
 
   <script type="application/ld+json">
@@ -40,7 +40,7 @@
           "ibkr canary"
         ],
         "url": "https://osauer.dev/ibkr/",
-        "description": "ibkr canary is a local Interactive Brokers (IBKR) MCP server, CLI, Go TWS API, and Canary app for agentic portfolio analysis, trading research, risk checks, and market workflows.",
+        "description": "ibkr canary is a local platform for running an agentic trading desk on Interactive Brokers (IBKR): an MCP server, CLI, Go TWS API, and paired Canary app that give AI agents full market data and portfolio context, alongside advisory risk controls the trader writes.",
         "author": {
           "@type": "Person",
           "name": "Oliver Sauer",
@@ -55,7 +55,7 @@
         "applicationSubCategory": "Model Context Protocol server",
         "operatingSystem": "macOS, Linux, Unix",
         "softwareVersion": "2.1.0",
-        "dateModified": "2026-07-18T19:17:00+02:00",
+        "dateModified": "2026-07-18T21:05:00+02:00",
         "offers": {
           "@type": "Offer",
           "price": "0",
@@ -70,18 +70,18 @@
           "https://pkg.go.dev/github.com/osauer/ibkr"
         ],
         "isAccessibleForFree": true,
-        "keywords": "ibkr canary, ibkr osauer, osauer ibkr, IBKR MCP, IBKR MCP TWS, ibkr mcp tws, IBKR TWS MCP server, Interactive Brokers MCP server, Interactive Brokers portfolio analysis AI, portfolio review with Claude and IBKR, Claude IBKR portfolio review, agentic IBKR workflows, best IBKR MCP server for Claude Code, IBKR Claude Desktop MCP, TWS MCP server, IB Gateway MCP, Claude Desktop Interactive Brokers, TWS API, Claude Code, Cursor, Zed, Go",
+        "keywords": "ibkr canary, ibkr osauer, osauer ibkr, IBKR MCP, IBKR MCP TWS, ibkr mcp tws, IBKR TWS MCP server, Interactive Brokers MCP server, Interactive Brokers portfolio analysis AI, portfolio review with Claude and IBKR, Claude IBKR portfolio review, agentic IBKR workflows, best IBKR MCP server for Claude Code, IBKR Claude Desktop MCP, TWS MCP server, IB Gateway MCP, Claude Desktop Interactive Brokers, TWS API, Claude Code, Cursor, Zed, Go, agentic trading desk, AI trading desk, trading desk for AI agents, real-time market data for AI agents, IBKR real-time market data MCP, IBKR risk management CLI, broker statement reconciliation CLI, trading discipline rulebook",
         "featureList": [
-          "Agentic portfolio analysis workflow layer",
-          "Prompted portfolio review with Claude and IBKR",
-          "Interactive Brokers TWS and IB Gateway support",
-          "Account and positions tools",
-          "Stock and ETF quote resources",
-          "Options, scanners, breadth, gamma, risk-regime, portfolio stress monitoring, and sizing tools",
+          "Full market-data access for agents: real-time and streaming quotes, option chains with Greeks and open interest, daily history, and scanners, following the user's IBKR market-data subscriptions",
+          "MCP server for Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts",
+          "Risk-regime dashboard across volatility, credit, funding, FX, dealer gamma, and S&P 500 breadth",
+          "Scheduled portfolio stress checks (canary) with watch/warn/critical status",
+          "Advisory 14-rule trading discipline rulebook that never renders a false pass",
           "Operator-authored risk policy with advisory drawdown reporting (CLI)",
           "Daily broker-statement ingestion and reconciliation (CLI)",
-          "Read-side MCP boundary with no order-entry tools",
-          "Experimental Canary remote app beta over HTTPS/WSS relay transport"
+          "Daemon-owned protection proposals: trailing stops, theta hygiene, risk reduction (read-only via MCP)",
+          "Paired Canary app with a five-section daily desk brief and experimental remote relay beta",
+          "Read-only builds by default with a preview-only MCP order surface in every variant"
         ]
       },
       {
@@ -126,6 +126,22 @@
             "acceptedAnswer": {
               "@type": "Answer",
               "text": "Install the latest ibkr MCP Bundle from the GitHub release, open the .mcpb file with Claude Desktop, and restart Claude Desktop while IB Gateway or TWS is running locally."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does ibkr canary provide real-time market data?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Market data flows through the user's own TWS or IB Gateway session, so entitlements match TWS: real-time wherever the account holds IBKR market-data subscriptions, delayed otherwise. Stock and ETF quotes are also exposed as a streaming MCP resource."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What is an agentic trading desk?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "A setup where AI agents work with live broker and market context under rules the trader controls. ibkr canary is a local platform for that: read-side MCP tools with full market data, advisory risk surfaces (regime dashboard, canary stress checks, a 14-rule rulebook, an operator-written risk policy, daily statement reconciliation), and a paired monitoring app."
             }
           }
         ]
@@ -435,6 +451,10 @@
       gap: 18px;
     }
 
+    .feature-grid.desk {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
     .feature {
       min-height: 210px;
       padding: 24px;
@@ -609,6 +629,10 @@
         grid-template-columns: 1fr;
       }
 
+      .feature-grid.desk {
+        grid-template-columns: 1fr;
+      }
+
       .trust-item,
       .trust-item:last-child {
         border-right: 1px solid var(--line);
@@ -642,9 +666,10 @@
   <main>
     <section class="wrap hero" aria-labelledby="hero-title">
       <div>
-        <p class="eyebrow">Agentic IBKR workflows</p>
-        <h1 id="hero-title">ibkr canary for portfolio analysis and trading research</h1>
-        <p class="lead">Connect Interactive Brokers (IBKR) Gateway or TWS to Claude Desktop first, with Claude Code, Cursor, Zed, and other local MCP hosts supported from the same binary. Ask real portfolio and market questions without copying tables out of TWS.</p>
+        <p class="eyebrow">Agentic trading desk</p>
+        <h1 id="hero-title">An agentic trading desk on your own Interactive Brokers account</h1>
+        <p class="lead">ibkr canary connects a local TWS or IB Gateway session to Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Around that connection it has grown the working parts of a small desk: regime context, stress checks, a discipline rulebook, an operator-written risk policy, daily statement reconciliation. Built for individual traders, and still growing in that direction.</p>
+        <p class="lead">Agents get the full market-data surface — real-time and streaming quotes, option chains with Greeks and open interest, daily history, scanners, dealer gamma, breadth — through your own broker session and your own IBKR market-data subscriptions.</p>
         <p class="safety">The bundled MCP surface is read-side only: agents can analyze, monitor, and size plans without receiving order-entry tools.</p>
         <div class="actions" aria-label="Main actions">
           <a class="button primary" href="claude-desktop-interactive-brokers/">Claude Desktop Install</a>
@@ -673,8 +698,8 @@
           <span>Runs as a stdio MCP server for Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts.</span>
         </div>
         <div class="trust-item">
-          <strong>Review depth</strong>
-          <span>Portfolio review, options diagnostics, scanners, scheduled stress checks, gamma, breadth, and regime context in one tool.</span>
+          <strong>Desk functions</strong>
+          <span>Regime context, stress checks, a 14-rule rulebook, an operator-written risk policy, and daily statement reconciliation.</span>
         </div>
         <div class="trust-item">
           <strong>Go binary</strong>
@@ -704,6 +729,65 @@ ibkr setup claude-desktop
 
 # then ask:
 # "How does my IBKR account look today?"</code></pre>
+    </section>
+
+    <section class="wrap" aria-labelledby="desk-title">
+      <div class="section-head">
+        <h2 id="desk-title">What the desk includes.</h2>
+        <p>Ten pieces that matter most. The <a href="https://github.com/osauer/ibkr/blob/main/CHANGELOG.md">changelog</a> carries the rest.</p>
+      </div>
+      <div class="feature-grid desk">
+        <article class="feature">
+          <small>Market data</small>
+          <h3>Full market data for agents</h3>
+          <p>Snapshot quotes with freshness and spread context, a streaming quote resource, option chains with implied volatility, Greeks, and open interest, daily bars, scanners, and S&amp;P 500 breadth. Real-time wherever your IBKR market-data subscriptions cover it; delayed where they don't.</p>
+        </article>
+        <article class="feature">
+          <small>MCP hosts</small>
+          <h3>Works with the agent you already use</h3>
+          <p>One binary serves Claude Desktop, Claude Code, Cursor, Zed, and other MCP hosts. Tool descriptions are written for agent routing, so an assistant picks the right surface without being told command names.</p>
+        </article>
+        <article class="feature">
+          <small>Regime</small>
+          <h3>Risk-regime dashboard</h3>
+          <p>Volatility, credit, funding, FX stress, dealer gamma, and breadth in one view. The same regime stage selects which thresholds the rulebook applies.</p>
+        </article>
+        <article class="feature">
+          <small>Stress checks</small>
+          <h3>Portfolio canary</h3>
+          <p>Scheduled stress checks that combine account, exposure, regime, and data-quality gates into a watch, warn, or critical status an agent can poll.</p>
+        </article>
+        <article class="feature">
+          <small>Discipline</small>
+          <h3>A 14-rule trading rulebook</h3>
+          <p>A daily checklist over the live book: concentration, premium caps, theta budget, expiry runway, earnings coverage, hedge integrity. Missing data degrades to unknown — never to a false pass. Advisory throughout.</p>
+        </article>
+        <article class="feature">
+          <small>Risk policy</small>
+          <h3>A risk policy you write yourself</h3>
+          <p><code>ibkr policy</code> reads a file you author: protected equity floor, declared risk capital, drawdown ladder. No default numbers exist in code. It reports; it does not block. Terminal only.</p>
+        </article>
+        <article class="feature">
+          <small>Reconciliation</small>
+          <h3>Daily statement reconciliation</h3>
+          <p><code>ibkr recon</code> fetches IBKR Flex statements every day and checks broker-confirmed flows against your declared ledger. Clean reports take care of themselves. Exceptions ask for you. Terminal only.</p>
+        </article>
+        <article class="feature">
+          <small>Protection</small>
+          <h3>Protection proposals</h3>
+          <p>The daemon maintains trailing-stop, theta-hygiene, and risk-reduction proposals with per-row blockers, refreshed every 30 seconds. Agents read them through MCP; acting on one stays behind the separate gated order path.</p>
+        </article>
+        <article class="feature">
+          <small>Desk brief</small>
+          <h3>A daily brief on your phone</h3>
+          <p>The paired Canary app opens on a five-section brief — market, calendar, portfolio, risk, process — built by the daemon from the same typed results the tools use. An experimental relay adds access away from home.</p>
+        </article>
+        <article class="feature">
+          <small>Boundary</small>
+          <h3>Read-only by default</h3>
+          <p>Standard downloads compile in no order tools, and the MCP order surface is preview-only in every variant. A separately published trading build carries the gated CLI path: previews, tokens, journaling, and a freeze switch.</p>
+        </article>
+      </div>
     </section>
 
     <section class="wrap">
@@ -750,6 +834,8 @@ ibkr setup claude-desktop
         <li>Are dealers supporting or amplifying today's SPY move?</li>
         <li>What expiries are listed for SPY and what is the implied move?</li>
         <li>If I enter MSFT at 418 with a stop at 408, what is my EUR risk?</li>
+        <li>Quote NVDA — how fresh is the price and how wide is the spread?</li>
+        <li>Which of my discipline rules is the book breaking today?</li>
       </ul>
     </section>
 
@@ -761,7 +847,7 @@ ibkr setup claude-desktop
         <article class="feature">
           <small>MCP server</small>
           <h3>For AI assistants</h3>
-          <p><code>ibkr mcp</code> exposes account, quote, calendar, chain, scanner, sizing, breadth, gamma, regime, and stress-monitoring tools to MCP clients for analysis and scheduled-review workflows.</p>
+          <p><code>ibkr mcp</code> exposes account, positions, quote, calendar, chain, history, scanner, sizing, breadth, gamma, regime, rulebook, and stress-monitoring tools, plus a streaming quote resource. Real-time data follows your IBKR market-data subscriptions.</p>
         </article>
         <article class="feature">
           <small>Terminal CLI</small>
@@ -779,13 +865,13 @@ ibkr setup claude-desktop
     <section class="wrap" aria-labelledby="remote-title">
       <div class="section-head">
         <h2 id="remote-title">Experimental remote Canary app.</h2>
-        <p>The paired Canary PWA can now run through a beta HTTPS relay when you want phone access away from the LAN. The app and broker session still live on your Mac; the relay is transport-only and currently maintainer-assisted for early users.</p>
+        <p>The paired Canary PWA opens on the daily desk brief and can run through a beta HTTPS relay when you want phone access away from the LAN. The app and broker session still live on your Mac; the relay is transport-only and currently maintainer-assisted for early users.</p>
       </div>
       <div class="proof-grid remote-grid">
         <article class="proof">
           <img src="social/canary-app-mobile.png" width="780" height="1688" loading="lazy" alt="Canary mobile app monitor screen">
           <h3>Mobile monitor</h3>
-          <p>Market regime, portfolio canary, protection, alerts, positions, and settings in the paired PWA.</p>
+          <p>Daily brief, market regime, portfolio canary, protection, alerts, positions, and settings in the paired PWA.</p>
         </article>
         <article class="proof">
           <img src="social/canary-app-desktop.png" width="2360" height="1520" loading="lazy" alt="Canary app wide viewport">
@@ -825,6 +911,14 @@ ibkr setup claude-desktop
         <article class="feature">
           <h3>How does Claude Desktop connect?</h3>
           <p>Install the latest MCPB release asset, open it with Claude Desktop, and restart Claude while IB Gateway or TWS is running.</p>
+        </article>
+        <article class="feature">
+          <h3>Is the market data real-time?</h3>
+          <p>Data comes through your own TWS or IB Gateway session, so entitlements match what you see in TWS: real-time where you hold IBKR market-data subscriptions, delayed otherwise. Stock and ETF quotes are also exposed as a streaming MCP resource.</p>
+        </article>
+        <article class="feature">
+          <h3>What is an agentic trading desk?</h3>
+          <p>AI agents working with live broker and market context under rules the trader controls. Here that means read-side MCP tools with full market data, advisory risk surfaces, and a paired monitoring app — all local.</p>
         </article>
       </div>
     </section>
