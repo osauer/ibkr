@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -168,9 +169,9 @@ func TestCapitalStateReportV3DualComputeWire(t *testing.T) {
 }
 
 func TestRiskPolicyPreviewWarnings(t *testing.T) {
-	s := newRiskPolicyTestServer(t, validRiskPolicyTOML)
-	c := s.riskPolicies.snapshot().policy
 	now := time.Now()
+	s := newV4NudgeTestServer(t, now)
+	c := s.riskPolicies.snapshot().policy
 	if _, err := s.riskCapital.ApplyCapitalEvent(rpc.CapitalEventParams{Type: "reconcile"}, rpc.OrderOriginHumanTTY); err != nil {
 		t.Fatal(err)
 	}
@@ -208,6 +209,25 @@ func TestRiskPolicyPreviewWarnings(t *testing.T) {
 	}
 	if !strings.Contains(warns[0].Impact, "submit eligibility is unaffected") {
 		t.Fatalf("impact %q must state submit eligibility is untouched", warns[0].Impact)
+	}
+	// A repeat preview increments only opaque episode state; the advisory
+	// warning remains byte-for-byte equal and has no eligibility field to alter.
+	repeat := s.riskPolicyPreviewWarnings(stockBuy, open)
+	if !slices.Equal(warns, repeat) {
+		t.Fatalf("repeat warning changed: first=%+v repeat=%+v", warns, repeat)
+	}
+	s.nudges.mu.Lock()
+	shadowCount := s.nudges.state.Shadow.Count
+	s.nudges.mu.Unlock()
+	if shadowCount != 2 {
+		t.Fatalf("shadow episode count=%d, want 2", shadowCount)
+	}
+	snapshot, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Context == nil || snapshot.Context.Shadow == nil || snapshot.Context.Shadow.Count != 2 {
+		t.Fatalf("shadow snapshot context=%+v, want active count 2", snapshot.Context)
 	}
 
 	// No policy file → no preview noise; policy show owns the disclosure.

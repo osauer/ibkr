@@ -40,6 +40,10 @@ func runBrief(ctx context.Context, env *Env, args []string) int {
 	if *kind != "" {
 		target = *kind
 	}
+	if target == rpc.BriefKindMonthly {
+		fmt.Fprintln(env.Stdout, "\nmonthly foreground render not recorded — paired-device origin required")
+		return 0
+	}
 	if target == "" {
 		fmt.Fprintf(env.Stdout, "\nnot stamped — %s\n", nonEmpty(res.StampTargetReason, "no daily artefact target"))
 		return 0
@@ -181,6 +185,16 @@ func renderBrief(env *Env, res rpc.BriefResult) {
 			state = "completed"
 		}
 		briefLine(env, "artefact "+artefact.Kind, artefact.BriefRowState, state)
+	}
+	if monthly := res.Process.MonthlyPulse; monthly != nil {
+		value := briefJoin(monthly.Status, monthly.Month)
+		if !monthly.DueAt.IsZero() {
+			value += " · due " + monthly.DueAt.Local().Format("2006-01-02 15:04")
+		}
+		if !monthly.CompletedAt.IsZero() {
+			value += " · rendered " + monthly.CompletedAt.Local().Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(env.Stdout, "  %-18s %-11s %s\n", "monthly pulse", monthly.Status, value)
 	}
 }
 

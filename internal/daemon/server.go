@@ -349,6 +349,9 @@ type Server struct {
 	// authorization.
 	riskPolicies *riskPolicyManager
 	riskCapital  *riskCapitalStore
+	// nudges owns only opaque governance occurrence state. Eligibility remains
+	// a pure projection over risk/recon/capital/pin authorities.
+	nudges *nudgeStateStore
 	// briefState persists only human render-stamps and their rulebook delta
 	// baselines. brief.snapshot reads it but never writes it.
 	briefState *briefStateStore
@@ -505,6 +508,7 @@ func New(opts Options) *Server {
 	s.installProtectionPolicyManager()
 	s.installRiskPolicyManager()
 	s.installRiskCapitalStore()
+	s.installNudgeStateStore()
 	s.installBriefStateStore()
 	s.installProposalEngine()
 	s.installOpportunityPolicyManager()
@@ -2398,6 +2402,10 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleBriefSnapshot(ctx, req) })
 	case rpc.MethodBriefAck:
 		s.unary(req, enc, func() (any, error) { return s.handleBriefAck(ctx, req) })
+	case rpc.MethodNudgesSnapshot:
+		s.unary(req, enc, func() (any, error) { return s.handleNudgesSnapshot(ctx, req) })
+	case rpc.MethodNudgesCutoverReview:
+		s.unary(req, enc, func() (any, error) { return s.handleNudgesCutoverReview(ctx, req) })
 	case rpc.MethodRiskPolicySnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicySnapshot(ctx, req) })
 	case rpc.MethodRiskPolicyCapitalEvent:
@@ -2556,6 +2564,9 @@ func unaryDeadline(method string) time.Duration {
 		// Brief composition fans out across the same gateway-heavy account,
 		// positions, regime, market-event, and rulebook reads as canary.
 		return 75 * time.Second
+	case rpc.MethodNudgesSnapshot, rpc.MethodNudgesCutoverReview:
+		// Local policy, retained statements, and daemon state only.
+		return 5 * time.Second
 	case rpc.MethodMarketEventsSnapshot:
 		return 20 * time.Second
 	case rpc.MethodScanRun:

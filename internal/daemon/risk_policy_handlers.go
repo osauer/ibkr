@@ -351,6 +351,20 @@ func (s *Server) riskPolicyPreviewWarnings(draft rpc.OrderDraft, position rpc.Or
 		severity, tier = "watch", "warning"
 	case risk.CapitalTierBlock:
 		severity, tier = "act", "block"
+		// Advisory occurrence bookkeeping is attached to this exact typed,
+		// risk-increasing, non-hedge preview path. Persistence failure cannot
+		// alter the preview warning or any submit-eligibility field.
+		if s.nudges != nil {
+			now := time.Now().UTC()
+			if s.now != nil {
+				now = s.now().UTC()
+			}
+			authority := s.currentNudgeAuthority(now)
+			open, episode, _ := s.riskCapital.NudgeLatch()
+			if authority.eligible && authority.policyIdentity == nudgePolicyIdentity(mgr.policy) && open {
+				_ = s.nudges.recordShadow(authority.policyIdentity, episode, true, false, true)
+			}
+		}
 	default:
 		return nil
 	}

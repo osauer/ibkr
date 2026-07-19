@@ -131,6 +131,34 @@ func TestRunBriefJSONAndAgentTextNeverStamp(t *testing.T) {
 	}
 }
 
+func TestRunBriefMonthlyTargetNeverAcknowledgesFromCLI(t *testing.T) {
+	snapshot := rpc.BriefResult{
+		AsOf:             time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC),
+		BriefFingerprint: "sha256:monthly", StampTarget: rpc.BriefKindMonthly,
+		Process: rpc.BriefProcessSection{MonthlyPulse: &rpc.BriefMonthlyPulseRow{
+			Status: rpc.BriefMonthlyPulseDue, Month: "2026-08",
+		}},
+	}
+	for _, origin := range []string{rpc.OrderOriginHumanTTY, rpc.OrderOriginAgent, rpc.OrderOriginPairedDevice} {
+		conn := &briefFakeConn{snapshot: snapshot}
+		var stdout, stderr bytes.Buffer
+		env := &Env{Stdout: &stdout, Stderr: &stderr, Conn: conn, Origin: origin}
+		if code := runBrief(context.Background(), env, nil); code != 0 {
+			t.Fatalf("origin=%s exit=%d stderr=%s", origin, code, stderr.String())
+		}
+		if len(conn.calls) != 1 || conn.calls[0].method != rpc.MethodBriefSnapshot {
+			t.Fatalf("origin=%s calls=%+v, CLI must never complete monthly", origin, conn.calls)
+		}
+		want := "paired-device origin required"
+		if origin == rpc.OrderOriginAgent {
+			want = "agent-origin render — not stamped"
+		}
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("origin=%s missing %q:\n%s", origin, want, stdout.String())
+		}
+	}
+}
+
 func TestRunBriefAckFailureIsLoudAndAdvisory(t *testing.T) {
 	conn := &briefFakeConn{
 		snapshot: rpc.BriefResult{

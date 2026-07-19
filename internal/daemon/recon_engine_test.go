@@ -57,6 +57,28 @@ func newReconV3TestServer(t *testing.T) *Server {
 	return newRiskPolicyTestServer(t, validRiskPolicyV3TOML())
 }
 
+func TestReconNudgeAccessorUsesOpaqueBrokerBackedContentIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	s := newV4NudgeTestServer(t, now)
+	day := now.Format("20060102")
+	writeFlexFixture(t, "flex-nudge-accessor.xml", now.Format("20060102")+";120000", day, day,
+		strings.Replace(cashLine("private-line-id", "Deposits/Withdrawals", 123, day), "FIXTURE", "hostile broker prose", 1))
+	report, snapshot := s.buildReconReportWithSnapshot()
+	if report.Status != rpc.ReconStatusActive || len(report.Confirmed) != 1 || snapshot == nil {
+		t.Fatalf("report=%+v snapshot=%+v", report, snapshot)
+	}
+	facts := snapshot.NudgeConfirmedFlows
+	if facts.PolicyVersion != 4 || !strings.HasPrefix(facts.ReportIdentity, "sha256:") || len(facts.ConfirmedRows) != 1 || !strings.HasPrefix(facts.ConfirmedRows[0], "sha256:") {
+		t.Fatalf("nudge facts=%+v", facts)
+	}
+	raw, _ := json.Marshal(facts)
+	for _, forbidden := range []string{"private-line-id", report.ReportID, "hostile broker prose", "123"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("nudge accessor leaked %q: %s", forbidden, raw)
+		}
+	}
+}
+
 func declare(t *testing.T, s *Server, typ string, amount float64, effectiveAt string) {
 	t.Helper()
 	var eff time.Time

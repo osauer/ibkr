@@ -56,6 +56,7 @@ type riskCapitalStateFileV1 struct {
 	LastTier                          string               `json:"last_tier,omitempty"`
 	BlockLatched                      bool                 `json:"block_latched"`
 	LatchedAt                         time.Time            `json:"latched_at,omitzero"`
+	LatchEpisodeSeq                   uint64               `json:"latch_episode_seq,omitempty"`
 	LatchConsumedPct                  float64              `json:"latch_consumed_pct,omitempty"`
 	Overrides                         []rpc.OverrideRecord `json:"overrides,omitempty"`
 	Artefacts                         []rpc.ArtefactRecord `json:"artefacts,omitempty"`
@@ -99,6 +100,7 @@ type capitalEventReplay struct {
 type riskCapitalStore struct {
 	mu     sync.Mutex
 	now    func() time.Time
+	nudges *nudgeStateStore
 	loaded bool
 	state  riskCapitalStateFileV1
 	// Re-derived from capital-events.jsonl on load, maintained incrementally
@@ -136,6 +138,11 @@ func (st *riskCapitalStore) loadLocked() {
 		}
 	}
 	st.state.Version = riskCapitalStateVer
+	if st.state.BlockLatched && st.state.LatchEpisodeSeq == 0 {
+		// Backward-compatible replay for a latch created before the opaque
+		// episode counter existed. Snapshot reads do not persist this upgrade.
+		st.state.LatchEpisodeSeq = 1
+	}
 	// Journal replay owns flows and reconciliation recency.
 	replayed := replayCapitalEvents()
 	st.cumFlowsBase = replayed.declaredFlowsBase
@@ -299,6 +306,7 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 	obs := risk.CapitalObservation{EquityBase: equityBase, AsOf: asOf}
 	v := risk.EvaluateCapital(c, st.runtimeLocked(c, now), &obs, now)
 	if v.Tier == risk.CapitalTierBlock && !st.state.BlockLatched && v.ConsumedPct != nil {
+		st.state.LatchEpisodeSeq++
 		st.state.BlockLatched = true
 		st.state.LatchedAt = now.UTC()
 		st.state.LatchConsumedPct = *v.ConsumedPct
@@ -434,9 +442,10 @@ func (st *riskCapitalStore) ApplyAutomaticReconcile(reportID string, coverageTo 
 }
 
 type statementCapitalSnapshot struct {
-	FlowsBase  float64
-	CoverageTo time.Time
-	Flows      []reconFlow
+	FlowsBase           float64
+	CoverageTo          time.Time
+	Flows               []reconFlow
+	NudgeConfirmedFlows nudgeConfirmedFlowSnapshot
 }
 
 // IncorporateStatementSnapshot installs one fully healthy reconstruction.
@@ -445,7 +454,6 @@ type statementCapitalSnapshot struct {
 // broker value dates for the one-time R4 peak correction.
 func (st *riskCapitalStore) IncorporateStatementSnapshot(snap statementCapitalSnapshot) {
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	st.loadLocked()
 	incorporated := make(map[string]struct{}, len(st.state.IncorporatedStatementLineIDs))
 	for _, id := range st.state.IncorporatedStatementLineIDs {
@@ -476,6 +484,13 @@ func (st *riskCapitalStore) IncorporateStatementSnapshot(snap statementCapitalSn
 	st.state.StatementFlowsBase = snap.FlowsBase
 	st.state.StatementCoverageTo = snap.CoverageTo
 	st.persistLocked(true)
+	st.mu.Unlock()
+	// The nudge store has its own lock and persistence boundary. Observe only
+	// after capital state is installed so neither store is held while writing
+	// the other, and never let advisory nudge persistence alter capital truth.
+	if st.nudges != nil {
+		_ = st.nudges.observeConfirmedFlows(snap.NudgeConfirmedFlows)
+	}
 }
 
 func (st *riskCapitalStore) ActivateStatementAuthorityWithoutStatements() {
@@ -734,6 +749,25 @@ func (st *riskCapitalStore) UnreconciledClock(c *risk.Constitution, now time.Tim
 	}
 	rt := st.runtimeLocked(c, now)
 	return risk.EvaluateUnreconciledClock(maxDays, rt.LastReconciledAt, rt.UnreconciledOverrideUntil, now)
+}
+
+// NudgeLatch returns only an opaque episode identity plus the authoritative
+// open/occurred facts. It never exposes capital values or changes latch state.
+func (st *riskCapitalStore) NudgeLatch() (open bool, episode string, occurredAt time.Time) {
+	if st == nil {
+		return false, "", time.Time{}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	if !st.state.BlockLatched || st.state.LatchedAt.IsZero() {
+		return false, "", time.Time{}
+	}
+	sequence := st.state.LatchEpisodeSeq
+	if sequence == 0 {
+		sequence = 1
+	}
+	return true, opaqueIdentity("drawdown-latch", st.state.LatchedAt.UTC().Format(time.RFC3339Nano), fmt.Sprintf("%d", sequence)), st.state.LatchedAt
 }
 
 // LastEquity returns the persisted last equity observation for the recon

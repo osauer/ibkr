@@ -139,6 +139,181 @@ func TestBriefFirstIncompleteAndExplicitKind(t *testing.T) {
 	}
 }
 
+func TestMonthlyBriefAckOriginPinsFingerprintIdempotencyAndRollover(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC) // 12:00 Europe/Berlin, after 09:00 due.
+	s := newV4NudgeTestServer(t, now)
+	policy := s.riskPolicies.snapshot().policy
+	month := "2026-08"
+	params := rpc.BriefAckParams{
+		Kind: rpc.BriefKindMonthly, Month: month, Evidence: rpc.BriefAckEvidenceRender,
+		BriefFingerprint: "sha256:rendered-monthly", Origin: rpc.OrderOriginPairedDevice,
+	}
+	statePath, _ := defaultTradingStatePath(governanceNudgeStateFile)
+	for _, origin := range []string{"", rpc.OrderOriginAgent, rpc.OrderOriginHumanTTY} {
+		bad := params
+		bad.Origin = origin
+		if _, err := s.handleBriefAck(context.Background(), rawParams(t, bad)); err == nil || !strings.Contains(err.Error(), "paired-device") {
+			t.Fatalf("origin %q err=%v, want paired-device refusal", origin, err)
+		}
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("refused origins wrote monthly state: %v", err)
+	}
+	badMonth := params
+	badMonth.Month = "2026-07"
+	if _, err := s.handleBriefAck(context.Background(), rawParams(t, badMonth)); err == nil || !strings.Contains(err.Error(), "month") {
+		t.Fatalf("bad month err=%v", err)
+	}
+	badEvidence := params
+	badEvidence.Evidence = "gesture"
+	if _, err := s.handleBriefAck(context.Background(), rawParams(t, badEvidence)); err == nil || !strings.Contains(err.Error(), "render evidence") {
+		t.Fatalf("bad evidence err=%v", err)
+	}
+
+	// An unreadable sibling pin blocks completion without creating state.
+	protection := s.protectionPolicies
+	s.protectionPolicies = nil
+	if _, err := s.handleBriefAck(context.Background(), rawParams(t, params)); err == nil || !strings.Contains(err.Error(), "matching policy pins") {
+		t.Fatalf("unavailable pin err=%v", err)
+	}
+	s.protectionPolicies = protection
+
+	if err := s.nudges.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{
+		PolicyVersion: 4, ReportIdentity: opaqueIdentity("report", "cutover"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := s.handleBriefAck(context.Background(), rawParams(t, params))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ack.OK || ack.AlreadyStamped || ack.Kind != rpc.BriefKindMonthly || ack.Month != month || ack.Evidence != rpc.BriefAckEvidenceRender {
+		t.Fatalf("ack=%+v", ack)
+	}
+	coverage, _, _ := s.nudges.confirmedSnapshot(nil)
+	if coverage == nil || !coverage.PreCutoverFlowsUnreviewed {
+		t.Fatalf("monthly completion silently reviewed pre-cutover coverage: %+v", coverage)
+	}
+	repeat, err := s.handleBriefAck(context.Background(), rawParams(t, params))
+	if err != nil || !repeat.AlreadyStamped || !repeat.At.Equal(ack.At) {
+		t.Fatalf("repeat=%+v err=%v", repeat, err)
+	}
+
+	policyIdentity := nudgePolicyIdentity(policy)
+	evaluation, completion := s.briefMonthlyPulse(policy, &rpc.RiskPolicyResult{Inventory: s.riskPolicyInventory(policy)}, now)
+	if evaluation.Status != risk.MonthlyPulseStatusCompleted || completion == nil || !completion.CompletedAt.Equal(ack.At) {
+		t.Fatalf("monthly evaluation=%+v completion=%+v", evaluation, completion)
+	}
+	// A within-month policy fingerprint change has no matching completion and
+	// therefore reopens the pulse.
+	revisedIdentity := opaqueIdentity("risk-policy", "revised")
+	reopened := risk.EvaluateMonthlyPulse(risk.MonthlyPulseInput{
+		Now: now, Cadence: policy.Cadence, PolicyFingerprint: revisedIdentity,
+		PolicyEvidenceReady: true, Completion: s.nudges.monthlyCompletion(month, revisedIdentity),
+	})
+	if reopened.Status != risk.MonthlyPulseStatusDue {
+		t.Fatalf("revised policy status=%s, want due (old identity %s)", reopened.Status, policyIdentity)
+	}
+
+	// The next month is a distinct key and can complete once it is due.
+	now = time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	s.riskCapital.now = s.now
+	s.riskPolicies.mu.Lock()
+	s.riskPolicies.now = s.now
+	s.riskPolicies.loadedAt = now
+	s.riskPolicies.lastCheckedAt = now
+	s.riskPolicies.mu.Unlock()
+	next := params
+	next.Month = "2026-09"
+	next.BriefFingerprint = "sha256:rendered-next-month"
+	nextAck, err := s.handleBriefAck(context.Background(), rawParams(t, next))
+	if err != nil || nextAck.AlreadyStamped || nextAck.Month != "2026-09" {
+		t.Fatalf("next month ack=%+v err=%v", nextAck, err)
+	}
+}
+
+func TestV3BriefMonthlyExtensionIsBehaviorCompatible(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	s := newRiskPolicyTestServer(t, dailyBriefPolicyTOML())
+	policy := s.briefPolicyResult(nil, context.Canceled, now)
+	process := s.composeBriefProcess(policy, s.riskPolicies.snapshot().policy, nil, nil, now)
+	if process.MonthlyPulse != nil {
+		t.Fatalf("v1-v3 brief unexpectedly gained monthly row: %+v", process.MonthlyPulse)
+	}
+	legacyKind, legacyReason := briefStampTarget(policy, s.riskPolicies.snapshot().policy, now)
+	kind, reason := s.briefStampTarget(policy, s.riskPolicies.snapshot().policy, now)
+	if kind != legacyKind || reason != legacyReason {
+		t.Fatalf("v3 target changed: method=%q/%q legacy=%q/%q", kind, reason, legacyKind, legacyReason)
+	}
+}
+
+func TestBriefAndNudgeMonthlyParityDueBlockedAndComplete(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	s := newV4NudgeTestServer(t, now)
+	constitution := s.riskPolicies.snapshot().policy
+	policy := &rpc.RiskPolicyResult{Status: rpc.RiskPolicyStatusActive, Inventory: s.riskPolicyInventory(constitution)}
+
+	dueSnapshot := s.composeNudgesSnapshot()
+	dueProcess := s.composeBriefProcess(policy, constitution, nil, nil, now)
+	if !candidateKindPresent(dueSnapshot.Candidates, rpc.NudgeKindMonthlyPulse) || dueProcess.MonthlyPulse == nil || dueProcess.MonthlyPulse.Status != rpc.BriefMonthlyPulseDue {
+		t.Fatalf("due parity snapshot=%+v process=%+v", dueSnapshot.Candidates, dueProcess.MonthlyPulse)
+	}
+
+	s.riskPolicies.mu.Lock()
+	s.riskPolicies.status = rpc.RiskPolicyStatusDrift
+	s.riskPolicies.mu.Unlock()
+	blockedSnapshot := s.composeNudgesSnapshot()
+	blockedProcess := s.composeBriefProcess(policy, constitution, nil, nil, now)
+	if candidateKindPresent(blockedSnapshot.Candidates, rpc.NudgeKindMonthlyPulse) || blockedProcess.MonthlyPulse == nil || blockedProcess.MonthlyPulse.Status != rpc.BriefMonthlyPulseBlocked {
+		t.Fatalf("blocked parity snapshot=%+v process=%+v", blockedSnapshot.Candidates, blockedProcess.MonthlyPulse)
+	}
+
+	s.riskPolicies.mu.Lock()
+	s.riskPolicies.status = rpc.RiskPolicyStatusActive
+	s.riskPolicies.mu.Unlock()
+	ack, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
+		Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+		BriefFingerprint: "sha256:monthly-parity", Origin: rpc.OrderOriginPairedDevice,
+	}))
+	if err != nil || !ack.OK {
+		t.Fatalf("monthly completion ack=%+v err=%v", ack, err)
+	}
+	completedSnapshot := s.composeNudgesSnapshot()
+	completedProcess := s.composeBriefProcess(policy, constitution, nil, nil, now)
+	if candidateKindPresent(completedSnapshot.Candidates, rpc.NudgeKindMonthlyPulse) || completedProcess.MonthlyPulse == nil || completedProcess.MonthlyPulse.Status != rpc.BriefMonthlyPulseCompleted {
+		t.Fatalf("complete parity snapshot=%+v process=%+v", completedSnapshot.Candidates, completedProcess.MonthlyPulse)
+	}
+}
+
+func TestBriefProcessAggregateIncludesMonthlyStatus(t *testing.T) {
+	ok := briefOK("ok")
+	base := rpc.BriefProcessSection{
+		Reconcile:  rpc.BriefReconcileRow{BriefRowState: ok},
+		AutoExtend: rpc.BriefAutoExtendRow{BriefRowState: ok},
+		OneTap:     rpc.BriefOneTapRow{BriefRowState: ok},
+		RulesDelta: rpc.BriefRulesDeltaRow{BriefRowState: ok},
+		Artefacts:  rpc.BriefArtefactsRow{BriefRowState: ok},
+	}
+	for _, tt := range []struct {
+		status string
+		want   string
+	}{
+		{rpc.BriefMonthlyPulseNotDue, rpc.BriefStatusOK},
+		{rpc.BriefMonthlyPulseCompleted, rpc.BriefStatusOK},
+		{rpc.BriefMonthlyPulseDue, rpc.BriefStatusDegraded},
+		{rpc.BriefMonthlyPulseBlocked, rpc.BriefStatusDegraded},
+	} {
+		t.Run(tt.status, func(t *testing.T) {
+			process := base
+			process.MonthlyPulse = &rpc.BriefMonthlyPulseRow{Status: tt.status}
+			if got := briefProcessSectionState(process); got.Status != tt.want {
+				t.Fatalf("monthly %s aggregate=%+v, want %s", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBriefSnapshotPurityAndDegradedRows(t *testing.T) {
 	s := newRiskPolicyTestServer(t, dailyBriefPolicyTOML())
 	root := os.Getenv("XDG_STATE_HOME")

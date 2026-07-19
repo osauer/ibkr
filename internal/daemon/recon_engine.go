@@ -150,7 +150,17 @@ func (s *Server) buildReconReportWithSnapshot() (*rpc.ReconResult, *statementCap
 	res.Equity = s.reconEquityCheck(merged.equityByDay)
 	res.ReportID = reconReportID(exceptions, baseline, confirmed, matchableFlows, bridgeEvents, res.CoverageFrom, res.CoverageTo, res.StatementAsOf, pol)
 	res.InputHealth = health
-	snapshot := &statementCapitalSnapshot{CoverageTo: res.CoverageTo, Flows: matchableFlows}
+	snapshot := &statementCapitalSnapshot{
+		CoverageTo: res.CoverageTo,
+		Flows:      matchableFlows,
+		NudgeConfirmedFlows: nudgeConfirmedFlowSnapshot{
+			PolicyVersion:  pol.PolicyVersion,
+			ReportIdentity: opaqueIdentity("recon-report", res.ReportID),
+		},
+	}
+	for _, row := range confirmed {
+		snapshot.NudgeConfirmedFlows.ConfirmedRows = append(snapshot.NudgeConfirmedFlows.ConfirmedRows, confirmedFlowContentIdentity(row))
+	}
 	for _, flow := range matchableFlows {
 		snapshot.FlowsBase += flow.amountBase
 	}
