@@ -352,7 +352,7 @@ try {
   // was just exercised in a visible headless page, so the SPA must have
   // attempted the acknowledge POST, and every attempt must have been
   // intercepted rather than reaching the real host.
-  const attentionGuardDeadline = Date.now() + 3000;
+  const attentionGuardDeadline = Date.now() + 10000;
   while (attentionReadIntercepted === 0 && Date.now() < attentionGuardDeadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -1569,6 +1569,13 @@ async function exerciseGovernanceFixtures(page) {
   await new Promise((resolve) => setTimeout(resolve, 100));
   const fetchesAfter = await page.evaluate((paths) => globalThis.__ibkrSmoke.fetches.filter((item) => paths.some((path) => item.url.endsWith(path))).length, mutationPaths);
   if (fetchesAfter !== fetchesBefore) throw new Error(`governance fixture QA called a mutation endpoint: before=${fetchesBefore} after=${fetchesAfter}`);
+  // Hold the Alerts tab until the SPA's dwell-gated acknowledge has fired
+  // (and been intercepted); leaving earlier would cancel the dwell and the
+  // guard assertion downstream would see zero intercepts.
+  const dwellDeadline = Date.now() + 10000;
+  while (attentionReadIntercepted === 0 && Date.now() < dwellDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   await page.locator("#tabMonitor").click();
   return { not_due: notDue, due, blocked, completed, failed_push: failedPush, partial_multi_target: partialPush, stale, not_observed: notObserved, unavailable_with_history: unavailable, mutation_fetches: 0 };
 }

@@ -46,7 +46,9 @@ semantics untouched.
    retained."), never an error state and never a blank pane.
 4. **Read semantics unchanged.** Landing and highlighting must not add any
    read path: the acknowledge flow stays exactly as shipped (visible +
-   rendered + exact watermark). A focus landing that renders the full view
+   rendered + exact watermark + the attention dwell gate added 2026-07-19:
+   a short continuous dwell or an in-view interaction, so a resume flash or
+   pass-through never reads). A focus landing that renders the full view
    reads it the same way a manual Alerts open does — no more, no less. The
    worker still never calls the read mutation (`alert-unread.test.mjs` pins
    `/api/attention/read` out of the worker source).

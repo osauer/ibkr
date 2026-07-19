@@ -94,6 +94,7 @@ function loadAlerts({ visibility = "visible", alertsPanelHidden = false } = {}) 
   };
   const document = {
     visibilityState: visibility,
+    addEventListener() {},
     createElement: () => new FakeElement(),
     getElementById: element,
     querySelectorAll(selector) {
@@ -201,6 +202,65 @@ test("unread state mirrors onto the app icon badge and clears with it", () => {
   assert.deepEqual(harness.badgeCalls.at(-1), ["set", 2]);
   harness.exports.applyAttention(attention(0, 5, 5, []));
   assert.deepEqual(harness.badgeCalls.at(-1), ["clear"]);
+});
+
+test("alerts entry marks read only after a continuous dwell", async () => {
+  const harness = loadAlerts();
+  harness.state.activeTab = "alerts";
+  harness.state.attentionDwellMs = 30;
+  const posts = [];
+  harness.context.fetch = async (url, init = {}) => {
+    if (url === "/api/attention/read") {
+      posts.push(JSON.parse(init.body));
+      return response(attention(0, 7, 7, []));
+    }
+    if (url === "/api/alerts") return response([{ id: "alert-7" }]);
+    if (url === "/api/governance") return response(governanceDTO());
+    return response(attention(1, 7, 6, [{ kind: "canary", id: "alert-7" }]));
+  };
+  assert.equal(harness.exports.handleAttentionContextChange(), true);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(posts, [], "a resume flash must not read");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(posts, [{ through_seq: 7 }], "a held view reads after the dwell");
+});
+
+test("leaving alerts before the dwell cancels the pending read", async () => {
+  const harness = loadAlerts();
+  harness.state.activeTab = "alerts";
+  harness.state.attentionDwellMs = 30;
+  const posts = [];
+  harness.context.fetch = async (url) => {
+    if (url === "/api/attention/read") {
+      posts.push(1);
+      return response(attention(0, 7, 7, []));
+    }
+    return response(attention(1, 7, 6, [{ kind: "canary", id: "alert-7" }]));
+  };
+  assert.equal(harness.exports.handleAttentionContextChange(), true);
+  harness.state.activeTab = "monitor";
+  await harness.exports.handleAttentionContextChange();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(posts, [], "a pass-through visit never reads");
+});
+
+test("interaction inside alerts reads immediately without waiting out the dwell", async () => {
+  const harness = loadAlerts();
+  harness.state.activeTab = "alerts";
+  harness.state.attentionDwellMs = 5000;
+  const posts = [];
+  harness.context.fetch = async (url, init = {}) => {
+    if (url === "/api/attention/read") {
+      posts.push(JSON.parse(init.body));
+      return response(attention(0, 7, 7, []));
+    }
+    if (url === "/api/alerts") return response([{ id: "alert-7" }]);
+    if (url === "/api/governance") return response(governanceDTO());
+    return response(attention(1, 7, 6, [{ kind: "canary", id: "alert-7" }]));
+  };
+  assert.equal(harness.exports.handleAttentionContextChange(), true, "dwell armed");
+  assert.equal(await harness.exports.acknowledgeAttentionNow(), true);
+  assert.deepEqual(posts, [{ through_seq: 7 }]);
 });
 
 test("attention is validated as exact opaque server state and badge rendering never recounts histories", () => {

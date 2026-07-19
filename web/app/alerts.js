@@ -227,19 +227,63 @@ async function acknowledgeAttention(options = {}) {
   return state.attentionReadInFlight;
 }
 
+// A rendered Alerts view marks evidence read only after it has plausibly held
+// the operator's attention: a short continuous dwell, or an explicit
+// interaction inside the view. A resume flash must not consume unread — the
+// app reopens on the last-used tab, so render-equals-read zeroed the badge on
+// every app open that merely passed through Alerts (operator finding,
+// 2026-07-19).
+const attentionDwellDefaultMs = 2000;
+let attentionDwellTimer = null;
+
+function attentionDwellDelayMs() {
+  return Number.isSafeInteger(state.attentionDwellMs) && state.attentionDwellMs >= 0 ? state.attentionDwellMs : attentionDwellDefaultMs;
+}
+
+function cancelAttentionDwell() {
+  if (attentionDwellTimer) {
+    clearTimeout(attentionDwellTimer);
+    attentionDwellTimer = null;
+  }
+}
+
 function handleAttentionContextChange() {
-  if (attentionViewReady()) return acknowledgeAttention();
-  return refreshAttention();
+  if (!attentionViewReady()) {
+    cancelAttentionDwell();
+    return refreshAttention();
+  }
+  if (attentionDwellTimer) return true;
+  attentionDwellTimer = setTimeout(() => {
+    attentionDwellTimer = null;
+    if (attentionViewReady()) acknowledgeAttention();
+  }, attentionDwellDelayMs());
+  return true;
+}
+
+// Deliberate interaction inside the Alerts view (a tap or a scroll) is
+// attention now; it skips the remaining dwell.
+function acknowledgeAttentionNow() {
+  cancelAttentionDwell();
+  if (!attentionViewReady()) return false;
+  return acknowledgeAttention();
 }
 
 function setupAttentionVisibility() {
   if (attentionVisibilityBound) return;
   attentionVisibilityBound = true;
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState !== "visible") return;
+    if (document.visibilityState !== "visible") {
+      cancelAttentionDwell();
+      return;
+    }
     refreshPushState();
     handleAttentionContextChange();
   });
+  const panel = $("alertsTab");
+  if (panel && typeof panel.addEventListener === "function") {
+    panel.addEventListener("pointerdown", acknowledgeAttentionNow);
+    panel.addEventListener("scroll", acknowledgeAttentionNow, { capture: true, passive: true });
+  }
 }
 
 function validateAlertSettings(value) {
@@ -1093,4 +1137,4 @@ function canUseWebPush() {
   return hasNotifications() && "PushManager" in globalThis && !!navigator.serviceWorker;
 }
 
-export { acknowledgeAttention, alertIsStale, alertItems, alertRowElement, alertSourceLabel, alertSourceTitle, alertTone, allAlertItems, applyAttention, applyGovernanceCutoverOverlay, applyGovernanceCutoverReceipt, attentionViewReady, canUseWebPush, canaryHasPortfolioAlert, canaryPreviewRows, clearAlerts, currentAlertPreviewItems, currentCanaryFingerprint, currentCanaryHasPortfolioAlert, currentHistoryAlertItems, enablePush, fetchAttentionHistories, filterAlertItems, governanceAttemptRows, governanceOccurrenceLifecycle, handleAttentionContextChange, hasNotifications, liveAlertPreviewsSuppressed, notificationStateLabel, previousContextAlertItems, refreshAlerts, refreshAttention, refreshGovernance, refreshPushState, renderAlertList, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, scheduleGovernanceRefresh, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility, staleAlertReason, unreadRefsAppear, validateAlertSettings, validateAttention, validateGovernanceResponse, warningMessages };
+export { acknowledgeAttention, acknowledgeAttentionNow, alertIsStale, alertItems, alertRowElement, alertSourceLabel, alertSourceTitle, alertTone, allAlertItems, applyAttention, applyGovernanceCutoverOverlay, applyGovernanceCutoverReceipt, attentionViewReady, canUseWebPush, canaryHasPortfolioAlert, canaryPreviewRows, clearAlerts, currentAlertPreviewItems, currentCanaryFingerprint, currentCanaryHasPortfolioAlert, currentHistoryAlertItems, enablePush, fetchAttentionHistories, filterAlertItems, governanceAttemptRows, governanceOccurrenceLifecycle, handleAttentionContextChange, hasNotifications, liveAlertPreviewsSuppressed, notificationStateLabel, previousContextAlertItems, refreshAlerts, refreshAttention, refreshGovernance, refreshPushState, renderAlertList, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, scheduleGovernanceRefresh, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility, staleAlertReason, unreadRefsAppear, validateAlertSettings, validateAttention, validateGovernanceResponse, warningMessages };
