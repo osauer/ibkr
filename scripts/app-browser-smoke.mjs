@@ -195,6 +195,33 @@ const context = await browser.newContext({
   isMobile: mobile,
   hasTouch: mobile,
 });
+// The operator's real unread attention is human-only evidence: this smoke
+// drives the real shared host in a headless page that reports itself
+// "visible", so opening the Alerts tab would POST /api/attention/read with
+// the real high-water and silently mark the operator's unread as read (same
+// hazard class as the guarded /api/brief/seen render stamp). Intercept the
+// POST before any page interaction, never forward it, and answer with the
+// shape the SPA expects so its state machine stays coherent.
+let attentionReadIntercepted = 0;
+await context.route(`${baseURL}/api/attention/read`, async (route) => {
+  if (route.request().method() !== "POST") {
+    await route.fallback();
+    return;
+  }
+  let throughSeq = 0;
+  try {
+    const parsed = JSON.parse(route.request().postData() || "{}");
+    throughSeq = Number.isFinite(Number(parsed.through_seq)) ? Number(parsed.through_seq) : 0;
+  } catch {
+    // Malformed body still must not reach the real host; answer neutrally.
+  }
+  attentionReadIntercepted += 1;
+  await route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ high_water_seq: throughSeq, read_through_seq: throughSeq, unread_count: 0, unread_refs: [] }),
+  });
+});
 if (noNotification) {
   await context.addInitScript(() => {
     try {
@@ -321,6 +348,17 @@ try {
   const protectionRiskRendering = await exerciseProtectionRiskRendering(page);
   const alertHistory = await exerciseAlertHistory(page);
   const governanceFixtures = await exerciseGovernanceFixtures(page);
+  // Prove the attention-read guard was armed and effective: the alerts tab
+  // was just exercised in a visible headless page, so the SPA must have
+  // attempted the acknowledge POST, and every attempt must have been
+  // intercepted rather than reaching the real host.
+  const attentionGuardDeadline = Date.now() + 3000;
+  while (attentionReadIntercepted === 0 && Date.now() < attentionGuardDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const attentionReadFetches = await page.evaluate(() => globalThis.__ibkrSmoke.fetches.filter((item) => item.url.endsWith("/api/attention/read")).length);
+  if (attentionReadIntercepted === 0) throw new Error("attention read guard never fired: alerts tab exercised without an intercepted /api/attention/read POST");
+  if (attentionReadFetches !== attentionReadIntercepted) throw new Error(`attention read guard bypass suspected: page fetches=${attentionReadFetches} intercepted=${attentionReadIntercepted}`);
   const openOrders = await exerciseOpenOrders(page);
   const settingsTab = await exerciseSettingsTab(page);
   const debugTools = await assertDebugToolsRemoved(page, baseURL);
@@ -369,6 +407,7 @@ try {
       opened_event_streams: eventsBefore.opened_event_streams,
       event_counts: smokeState.eventCounts,
     },
+    attention_read_intercepted: attentionReadIntercepted,
     lifecycle: lifecycleResult,
     pair_expires_at: pairing.expires_at,
   }, null, 2));
