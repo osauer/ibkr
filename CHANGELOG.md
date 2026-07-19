@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v2.2.2 — 2026-07-19 21:37 CEST
+
+### What's new
+
+- **The Alerts page now talks like a trading desk, not a debug console.** A trader-panel review (discretionary trader, prop-desk risk manager, UX writer) found the page inverted: all-clear rows dressed as alerts, one real warning buried in telemetry ("0 red clusters (none), 5/6 ranked"), a counter in storage vocabulary ("3 current / 1 stored"), and weekend-idle governance plumbing that read as an outage. The page is now severity-first: the header counts conditions ("2 watch · 2 data", "All clear"), a plain-English status sentence leads with first-seen and data-as-of stamps, only rows that need attention render as alerts — each with a text severity chip (ACT / WATCH / DATA / INFO) instead of unexplained bullet colors — and passed checks collapse into one "✓ N checks passed" line. Evidence moved behind per-row Details disclosures and dropped its zero-count noise. History and previous-context alerts fold into one collapsed, dated section whose clear button states its consequence, and "Governance evidence" became a one-line "Process checks" status ("paused — data sources are not ready (normal outside market hours)") with the delivery ledger tucked behind the evidence disclosure, nonzero counters only.
+
+### Changed
+
+- Canary copy is authored in plain English at the source: "A provisional market warning is visible" → "An early market warning is flashing (credit red, not confirmed yet)"; market evidence renders only informative facts ("2 yellow (credit and vol); red but unconfirmed: credit; 5 of 6 clusters reporting") and never zero-count buckets; low-exposure watch guidance reads "your exposure is low; keep watching — no reductions needed"; internal pipeline terms (confirmation-eligible, ranked regime clusters, cached compute, "rebalance this title") were rewritten as observable facts. CLI and MCP surfaces render the same daemon-authored copy.
+- A trader-panel re-review then drove a second pass: with the market closed, the status line stamps "market closed — prices are last-session prints" instead of presenting frozen Friday quotes as fresh; data-quality caveats sit in their own quieter "Data caveats" band with a muted DATA chip and never inflate the needs-attention count (which now counts decisions only); the market-stress check explains itself when an early warning is flashing but below the de-risking trigger, so the status line and the passed-checks line can no longer contradict each other; SPY/VIX tape evidence prints its trigger levels next to the observed moves; history timestamps older than two days carry real dates; and the history section is titled "Signal history".
+- Dismissing live alerts is now safe by construction: the control is labeled "Hide until signal changes", hides only watch/data rows, never touches act-severity rows or the header counter, and a regression test pins the act-day rendering (act rows sort first, dismiss keeps them visible, counter stays truthful).
+- Stored alert records are titled "Canary: watch" with a plain body ("Watch severity — market stress partly confirmed."); the "Open ibkr for portfolio details." call to action now appears only in the web-push payload, never inside the app. Push payloads remain redacted (no symbols, quantities, or account data).
+- The alerts severity filter bar (All / Warnings / Info) was removed: with only exceptions rendered, the filter had no job left, and its labels were the page's only (accidental) color legend.
+
+### Fixed
+
+- `urgent` — the top canary severity — rendered with the informational blue tone in the alerts list; severity tones now map the daemon ladder exactly (observe < watch < act < urgent, order-mismatch `critical` included) and the copy-text sniffing fallback is gone.
+- Protection evidence no longer renders a bare "unprotected € —" when the unprotected notional is zero or unavailable.
+- Protective-stop mismatch alerts no longer sink into "previous context" the moment the canary fingerprint moves: fingerprint staleness now applies only to canary-source alerts, so order-mismatch alerts stay current until their account or mode context actually changes.
+- Opening the Alerts tab before the first canary snapshot no longer floods "Needs attention" with the entire stored history (each stored record counted as a live condition); history now stays history until a staleness verdict is possible, and repeated records of one condition count once.
+- A data race in connection teardown (caught intermittently by `make test`): `Disconnect` nulled the transport fields while the reader goroutine could still dereference them. Teardown now closes only the socket to unblock a parked reader and drops the buffered transport state after the goroutine wait succeeds; a reader that outlives the bounded wait keeps valid fields until the next connect attempt replaces them.
+
 ## v2.2.1 — 2026-07-19 19:49 CEST
 
 ### What's new
