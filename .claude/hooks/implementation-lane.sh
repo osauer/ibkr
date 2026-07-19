@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Implementation-lane gate (ibkr pilot): primary-tree code stays gated to
-# headless Codex; agent worktrees allow Claude edits only as a hard-cap fallback.
-# This PreToolUse hook (matcher Edit|Write in .claude/settings.json) enforces
-# that deterministically. The break-glass is a per-session waiver written by
-# scripts/waive-inline.sh, which is deliberately not allowlisted so each use
-# needs the user's permission click. Docs and config stay freely editable:
-# only the code extensions below are gated, and only inside this checkout.
+# headless Codex by default; agent worktrees allow Claude edits as the
+# hard-cap fallback. This PreToolUse hook (matcher Edit|Write in
+# .claude/settings.json) enforces that deterministically. The valve is a
+# per-session waiver written by scripts/waive-inline.sh: the orchestrating
+# session may self-grant it with a logged reason when its judgment says
+# inline action is right (user decision 2026-07-19); spawned agents must
+# never invoke it. Docs and config stay freely editable: only the code
+# extensions below are gated, and only inside this checkout.
 set -euo pipefail
 
 payload="$(cat)"

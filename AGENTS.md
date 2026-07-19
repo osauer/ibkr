@@ -27,9 +27,15 @@ app, and SPA code are adapters and must not re-create daemon or risk policy.
   review, gates, and integration (`.claude/skills/codex-delegate/SKILL.md`).
   The implementation-lane hook (`.claude/hooks/implementation-lane.sh`)
   deterministically blocks inline code edits by Claude sessions and their
-  subagents; `scripts/waive-inline.sh` is the human-approved break-glass and
-  stays un-allowlisted so every use needs the user's click. Delegated Codex
-  runs implement their brief and never re-delegate.
+  subagents by default. Oversteer clause (user decision 2026-07-19): the
+  orchestrating session may overrule the gate by self-granting a session
+  waiver via `scripts/waive-inline.sh` (allowlisted for this purpose) when
+  its judgment says inline action is right — Codex hard-capped, urgent fix,
+  or a broken delegation path. Every oversteer carries a concrete logged
+  reason and is announced in the session, never silent; waivers expire
+  after 48h and routing returns to Codex-first. Delegated and spawned
+  agents must never invoke the waiver themselves. Delegated Codex runs
+  implement their brief and never re-delegate.
 - Model and effort routing (user decision 2026-07-19): judgment concentrates
   upward, breadth fans out downward, and the two budgets are separate pools —
   Codex effort burns the metered weekly window (the runner prints the gauge
@@ -52,8 +58,9 @@ app, and SPA code are adapters and must not re-create daemon or risk policy.
   the `implementer` agent (`.claude/agents/implementer.md`) in an isolated
   agent worktree, same brief, same orchestrator review, same offline gates,
   same patch-based integration. The fallback is announced per task, never
-  silent; the primary tree stays hook-blocked (only agent worktrees are
-  writable); routing returns to Codex automatically once the window resets.
+  silent; the primary tree stays hook-blocked by default (agent worktrees
+  are writable, and the oversteer clause above covers judged exceptions);
+  routing returns to Codex automatically once the window resets.
 - A task is Codex-ready only when it is self-contained, its contract is
   decided, and its done-criteria are offline-verifiable in the worktree.
   "Clearly defined" is necessary, not sufficient: unspec'd "figure out what

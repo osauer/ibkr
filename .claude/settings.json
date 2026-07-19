@@ -40,7 +40,8 @@
       "Bash(make smoke-fast)",
       "Bash(make app-check)",
       "Bash(make account-data-check)",
-      "Bash(scripts/codex-implement.sh *)"
+      "Bash(scripts/codex-implement.sh *)",
+      "Bash(scripts/waive-inline.sh *)"
     ]
   },
   "hooks": {

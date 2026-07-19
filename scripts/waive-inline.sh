@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Break-glass for the implementation-lane hook: records a human-approved
-# inline-edit waiver for one Claude session (48h max; the hook prunes older
-# files). Deliberately NOT allowlisted in .claude/settings.json — the
-# permission prompt this command triggers in an agent session IS the
-# approval. Keep it that way.
+# Oversteer valve for the implementation-lane hook: records an inline-edit
+# waiver for one Claude session (48h max; the hook prunes older files).
+# Contract (user decision 2026-07-19): Codex stays the default coding lane,
+# but the ORCHESTRATING session may self-grant this waiver when its judgment
+# says inline action is right (Codex window hard-capped, urgent fix, broken
+# delegation path). Every use must carry a concrete reason and be announced
+# in the session — the waiver file is the audit record, silence is a
+# violation. The script is allowlisted in .claude/settings.json for exactly
+# this purpose; delegated/spawned agents must still never invoke it.
 set -euo pipefail
 
 if [ $# -lt 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
