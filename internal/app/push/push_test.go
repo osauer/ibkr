@@ -2,8 +2,12 @@ package push
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -39,6 +43,84 @@ func TestGovernancePayloadIsExactCanonicalAllowlist(t *testing.T) {
 		if strings.Contains(got, sentinel) {
 			t.Fatalf("payload leaked %q: %s", sentinel, got)
 		}
+	}
+}
+
+type captureClient struct {
+	req *http.Request
+}
+
+func (c *captureClient) Do(req *http.Request) (*http.Response, error) {
+	c.req = req
+	return &http.Response{StatusCode: http.StatusCreated, Status: "201 Created", Body: io.NopCloser(strings.NewReader(""))}, nil
+}
+
+// Apple's push service rejects the whole JWT (403 BadJwtToken) when the sub
+// claim is double-prefixed ("mailto:mailto:…", the webpush-go v1.4.0 behavior
+// for values that already carry "mailto:") or names an @localhost contact.
+func TestWebPushSenderVAPIDContactSurvivesLibraryPrefixing(t *testing.T) {
+	t.Parallel()
+	browserKey, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := make([]byte, 16)
+	if _, err := rand.Read(auth); err != nil {
+		t.Fatal(err)
+	}
+	vapidPrivate, vapidPublic, err := GenerateVAPIDKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &captureClient{}
+	sender := WebPushSender{Subscriber: Subscriber, Client: client}
+	attempt := sender.Send(context.Background(), state.PushSubscription{
+		ID:       "sub-vapid-contact",
+		Endpoint: "https://web.push.apple.com/probe-token",
+		P256DH:   base64.RawURLEncoding.EncodeToString(browserKey.PublicKey().Bytes()),
+		Auth:     base64.RawURLEncoding.EncodeToString(auth),
+	}, state.VAPIDKeys{PrivateKey: vapidPrivate, PublicKey: vapidPublic}, SafeDiagnosticPayload())
+	if !attempt.OK {
+		t.Fatalf("send attempt not OK: %+v", attempt)
+	}
+	if client.req == nil {
+		t.Fatal("no outbound request captured")
+	}
+	authz := client.req.Header.Get("Authorization")
+	rest, ok := strings.CutPrefix(authz, "vapid t=")
+	if !ok {
+		t.Fatalf("authorization header shape unexpected: %q", authz)
+	}
+	jwt, _, ok := strings.Cut(rest, ",")
+	if !ok {
+		t.Fatalf("authorization header missing k= segment: %q", authz)
+	}
+	segments := strings.Split(jwt, ".")
+	if len(segments) != 3 {
+		t.Fatalf("JWT does not have three segments: %q", jwt)
+	}
+	payloadRaw, err := base64.RawURLEncoding.DecodeString(segments[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims struct {
+		Aud string `json:"aud"`
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(payloadRaw, &claims); err != nil {
+		t.Fatal(err)
+	}
+	if claims.Sub != Subscriber {
+		t.Fatalf("JWT sub=%q, want %q", claims.Sub, Subscriber)
+	}
+	if strings.Contains(claims.Sub, "mailto:mailto:") {
+		t.Fatalf("JWT sub double-prefixed: %q", claims.Sub)
+	}
+	if strings.Contains(claims.Sub, "@localhost") {
+		t.Fatalf("JWT sub uses localhost contact: %q", claims.Sub)
+	}
+	if want := "https://web.push.apple.com"; claims.Aud != want {
+		t.Fatalf("JWT aud=%q, want %q", claims.Aud, want)
 	}
 }
 

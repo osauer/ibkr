@@ -74,6 +74,14 @@ func SafeDiagnosticPayload() Payload {
 	}
 }
 
+// Subscriber is the VAPID contact claim presented to push services. It must
+// be an "https:" URL (webpush-go passes those through unchanged) or a bare
+// email without the "mailto:" prefix (the library prepends exactly one).
+// Never a "mailto:"-prefixed value — webpush-go v1.4.0 would double it into
+// "mailto:mailto:…" — and never an @localhost address: Apple rejects both
+// with 403 BadJwtToken, surfacing as http_rejected on every delivery.
+const Subscriber = "https://osauer.dev"
+
 type WebPushSender struct {
 	Subscriber string
 	Client     webpush.HTTPClient

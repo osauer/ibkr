@@ -71,7 +71,7 @@ func New(opts Options) (*App, error) {
 			opts.PublicURL = publicURL
 		}
 	}
-	pushSender := push.WebPushSender{Subscriber: "mailto:ibkr-app@localhost"}
+	pushSender := push.WebPushSender{Subscriber: push.Subscriber}
 	monitor := alerts.Monitor{
 		Store:  store,
 		Sender: pushSender,
