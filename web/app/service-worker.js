@@ -23,14 +23,38 @@ self.addEventListener("push", (event) => {
   const title = typeof payload.title === "string" && payload.title ? payload.title : "ibkr canary";
   const body = typeof payload.body === "string" && payload.body ? payload.body : "Open ibkr canary for details.";
   const tag = notificationTag(payload);
-  event.waitUntil(self.registration.showNotification(title, {
-    body,
-    data: { destination },
-    tag,
-    badge: "/favicon-64.png",
-    icon: "/icon-192.png",
-  }));
+  event.waitUntil((async () => {
+    await self.registration.showNotification(title, {
+      body,
+      data: { destination },
+      tag,
+      badge: "/favicon-64.png",
+      icon: "/icon-192.png",
+    });
+    await refreshAppIconBadge();
+  })());
 });
+
+// After showing a notification, mirror the server's unread truth onto the
+// installed app icon (Badging API). Best-effort: an unsupported runtime or a
+// failed fetch leaves the icon untouched — the notification itself already
+// displayed. notificationclick deliberately never touches the badge: a tap
+// navigates, it does not mark anything read.
+async function refreshAppIconBadge() {
+  const nav = self.navigator;
+  if (!nav || typeof nav.setAppBadge !== "function" || typeof self.fetch !== "function") return;
+  try {
+    const res = await self.fetch("/api/attention", { credentials: "include" });
+    if (!res.ok) return;
+    const attention = await res.json();
+    const unread = attention?.unread_count;
+    if (Number.isSafeInteger(unread) && unread > 0) await nav.setAppBadge(unread);
+    else if (typeof nav.clearAppBadge === "function") await nav.clearAppBadge();
+    else await nav.setAppBadge(0);
+  } catch {
+    // Best-effort only.
+  }
+}
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();

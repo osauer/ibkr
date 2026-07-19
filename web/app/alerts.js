@@ -60,6 +60,20 @@ function applyAttention(value, options = {}) {
   return true;
 }
 
+// Mirror unread onto the installed app icon (Badging API; iOS 16.4+
+// home-screen web apps). Follows the in-app badge presentation exactly: a
+// known positive count sets the number, anything else clears. Best-effort —
+// the API is absent in plain browser tabs and older systems.
+function syncAppIconBadge(unread) {
+  if (typeof navigator === "undefined" || typeof navigator.setAppBadge !== "function") return;
+  const apply = Number.isSafeInteger(unread) && unread > 0
+    ? navigator.setAppBadge(unread)
+    : typeof navigator.clearAppBadge === "function"
+      ? navigator.clearAppBadge()
+      : navigator.setAppBadge(0);
+  Promise.resolve(apply).catch(() => {});
+}
+
 function renderAttention() {
   const attention = state.attention;
   const unread = attention?.unread_count;
@@ -71,6 +85,7 @@ function renderAttention() {
   badge.textContent = known && unread > 0 ? (unread > 99 ? "99+" : String(unread)) : "";
   badge.setAttribute("aria-hidden", "true");
   tab.setAttribute("aria-label", known && unread > 0 ? `Alerts, ${unread} unread` : "Alerts, no unread alerts");
+  syncAppIconBadge(known ? unread : 0);
   status.textContent = state.attentionStatus.state;
   status.classList.toggle("governance-action-status--error", state.attentionStatus.error);
 }

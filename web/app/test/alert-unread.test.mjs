@@ -53,6 +53,7 @@ function loadAlerts({ visibility = "visible", alertsPanelHidden = false } = {}) 
     return button;
   });
   const storageWrites = [];
+  const badgeCalls = [];
   const state = {
     activeTab: "monitor",
     alertFilter: "all",
@@ -121,7 +122,11 @@ function loadAlerts({ visibility = "visible", alertsPanelHidden = false } = {}) 
       getItem: () => "",
       setItem(key, value) { storageWrites.push([key, value]); },
     },
-    navigator: { serviceWorker: { ready: Promise.resolve(registration) } },
+    navigator: {
+      serviceWorker: { ready: Promise.resolve(registration) },
+      setAppBadge(count) { badgeCalls.push(["set", count]); return Promise.resolve(); },
+      clearAppBadge() { badgeCalls.push(["clear"]); return Promise.resolve(); },
+    },
     Notification,
     PushManager: function PushManager() {},
   });
@@ -129,7 +134,7 @@ function loadAlerts({ visibility = "visible", alertsPanelHidden = false } = {}) 
     .replace(/^import .*;\n/gm, "")
     .replace(/export \{([^}]+)\};\s*$/m, "globalThis.__exports = {$1};");
   vm.runInContext(executable, context, { filename: "alerts.js" });
-  return { context, document, elements, exports: context.__exports, modeButtons, registration, state, storageWrites };
+  return { badgeCalls, context, document, elements, exports: context.__exports, modeButtons, registration, state, storageWrites };
 }
 
 function response(body, ok = true) {
@@ -189,6 +194,14 @@ function assertExactJSONCall(call, { method, url, body }) {
   assert.equal(call.init.headers["Content-Type"], "application/json");
   assert.deepEqual(JSON.parse(call.init.body), body);
 }
+
+test("unread state mirrors onto the app icon badge and clears with it", () => {
+  const harness = loadAlerts();
+  harness.exports.applyAttention(attention(2, 5, 3, [{ kind: "canary", id: "a" }, { kind: "governance", id: "g" }]));
+  assert.deepEqual(harness.badgeCalls.at(-1), ["set", 2]);
+  harness.exports.applyAttention(attention(0, 5, 5, []));
+  assert.deepEqual(harness.badgeCalls.at(-1), ["clear"]);
+});
 
 test("attention is validated as exact opaque server state and badge rendering never recounts histories", () => {
   const harness = loadAlerts();
@@ -498,7 +511,11 @@ test("malformed attention fails closed and notification click routing alone has 
   assert.equal(await harness.exports.acknowledgeAttention({ retry: false }), false);
   assert.equal(harness.elements.get("alertUnreadBadge").textContent, "1", "last valid server state is retained");
   assert.match(harness.elements.get("attentionStatus").textContent, /unavailable/i);
-  assert.equal(serviceWorkerSource.includes("/api/attention"), false);
+  // The worker may GET /api/attention (icon-badge truth after a push) but
+  // must never reference the read-acknowledge mutation; the click path is
+  // additionally proven fetch-free in service-worker.test.mjs.
+  assert.equal(serviceWorkerSource.includes("/api/attention/read"), false);
+  assert.match(serviceWorkerSource, /fetch\("\/api\/attention", \{ credentials: "include" \}\)/);
   assert.match(serviceWorkerSource, /\?tab=alerts/);
 });
 

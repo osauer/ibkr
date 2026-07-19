@@ -32,9 +32,22 @@ function loadWorker(options = {}) {
       },
     },
   };
+  if (options.navigator) self.navigator = options.navigator;
+  if (options.fetch) self.fetch = options.fetch;
   const context = vm.createContext({ self, console });
   vm.runInContext(workerSource, context, { filename: "service-worker.js" });
   return { listeners, notifications, opened };
+}
+
+function badgeRecorder() {
+  const calls = [];
+  return {
+    calls,
+    navigator: {
+      setAppBadge: async (count) => { calls.push(["set", count]); },
+      clearAppBadge: async () => { calls.push(["clear"]); },
+    },
+  };
 }
 
 async function dispatch(listener, event) {
@@ -124,4 +137,60 @@ test("notification click opens only fixed monitor and alerts routes when no clie
   }
   assert.deepEqual(worker.opened, ["/?tab=alerts", "/?tab=monitor", "/?tab=monitor", "/?tab=monitor"]);
   assert.equal(worker.opened.some((route) => /evil|file:|private/.test(route)), false);
+});
+
+test("push mirrors the server unread count onto the app icon badge", async () => {
+  const badge = badgeRecorder();
+  const fetchCalls = [];
+  const worker = loadWorker({
+    navigator: badge.navigator,
+    fetch: async (url, init) => {
+      fetchCalls.push({ url, init });
+      return { ok: true, async json() { return { unread_count: 3, high_water_seq: 9, read_through_seq: 6, unread_refs: [] }; } };
+    },
+  });
+  await dispatch(worker.listeners.get("push"), { data: { json: () => ({ title: "t", body: "b", destination: "alerts" }) } });
+  assert.equal(worker.notifications.length, 1);
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].url, "/api/attention");
+  assert.equal(fetchCalls[0].init.credentials, "include");
+  assert.deepEqual(badge.calls, [["set", 3]]);
+});
+
+test("push clears the icon badge when the server reports zero unread", async () => {
+  const badge = badgeRecorder();
+  const worker = loadWorker({
+    navigator: badge.navigator,
+    fetch: async () => ({ ok: true, async json() { return { unread_count: 0 }; } }),
+  });
+  await dispatch(worker.listeners.get("push"), { data: { json: () => ({}) } });
+  assert.deepEqual(badge.calls, [["clear"]]);
+});
+
+test("a failed attention fetch leaves the icon badge untouched and still shows the notification", async () => {
+  const badge = badgeRecorder();
+  const worker = loadWorker({
+    navigator: badge.navigator,
+    fetch: async () => ({ ok: false, async json() { return {}; } }),
+  });
+  await dispatch(worker.listeners.get("push"), { data: { json: () => ({}) } });
+  assert.equal(worker.notifications.length, 1);
+  assert.deepEqual(badge.calls, []);
+});
+
+test("a badge-less runtime still shows the notification", async () => {
+  const worker = loadWorker();
+  await dispatch(worker.listeners.get("push"), { data: { json: () => ({}) } });
+  assert.equal(worker.notifications.length, 1);
+});
+
+test("notification click navigates without fetching or touching the icon badge", async () => {
+  const badge = badgeRecorder();
+  const worker = loadWorker({
+    navigator: badge.navigator,
+    fetch: async () => { throw new Error("notificationclick must not fetch"); },
+  });
+  await dispatch(worker.listeners.get("notificationclick"), { notification: { close() {}, data: { destination: "alerts" } } });
+  assert.deepEqual(worker.opened, ["/?tab=alerts"]);
+  assert.deepEqual(badge.calls, []);
 });
