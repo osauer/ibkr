@@ -1,15 +1,29 @@
 package rpc
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/risk"
 )
 
-const MethodNudgesSnapshot = "nudges.snapshot"
+const (
+	MethodNudgesSnapshot      = "nudges.snapshot"
+	MethodNudgesCutoverReview = "nudges.cutover_review"
+)
+
+type NudgeCutoverReviewOrigin string
+
+const NudgeCutoverReviewOriginPairedDevice NudgeCutoverReviewOrigin = "paired_device"
+
+type NudgeCutoverReviewEvidence string
+
+const NudgeCutoverReviewEvidencePairedDeviceForegroundRender NudgeCutoverReviewEvidence = "paired_device_foreground_render_review"
 
 const (
 	NudgeKindReconcileDue       = risk.NudgeKindReconcileDue
@@ -31,6 +45,8 @@ const (
 
 	NudgeDestinationMonitor = risk.NudgeDestinationMonitor
 	NudgeDestinationAlerts  = risk.NudgeDestinationAlerts
+
+	NudgeDrawdownTierBlock = risk.CapitalTierBlock
 )
 
 const (
@@ -62,6 +78,157 @@ const (
 // NudgesSnapshotParams is empty because nudges.snapshot is a
 // gateway-independent, side-effect-free read.
 type NudgesSnapshotParams struct{}
+
+// NudgesCutoverReviewParams carries only the fixed paired-surface evidence
+// labels. The daemon, not this DTO, authenticates the origin and authorizes
+// the advisory evidence write against current broker-backed report health.
+type NudgesCutoverReviewParams struct {
+	Origin   NudgeCutoverReviewOrigin   `json:"origin"`
+	Evidence NudgeCutoverReviewEvidence `json:"evidence"`
+}
+
+func (params NudgesCutoverReviewParams) MarshalJSON() ([]byte, error) {
+	if err := validateNudgesCutoverReviewParams(params); err != nil {
+		return nil, err
+	}
+	type wire NudgesCutoverReviewParams
+	return json.Marshal(wire(params))
+}
+
+func (params *NudgesCutoverReviewParams) UnmarshalJSON(data []byte) error {
+	type wire NudgesCutoverReviewParams
+	var decoded wire
+	if err := decodeExactNudgeJSONObject(data, []string{"origin", "evidence"}, &decoded); err != nil {
+		return err
+	}
+	value := NudgesCutoverReviewParams(decoded)
+	if err := validateNudgesCutoverReviewParams(value); err != nil {
+		return err
+	}
+	*params = value
+	return nil
+}
+
+func validateNudgesCutoverReviewParams(params NudgesCutoverReviewParams) error {
+	if params.Origin != NudgeCutoverReviewOriginPairedDevice {
+		return errors.New("invalid nudge cutover-review origin")
+	}
+	if params.Evidence != NudgeCutoverReviewEvidencePairedDeviceForegroundRender {
+		return errors.New("invalid nudge cutover-review evidence")
+	}
+	return nil
+}
+
+// NudgesCutoverReviewResult reports only daemon-authored, redacted evidence.
+// It is neither broker authority nor monthly-pulse completion.
+type NudgesCutoverReviewResult struct {
+	OK              bool                       `json:"ok"`
+	AlreadyReviewed bool                       `json:"already_reviewed"`
+	ReviewedAt      time.Time                  `json:"reviewed_at"`
+	CoverageFrom    time.Time                  `json:"coverage_from"`
+	Evidence        NudgeCutoverReviewEvidence `json:"evidence"`
+}
+
+func (result NudgesCutoverReviewResult) MarshalJSON() ([]byte, error) {
+	if err := validateNudgesCutoverReviewResult(result); err != nil {
+		return nil, err
+	}
+	type wire NudgesCutoverReviewResult
+	return json.Marshal(wire(result))
+}
+
+func (result *NudgesCutoverReviewResult) UnmarshalJSON(data []byte) error {
+	type wire NudgesCutoverReviewResult
+	var decoded wire
+	if err := decodeExactNudgeJSONObject(data, []string{"ok", "already_reviewed", "reviewed_at", "coverage_from", "evidence"}, &decoded); err != nil {
+		return err
+	}
+	value := NudgesCutoverReviewResult(decoded)
+	if err := validateNudgesCutoverReviewResult(value); err != nil {
+		return err
+	}
+	*result = value
+	return nil
+}
+
+func validateNudgesCutoverReviewResult(result NudgesCutoverReviewResult) error {
+	if !result.OK {
+		return errors.New("nudge cutover-review result must be successful")
+	}
+	if result.ReviewedAt.IsZero() {
+		return errors.New("nudge cutover-review result is missing reviewed_at")
+	}
+	if result.CoverageFrom.IsZero() {
+		return errors.New("nudge cutover-review result is missing coverage_from")
+	}
+	if result.CoverageFrom.After(result.ReviewedAt) {
+		return errors.New("nudge cutover-review coverage_from is after reviewed_at")
+	}
+	if result.Evidence != NudgeCutoverReviewEvidencePairedDeviceForegroundRender {
+		return errors.New("invalid nudge cutover-review result evidence")
+	}
+	return nil
+}
+
+func decodeExactNudgeJSONObject(data []byte, allowedKeys []string, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := opening.(json.Delim); !ok || delimiter != '{' {
+		return errors.New("nudge JSON value must be an object")
+	}
+
+	allowed := make(map[string]struct{}, len(allowedKeys))
+	for _, key := range allowedKeys {
+		allowed[key] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(allowedKeys))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return errors.New("nudge JSON object contains a non-string key")
+		}
+		if _, ok := allowed[key]; !ok {
+			return fmt.Errorf("nudge JSON object contains unknown key %q", key)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("nudge JSON object contains duplicate key %q", key)
+		}
+		seen[key] = struct{}{}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return err
+		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("nudge JSON object key %q must not be null", key)
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := closing.(json.Delim); !ok || delimiter != '}' {
+		return errors.New("nudge JSON object is not closed")
+	}
+	for _, key := range allowedKeys {
+		if _, ok := seen[key]; !ok {
+			return fmt.Errorf("nudge JSON object is missing key %q", key)
+		}
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("unexpected trailing nudge JSON value")
+		}
+		return err
+	}
+	return json.Unmarshal(data, destination)
+}
 
 // NudgeCandidate is intentionally lockscreen-safe. Its title and body are
 // daemon-authored enum templates; Fingerprint is an opaque semantic identity.
@@ -195,6 +362,23 @@ type NudgesSnapshotResult struct {
 	Candidates            []NudgeCandidate            `json:"candidates"`
 	SourceHealth          NudgeSourceHealth           `json:"source_health"`
 	ConfirmedFlowCoverage *NudgeConfirmedFlowCoverage `json:"confirmed_flow_coverage,omitempty"`
+	Context               *NudgeSnapshotContext       `json:"context,omitempty"`
+}
+
+// NudgeSnapshotContext is visible snapshot detail, never candidate or push
+// copy. Its concrete summaries deliberately admit no arbitrary display text.
+type NudgeSnapshotContext struct {
+	Shadow   *NudgeShadowSummary   `json:"shadow,omitempty"`
+	Drawdown *NudgeDrawdownSummary `json:"drawdown,omitempty"`
+}
+
+type NudgeShadowSummary struct {
+	Count int `json:"count"`
+}
+
+type NudgeDrawdownSummary struct {
+	Tier        string   `json:"tier"`
+	ConsumedPct *float64 `json:"consumed_pct"`
 }
 
 // NudgeConfirmedFlowCoverage discloses only the redacted cutover boundary and
@@ -205,44 +389,125 @@ type NudgeConfirmedFlowCoverage struct {
 }
 
 func (result NudgesSnapshotResult) MarshalJSON() ([]byte, error) {
-	normalizedHealth := NormalizeNudgeSourceHealth(result.SourceHealth, len(result.Candidates))
-	if err := validateNudgeSnapshotConfirmedFlowCoherence(result.AsOf, result.ConfirmedFlowCoverage, normalizedHealth.ConfirmedFlow); err != nil {
+	normalizedHealth, candidates, err := validateNudgeSnapshot(result)
+	if err != nil {
 		return nil, err
-	}
-	if err := validateNudgeSnapshotSourceHealthTimestamps(result.AsOf, normalizedHealth); err != nil {
-		return nil, err
-	}
-	candidates := make([]NudgeCandidate, len(result.Candidates))
-	for i, candidate := range result.Candidates {
-		canonical, err := canonicalizeRPCNudgeCandidate(candidate)
-		if err != nil {
-			return nil, fmt.Errorf("invalid nudge candidate at index %d: %w", i, err)
-		}
-		candidates[i] = canonical
 	}
 	wire := struct {
 		AsOf                  time.Time                   `json:"as_of"`
 		Candidates            []NudgeCandidate            `json:"candidates"`
 		SourceHealth          nudgeSourceHealthWire       `json:"source_health"`
 		ConfirmedFlowCoverage *NudgeConfirmedFlowCoverage `json:"confirmed_flow_coverage,omitempty"`
+		Context               *NudgeSnapshotContext       `json:"context,omitempty"`
 	}{
 		AsOf:                  result.AsOf,
 		Candidates:            candidates,
 		SourceHealth:          nudgeSourceHealthWire(normalizedHealth),
 		ConfirmedFlowCoverage: result.ConfirmedFlowCoverage,
+		Context:               result.Context,
 	}
 	return json.Marshal(wire)
 }
 
 func (result NudgesSnapshotResult) IsCleanEmpty() bool {
-	normalized := NormalizeNudgeSourceHealth(result.SourceHealth, len(result.Candidates))
-	if err := validateNudgeSnapshotConfirmedFlowCoherence(result.AsOf, result.ConfirmedFlowCoverage, normalized.ConfirmedFlow); err != nil {
+	normalized, candidates, err := validateNudgeSnapshot(result)
+	if err != nil {
 		return false
 	}
-	if err := validateNudgeSnapshotSourceHealthTimestamps(result.AsOf, normalized); err != nil {
-		return false
+	return len(candidates) == 0 && result.Context == nil && normalized.Aggregate == NudgeAggregateReady
+}
+
+func validateNudgeSnapshot(result NudgesSnapshotResult) (NudgeSourceHealth, []NudgeCandidate, error) {
+	normalizedHealth := NormalizeNudgeSourceHealth(result.SourceHealth, len(result.Candidates))
+	if err := validateNudgeSnapshotConfirmedFlowCoherence(result.AsOf, result.ConfirmedFlowCoverage, normalizedHealth.ConfirmedFlow); err != nil {
+		return NudgeSourceHealth{}, nil, err
 	}
-	return len(result.Candidates) == 0 && normalized.Aggregate == NudgeAggregateReady
+	if err := validateNudgeSnapshotSourceHealthTimestamps(result.AsOf, normalizedHealth); err != nil {
+		return NudgeSourceHealth{}, nil, err
+	}
+	candidates := make([]NudgeCandidate, len(result.Candidates))
+	for i, candidate := range result.Candidates {
+		canonical, err := canonicalizeRPCNudgeCandidate(candidate)
+		if err != nil {
+			return NudgeSourceHealth{}, nil, fmt.Errorf("invalid nudge candidate at index %d: %w", i, err)
+		}
+		if err := validateNudgeCandidateSnapshotTime(result.AsOf, canonical); err != nil {
+			return NudgeSourceHealth{}, nil, fmt.Errorf("invalid nudge candidate at index %d: %w", i, err)
+		}
+		candidates[i] = canonical
+	}
+	if err := validateNudgeSnapshotContext(result.Context, candidates); err != nil {
+		return NudgeSourceHealth{}, nil, err
+	}
+	return normalizedHealth, candidates, nil
+}
+
+func validateNudgeCandidateSnapshotTime(asOf time.Time, candidate NudgeCandidate) error {
+	if candidate.OccurredAt.After(asOf) {
+		return errors.New("nudge candidate occurrence time is after snapshot as_of")
+	}
+	switch {
+	case candidate.Kind == NudgeKindReconcileDue && candidate.State == NudgeStateDueSoon:
+		if candidate.DueAt.Before(asOf) {
+			return errors.New("reconcile due-soon deadline is before snapshot as_of")
+		}
+	case candidate.Kind == NudgeKindReconcileDue && candidate.State == NudgeStateOverdue:
+		if candidate.DueAt.After(asOf) {
+			return errors.New("reconcile overdue deadline is after snapshot as_of")
+		}
+	case candidate.Kind == NudgeKindMonthlyPulse && candidate.State == NudgeStateDue:
+		if candidate.DueAt.After(asOf) {
+			return errors.New("monthly pulse deadline is after snapshot as_of")
+		}
+	}
+	return nil
+}
+
+func validateNudgeSnapshotContext(context *NudgeSnapshotContext, candidates []NudgeCandidate) error {
+	if context != nil && context.Shadow == nil && context.Drawdown == nil {
+		return errors.New("nudge snapshot context is empty")
+	}
+	shadowCandidates := 0
+	drawdownCandidates := 0
+	for _, candidate := range candidates {
+		switch {
+		case candidate.Kind == NudgeKindShadowWouldBlock && candidate.State == NudgeStateObserved:
+			shadowCandidates++
+		case candidate.Kind == NudgeKindDrawdownLatched && candidate.State == NudgeStateOpen:
+			drawdownCandidates++
+		}
+	}
+	if shadowCandidates > 1 {
+		return errors.New("nudge snapshot has duplicate shadow context candidates")
+	}
+	if drawdownCandidates > 1 {
+		return errors.New("nudge snapshot has duplicate drawdown context candidates")
+	}
+
+	var shadow *NudgeShadowSummary
+	var drawdown *NudgeDrawdownSummary
+	if context != nil {
+		shadow = context.Shadow
+		drawdown = context.Drawdown
+	}
+	if (shadowCandidates == 1) != (shadow != nil) {
+		return errors.New("nudge snapshot shadow summary and candidate are incoherent")
+	}
+	if shadow != nil && shadow.Count < 1 {
+		return errors.New("nudge snapshot shadow count must be positive")
+	}
+	if (drawdownCandidates == 1) != (drawdown != nil) {
+		return errors.New("nudge snapshot drawdown summary and candidate are incoherent")
+	}
+	if drawdown != nil {
+		if drawdown.Tier != NudgeDrawdownTierBlock {
+			return errors.New("nudge snapshot drawdown tier must be block")
+		}
+		if drawdown.ConsumedPct != nil && (math.IsNaN(*drawdown.ConsumedPct) || math.IsInf(*drawdown.ConsumedPct, 0) || *drawdown.ConsumedPct < 0) {
+			return errors.New("nudge snapshot drawdown consumed_pct must be finite and non-negative")
+		}
+	}
+	return nil
 }
 
 func validateNudgeSnapshotSourceHealthTimestamps(asOf time.Time, health NudgeSourceHealth) error {
