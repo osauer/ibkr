@@ -491,6 +491,7 @@ p {
 }
 
 .bottom-tab {
+  position: relative;
   display: grid;
   place-items: center;
   align-content: center;
@@ -505,6 +506,22 @@ p {
   font-size: 11px;
   font-weight: 700;
   line-height: 1.1;
+}
+
+.bottom-tab__badge {
+  position: absolute;
+  top: 3px;
+  left: calc(50% + 4px);
+  min-width: 18px;
+  padding: 2px 5px;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: #b42318;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: center;
 }
 
 .bottom-tab svg {
@@ -3957,6 +3974,248 @@ p {
   white-space: nowrap;
 }
 
+.governance-section {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 2px solid var(--line);
+}
+
+.governance-heading,
+.governance-delivery__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.governance-heading > div {
+  display: grid;
+  gap: 2px;
+}
+
+.governance-heading span,
+.governance-evidence span,
+.governance-delivery__head span {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.governance-heading b {
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.governance-state {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--ink-2) !important;
+  white-space: nowrap;
+}
+
+.governance-block,
+.governance-delivery,
+.governance-coverage,
+.governance-delivery-summary {
+  display: grid;
+  gap: 5px;
+}
+
+.governance-coverage,
+.governance-delivery-summary {
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.governance-coverage > span {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.governance-coverage p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.governance-coverage .text-button {
+  justify-self: start;
+}
+
+.governance-details {
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.governance-details > summary {
+  padding: 11px 12px;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.governance-details > :not(summary) {
+  margin: 0 10px 10px;
+}
+
+.governance-evidence {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.governance-evidence > div,
+.governance-delivery {
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.governance-evidence p,
+.governance-delivery p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-line;
+}
+
+.governance-list {
+  display: grid;
+}
+
+.governance-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  padding: 10px 0 10px 14px;
+  border-top: 1px solid var(--line-soft);
+  box-shadow: inset 4px 0 var(--line);
+}
+
+.governance-row:first-child {
+  border-top: 0;
+}
+
+.governance-row--watch {
+  box-shadow: inset 4px 0 var(--orange);
+}
+
+.governance-row--act {
+  box-shadow: inset 4px 0 var(--red);
+}
+
+.governance-row b,
+.governance-row p,
+.governance-row span,
+.governance-row small {
+  display: block;
+}
+
+.governance-row b {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.governance-row p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.governance-row span,
+.governance-row small {
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.governance-row small {
+  grid-column: 1 / -1;
+}
+
+.governance-delivery__head b {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.governance-attempts {
+  display: grid;
+  gap: 4px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.governance-attempts > span {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+#governanceAttemptList {
+  display: grid;
+}
+
+.governance-attempt {
+  display: grid;
+  grid-template-columns: minmax(140px, auto) minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.governance-attempt:first-child {
+  border-top: 0;
+}
+
+.governance-attempt b {
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+  font-size: 11px;
+}
+
+.governance-attempt p {
+  margin: 0;
+  text-align: right;
+}
+
+.governance-attempt--unknown b {
+  color: var(--muted-2);
+}
+
+.governance-safe-test {
+  justify-self: start;
+  margin-top: 9px;
+}
+
+.governance-action-status {
+  min-height: 17px;
+}
+
+.governance-action-status--error {
+  color: var(--red) !important;
+}
+
 .text-button,
 .text-button--dark {
   min-height: 32px;
@@ -3988,11 +4247,55 @@ p {
   align-self: start;
 }
 
-.alert-settings {
-  display: none;
+.settings-notification-card {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.settings-notification-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-notification-card__head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-notification-card__head span,
+.settings-notification-card__head b {
+  display: block;
+}
+
+.settings-notification-card__head > div > span {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-notification-card__head b {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.settings-notification-copy {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-notification-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line-soft);
 }
 
 #pushState {
@@ -4142,6 +4445,18 @@ p {
 @media (max-width: 700px) {
   .shell {
     --shell-pad-x: 18px;
+  }
+
+  .governance-evidence {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .governance-attempt {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .governance-attempt p {
+    text-align: left;
   }
 
   .source-banner {

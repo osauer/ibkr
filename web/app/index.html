@@ -409,9 +409,9 @@
               </div>
               <div class="list" id="currentSignalList"></div>
             </section>
-            <section class="alert-section" aria-label="Alert history">
+            <section class="alert-section" aria-label="Canary history">
               <div class="alert-section__head">
-                <span>Alert History</span>
+                <span>Canary history</span>
                 <b id="alertHistoryCount">0</b>
               </div>
               <div class="list" id="alertHistoryList"></div>
@@ -427,15 +427,66 @@
               <span id="alertsHint">No alert history yet.</span>
               <button class="text-button" id="clearAlertsButton" type="button">Clear alerts</button>
             </div>
-            <div class="alert-settings">
-              <span id="pushState">push off</span>
-              <div class="segments segments--settings" id="alertSegments">
-                <button type="button" data-mode="none">None</button>
-                <button type="button" data-mode="act_only">Act only</button>
-                <button type="button" data-mode="watch_and_act">Watch + act</button>
+            <section class="governance-section" aria-labelledby="governanceHeading">
+              <div class="governance-heading">
+                <div>
+                  <span>Risk &amp; process</span>
+                  <b id="governanceHeading">Governance evidence</b>
+                </div>
+                <span class="governance-state" id="governanceCurrentState">unavailable</span>
               </div>
-              <button class="primary" id="enablePushButton" type="button">Enable phone alerts</button>
-            </div>
+              <section class="governance-block" aria-label="Current risk and process nudges">
+                <div class="alert-section__head">
+                  <span>Current</span>
+                  <b id="governanceCurrentCount">--</b>
+                </div>
+                <div class="governance-list" id="governanceCurrentList"></div>
+              </section>
+              <section class="governance-coverage" aria-label="Confirmed-flow review">
+                <span>Confirmed-flow coverage</span>
+                <p id="governanceCoverage">Confirmed-flow coverage unavailable.</p>
+                <button class="text-button" id="governanceCutoverReviewButton" type="button" hidden>Record foreground review</button>
+                <p class="governance-action-status" id="governanceCutoverReviewStatus" role="status"></p>
+              </section>
+              <section class="governance-block" aria-label="Governance history">
+                <div class="alert-section__head">
+                  <span>History</span>
+                  <b id="governanceHistoryCount">0</b>
+                </div>
+                <div class="governance-list" id="governanceHistoryList"></div>
+              </section>
+              <section class="governance-delivery-summary" aria-label="Notification delivery state">
+                <div class="governance-delivery__head">
+                  <span>Delivery</span>
+                  <b id="governanceDeliveryHealth">unavailable</b>
+                </div>
+              </section>
+              <details class="governance-details" id="governanceEvidenceDetails">
+                <summary>Evidence &amp; delivery details</summary>
+                <div class="governance-evidence" aria-label="Governance authority evidence">
+                  <div>
+                    <span>Source health</span>
+                    <p id="governanceSourceHealth">unavailable · not_observed</p>
+                  </div>
+                  <div>
+                    <span>Typed context</span>
+                    <p id="governanceContext">Context unavailable.</p>
+                  </div>
+                  <div>
+                    <span>Resolved coverage detail</span>
+                    <p id="governanceCoverageDetail">Confirmed-flow coverage unavailable.</p>
+                  </div>
+                </div>
+                <section class="governance-delivery" aria-label="Notification delivery evidence">
+                  <p id="governanceDeliveryDetail">Delivery evidence not observed.</p>
+                  <div class="governance-attempts">
+                    <span>Recent attempts</span>
+                    <div id="governanceAttemptList"></div>
+                  </div>
+                </section>
+              </details>
+            </section>
+            <p class="governance-action-status" id="attentionStatus" role="status"></p>
           </div>
         </details>
       </section>
@@ -477,6 +528,29 @@
             <span class="panel-time" id="settingsAsOf">--</span>
           </div>
           <div class="settings-stack">
+            <section class="settings-notification-card" aria-labelledby="phoneNotificationsHeading">
+              <div class="settings-notification-card__head">
+                <div>
+                  <span>Alerts</span>
+                  <b id="phoneNotificationsHeading">Phone notifications</b>
+                </div>
+                <span id="pushState">status unavailable</span>
+              </div>
+              <div class="segments segments--settings" id="alertSegments" aria-label="App-host notification level">
+                <button type="button" data-mode="none">Off</button>
+                <button type="button" data-mode="act_only">Action required</button>
+                <button type="button" data-mode="watch_and_act">Watch + action</button>
+              </div>
+              <p class="settings-notification-copy">The delivery level is global for this app host and all paired devices. Browser permission and subscription belong only to this browser or installed PWA.</p>
+              <p class="settings-notification-copy">Off suppresses Web Push while in-app history remains. Action required limits Canary delivery to typed required actions while governance remains included. Watch + action broadens Canary delivery and includes governance.</p>
+              <p class="settings-notification-copy">Risk and process eligibility is not configured here. The unread badge and read state are shared across paired devices.</p>
+              <p class="governance-action-status" id="alertSettingsStatus" role="status"></p>
+              <div class="settings-notification-actions">
+                <button class="primary" id="enablePushButton" type="button">Enable phone notifications</button>
+                <button class="text-button" id="safeNotificationTestButton" type="button">Send safe test notification</button>
+              </div>
+              <p class="governance-action-status" id="safeNotificationTestStatus" role="status"></p>
+            </section>
             <div class="settings-row settings-row--toggle">
               <div>
                 <span>Purge/restore</span>
@@ -562,11 +636,12 @@
           </svg>
           <span>Monitor</span>
         </button>
-        <button class="bottom-tab" id="tabAlerts" type="button" data-tab="alerts" aria-selected="false">
+        <button class="bottom-tab" id="tabAlerts" type="button" data-tab="alerts" aria-selected="false" aria-label="Alerts, no unread alerts">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6.5 10.5a5.5 5.5 0 0 1 11 0c0 5 2 5.5 2 7H4.5c0-1.5 2-2 2-7Z"></path>
             <path d="M10 20a2.3 2.3 0 0 0 4 0"></path>
           </svg>
+          <b class="bottom-tab__badge" id="alertUnreadBadge" aria-hidden="true" hidden></b>
           <span>Alerts</span>
         </button>
         <button class="bottom-tab" id="tabOrders" type="button" data-tab="orders" aria-selected="false">

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { extname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createPairingSession, launchBrowser, loadPlaywright, parseArgs } from "./lib-app-browser.mjs";
 
 const args = parseArgs(process.argv.slice(2));
@@ -14,6 +17,7 @@ const lifecycle = args.lifecycle === "true";
 const restartCommand = args["restart-command"] || "";
 const stopRestartedApp = args["stop-restarted-app"] === "true";
 const mobile = args.mobile !== "false";
+const round4Synthetic = args["round4-synthetic"] === "true";
 const rawGatewayCopyPattern = /gateway_unavailable|ibkr connection unavailable|quote\.snapshot|account\.summary|positions\.list/i;
 
 const playwright = loadPlaywright("app-browser-smoke");
@@ -23,10 +27,165 @@ if (!playwright[browserName]) {
   process.exit(2);
 }
 
+if (round4Synthetic) {
+  await runRound4SyntheticSmoke();
+  process.exit(0);
+}
+
 const pairing = await createPairingSession(baseURL, pairPublicURL);
 const launchOptions = { headless: true };
 if (channel) {
   launchOptions.channel = channel;
+}
+
+async function runRound4SyntheticSmoke() {
+  const syntheticURL = "http://ibkr-synthetic.invalid/";
+  const staticRoot = resolve(fileURLToPath(new URL("../web/app/", import.meta.url)));
+  const staticTypes = { ".css": "text/css", ".html": "text/html", ".js": "text/javascript", ".json": "application/json", ".webmanifest": "application/manifest+json" };
+  const launchedSynthetic = await launchBrowser(playwright[browserName], browserName, { headless: true, ...(channel ? { channel } : {}) });
+  const browser = launchedSynthetic.browser;
+  const mutationRequests = [];
+  let attention = {
+    unread_count: 2,
+    high_water_seq: 4,
+    read_through_seq: 2,
+    unread_refs: [
+      { kind: "canary", id: "synthetic-alert-4" },
+      { kind: "governance", id: "gov-synthetic-4" },
+    ],
+  };
+  const now = new Date().toISOString();
+  const earlier = new Date(Date.now() - 60_000).toISOString();
+  const alerts = [{
+    id: "synthetic-alert-4",
+    title: "Synthetic watch",
+    body: "Review the retained Canary history.",
+    severity: "watch",
+    created_at: now,
+  }];
+  const readyInput = { status: "ok", as_of: now };
+  const governance = {
+    candidates: [],
+    source_health: {},
+    poll_source: {},
+    occurrences: [{
+      display_id: "gov-synthetic-4",
+      title: "Synthetic process review",
+      body: "Review the retained governance occurrence.",
+      severity: "act",
+      destination: "alerts",
+      occurred_at: now,
+    }],
+    attempts: [],
+    attempt_aggregate: {},
+    health_aggregate: {},
+    delivery_health: { state: "healthy", updated_at: now },
+    diagnostic: { state: "push_service_accepted", at: now },
+  };
+  const bootstrap = {
+    auth: { authenticated: true },
+    attention,
+    alert_settings: { mode: "watch_and_act" },
+    alerts: alerts.slice(0, 20),
+    governance,
+    settings: null,
+    vapid_public_key: "",
+    snapshot: {
+      account: {},
+      positions: { stocks: [], options: [], portfolio: {} },
+      canary: { portfolio_fit: "low", portfolio: {}, fingerprint: { key: "synthetic-canary" } },
+      trading: { mode: "disabled", can_preview: false, can_write: false },
+      proposals: {},
+      opportunities: {},
+      sources: { nudges: { state: "current", updated_at: now, last_success_at: now } },
+      nudges: {
+        as_of: now,
+        candidates: [{ title: "Synthetic process review", body: "Review the current process exception.", severity: "act", destination: "alerts" }],
+        source_health: {
+          aggregate: "degraded", policy: readyInput, reconciliation: readyInput, capital: readyInput,
+          pins: readyInput, cadence: readyInput,
+          confirmed_flow: { status: "unapproved", reason: "cutover_review_required", as_of: now },
+        },
+        context: { shadow: { count: 1 }, drawdown: { tier: "block", consumed_pct: 0 } },
+        confirmed_flow_coverage: { coverage_from: earlier, pre_cutover_flows_unreviewed: true },
+      },
+    },
+  };
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  await context.addInitScript(() => {
+    globalThis.__ibkrSmoke = { applySnapshotPatch: null };
+    try { Object.defineProperty(globalThis, "Notification", { configurable: true, value: undefined }); } catch {}
+    try { Object.defineProperty(globalThis, "EventSource", { configurable: true, value: undefined }); } catch {}
+  });
+  await context.route("http://ibkr-synthetic.invalid/**", async (route) => {
+    const request = route.request();
+    const requestURL = new URL(request.url());
+    const requestPath = requestURL.pathname;
+    const method = request.method();
+    if (!['GET', 'HEAD'].includes(method)) {
+      mutationRequests.push({ method, path: requestPath, body: request.postData() || "" });
+    }
+    const json = (body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+    if (method === "GET" && requestPath === "/api/bootstrap") return json({ ...bootstrap, attention });
+    if (method === "GET" && requestPath === "/api/attention") return json(attention);
+    if (method === "GET" && requestPath === "/api/alerts") return json(alerts);
+    if (method === "GET" && requestPath === "/api/governance") return json(governance);
+    if (method === "GET" && requestPath === "/api/orders/open") return json({ orders: [] });
+    if (method === "GET" && requestPath === "/api/purge/status") return json({ entries: [] });
+    if (method === "POST" && requestPath === "/api/attention/read") {
+      const body = request.postDataJSON();
+      if (Object.keys(body).length !== 1 || body.through_seq !== 4) return json({ error: "unexpected synthetic watermark" }, 400);
+      attention = { unread_count: 0, high_water_seq: 4, read_through_seq: 4, unread_refs: [] };
+      return json(attention);
+    }
+    if (!['GET', 'HEAD'].includes(method)) return json({ error: "synthetic mutation blocked" }, 503);
+    if (requestPath.startsWith("/api/")) return json({});
+    try {
+      const relative = requestPath === "/" ? "index.html" : requestPath.slice(1);
+      if (!/^[A-Za-z0-9._/-]+$/.test(relative) || relative.includes("..")) throw new Error("invalid path");
+      const body = await readFile(resolve(staticRoot, relative));
+      return route.fulfill({ status: 200, contentType: staticTypes[extname(relative)] || "application/octet-stream", body, headers: { "Cache-Control": "no-store" } });
+    } catch {
+      return route.fulfill({ status: 404, contentType: "text/plain", body: "not found" });
+    }
+  });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(String(error?.message || error)));
+  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+  try {
+    await page.goto(syntheticURL, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.getElementById("dashboard")?.hidden === false, { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById("alertUnreadBadge")?.textContent === "2", { timeout: 5000 });
+    const monitor = await page.evaluate(() => ({
+      active: document.getElementById("tabMonitor")?.classList.contains("active"),
+      badge: document.getElementById("alertUnreadBadge")?.textContent || "",
+      label: document.getElementById("tabAlerts")?.getAttribute("aria-label") || "",
+    }));
+    await page.locator("#tabAlerts").click();
+    await page.waitForFunction(() => document.getElementById("alertUnreadBadge")?.hidden === true, { timeout: 5000 });
+    const alertsView = await page.evaluate(() => ({
+      detailsOpen: document.getElementById("governanceEvidenceDetails")?.open,
+      cutoverVisible: document.getElementById("governanceCutoverReviewButton")?.hidden === false,
+      coverage: document.getElementById("governanceCoverage")?.textContent || "",
+      canaryHistory: document.getElementById("alertHistoryList")?.textContent || "",
+      governanceHistory: document.getElementById("governanceHistoryList")?.textContent || "",
+    }));
+    await page.locator("#tabSettings").click();
+    const settings = await page.evaluate(() => ({
+      modes: [...document.querySelectorAll("#alertSegments button")].map((button) => button.textContent.trim()),
+      copy: document.querySelector(".settings-notification-card")?.textContent || "",
+      pushState: document.getElementById("pushState")?.textContent || "",
+    }));
+    if (!monitor.active || monitor.badge !== "2" || monitor.label !== "Alerts, 2 unread") throw new Error(`synthetic unread monitor state failed: ${JSON.stringify(monitor)}`);
+    if (alertsView.detailsOpen !== false || !alertsView.cutoverVisible || !alertsView.coverage.includes("need foreground review") || !alertsView.canaryHistory.includes("Synthetic watch") || !alertsView.governanceHistory.includes("Synthetic process review")) throw new Error(`synthetic Alerts state failed: ${JSON.stringify(alertsView)}`);
+    if (JSON.stringify(settings.modes) !== JSON.stringify(["Off", "Action required", "Watch + action"]) || !settings.copy.includes("global for this app host and all paired devices") || !settings.copy.includes("Off suppresses Web Push while in-app history remains") || !settings.copy.includes("Action required limits Canary delivery to typed required actions while governance remains included") || !settings.copy.includes("Watch + action broadens Canary delivery and includes governance") || !settings.copy.includes("not configured here") || !settings.copy.includes("shared across paired devices") || settings.pushState !== "unsupported") throw new Error(`synthetic Settings state failed: ${JSON.stringify(settings)}`);
+    if (mutationRequests.length !== 1 || mutationRequests[0].method !== "POST" || mutationRequests[0].path !== "/api/attention/read" || JSON.parse(mutationRequests[0].body).through_seq !== 4) throw new Error(`unexpected synthetic mutations: ${JSON.stringify(mutationRequests)}`);
+    if (errors.length > 0) throw new Error(`synthetic browser errors: ${errors.join("\n")}`);
+    console.log(JSON.stringify({ ok: true, browser: browserName, mobile: true, isolated: true, monitor, alerts: alertsView, settings, intercepted_mutations: mutationRequests.map(({ method, path }) => ({ method, path })) }, null, 2));
+  } finally {
+    await browser.close();
+  }
 }
 const launched = await launchBrowser(playwright[browserName], browserName, launchOptions);
 const browser = launched.browser;
@@ -99,7 +258,7 @@ await context.addInitScript(() => {
   globalThis.EventSource = function smokeEventSource(url, options) {
     const es = new NativeEventSource(url, options);
     globalThis.__ibkrSmoke.openedEvents++;
-    for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "canary", "rules", "heartbeat"]) {
+    for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_quotes", "canary", "rules", "nudges", "heartbeat"]) {
       es.addEventListener(type, (event) => {
         globalThis.__ibkrSmoke.eventCounts[type] = (globalThis.__ibkrSmoke.eventCounts[type] || 0) + 1;
         if (type === "snapshot" || type === "canary") {
@@ -161,11 +320,12 @@ try {
   const portfolioDetail = await exercisePortfolioDetail(page);
   const protectionRiskRendering = await exerciseProtectionRiskRendering(page);
   const alertHistory = await exerciseAlertHistory(page);
+  const governanceFixtures = await exerciseGovernanceFixtures(page);
   const openOrders = await exerciseOpenOrders(page);
   const settingsTab = await exerciseSettingsTab(page);
   const debugTools = await assertDebugToolsRemoved(page, baseURL);
-  if (noNotification && pushState !== "push unsupported") {
-    throw new Error(`expected push unsupported with Notification removed, got ${JSON.stringify(pushState)}`);
+  if (noNotification && pushState !== "unsupported") {
+    throw new Error(`expected unsupported with Notification removed, got ${JSON.stringify(pushState)}`);
   }
   if (pageErrors.length > 0 || consoleMessages.length > 0) {
     throw new Error(`browser errors:\n${[...pageErrors, ...consoleMessages].join("\n")}`);
@@ -201,6 +361,7 @@ try {
     portfolio_detail: portfolioDetail,
     protection_risk_rendering: protectionRiskRendering,
     alert_history: alertHistory,
+    governance_fixtures: governanceFixtures,
     open_orders: openOrders,
     settings_tab: settingsTab,
     debug_tools: debugTools,
@@ -1163,6 +1324,216 @@ async function exerciseAlertHistory(page) {
   };
 }
 
+async function exerciseGovernanceFixtures(page) {
+  const mutationPaths = ["/api/push/test", "/api/governance/cutover-review", "/api/brief/seen"];
+  const fetchesBefore = await page.evaluate((paths) => globalThis.__ibkrSmoke.fetches.filter((item) => paths.some((path) => item.url.endsWith(path))).length, mutationPaths);
+  await page.locator("#tabAlerts").click();
+  await page.waitForFunction(() => document.getElementById("alertsTab")?.hidden === false, { timeout: 5000 });
+
+  const renderFixture = (fixture) => page.evaluate((value) => {
+    const apply = globalThis.__ibkrSmoke?.applySnapshotPatch;
+    if (!apply) throw new Error("smoke snapshot patch hook is unavailable");
+    apply(value.patch);
+  }, fixture);
+  const now = new Date();
+  const asOf = now.toISOString();
+  const earlier = new Date(now.getTime() - 60_000).toISOString();
+  const later = new Date(now.getTime() + 3_600_000).toISOString();
+  const readyInput = { status: "ok", as_of: asOf };
+  const readyHealth = {
+    aggregate: "ready", policy: readyInput, reconciliation: readyInput, capital: readyInput,
+    pins: readyInput, cadence: readyInput, confirmed_flow: readyInput,
+  };
+  const baseGovernance = {
+    candidates: [],
+    source_health: {},
+    poll_source: {},
+    occurrences: [{
+      display_id: "gov-1111111111111111", kind: "monthly_pulse", state: "due", severity: "watch",
+      title: "Monthly risk pulse", body: "Monthly risk pulse is ready. Review the brief and policy pins.",
+      destination: "monitor", occurred_at: earlier, first_seen_at: earlier, last_seen_at: asOf,
+      fingerprint: "private-fingerprint-sentinel", target_ref: "private-target-sentinel", notes: "private-note-sentinel",
+    }, {
+      display_id: "gov-2222222222222222", kind: "policy_drift", state: "open", severity: "act",
+      title: "Policy drift", body: "Approved policy identities changed. Review the drift table.",
+      destination: "monitor", occurred_at: earlier, first_seen_at: earlier, last_seen_at: earlier, resolved_at: asOf,
+    }, {
+      display_id: "gov-3333333333333333", kind: "reconcile_due", state: "overdue", severity: "act",
+      title: "Reconciliation overdue", body: "Reconciliation is overdue. Open IBKR for the current report.",
+      destination: "monitor", occurred_at: earlier, first_seen_at: earlier, last_seen_at: earlier, expires_at: earlier,
+    }],
+    attempts: [{ class: "transport_retry", target_ref: "private-target-sentinel", raw_error: "private-error-sentinel" }],
+    attempt_aggregate: { cumulative_attempts: 2, push_service_accepted: 1, retryable_failures: 1, rejected: 0, retry_pending: 1, missed: 0, suppressed: 0 },
+    health_aggregate: { partial_episodes: 1, state_write_failures: 0, recoveries: 0, overflows: 0 },
+    delivery_health: { state: "healthy", updated_at: asOf, last_push_service_acceptance_at: earlier },
+    diagnostic: { state: "push_service_accepted", at: earlier },
+  };
+
+  await renderFixture({ patch: {
+    sources: { nudges: { state: "current", updated_at: asOf, last_success_at: asOf } },
+    nudges: { as_of: asOf, candidates: [], source_health: readyHealth, context: null, confirmed_flow_coverage: { coverage_from: earlier, pre_cutover_flows_unreviewed: false } },
+    brief: { stamp_target: "", brief_fingerprint: "", process: { monthly_pulse: { status: "not_due", month: "2099-01", due_at: later } } },
+    governance: baseGovernance,
+    governanceRefreshSucceeded: true,
+  } });
+  const notDue = await page.evaluate(() => [...document.querySelectorAll("#briefSections .brief-row")]
+    .find((row) => row.querySelector(".brief-row__head b")?.textContent === "Monthly pulse")?.textContent || "");
+  if (!notDue.includes("not due")) throw new Error(`governance not-due fixture is incomplete: ${JSON.stringify(notDue)}`);
+
+  await renderFixture({ patch: {
+    sources: { nudges: { state: "current", updated_at: asOf, last_success_at: asOf } },
+    nudges: {
+      as_of: asOf,
+      candidates: [{
+        fingerprint: "private-fingerprint-sentinel", kind: "monthly_pulse", state: "due", severity: "watch",
+        title: "Monthly risk pulse", body: "Monthly risk pulse is ready. Review the brief and policy pins.",
+        occurred_at: earlier, due_at: earlier, destination: "monitor", url: "https://evil.example/private",
+      }],
+      source_health: { ...readyHealth, aggregate: "degraded", confirmed_flow: { status: "unapproved", reason: "cutover_review_required", as_of: asOf } },
+      context: { shadow: { count: 2 }, drawdown: { tier: "block", consumed_pct: 0 } },
+      confirmed_flow_coverage: { coverage_from: earlier, pre_cutover_flows_unreviewed: true },
+    },
+    brief: { stamp_target: "", brief_fingerprint: "", process: { monthly_pulse: { status: "due", month: "2099-01", due_at: earlier } } },
+    governance: baseGovernance,
+  } });
+  await page.waitForFunction(() => document.getElementById("governanceCurrentList")?.textContent?.includes("Monthly risk pulse"), { timeout: 5000 });
+  const due = await page.evaluate(() => ({
+    ids: [
+      "governanceCurrentState", "governanceCurrentCount", "governanceCurrentList", "governanceSourceHealth",
+      "governanceContext", "governanceCoverage", "governanceCoverageDetail", "governanceEvidenceDetails", "governanceCutoverReviewButton", "governanceCutoverReviewStatus",
+      "governanceHistoryCount", "governanceHistoryList", "governanceDeliveryHealth", "governanceDeliveryDetail",
+      "governanceAttemptList", "safeNotificationTestButton", "safeNotificationTestStatus",
+    ].filter((id) => !document.getElementById(id)),
+    current: document.getElementById("governanceCurrentList")?.textContent || "",
+    source: document.getElementById("governanceSourceHealth")?.textContent || "",
+    context: document.getElementById("governanceContext")?.textContent || "",
+    coverage: document.getElementById("governanceCoverage")?.textContent || "",
+    coverageDetail: document.getElementById("governanceCoverageDetail")?.textContent || "",
+    detailsOpen: document.getElementById("governanceEvidenceDetails")?.open,
+    cutoverVisible: !document.getElementById("governanceCutoverReviewButton")?.hidden,
+    history: document.getElementById("governanceHistoryList")?.textContent || "",
+    monthly: [...document.querySelectorAll("#briefSections .brief-row")].find((row) => row.querySelector(".brief-row__head b")?.textContent === "Monthly pulse")?.textContent || "",
+    visible: document.querySelector(".governance-section")?.textContent || "",
+  }));
+  if (due.ids.length > 0 || !due.current.includes("Monthly risk pulse") || !due.source.includes("confirmed_flow: unapproved") || !due.context.includes("Shadow count 2") || !due.context.includes("0.0% consumed") || !due.coverage.includes("need foreground review") || !due.coverageDetail.includes("pre-cutover flows unreviewed") || due.detailsOpen !== false || !due.cutoverVisible || !["active", "resolved", "expired"].every((status) => due.history.includes(status)) || !due.monthly.includes("due")) {
+    throw new Error(`governance due fixture is incomplete: ${JSON.stringify(due)}`);
+  }
+  for (const privateText of ["private-fingerprint-sentinel", "private-target-sentinel", "private-note-sentinel", "private-error-sentinel", "evil.example"]) {
+    if (due.visible.includes(privateText)) throw new Error(`governance fixture leaked private text ${JSON.stringify(privateText)}`);
+  }
+
+  await renderFixture({ patch: {
+    sources: { nudges: { state: "current", updated_at: asOf, last_success_at: asOf } },
+    nudges: { candidates: [], source_health: { ...readyHealth, aggregate: "suppressed", pins: { status: "stale", reason: "evidence_stale", as_of: asOf } }, context: { drawdown: { tier: "block", consumed_pct: null } }, confirmed_flow_coverage: { coverage_from: earlier, pre_cutover_flows_unreviewed: false } },
+    brief: { stamp_target: "", brief_fingerprint: "", process: { monthly_pulse: { status: "blocked", month: "2099-01" } } },
+    governance: baseGovernance,
+  } });
+  const blocked = await page.evaluate(() => ({ source: document.getElementById("governanceSourceHealth")?.textContent || "", context: document.getElementById("governanceContext")?.textContent || "", monthly: [...document.querySelectorAll("#briefSections .brief-row")].find((row) => row.querySelector(".brief-row__head b")?.textContent === "Monthly pulse")?.textContent || "" }));
+  if (!blocked.source.includes("pins: stale · evidence_stale") || !blocked.context.includes("measurement unavailable") || !blocked.monthly.includes("blocked by policy evidence")) throw new Error(`governance blocked fixture is incomplete: ${JSON.stringify(blocked)}`);
+
+  await renderFixture({ patch: {
+    sources: { nudges: { state: "current", updated_at: asOf, last_success_at: asOf } },
+    nudges: { candidates: [], source_health: readyHealth, context: null, confirmed_flow_coverage: { coverage_from: earlier, pre_cutover_flows_unreviewed: false } },
+    brief: { stamp_target: "", brief_fingerprint: "", process: { monthly_pulse: { status: "completed", month: "2099-01", completed_at: asOf } } },
+  } });
+  const completed = await page.evaluate(() => ({ current: document.getElementById("governanceCurrentList")?.textContent || "", monthly: [...document.querySelectorAll("#briefSections .brief-row")].find((row) => row.querySelector(".brief-row__head b")?.textContent === "Monthly pulse")?.textContent || "" }));
+  if (!completed.current.includes("No current risk & process nudges") || !completed.monthly.includes("completed this month")) throw new Error(`governance completed fixture is incomplete: ${JSON.stringify(completed)}`);
+
+  await renderFixture({ patch: {
+    governance: {
+      ...baseGovernance,
+      delivery_health: { state: "degraded", class: "transport_retry", updated_at: asOf, last_push_service_acceptance_at: earlier },
+      diagnostic: { state: "all_failed", at: asOf },
+      attempts: [
+        { target_ref: "failed-private-target-a", class: "transport_retry", at: earlier, retry_at: later, transport_count: 2 },
+        { target_ref: "failed-private-target-b", class: "http_rejected", at: asOf, completed_at: asOf, transport_count: 1 },
+      ],
+    },
+  } });
+  const failedPush = await page.evaluate(() => ({
+    health: document.getElementById("governanceDeliveryHealth")?.textContent || "",
+    detail: document.getElementById("governanceDeliveryDetail")?.textContent || "",
+    attempts: document.getElementById("governanceAttemptList")?.textContent || "",
+    safeTestVisible: document.getElementById("safeNotificationTestButton")?.getClientRects().length > 0,
+  }));
+  if (!failedPush.health.includes("degraded · transport_retry") || !failedPush.detail.includes("diagnostic all_failed") || !failedPush.attempts.includes("transport_retry") || !failedPush.attempts.includes("http_rejected") || failedPush.safeTestVisible) throw new Error(`governance failed-push fixture is incomplete: ${JSON.stringify(failedPush)}`);
+
+  await renderFixture({ patch: {
+    governance: {
+      ...baseGovernance,
+      delivery_health: { state: "degraded", class: "partial_acceptance", updated_at: asOf, last_push_service_acceptance_at: asOf },
+      diagnostic: { state: "partial_acceptance", at: asOf },
+      attempts: [
+        { target_ref: "partial-private-target-a", occurrence_id: "private-occurrence", class: "push_service_accepted", at: earlier, completed_at: asOf, transport_count: 1 },
+        { target_ref: "partial-private-target-b", class: "timeout_retry", at: asOf, retry_at: later, transport_count: 2, raw_error: "private-timeout" },
+        { target_ref: "partial-private-target-c", class: "http_rejected", at: asOf, completed_at: asOf, transport_count: 1, endpoint: "https://evil.example/push" },
+      ],
+    },
+  } });
+  const partialPush = await page.evaluate(() => ({
+    health: document.getElementById("governanceDeliveryHealth")?.textContent || "",
+    attempts: document.getElementById("governanceAttemptList")?.textContent || "",
+  }));
+  if (!partialPush.health.includes("degraded · partial_acceptance") || !["push_service_accepted", "timeout_retry", "http_rejected", "target 1", "target 2", "target 3", "retry", "transport count 2"].every((copy) => partialPush.attempts.includes(copy))) {
+    throw new Error(`governance partial multi-target fixture is incomplete: ${JSON.stringify(partialPush)}`);
+  }
+  for (const privateText of ["partial-private", "private-occurrence", "private-timeout", "evil.example"]) {
+    if (partialPush.attempts.includes(privateText)) throw new Error(`governance attempt fixture leaked private text ${JSON.stringify(privateText)}`);
+  }
+
+  await renderFixture({ patch: {
+    sources: { nudges: { state: "stale", reason: "poll_stale", updated_at: asOf, last_success_at: earlier } },
+    nudges: { candidates: [{ title: "Stale retained candidate", body: "Retained", severity: "act", destination: "alerts" }] },
+    governance: baseGovernance,
+    governanceRefreshSucceeded: true,
+  } });
+  const stale = await page.evaluate(() => ({
+    state: document.getElementById("governanceCurrentState")?.textContent || "",
+    current: document.getElementById("governanceCurrentList")?.textContent || "",
+    source: document.getElementById("governanceSourceHealth")?.textContent || "",
+    delivery: document.getElementById("governanceDeliveryHealth")?.textContent || "",
+  }));
+  if (stale.state !== "stale" || stale.current.includes("Stale retained candidate") || !stale.current.includes("unavailable") || !stale.source.includes("stale · poll_stale") || !stale.source.includes("updated") || !stale.source.includes("last successful") || !stale.delivery.includes("healthy · updated")) {
+    throw new Error(`governance stale fixture is incomplete: ${JSON.stringify(stale)}`);
+  }
+
+  await renderFixture({ patch: {
+    sources: { nudges: { state: "not_observed", reason: "not_observed" } },
+    nudges: { candidates: [{ title: "Unobserved retained candidate", body: "Retained", severity: "act", destination: "alerts" }] },
+  } });
+  const notObserved = await page.evaluate(() => ({
+    state: document.getElementById("governanceCurrentState")?.textContent || "",
+    current: document.getElementById("governanceCurrentList")?.textContent || "",
+    source: document.getElementById("governanceSourceHealth")?.textContent || "",
+  }));
+  if (notObserved.state !== "not_observed" || notObserved.current.includes("Unobserved retained candidate") || !notObserved.source.includes("not_observed · not_observed")) {
+    throw new Error(`governance not-observed fixture is incomplete: ${JSON.stringify(notObserved)}`);
+  }
+
+  await renderFixture({ patch: {
+    sources: { nudges: { state: "unavailable", reason: "transport_unavailable", updated_at: asOf, last_success_at: earlier } },
+    nudges: { candidates: [{ title: "Retained candidate must not win", body: "Retained", severity: "act", destination: "alerts" }] },
+    governance: baseGovernance,
+    governanceRefreshSucceeded: false,
+  } });
+  const unavailable = await page.evaluate(() => ({
+    state: document.getElementById("governanceCurrentState")?.textContent || "",
+    current: document.getElementById("governanceCurrentList")?.textContent || "",
+    source: document.getElementById("governanceSourceHealth")?.textContent || "",
+    history: document.getElementById("governanceHistoryList")?.textContent || "",
+    delivery: document.getElementById("governanceDeliveryHealth")?.textContent || "",
+  }));
+  if (unavailable.state !== "unavailable" || !unavailable.current.includes("unavailable") || unavailable.current.includes("Retained candidate") || !unavailable.source.includes("transport_unavailable") || !unavailable.source.includes("updated") || !unavailable.source.includes("last successful") || !unavailable.history.includes("Monthly risk pulse") || !unavailable.delivery.includes("retained · refresh unavailable · last known healthy · updated")) {
+    throw new Error(`governance unavailable-with-history fixture is incomplete: ${JSON.stringify(unavailable)}`);
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const fetchesAfter = await page.evaluate((paths) => globalThis.__ibkrSmoke.fetches.filter((item) => paths.some((path) => item.url.endsWith(path))).length, mutationPaths);
+  if (fetchesAfter !== fetchesBefore) throw new Error(`governance fixture QA called a mutation endpoint: before=${fetchesBefore} after=${fetchesAfter}`);
+  await page.locator("#tabMonitor").click();
+  return { not_due: notDue, due, blocked, completed, failed_push: failedPush, partial_multi_target: partialPush, stale, not_observed: notObserved, unavailable_with_history: unavailable, mutation_fetches: 0 };
+}
+
 // Orders now lives on its own bottom-nav tab (Monitor, Alerts, Orders,
 // Settings) rather than an inline <details> panel — visibility is
 // tab-driven, not a per-panel open/closed toggle, and the panel itself is
@@ -1222,6 +1593,7 @@ async function exerciseOpenOrders(page) {
 }
 
 async function exerciseSettingsTab(page) {
+  const settingWritesBefore = await page.evaluate(() => globalThis.__ibkrSmoke.fetches.filter((item) => item.url.endsWith("/api/alerts/settings")).length);
   await page.locator("#tabSettings").click();
   await page.waitForFunction(() => document.getElementById("settingsTab")?.hidden === false, { timeout: 5000 });
   const selectors = [
@@ -1241,6 +1613,11 @@ async function exerciseSettingsTab(page) {
     "#settingsProtectionMeta",
     "#settingsPolicyStatus",
     "#settingsPolicyMeta",
+    "#alertSegments",
+    "#pushState",
+    "#enablePushButton",
+    "#safeNotificationTestButton",
+    "#safeNotificationTestStatus",
   ];
   const elements = await page.evaluate((expectedSelectors) => expectedSelectors.map((selector) => {
     const element = document.querySelector(selector);
@@ -1255,10 +1632,20 @@ async function exerciseSettingsTab(page) {
       throw new Error(`Settings tab element ${element.selector} should be present and visible: ${JSON.stringify(element)}`);
     }
   }
+  const notification = await page.evaluate(() => ({
+    modes: [...document.querySelectorAll("#alertSegments button")].map((button) => button.textContent.trim()),
+    copy: document.querySelector(".settings-notification-card")?.textContent || "",
+  }));
+  if (JSON.stringify(notification.modes) !== JSON.stringify(["Off", "Action required", "Watch + action"]) || !notification.copy.includes("global for this app host and all paired devices") || !notification.copy.includes("Off suppresses Web Push while in-app history remains") || !notification.copy.includes("Action required limits Canary delivery to typed required actions while governance remains included") || !notification.copy.includes("Watch + action broadens Canary delivery and includes governance") || !notification.copy.includes("not configured here") || !notification.copy.includes("shared across paired devices")) {
+    throw new Error(`Settings notification card is incomplete: ${JSON.stringify(notification)}`);
+  }
+  const settingWritesAfter = await page.evaluate(() => globalThis.__ibkrSmoke.fetches.filter((item) => item.url.endsWith("/api/alerts/settings")).length);
+  if (settingWritesAfter !== settingWritesBefore) throw new Error("rendered Settings smoke changed the alert delivery setting");
   await page.locator("#tabMonitor").click();
   await page.waitForFunction(() => document.getElementById("dashboard")?.hidden === false, { timeout: 5000 });
   return {
     elements: elements.map((element) => element.selector),
+    notification,
   };
 }
 

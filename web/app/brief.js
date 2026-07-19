@@ -172,11 +172,33 @@ function renderProcessSection(section, brief) {
     renderOneTapRow(section.one_tap || {}, brief),
     briefRow("Rules delta", section.rules_delta, rulesDeltaValue(section.rules_delta || {})),
   ];
+  if (Object.prototype.hasOwnProperty.call(section, "monthly_pulse") && section.monthly_pulse) {
+    rows.push(renderMonthlyPulseRow(section.monthly_pulse));
+  }
   rows.push(briefRow("Artefacts", section.artefacts, null));
   for (const artefact of section.artefacts?.rows || []) {
     rows.push(briefRow(`Artefact · ${artefact.kind || "--"}`, artefact, artefactValue(artefact), "brief-row--nested"));
   }
   return briefSection("E", "Process", section, rows, "brief-section--process");
+}
+
+function renderMonthlyPulseRow(monthly) {
+  return briefRow("Monthly pulse", {}, monthlyPulseStatus(monthly));
+}
+
+function monthlyPulseStatus(monthly = {}) {
+  switch (monthly.status) {
+  case "not_due":
+    return "not due";
+  case "due":
+    return "due";
+  case "completed":
+    return "completed this month";
+  case "blocked":
+    return "blocked by policy evidence";
+  default:
+    return "blocked by policy evidence";
+  }
 }
 
 function artefactValue(artefact) {
@@ -292,6 +314,7 @@ function signoffOutcome(fingerprint, reportID) {
 
 function scheduleBriefStamp(brief) {
   const fingerprint = String(brief?.brief_fingerprint || "");
+  if (brief?.stamp_target === "monthly" && !brief?.process?.monthly_pulse?.month) return;
   if (!briefStampArmed || briefStampScheduled || briefStampInFlight || !brief?.stamp_target || !fingerprint || attemptedStampFingerprints.has(fingerprint) || pendingStampFingerprints.has(fingerprint)) return;
   if (!briefStampVisible()) return;
   const look = briefStampLook;
@@ -319,7 +342,7 @@ async function acknowledgeBrief(brief, fingerprint, look) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ kind: brief.stamp_target, brief_fingerprint: fingerprint }),
+      body: JSON.stringify(briefAckBody(brief, fingerprint)),
     });
     const body = await readJSONOrText(res);
     if (!res.ok) throw new Error(body.error || body.message || String(body));
@@ -333,6 +356,15 @@ async function acknowledgeBrief(brief, fingerprint, look) {
   }
 }
 
+function briefAckBody(brief, fingerprint) {
+  const body = { kind: brief.stamp_target, brief_fingerprint: fingerprint };
+  if (brief.stamp_target === "monthly") {
+    body.month = brief.process?.monthly_pulse?.month || "";
+    body.evidence = "render";
+  }
+  return body;
+}
+
 function renderBriefAckStatus(brief) {
   const target = $("briefAckStatus");
   const outcome = brief ? stampOutcomes.get(String(brief.brief_fingerprint || "")) : null;
@@ -344,10 +376,14 @@ function renderBriefAckStatus(brief) {
   target.hidden = false;
   target.classList.toggle("brief-receipt--error", Boolean(outcome.error));
   if (outcome.error) {
-    target.textContent = `Render stamp failed: ${outcome.error}`;
+    target.textContent = brief?.stamp_target === "monthly" ? "Monthly foreground render unavailable." : `Render stamp failed: ${outcome.error}`;
     return;
   }
   const result = outcome.result || {};
+  if (result.kind === "monthly") {
+    target.textContent = result.already_stamped ? "foreground render already recorded" : "foreground render recorded";
+    return;
+  }
   target.textContent = result.already_stamped
     ? `${result.kind || "Brief"} artefact · ${result.day || "--"} · already stamped`
     : `${result.kind || "Brief"} artefact stamped · ${result.day || "--"}`;
@@ -446,4 +482,4 @@ function verbatimText(value) {
   return value === undefined || value === null || value === "" ? "--" : String(value);
 }
 
-export { renderBriefCard, setupBriefVisibility };
+export { briefAckBody, monthlyPulseStatus, renderBriefCard, scheduleBriefStamp, setupBriefVisibility };

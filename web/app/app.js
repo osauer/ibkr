@@ -1,8 +1,8 @@
-import { clearAlerts, enablePush, renderAlertMode, renderAlerts, renderSelectedAlert } from "./alerts.js";
+import { clearAlerts, enablePush, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility } from "./alerts.js";
 import { completePairing } from "./auth.js";
 import { renderBriefCard, setupBriefVisibility } from "./brief.js";
 import { canaryStageLabel, canarySummaryText, firstClause, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderMarketContext, renderRegimePanel, renderRulesCard } from "./canary.js";
-import { ensureRegimeCanaryExpansion, handleAccountPanelTap, handleExpandablePanelTap, handleOpportunitiesPanelTap, handlePortfolioPanelTap, handleProtectionPanelTap, handleUnderlyingPanelTap, renderTabs, resetViewportScroll, setAccountOverviewExpansion, setAccountValueVisible, setOpportunitiesExpansion, setProtectionExpansion, setRegimeCanaryExpansion, setupBottomTabs, syncAccountPrivacyState } from "./chrome.js";
+import { ensureRegimeCanaryExpansion, handleAccountPanelTap, handleExpandablePanelTap, handleOpportunitiesPanelTap, handlePortfolioPanelTap, handleProtectionPanelTap, handleUnderlyingPanelTap, renderTabs, resetViewportScroll, setAccountOverviewExpansion, setAccountValueVisible, setActiveTab, setOpportunitiesExpansion, setProtectionExpansion, setRegimeCanaryExpansion, setupBottomTabs, syncAccountPrivacyState } from "./chrome.js";
 import { bootstrap, bootstrapWithRetry, refreshBootstrapIfSSEUnavailable, showPairing } from "./lifecycle.js";
 import { refreshOpportunities, renderOpportunitiesPanel } from "./opportunities.js";
 import { renderOpenOrders } from "./orders.js";
@@ -21,23 +21,49 @@ function installSmokeHooks() {
   if (!smoke || smoke.applySnapshotPatch) return;
   smoke.applySnapshotPatch = (patch = {}, ui = {}) => {
     const current = state.snapshot || {};
+    const { governance, governanceRefreshSucceeded, ...snapshotPatch } = patch;
     state.snapshot = {
       ...current,
-      ...patch,
-      account: patch.account ? { ...(current.account || {}), ...patch.account } : current.account,
-      positions: patch.positions ? {
+      ...snapshotPatch,
+      account: snapshotPatch.account ? { ...(current.account || {}), ...snapshotPatch.account } : current.account,
+      positions: snapshotPatch.positions ? {
         ...(current.positions || {}),
-        ...patch.positions,
-        portfolio: patch.positions.portfolio ? { ...(current.positions?.portfolio || {}), ...patch.positions.portfolio } : current.positions?.portfolio,
+        ...snapshotPatch.positions,
+        portfolio: snapshotPatch.positions.portfolio ? { ...(current.positions?.portfolio || {}), ...snapshotPatch.positions.portfolio } : current.positions?.portfolio,
       } : current.positions,
-      canary: patch.canary ? {
+      canary: snapshotPatch.canary ? {
         ...(current.canary || {}),
-        ...patch.canary,
-        portfolio: patch.canary.portfolio ? { ...(current.canary?.portfolio || {}), ...patch.canary.portfolio } : current.canary?.portfolio,
+        ...snapshotPatch.canary,
+        portfolio: snapshotPatch.canary.portfolio ? { ...(current.canary?.portfolio || {}), ...snapshotPatch.canary.portfolio } : current.canary?.portfolio,
       } : current.canary,
-      proposals: patch.proposals ? { ...(current.proposals || {}), ...patch.proposals } : current.proposals,
-      opportunities: patch.opportunities ? { ...(current.opportunities || {}), ...patch.opportunities } : current.opportunities,
+      proposals: snapshotPatch.proposals ? { ...(current.proposals || {}), ...snapshotPatch.proposals } : current.proposals,
+      opportunities: snapshotPatch.opportunities ? { ...(current.opportunities || {}), ...snapshotPatch.opportunities } : current.opportunities,
+      sources: snapshotPatch.sources ? {
+        ...(current.sources || {}),
+        ...snapshotPatch.sources,
+        nudges: snapshotPatch.sources.nudges ? { ...(current.sources?.nudges || {}), ...snapshotPatch.sources.nudges } : current.sources?.nudges,
+      } : current.sources,
+      nudges: snapshotPatch.nudges ? {
+        ...(current.nudges || {}),
+        ...snapshotPatch.nudges,
+        context: Object.prototype.hasOwnProperty.call(snapshotPatch.nudges, "context")
+          ? snapshotPatch.nudges.context ? { ...(current.nudges?.context || {}), ...snapshotPatch.nudges.context } : snapshotPatch.nudges.context
+          : current.nudges?.context,
+      } : current.nudges,
+      brief: snapshotPatch.brief ? {
+        ...(current.brief || {}),
+        ...snapshotPatch.brief,
+        process: snapshotPatch.brief.process ? {
+          ...(current.brief?.process || {}),
+          ...snapshotPatch.brief.process,
+          monthly_pulse: Object.prototype.hasOwnProperty.call(snapshotPatch.brief.process, "monthly_pulse")
+            ? snapshotPatch.brief.process.monthly_pulse
+            : current.brief?.process?.monthly_pulse,
+        } : current.brief?.process,
+      } : current.brief,
     };
+    if (Object.prototype.hasOwnProperty.call(patch, "governance")) state.governance = governance;
+    if (Object.prototype.hasOwnProperty.call(patch, "governanceRefreshSucceeded")) state.governanceRefreshSucceeded = governanceRefreshSucceeded;
     for (const key of ["protectionOpen", "portfolioDetailOpen", "canaryDetailOpen", "opportunitiesOpen"]) {
       if (Object.prototype.hasOwnProperty.call(ui, key)) state[key] = Boolean(ui[key]);
     }
@@ -50,8 +76,10 @@ async function main() {
   resetViewportScroll();
   setupBottomTabs();
   setupBriefVisibility();
+  setupAttentionVisibility();
   await navigator.serviceWorker?.register("/service-worker.js");
   const params = new URLSearchParams(location.search);
+  const launchTab = ["monitor", "alerts"].includes(params.get("tab")) ? params.get("tab") : "";
   const pair = params.get("pair");
   const nonce = params.get("nonce");
   const remote = params.get("remote");
@@ -77,6 +105,8 @@ async function main() {
   if (!bootstrapped) {
     return;
   }
+  if (launchTab) setActiveTab(launchTab, { persist: false });
+  if (params.has("tab")) history.replaceState({}, "", location.pathname || "/");
   resetViewportScroll();
   setupMarketSelect();
   setupBottomTabs();
@@ -137,25 +167,16 @@ function renderAll() {
   renderPortfolioRisk(positions, account);
   renderSourceBanners(snap);
   renderAlertMode();
+  renderAttention();
   renderAlerts();
+  renderGovernance();
   renderSettings();
   renderTabs();
   renderSyncStrip(snap);
 }
 
 document.querySelectorAll("#alertSegments button").forEach((button) => {
-  button.addEventListener("click", async () => {
-    const res = await fetch("/api/alerts/settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ mode: button.dataset.mode }),
-    });
-    if (res.ok) {
-      state.alertSettings = await res.json();
-      renderAlertMode();
-    }
-  });
+  button.addEventListener("click", () => setAlertMode(button.dataset.mode));
 });
 
 document.querySelectorAll("[data-alert-filter]").forEach((button) => {
@@ -168,6 +189,8 @@ document.querySelectorAll("[data-alert-filter]").forEach((button) => {
 });
 
 $("enablePushButton").addEventListener("click", enablePush);
+$("safeNotificationTestButton").addEventListener("click", sendSafeNotificationTest);
+$("governanceCutoverReviewButton").addEventListener("click", sendGovernanceCutoverReview);
 $("retryAuthButton").addEventListener("click", bootstrap);
 $("accountPrivacyToggle").addEventListener("click", () => {
   setAccountValueVisible(!state.accountValueVisible);

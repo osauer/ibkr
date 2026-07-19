@@ -1,4 +1,4 @@
-import { refreshAlerts } from "./alerts.js";
+import { applyAttention, applyGovernanceCutoverOverlay, handleAttentionContextChange, refreshAlerts, refreshGovernance, refreshPushState, scheduleGovernanceRefresh } from "./alerts.js";
 import { renderAll } from "./app.js";
 import { tryDeviceLogin } from "./auth.js";
 import { refreshOpenOrders } from "./orders.js";
@@ -64,12 +64,16 @@ async function fetchBootstrap() {
 }
 
 function applyBootstrap(data) {
-  state.snapshot = data.snapshot;
+  state.snapshot = applyGovernanceCutoverOverlay(data.snapshot);
+  state.governance = data.governance ?? null;
+  state.governanceRefreshSucceeded = null;
   state.authenticated = Boolean(data.auth?.authenticated);
   state.settings = data.settings || data.snapshot?.settings || state.settings;
   if (state.snapshot && state.settings) state.snapshot.settings = state.settings;
   state.alertSettings = data.alert_settings || state.alertSettings;
   state.alerts = data.alerts || [];
+  state.attentionEpoch = (state.attentionEpoch || 0) + 1;
+  applyAttention(data.attention);
   state.vapidPublicKey = data.vapid_public_key || "";
   $("pairingPanel").hidden = true;
   $("accountPanel").hidden = false;
@@ -80,6 +84,8 @@ function applyBootstrap(data) {
   $("alertsPanel").hidden = false;
   setConnection("Connected", true);
   renderAll();
+  refreshPushState();
+  handleAttentionContextChange();
   connectEvents();
   refreshOpenOrders();
   refreshPurgeStatus();
@@ -100,17 +106,37 @@ function connectEvents() {
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules", "brief"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules", "brief", "nudges"]) {
     es.addEventListener(type, (event) => {
       const data = JSON.parse(event.data);
-      if (type === "snapshot") state.snapshot = data;
+      if (type === "snapshot") state.snapshot = applyGovernanceCutoverOverlay(data);
       if (type !== "snapshot") state.snapshot = { ...(state.snapshot || {}), [type]: data };
+      if (type === "nudges") {
+        const observedAt = data?.as_of || new Date().toISOString();
+        state.snapshot = {
+          ...(state.snapshot || {}),
+          nudges: data,
+          sources: {
+            ...(state.snapshot?.sources || {}),
+            nudges: { state: "current", updated_at: observedAt, last_success_at: observedAt },
+          },
+        };
+        state.snapshot = applyGovernanceCutoverOverlay(state.snapshot);
+      }
       if (type === "snapshot" || type === "settings") state.settings = type === "settings" ? data : data.settings || state.settings;
       state.lastEventAt = Date.now();
       setConnection("Connected", true);
       renderAll();
+      if (["snapshot", "canary", "nudges"].includes(type)) handleAttentionContextChange();
       if (type === "canary") {
         setTimeout(refreshAlerts, 500);
+      }
+      if (type === "nudges" && state.authenticated) {
+        refreshGovernance();
+        scheduleGovernanceRefresh({ delayMs: 1500, minIntervalMs: 0, ensureTrailing: true });
+      }
+      if (type === "snapshot" && state.authenticated) {
+        scheduleGovernanceRefresh();
       }
     });
   }

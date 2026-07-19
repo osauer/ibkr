@@ -1,4 +1,5 @@
 import { renderAll } from "./app.js";
+import { handleAttentionContextChange } from "./alerts.js";
 import { renderCanaryDetail, renderRegimePanel } from "./canary.js";
 import { renderOpportunitiesPanel } from "./opportunities.js";
 import { setPortfolioExpansion } from "./portfolio.js";
@@ -39,6 +40,7 @@ function setActiveTab(tab, options = {}) {
     localStorage.setItem("ibkrActiveTab", state.activeTab);
   }
   renderTabs();
+  handleAttentionContextChange();
 }
 
 function renderTabs() {
