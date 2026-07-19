@@ -1348,15 +1348,6 @@ func briefSectionState(name string, rows ...rpc.BriefRowState) rpc.BriefRowState
 	return briefOK(name + " section complete")
 }
 
-func briefSourceHealthDegraded(rows []rpc.SourceHealth) bool {
-	for _, row := range rows {
-		if row.Status != "ok" {
-			return true
-		}
-	}
-	return false
-}
-
 func mapKeysSorted(set map[string]struct{}) []string {
 	out := make([]string, 0, len(set))
 	for key := range set {
