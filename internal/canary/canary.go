@@ -1139,8 +1139,23 @@ func canaryPortfolioFit(p CanaryPortfolioSummary, signals []risk.Signal) string 
 		return canaryPortfolioFitUnknown
 	}
 	hasMedium := false
+	blindExposure := false
 	for _, sig := range signals {
 		if len(sig.BlockedBy) > 0 || sig.Direction == risk.DirectionDataQuality {
+			// A skipped exposure-family signal means the classifier is blind
+			// on that axis. "Low" must remain a measurement; when the
+			// measuring signals themselves are blocked or data-quality, the
+			// honest default is unknown, never low.
+			switch sig.ID {
+			case risk.SignalGrossExposureHigh,
+				risk.SignalNetDeltaHigh,
+				risk.SignalGrossDeltaHigh,
+				risk.SignalSingleNameExposureHigh,
+				risk.SignalSingleNameDeltaHigh,
+				risk.SignalShortConvexityHigh,
+				risk.SignalOptionGreeksDegraded:
+				blindExposure = true
+			}
 			continue
 		}
 		switch sig.ID {
@@ -1162,6 +1177,9 @@ func canaryPortfolioFit(p CanaryPortfolioSummary, signals []risk.Signal) string 
 	}
 	if hasMedium {
 		return canaryPortfolioFitMedium
+	}
+	if blindExposure {
+		return canaryPortfolioFitUnknown
 	}
 	return canaryPortfolioFitLow
 }
@@ -1208,6 +1226,12 @@ func canaryDecisionState(marketConfirmation, portfolioFit, inputHealth string, m
 		return risk.DirectionDefensive, risk.SeverityWatch
 	}
 	if marketConfirmation == canaryMarketPartial && portfolioFit == canaryPortfolioFitLow {
+		return risk.DirectionDefensive, risk.SeverityWatch
+	}
+	// Unmeasured exposure against live market pressure keeps the defensive
+	// watch frame: the market signal is real and must not be demoted to a
+	// data-quality footnote just because the portfolio side is blind.
+	if (marketConfirmation == canaryMarketConfirmed || marketConfirmation == canaryMarketPartial) && portfolioFit == canaryPortfolioFitUnknown {
 		return risk.DirectionDefensive, risk.SeverityWatch
 	}
 	if marketConfirmation == canaryMarketNone && portfolioFit == canaryPortfolioFitHigh {
@@ -1332,6 +1356,13 @@ func canaryDecisionSummary(r CanaryResult) string {
 				return "Market stress is confirmed, but your exposure is low; keep watching — no reductions needed."
 			}
 			return canaryPartialMarketSummary(r.Market) + ", but your exposure is low; keep watching — no reductions needed."
+		}
+		if r.PortfolioFit == canaryPortfolioFitUnknown {
+			head := "Market stress is confirmed"
+			if r.MarketConfirmation != canaryMarketConfirmed {
+				head = canaryPartialMarketSummary(r.Market)
+			}
+			return head + ", and your portfolio exposure could not be measured from this snapshot; verify exposure before relying on this reading."
 		}
 		if r.MarketConfirmation == canaryMarketPartial {
 			return canaryPartialMarketSummary(r.Market) + " and the portfolio is exposed; freeze new risk and stage reductions."
