@@ -2,6 +2,7 @@ package agentconfig
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,10 +106,24 @@ func assertNoTaskState(t *testing.T, repo, task string) {
 	}
 }
 
+func seedBudgetTelemetry(t *testing.T, home string, usedPercent int) {
+	t.Helper()
+	sessionDir := filepath.Join(home, ".codex", "sessions", "2026", "07", "19")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	event := fmt.Sprintf(`{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":%d}}}}`+"\n", usedPercent)
+	path := filepath.Join(sessionDir, "rollout-2026-07-19T00-00-00-test.jsonl")
+	if err := os.WriteFile(path, []byte(event), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDelegationRunnerLifecycle(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skipf("jq not on PATH; the runner requires it: %v", err)
 	}
+	t.Setenv("HOME", t.TempDir())
 	repo, env := lifecycleEnv(t)
 	worktree := filepath.Join(filepath.Dir(repo), filepath.Base(repo)+"-codex-t1")
 
@@ -197,6 +212,7 @@ func TestDelegationRunnerCleanupSurvivesMissingWorktreeDir(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skipf("jq not on PATH; the runner requires it: %v", err)
 	}
+	t.Setenv("HOME", t.TempDir())
 	repo, env := lifecycleEnv(t)
 	brief := filepath.Join(repo, "brief.md")
 	if err := os.WriteFile(brief, []byte("do the thing\n"), 0o644); err != nil {
@@ -226,4 +242,59 @@ func TestDelegationRunnerCleanupSurvivesMissingWorktreeDir(t *testing.T) {
 	if code, out = runRunner(t, repo, env, "", "--task", "t2", "--cleanup"); code != 0 {
 		t.Fatalf("repeat cleanup: exit = %d\n%s", code, out)
 	}
+}
+
+func TestDelegationRunnerBudgetGate(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not on PATH; the runner requires it: %v", err)
+	}
+
+	t.Run("refuses above threshold", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		repo, env := lifecycleEnv(t)
+		seedBudgetTelemetry(t, home, 95)
+		brief := filepath.Join(repo, "brief.md")
+		if err := os.WriteFile(brief, []byte("do the thing\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		code, out := runRunner(t, repo, env, "", "--task", "budget-refusal", "--brief", brief)
+		if code != 3 || !strings.Contains(out, "95%") || !strings.Contains(out, "--force-budget") {
+			t.Fatalf("above threshold: exit = %d, want 3 mentioning 95%% and --force-budget\n%s", code, out)
+		}
+		assertNoTaskState(t, repo, "budget-refusal")
+	})
+
+	t.Run("force budget proceeds", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		repo, env := lifecycleEnv(t)
+		seedBudgetTelemetry(t, home, 95)
+		brief := filepath.Join(repo, "brief.md")
+		if err := os.WriteFile(brief, []byte("do the thing\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		code, out := runRunner(t, repo, env, "", "--task", "budget-force", "--force-budget", "--brief", brief)
+		if code != 0 || !strings.Contains(out, "thread:    stub-thread-1") {
+			t.Fatalf("forced budget run: exit = %d, want 0 reaching stubbed codex\n%s", code, out)
+		}
+	})
+
+	t.Run("below threshold proceeds", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		repo, env := lifecycleEnv(t)
+		seedBudgetTelemetry(t, home, 10)
+		brief := filepath.Join(repo, "brief.md")
+		if err := os.WriteFile(brief, []byte("do the thing\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		code, out := runRunner(t, repo, env, "", "--task", "budget-low", "--brief", brief)
+		if code != 0 || !strings.Contains(out, "thread:    stub-thread-1") {
+			t.Fatalf("below threshold run: exit = %d, want 0 reaching stubbed codex\n%s", code, out)
+		}
+	})
 }

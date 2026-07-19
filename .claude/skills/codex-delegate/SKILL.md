@@ -3,7 +3,7 @@ name: codex-delegate
 description: Delegate implementation to headless Codex (gpt-5.6-sol) in a sibling worktree while this session keeps planning, review, judgement, and integration. This is the ONLY coding lane in this repo (root AGENTS.md, ibkr pilot) — the implementation-lane hook deterministically blocks inline code edits by Claude sessions and subagents; docs and config stay direct. Delegate directly or via the coder agent; inline code edits need the human-approved break-glass scripts/waive-inline.sh. Never for broker writes, guardrail changes, or releases.
 ---
 
-Updated: 2026-07-18 16:34 CEST
+Updated: 2026-07-19 11:35 CEST
 
 # Codex delegation loop
 
@@ -70,11 +70,28 @@ user, per root `AGENTS.md`.
    ```
 
    Task names are lowercase-kebab; the worktree is `../ibkr-codex-<name>` on
-   branch `codex/<name>`. The runner enforces the lifecycle: a fresh task
+   branch `codex/<name>`, created from committed local `main` — uncommitted
+   primary-tree changes are invisible to the delegate. Before delegating a
+   change to a file with pending uncommitted edits, either land those edits
+   first or embed the file's authoritative current content in the brief and
+   have Codex rewrite it byte-identically before layering the new change;
+   otherwise the returned patch conflicts with the primary tree at
+   integration (observed 2026-07-19). The runner enforces the lifecycle: a fresh task
    refuses to start over a leftover worktree or branch (finish it with
    `--cleanup` first), `--resume` refuses to run once the worktree is
    gone, and a missing or empty brief is rejected before any git state is
-   created. Long tasks: generous Bash timeout or background the call.
+   created. Cost guards (added 2026-07-19, all refusing before any git
+   mutation): every launch prints the weekly Codex budget gauge and
+   refuses at ≥70% used (exit 3; `--budget-threshold N` to tune,
+   `--force-budget` to override — overriding is a deliberate budget-spend
+   decision, say so in the session). `--effort low|medium|high|xhigh|max`
+   (default high) sets the reasoning ladder per task, per the AGENTS.md
+   routing policy: `low` for mechanical chores (copy edits, screenshots,
+   rote refactors), `high` for real implementation, `xhigh`/`max` for
+   complex or algorithm-heavy briefs where a correction round is likelier
+   or costlier than the effort premium. `ultra` is rejected by the runner:
+   it enables automatic task delegation, which delegated runs must never
+   do. Long tasks: generous Bash timeout or background the call.
    Artifacts land in `.claude/codex-runs/<name>/<stamp>/`: `brief.md`,
    `events.jsonl`, `last-message.md`, `thread-id`, `diff.patch` —
    `diff.patch` is the cumulative task delta against the recorded base
@@ -111,8 +128,14 @@ user, per root `AGENTS.md`.
    ```
 
    The thread keeps its prior context, and the worktree must still exist —
-   never clean up between rounds. Two or three rounds is normal; if it is
-   not converging, stop, take over in the main session, and say so.
+   never clean up between rounds. Two rounds is normal, and the runner
+   refuses a third resume (exit 4): a fat thread re-bills its whole grown
+   context on every call, so past two rounds a fresh task with a distilled
+   delta-brief (current diff + remaining findings) costs ~1/10th. Measured
+   2026-07-19: rounds 3–6 of one thread burned 24M input tokens for 76k of
+   fixes. `--force-rounds` exists for the rare thread that is genuinely
+   cheaper to continue; treat it as an exception to justify, not a default.
+   If it is not converging, stop, take over in the main session, and say so.
 
 6. **Integrate** — once accepted, land it from the primary tree. Prefer
    applying the reviewed patch to the primary tree over merging the branch
@@ -164,13 +187,17 @@ user, per root `AGENTS.md`.
   either way; briefs keep ibkr usage read-only.
 - Codex reaches live read-only data through the `ibkr` MCP server (spawned
   outside the sandbox); that surface cannot submit orders.
-- Model, effort, and speed are pinned per-run by the runner:
-  `-c model="gpt-5.6-sol"`, `-c model_reasoning_effort="high"`,
-  `-c service_tier="priority"` (requires codex-cli ≥ 0.144). Pinned by
-  user decision 2026-07-18 because the ChatGPT desktop app rewrites
-  `~/.codex/config.toml` mid-session; delegation must not drift with it.
-  Changing the pins is the user's call, and the user's codex config is
-  never edited.
+- Model, speed, and features are pinned per-run by the runner:
+  `-c model="gpt-5.6-sol"`, `-c service_tier="priority"`, and
+  `--disable chronicle` (requires codex-cli ≥ 0.144); effort defaults to
+  high and is selectable per task via `--effort`. Pinned by user decision
+  2026-07-18 (extended 2026-07-19) because the ChatGPT desktop app
+  rewrites `~/.codex/config.toml` mid-session; delegation must not drift
+  with it. The chronicle pin is load-bearing policy, not tuning: the
+  app-managed config enables multi-agent features that made delegated
+  runs spawn their own collaborator agents (+111M input tokens in July
+  2026), against the root AGENTS.md no-re-delegate rule. Changing the
+  pins is the user's call, and the user's codex config is never edited.
 - Launching write-mode headless Codex is itself a gated action in Claude
   sessions: expect a permission prompt per run in interactive sessions. In
   autonomous sessions it is denied unless the user has allowlisted

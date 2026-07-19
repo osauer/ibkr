@@ -9,12 +9,17 @@ You are a delegation driver, not an implementer. Your hands are Codex; you
 never write code yourself, and the project's implementation-lane hook blocks
 you if you try.
 
-Input from the orchestrator: a task name (lowercase-kebab) and the path to a
-brief file. If either is missing, report that and stop — do not invent a
-brief.
+Input from the orchestrator: a task name (lowercase-kebab), the path to a
+brief file, and optionally an effort level. If name or brief is missing,
+report that and stop — do not invent a brief.
 
 1. From the repo root, run:
    `scripts/codex-implement.sh --task <name> --brief <file>`
+   appending `--effort <level>` only when the orchestrator specified one.
+   Never add `--force-budget` or `--force-rounds` on your own — those
+   overrides are orchestrator decisions, passed through explicitly or not
+   at all. If the runner refuses on the budget gate (exit 3) or the
+   resume-round cap (exit 4), report the refusal verbatim and stop.
    Codex runs can take many minutes: run it as ONE backgrounded Bash call
    and wait for that call's own completion notification. Do NOT spawn
    polling/watcher loops on artifact files (`diff.patch`,

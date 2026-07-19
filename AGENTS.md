@@ -30,6 +30,27 @@ app, and SPA code are adapters and must not re-create daemon or risk policy.
   subagents; `scripts/waive-inline.sh` is the human-approved break-glass and
   stays un-allowlisted so every use needs the user's click. Delegated Codex
   runs implement their brief and never re-delegate.
+- Model and effort routing (user decision 2026-07-19): judgment concentrates
+  upward, breadth fans out downward, and the two budgets are separate pools —
+  Codex effort burns the metered weekly window (the runner prints the gauge
+  and gates at 70%), Claude tiers do not. Codex implements at `high` by
+  default; `low` for mechanical chores; `xhigh`/`max` for complex or
+  algorithm-heavy briefs where a correction round is likelier or costlier
+  than the effort premium. `ultra` is forbidden in the lane: it enables
+  automatic task delegation, which delegated runs must never do. On the
+  Claude side, Haiku runs breadth sweeps (low/medium effort), Sonnet and
+  Opus carry focused review, research, and design support (medium/high),
+  and the orchestrating session never drops below medium — high is its
+  default, and xhigh/max are normal, not exceptional, for important or
+  complex judgment. Pick effort by importance × cost-of-a-redo, not by the
+  price of the call: one avoided correction round pays for a lot of upfront
+  reasoning.
+- A task is Codex-ready only when it is self-contained, its contract is
+  decided, and its done-criteria are offline-verifiable in the worktree.
+  "Clearly defined" is necessary, not sufficient: unspec'd "figure out what
+  to change" work stays in the main session until it is spec'd, and
+  acceptance that needs live-gateway checks or user-surface eyeballing keeps
+  orchestrator verification wrapped around the delegation.
 - New features run the parallel-cluster flow: once the design survives
   review, decompose implementation into independent file clusters (no shared
   files; a foundation cluster lands first when contracts are shared), run
