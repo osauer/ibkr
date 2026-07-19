@@ -470,6 +470,14 @@ func (h *handler) handleGovernanceCutoverReview(w nethttp.ResponseWriter, r *net
 		writeCutoverReviewError(w, err)
 		return
 	}
+	if result == nil {
+		writeError(w, nethttp.StatusBadGateway, "invalid governance cutover review result")
+		return
+	}
+	if _, err := json.Marshal(result); err != nil {
+		writeError(w, nethttp.StatusBadGateway, "invalid governance cutover review result")
+		return
+	}
 	writeJSON(w, result)
 }
 
@@ -497,6 +505,10 @@ func decodeEmptyJSONObject(r *nethttp.Request) error {
 }
 
 func writeCutoverReviewError(w nethttp.ResponseWriter, err error) {
+	if errors.Is(err, daemonclient.ErrInvalidNudgesCutoverReviewResult) {
+		writeError(w, nethttp.StatusBadGateway, "invalid governance cutover review result")
+		return
+	}
 	var rpcErr *rpc.Error
 	if errors.As(err, &rpcErr) {
 		switch rpcErr.Code {

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -235,6 +236,43 @@ func TestGovernanceCutoverReviewRequiresAuthentication(t *testing.T) {
 	}
 }
 
+func TestGovernanceCutoverReviewRejectsMissingOrInvalidTypedResult(t *testing.T) {
+	t.Parallel()
+	reviewedAt := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		result *rpc.NudgesCutoverReviewResult
+	}{
+		{name: "nil result"},
+		{name: "zero result", result: &rpc.NudgesCutoverReviewResult{}},
+		{name: "invalid populated result", result: &rpc.NudgesCutoverReviewResult{
+			OK: true, ReviewedAt: reviewedAt, CoverageFrom: reviewedAt.Add(-time.Hour), Evidence: "HOSTILE_PRIVATE_EVIDENCE",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &cutoverRouteClient{result: tc.result}
+			srv, store, _ := newGovernanceTestHandler(t, client)
+			handler := srv.Handler()
+			cookie := routeSessionCookie(t, handler)
+			before := governanceAppStateForTest(t, store, reviewedAt)
+			req := httptest.NewRequest(http.MethodPost, "/api/governance/cutover-review", nil)
+			req.AddCookie(cookie)
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != http.StatusBadGateway || res.Body.Len() == 0 || res.Body.String() == "null\n" || strings.Contains(res.Body.String(), "HOSTILE") || strings.Contains(res.Body.String(), "PRIVATE") {
+				t.Fatalf("status=%d body=%q", res.Code, res.Body.String())
+			}
+			if client.calls != 1 || client.params.Origin != rpc.NudgeCutoverReviewOriginPairedDevice || client.params.Evidence != rpc.NudgeCutoverReviewEvidencePairedDeviceForegroundRender {
+				t.Fatalf("cutover calls=%d params=%+v", client.calls, client.params)
+			}
+			after := governanceAppStateForTest(t, store, reviewedAt)
+			if !bytes.Equal(after, before) {
+				t.Fatalf("invalid result mutated app state:\nbefore=%s\nafter=%s", before, after)
+			}
+		})
+	}
+}
+
 func TestGovernanceCutoverReviewRejectsEveryBrowserSuppliedField(t *testing.T) {
 	t.Parallel()
 	client := &cutoverRouteClient{}
@@ -276,6 +314,7 @@ func TestGovernanceCutoverReviewMapsDaemonErrorsWithoutPrivateText(t *testing.T)
 	}{
 		{name: "revalidation conflict", err: &rpc.Error{Code: rpc.CodeBadRequest, Message: "HOSTILE report /private/report token"}, status: http.StatusConflict},
 		{name: "daemon unavailable", err: &rpc.Error{Code: rpc.CodeDaemonUnavailable, Message: "HOSTILE socket /private/daemon.sock"}, status: http.StatusServiceUnavailable},
+		{name: "invalid client result", err: fmt.Errorf("%w: HOSTILE private result", daemonclient.ErrInvalidNudgesCutoverReviewResult), status: http.StatusBadGateway},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &cutoverRouteClient{err: tc.err}

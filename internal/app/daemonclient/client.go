@@ -67,6 +67,8 @@ type Real struct {
 
 const appQuoteSnapshotTimeout = 2500 * time.Millisecond
 
+var ErrInvalidNudgesCutoverReviewResult = errors.New("invalid nudges cutover-review result")
+
 func (c Real) Status(ctx context.Context) (*rpc.HealthResult, error) {
 	var out rpc.HealthResult
 	if err := c.call(ctx, rpc.MethodStatusHealth, nil, &out); err != nil {
@@ -202,6 +204,9 @@ func nudgesCutoverReview(ctx context.Context, params rpc.NudgesCutoverReviewPara
 	var out rpc.NudgesCutoverReviewResult
 	if err := call(ctx, rpc.MethodNudgesCutoverReview, params, &out); err != nil {
 		return nil, err
+	}
+	if _, err := json.Marshal(out); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidNudgesCutoverReviewResult, err)
 	}
 	return &out, nil
 }
