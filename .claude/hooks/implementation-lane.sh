@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Implementation-lane gate (ibkr pilot): all code in this repo is implemented
-# by headless Codex via scripts/codex-implement.sh; Claude sessions and their
-# subagents plan, brief, review, and integrate but do not hand-edit code.
+# Implementation-lane gate (ibkr pilot): primary-tree code stays gated to
+# headless Codex; agent worktrees allow Claude edits only as a hard-cap fallback.
 # This PreToolUse hook (matcher Edit|Write in .claude/settings.json) enforces
 # that deterministically. The break-glass is a per-session waiver written by
 # scripts/waive-inline.sh, which is deliberately not allowlisted so each use
@@ -46,6 +45,21 @@ case "$file_path" in
       "$root"/*) : ;;
       *) exit 0 ;;
     esac
+    ;;
+esac
+
+# Allow code edits in real Claude agent worktrees at the repository root. The
+# strict generated-name shape plus a regular .git worktree marker keeps plain
+# lookalike directories gated.
+relative_path="${file_path#"$root"/}"
+first_segment="${relative_path%%/*}"
+case "/$relative_path/" in
+  */../*) ;;
+  *)
+    if printf '%s\n' "$first_segment" | grep -Eq '^[a-z0-9]+(-[a-z0-9]+)+-[0-9a-f]{6}$' &&
+      [ -f "$root/$first_segment/.git" ]; then
+      exit 0
+    fi
     ;;
 esac
 

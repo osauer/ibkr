@@ -47,6 +47,21 @@ run_case "json allowed" 0 "$(payload Edit "$root/.claude/settings.json" s1)"
 run_case "outside checkout allowed" 0 "$(payload Edit "$work/scratch/probe.go" s1)"
 run_case "no file_path allowed" 0 '{"tool_name":"Edit","session_id":"s1","tool_input":{}}'
 
+mkdir -p "$root/eager-noether-1a2b3c/internal/x"
+printf 'gitdir: test\n' >"$root/eager-noether-1a2b3c/.git"
+run_case "agent worktree code allowed" 0 "$(payload Edit "$root/eager-noether-1a2b3c/internal/x/file.go" s1)"
+
+rm "$root/eager-noether-1a2b3c/.git"
+run_case "lookalike without git marker blocked" 2 "$(payload Edit "$root/eager-noether-1a2b3c/internal/x/file.go" s1)"
+
+printf 'gitdir: test\n' >"$root/eager-noether-1a2b3c/.git"
+run_case "agent worktree docs allowed" 0 "$(payload Edit "$root/eager-noether-1a2b3c/notes.md" s1)"
+run_case "agent worktree parent traversal blocked" 2 "$(payload Edit "$root/eager-noether-1a2b3c/../internal/x/file.go" s1)"
+
+mkdir -p "$root/eager-noether-xyzzzz"
+printf 'gitdir: test\n' >"$root/eager-noether-xyzzzz/.git"
+run_case "non-hex agent worktree blocked" 2 "$(payload Edit "$root/eager-noether-xyzzzz/file.go" s1)"
+
 printf 'granted: test\nreason: test\n' >"$root/.claude/state/inline-waivers/s2"
 run_case "waived session allowed" 0 "$(payload Edit "$root/internal/app/relay/worker.go" s2)"
 run_case "other session still blocked" 2 "$(payload Edit "$root/internal/app/relay/worker.go" s3)"

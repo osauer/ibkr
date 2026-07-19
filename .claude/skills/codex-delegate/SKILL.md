@@ -3,7 +3,7 @@ name: codex-delegate
 description: Delegate implementation to headless Codex (gpt-5.6-sol) in a sibling worktree while this session keeps planning, review, judgement, and integration. This is the ONLY coding lane in this repo (root AGENTS.md, ibkr pilot) — the implementation-lane hook deterministically blocks inline code edits by Claude sessions and subagents; docs and config stay direct. Delegate directly or via the coder agent; inline code edits need the human-approved break-glass scripts/waive-inline.sh. Never for broker writes, guardrail changes, or releases.
 ---
 
-Updated: 2026-07-19 11:35 CEST
+Updated: 2026-07-19 13:42 CEST
 
 # Codex delegation loop
 
@@ -160,6 +160,28 @@ user, per root `AGENTS.md`.
    stay under `.claude/codex-runs/<name>/` as the gitignored audit trail;
    prune them once the work is committed. An abandoned task ends the same
    way — run `--cleanup` and nothing ever touched the primary tree.
+
+## Hard-cap fallback (Claude lane)
+
+When the runner's budget line reports 100% (or codex itself refuses with a
+rate-limit error), the weekly window is hard-capped and `--force-budget`
+buys nothing. Do not stall the task and do not waive inline. Fall back to
+the Claude lane, announcing it in the session ("codex hard-capped — running
+<task> through the implementer agent"):
+
+1. Spawn the `implementer` agent (`.claude/agents/implementer.md`) with
+   worktree isolation and the same brief you would have given Codex. Pick
+   the model/effort by the AGENTS.md ladder (Opus high is the default;
+   bump for algorithm-heavy work).
+2. Review its worktree diff exactly as in step 3 — same standards, same
+   distrust of claims without diffs.
+3. Gate offline in its worktree, integrate the reviewed patch into the
+   primary tree, run the binding `make test` there (step 6 unchanged).
+4. The next delegation checks the gauge again and returns to Codex as soon
+   as the window allows. The fallback is per-task, never a standing switch.
+
+The soft gate (70–99%) is NOT this fallback: there the choice is defer vs
+`--force-budget`, made explicitly, with Codex still the lane.
 
 ## Execution model and safety facts
 

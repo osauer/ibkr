@@ -45,6 +45,15 @@ app, and SPA code are adapters and must not re-create daemon or risk policy.
   complex judgment. Pick effort by importance × cost-of-a-redo, not by the
   price of the call: one avoided correction round pays for a lot of upfront
   reasoning.
+- Hard-cap fallback (user decision 2026-07-19): below 100% of the weekly
+  Codex window, Codex is the only coding lane — the ≥70% gate is an
+  explicit-override decision, not a reroute. At hard cap (gauge 100% or a
+  Codex rate-limit refusal), implementation falls back to the Claude lane:
+  the `implementer` agent (`.claude/agents/implementer.md`) in an isolated
+  agent worktree, same brief, same orchestrator review, same offline gates,
+  same patch-based integration. The fallback is announced per task, never
+  silent; the primary tree stays hook-blocked (only agent worktrees are
+  writable); routing returns to Codex automatically once the window resets.
 - A task is Codex-ready only when it is self-contained, its contract is
   decided, and its done-criteria are offline-verifiable in the worktree.
   "Clearly defined" is necessary, not sufficient: unspec'd "figure out what
