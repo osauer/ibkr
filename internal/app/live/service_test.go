@@ -524,6 +524,110 @@ func TestNudgesPollSeparatesTransportFromDaemonSourceHealth(t *testing.T) {
 	}
 }
 
+func TestPollOnceAndForcedNudgePollSerializeWholeSnapshotReplacement(t *testing.T) {
+	t.Run("normal poll owns writer first", func(t *testing.T) {
+		now := time.Date(2026, 7, 19, 14, 0, 0, 0, time.UTC)
+		statusStarted := make(chan struct{})
+		releaseStatus := make(chan struct{})
+		client := &pollOverlapClient{
+			fakeClient:    &fakeClient{status: &rpc.HealthResult{Connected: true}},
+			statusStarted: statusStarted,
+			statusRelease: releaseStatus,
+			nudgeResults:  []*rpc.NudgesSnapshotResult{readyNudges(now), readyNudges(now.Add(time.Minute))},
+		}
+		service := New(client, time.Hour, time.Hour)
+		service.now = func() time.Time { return now }
+		normalDone := make(chan Snapshot, 1)
+		go func() { normalDone <- service.PollOnce(t.Context()) }()
+		<-statusStarted
+		forcedStarted := make(chan struct{})
+		forcedDone := make(chan Snapshot, 1)
+		go func() {
+			close(forcedStarted)
+			forcedDone <- service.PollNudgesOnce(t.Context())
+		}()
+		<-forcedStarted
+		close(releaseStatus)
+		<-normalDone
+		<-forcedDone
+		final := service.Snapshot()
+		if final.Status == nil || !final.Status.Connected || final.Nudges == nil || !final.Nudges.AsOf.Equal(now.Add(time.Minute)) {
+			t.Fatalf("final snapshot lost serialized fields: %+v", final)
+		}
+	})
+
+	t.Run("forced nudge poll owns writer first", func(t *testing.T) {
+		now := time.Date(2026, 7, 19, 14, 30, 0, 0, time.UTC)
+		nudgeStarted := make(chan struct{})
+		releaseNudge := make(chan struct{})
+		statusStarted := make(chan struct{})
+		client := &pollOverlapClient{
+			fakeClient:        &fakeClient{status: &rpc.HealthResult{Connected: true}},
+			statusStarted:     statusStarted,
+			firstNudgeStarted: nudgeStarted,
+			firstNudgeRelease: releaseNudge,
+			nudgeResults:      []*rpc.NudgesSnapshotResult{readyNudges(now.Add(time.Minute)), readyNudges(now)},
+		}
+		service := New(client, time.Hour, time.Hour)
+		service.now = func() time.Time { return now }
+		forcedDone := make(chan Snapshot, 1)
+		go func() { forcedDone <- service.PollNudgesOnce(t.Context()) }()
+		<-nudgeStarted
+		normalStarted := make(chan struct{})
+		normalDone := make(chan Snapshot, 1)
+		go func() {
+			close(normalStarted)
+			normalDone <- service.PollOnce(t.Context())
+		}()
+		<-normalStarted
+		close(releaseNudge)
+		<-forcedDone
+		<-statusStarted
+		<-normalDone
+		final := service.Snapshot()
+		if final.Status == nil || !final.Status.Connected || final.Nudges == nil || !final.Nudges.AsOf.Equal(now.Add(time.Minute)) {
+			t.Fatalf("final snapshot lost serialized fields: %+v", final)
+		}
+	})
+}
+
+func TestStartupStatusAndForcedNudgePollSerializeWholeSnapshotReplacement(t *testing.T) {
+	now := time.Date(2026, 7, 19, 15, 0, 0, 0, time.UTC)
+	statusStarted := make(chan struct{})
+	releaseStatus := make(chan struct{})
+	client := &pollOverlapClient{
+		fakeClient:    &fakeClient{status: &rpc.HealthResult{Connected: true}},
+		statusStarted: statusStarted,
+		statusRelease: releaseStatus,
+		nudgeResults:  []*rpc.NudgesSnapshotResult{readyNudges(now.Add(time.Minute))},
+	}
+	service := New(client, time.Hour, time.Hour)
+	service.now = func() time.Time { return now }
+	statusDone := make(chan Snapshot, 1)
+	go func() { statusDone <- service.pollStatus(t.Context()) }()
+	<-statusStarted
+	if service.pollMu.TryLock() {
+		service.pollMu.Unlock()
+		close(releaseStatus)
+		<-statusDone
+		t.Fatal("pollStatus did not own the full-snapshot writer lock while status I/O was blocked")
+	}
+	forcedStarted := make(chan struct{})
+	forcedDone := make(chan Snapshot, 1)
+	go func() {
+		close(forcedStarted)
+		forcedDone <- service.PollNudgesOnce(t.Context())
+	}()
+	<-forcedStarted
+	close(releaseStatus)
+	<-statusDone
+	<-forcedDone
+	final := service.Snapshot()
+	if final.Status == nil || !final.Status.Connected || final.Nudges == nil || !final.Nudges.AsOf.Equal(now.Add(time.Minute)) {
+		t.Fatalf("final snapshot lost startup status or forced nudges: %+v", final)
+	}
+}
+
 func TestNudgesPollUsesDedicatedOneMinuteCadence(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
@@ -607,6 +711,52 @@ type fakeClient struct {
 	briefCalls  int
 	briefAcks   int
 	nudgeCalls  int
+}
+
+type pollOverlapClient struct {
+	*fakeClient
+	mu                sync.Mutex
+	statusOnce        sync.Once
+	statusStarted     chan struct{}
+	statusRelease     <-chan struct{}
+	firstNudgeOnce    sync.Once
+	firstNudgeStarted chan struct{}
+	firstNudgeRelease <-chan struct{}
+	nudgeResults      []*rpc.NudgesSnapshotResult
+	nudgeCalls        int
+}
+
+func (c *pollOverlapClient) Status(context.Context) (*rpc.HealthResult, error) {
+	c.statusOnce.Do(func() {
+		if c.statusStarted != nil {
+			close(c.statusStarted)
+		}
+		if c.statusRelease != nil {
+			<-c.statusRelease
+		}
+	})
+	return c.fakeClient.status, nil
+}
+
+func (c *pollOverlapClient) NudgesSnapshot(context.Context) (*rpc.NudgesSnapshotResult, error) {
+	c.mu.Lock()
+	call := c.nudgeCalls
+	c.nudgeCalls++
+	c.mu.Unlock()
+	if call == 0 {
+		c.firstNudgeOnce.Do(func() {
+			if c.firstNudgeStarted != nil {
+				close(c.firstNudgeStarted)
+			}
+			if c.firstNudgeRelease != nil {
+				<-c.firstNudgeRelease
+			}
+		})
+	}
+	if call >= len(c.nudgeResults) {
+		return nil, nil
+	}
+	return c.nudgeResults[call], nil
 }
 
 func (c *fakeClient) Status(context.Context) (*rpc.HealthResult, error) {

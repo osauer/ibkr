@@ -37,6 +37,9 @@ func TestShouldAlertModes(t *testing.T) {
 	if !ShouldAlert(state.AlertModeActOnly, confirm) {
 		t.Fatalf("act_only should alert on confirm_inputs")
 	}
+	if !ShouldAlert(state.AlertModeWatchAndAct, confirm) {
+		t.Fatalf("watch_and_act should alert on confirm_inputs")
+	}
 	if !ShouldAlert(state.AlertModeWatchAndAct, watch) {
 		t.Fatalf("watch_and_act should alert on watch severity")
 	}
@@ -59,6 +62,25 @@ func TestShouldAlertModes(t *testing.T) {
 	}
 	if ShouldAlert(state.AlertModeWatchAndAct, observe) {
 		t.Fatalf("watch_and_act should ignore observe severity")
+	}
+}
+
+func TestWatchAndActIncludesEveryActOnlyCanary(t *testing.T) {
+	t.Parallel()
+	cases := []rpc.CanaryResult{
+		{Severity: risk.SeverityObserve, Action: "defend"},
+		{Severity: risk.SeverityObserve, Action: "rebalance"},
+		{Severity: risk.SeverityObserve, Action: "confirm_inputs"},
+		{Severity: risk.SeverityAct},
+		{Severity: risk.SeverityUrgent},
+	}
+	for _, canary := range cases {
+		if !ShouldAlert(state.AlertModeActOnly, canary) {
+			t.Fatalf("fixture is not act_only eligible: %+v", canary)
+		}
+		if !ShouldAlert(state.AlertModeWatchAndAct, canary) {
+			t.Fatalf("watch_and_act excluded act_only-eligible canary: %+v", canary)
+		}
 	}
 }
 
@@ -125,6 +147,440 @@ func TestObserveRedactsPayloadAndDedupesFingerprint(t *testing.T) {
 	}
 	if got := store.AlertHistory(10); len(got) != 1 {
 		t.Fatalf("alert history length=%d, want 1", len(got))
+	}
+}
+
+func TestObserveRecordsBeforeApplyingDeliveryMode(t *testing.T) {
+	t.Parallel()
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := store.EnsureVAPID(time.Now().UTC(), func() (string, string, error) {
+		return "private", "public", nil
+	}); err != nil {
+		t.Fatalf("EnsureVAPID: %v", err)
+	}
+	if err := store.AddPushSubscription(state.PushSubscription{
+		ID: "sub-1", DeviceID: "device-1", Endpoint: "https://push.example/sub", P256DH: "p256dh", Auth: "auth",
+	}); err != nil {
+		t.Fatalf("AddPushSubscription: %v", err)
+	}
+	sender := &recordingSender{}
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	monitor := Monitor{Store: store, Sender: sender, Now: func() time.Time { return now }}
+
+	if err := store.SetAlertMode(state.AlertModeActOnly); err != nil {
+		t.Fatal(err)
+	}
+	watch := rpc.CanaryResult{
+		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:watch-under-act-only"},
+		Severity:    risk.SeverityWatch,
+	}
+	rec, attempts := monitor.Observe(t.Context(), watch)
+	if rec == nil || len(attempts) != 0 || len(sender.payloads) != 0 {
+		t.Fatalf("act_only watch rec=%#v attempts=%d sends=%d, want durable record without transport", rec, len(attempts), len(sender.payloads))
+	}
+
+	if err := store.SetAlertMode(state.AlertModeWatchAndAct); err != nil {
+		t.Fatal(err)
+	}
+	rec, attempts = monitor.Observe(t.Context(), watch)
+	if rec != nil || len(attempts) != 0 || len(sender.payloads) != 0 {
+		t.Fatalf("re-enabled delivery retried persisted fingerprint: rec=%#v attempts=%d sends=%d", rec, len(attempts), len(sender.payloads))
+	}
+
+	if err := store.SetAlertMode(state.AlertModeNone); err != nil {
+		t.Fatal(err)
+	}
+	underNone := rpc.CanaryResult{
+		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:act-under-none"},
+		Action:      "defend", Severity: risk.SeverityAct,
+	}
+	rec, attempts = monitor.Observe(t.Context(), underNone)
+	if rec == nil || len(attempts) != 0 || len(sender.payloads) != 0 {
+		t.Fatalf("none rec=%#v attempts=%d sends=%d, want durable record without transport", rec, len(attempts), len(sender.payloads))
+	}
+
+	if err := store.SetAlertMode(state.AlertModeActOnly); err != nil {
+		t.Fatal(err)
+	}
+	rec, attempts = monitor.Observe(t.Context(), underNone)
+	if rec != nil || len(attempts) != 0 || len(sender.payloads) != 0 {
+		t.Fatalf("re-enabled delivery retried fingerprint first seen under none: rec=%#v attempts=%d sends=%d", rec, len(attempts), len(sender.payloads))
+	}
+	now = now.Add(time.Minute)
+	action := rpc.CanaryResult{
+		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:new-action"},
+		Action:      "confirm_inputs", Severity: risk.SeverityObserve,
+	}
+	rec, attempts = monitor.Observe(t.Context(), action)
+	if rec == nil || len(attempts) != 1 || len(sender.payloads) != 1 {
+		t.Fatalf("new act_only action rec=%#v attempts=%d sends=%d, want record and transport", rec, len(attempts), len(sender.payloads))
+	}
+	if got := store.AlertHistory(10); len(got) != 3 {
+		t.Fatalf("alert history length=%d, want 3 independently recorded occurrences", len(got))
+	}
+}
+
+func TestObserveRequiresPreAndPostRecordDeliveryEligibility(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		before    string
+		after     string
+		canary    rpc.CanaryResult
+		wantSends int
+	}{
+		{
+			name: "none to act_only", before: state.AlertModeNone, after: state.AlertModeActOnly,
+			canary: rpc.CanaryResult{Action: "defend", Severity: risk.SeverityAct},
+		},
+		{
+			name: "act_only suppression to watch_and_act", before: state.AlertModeActOnly, after: state.AlertModeWatchAndAct,
+			canary: rpc.CanaryResult{Severity: risk.SeverityWatch},
+		},
+		{
+			name: "watch_and_act to none", before: state.AlertModeWatchAndAct, after: state.AlertModeNone,
+			canary: rpc.CanaryResult{Severity: risk.SeverityWatch},
+		},
+		{
+			name: "unchanged enabled", before: state.AlertModeActOnly, after: state.AlertModeActOnly,
+			canary: rpc.CanaryResult{Action: "confirm_inputs", Severity: risk.SeverityObserve}, wantSends: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := state.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetAlertMode(tc.before); err != nil {
+				t.Fatal(err)
+			}
+			ensureGovernanceKeys(t, store)
+			if err := store.AddPushSubscription(state.PushSubscription{
+				ID: "sub", DeviceID: "device", Endpoint: "https://push.example/sub", P256DH: "key", Auth: "auth",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			tc.canary.Fingerprint = rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:" + strings.ReplaceAll(tc.name, " ", "-")}
+			sender := &recordingSender{}
+			var transitionErr error
+			monitor := Monitor{
+				Store: store, Sender: sender,
+				afterRecord: func() { transitionErr = store.SetAlertMode(tc.after) },
+			}
+			rec, attempts := monitor.Observe(t.Context(), tc.canary)
+			if transitionErr != nil {
+				t.Fatalf("transition alert mode: %v", transitionErr)
+			}
+			if rec == nil || len(store.AlertHistory(10)) != 1 {
+				t.Fatalf("durable history missing: rec=%#v history=%+v", rec, store.AlertHistory(10))
+			}
+			if len(attempts) != tc.wantSends || len(sender.payloads) != tc.wantSends {
+				t.Fatalf("attempts=%d sends=%d, want %d", len(attempts), len(sender.payloads), tc.wantSends)
+			}
+			duplicate, duplicateAttempts := monitor.Observe(t.Context(), tc.canary)
+			if duplicate != nil || len(duplicateAttempts) != 0 || len(sender.payloads) != tc.wantSends {
+				t.Fatalf("duplicate rec=%#v attempts=%d total sends=%d, want no resend", duplicate, len(duplicateAttempts), len(sender.payloads))
+			}
+		})
+	}
+}
+
+func TestObserveConcurrentSameFingerprintCreatesAndSendsOnce(t *testing.T) {
+	store := governanceStore(t, state.AlertModeActOnly)
+	addGovernanceTarget(t, store, "device", "sub")
+	now := time.Date(2026, 7, 19, 12, 15, 0, 0, time.UTC)
+	sender := &threadSafeRecordingSender{}
+	monitor := Monitor{Store: store, Sender: sender, Now: func() time.Time { return now }}
+	canary := rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "sha256:atomic-canary"}, Action: "defend", Severity: risk.SeverityAct}
+	const observers = 32
+	start := make(chan struct{})
+	results := make(chan *state.AlertRecord, observers)
+	var wg sync.WaitGroup
+	for range observers {
+		wg.Go(func() {
+			<-start
+			record, _ := monitor.Observe(t.Context(), canary)
+			results <- record
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	created := 0
+	for record := range results {
+		if record != nil {
+			created++
+		}
+	}
+	if created != 1 || len(store.AlertHistory(0)) != 1 || sender.Calls() != 1 {
+		t.Fatalf("created=%d history=%+v sends=%d", created, store.AlertHistory(0), sender.Calls())
+	}
+	attention := store.Attention()
+	if attention.HighWaterSeq != 1 || attention.UnreadCount != 1 || len(attention.UnreadRefs) != 1 {
+		t.Fatalf("attention=%+v", attention)
+	}
+}
+
+func TestObserveSameTimestampDifferentFingerprintsHaveDistinctIDs(t *testing.T) {
+	store := governanceStore(t, state.AlertModeNone)
+	now := time.Date(2026, 7, 19, 12, 20, 0, 0, time.UTC)
+	monitor := Monitor{Store: store, Now: func() time.Time { return now }}
+	first, _ := monitor.Observe(t.Context(), rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "sha256:first"}, Action: "defend", Severity: risk.SeverityAct})
+	second, _ := monitor.Observe(t.Context(), rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "sha256:second"}, Action: "defend", Severity: risk.SeverityAct})
+	if first == nil || second == nil || first.ID == "" || second.ID == "" || first.ID == second.ID {
+		t.Fatalf("first=%+v second=%+v", first, second)
+	}
+	attention := store.Attention()
+	if attention.UnreadCount != 2 || len(attention.UnreadRefs) != 2 || attention.UnreadRefs[0].ID == attention.UnreadRefs[1].ID {
+		t.Fatalf("attention refs=%+v", attention)
+	}
+}
+
+func TestGovernanceWatchDeliveryIgnoresCanarySeverityBand(t *testing.T) {
+	t.Parallel()
+	store := governanceStore(t, state.AlertModeActOnly)
+	addGovernanceTarget(t, store, "device", "sub")
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	sender := &recordingSender{}
+	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
+
+	watch := governanceSnapshot(now)
+	watch.Candidates[0].Severity = rpc.NudgeSeverityWatch
+	view, err := dispatcher.Observe(t.Context(), watch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Occurrences) != 1 || len(sender.payloads) != 1 {
+		t.Fatalf("act_only governance watch occurrences=%d sends=%d, want record and delivery", len(view.Occurrences), len(sender.payloads))
+	}
+
+	if err := store.SetAlertMode(state.AlertModeNone); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	watch.Candidates[0].Fingerprint = "sha256:" + strings.Repeat("b", 64)
+	watch.Candidates[0].OccurredAt = now
+	view, err = dispatcher.Observe(t.Context(), watch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Occurrences) != 2 || len(sender.payloads) != 1 {
+		t.Fatalf("none governance occurrences=%d sends=%d, want new record without transport", len(view.Occurrences), len(sender.payloads))
+	}
+	if view.DeliveryHealth.State != state.GovernanceDeliverySuppressed || view.DeliveryHealth.Class != state.GovernanceTransportSuppressed {
+		t.Fatalf("none mode health=%+v", view.DeliveryHealth)
+	}
+	if len(view.Attempts) != 2 || view.Attempts[1].Class != state.GovernanceTransportSuppressed {
+		t.Fatalf("none mode attempts=%+v, want durable suppressed transport evidence", view.Attempts)
+	}
+}
+
+func TestGovernanceDeliversUnderBothNonNoneModes(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{state.AlertModeActOnly, state.AlertModeWatchAndAct} {
+		t.Run(mode, func(t *testing.T) {
+			store := governanceStore(t, mode)
+			addGovernanceTarget(t, store, "device", "sub")
+			now := time.Date(2026, 7, 19, 12, 30, 0, 0, time.UTC)
+			snapshot := governanceSnapshot(now)
+			snapshot.Candidates[0].Severity = rpc.NudgeSeverityWatch
+			sender := &recordingSender{}
+			view, err := (&GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}).Observe(t.Context(), snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sender.payloads) != 1 || len(view.Receipts) != 1 || view.AttemptTotals.Accepted != 1 {
+				t.Fatalf("mode=%s sends=%d receipts=%+v totals=%+v", mode, len(sender.payloads), view.Receipts, view.AttemptTotals)
+			}
+		})
+	}
+}
+
+func TestGovernanceFirstSeenUnderNoneStaysSuppressedAfterReenable(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{state.AlertModeActOnly, state.AlertModeWatchAndAct} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := state.Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetAlertMode(state.AlertModeNone); err != nil {
+				t.Fatal(err)
+			}
+			ensureGovernanceKeys(t, store)
+			addGovernanceTarget(t, store, "device-first", "sub-first")
+			now := time.Date(2026, 7, 19, 13, 0, 0, 0, time.UTC)
+			sender := &recordingSender{}
+			dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
+			view, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(view.Occurrences) != 1 || len(view.Attempts) != 1 || view.Attempts[0].Class != state.GovernanceTransportSuppressed {
+				t.Fatalf("initial none observation=%+v", view)
+			}
+			firstDisplayID := view.Occurrences[0].DisplayID
+
+			reopened, err := state.Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			addGovernanceTarget(t, reopened, "device-late", "sub-late")
+			if err := reopened.SetAlertMode(mode); err != nil {
+				t.Fatal(err)
+			}
+			now = now.Add(time.Minute)
+			dispatcher = GovernanceDispatcher{Store: reopened, Sender: sender, Now: func() time.Time { return now }}
+			view, err = dispatcher.Observe(t.Context(), governanceSnapshot(now))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sender.payloads) != 0 || len(view.Receipts) != 0 {
+				t.Fatalf("%s re-enable sent first-seen-none episode: sends=%d receipts=%+v", mode, len(sender.payloads), view.Receipts)
+			}
+			if len(view.Occurrences) != 1 || view.Occurrences[0].DisplayID != firstDisplayID || !view.Occurrences[0].ResolvedAt.IsZero() {
+				t.Fatalf("%s changed occurrence episode: %+v", mode, view.Occurrences)
+			}
+			if view.AttemptTotals.Suppressed != 1 || view.AttemptTotals.Accepted != 0 || view.DeliveryHealth.State != state.GovernanceDeliverySuppressed {
+				t.Fatalf("%s suppression evidence/health=%+v totals=%+v", mode, view.DeliveryHealth, view.AttemptTotals)
+			}
+		})
+	}
+}
+
+func TestGovernanceDurableSuppressionDoesNotDependOnForensicAttempt(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 19, 13, 30, 0, 0, time.UTC)
+	snapshot := governanceSnapshot(now)
+	raw, err := json.Marshal(state.Data{
+		AlertSettings:         state.AlertSettings{Mode: state.AlertModeActOnly},
+		AttentionHighWaterSeq: 1,
+		GovernanceOccurrences: []state.GovernanceOccurrence{{
+			Fingerprint: snapshot.Candidates[0].Fingerprint, DisplayID: "gov-durable", Kind: string(snapshot.Candidates[0].Kind),
+			State: string(snapshot.Candidates[0].State), Severity: string(snapshot.Candidates[0].Severity),
+			Title: snapshot.Candidates[0].Title, Body: snapshot.Candidates[0].Body, Destination: string(snapshot.Candidates[0].Destination),
+			OccurredAt: now, FirstSeenAt: now, LastSeenAt: now, AttentionSeq: 1,
+			DeliveryDisposition: state.GovernanceDispositionSuppressedAtCreation,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ensureGovernanceKeys(t, store)
+	addGovernanceTarget(t, store, "device", "sub")
+	sender := &recordingSender{}
+	view, err := (&GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now.Add(time.Minute) }}).Observe(t.Context(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.payloads) != 0 || len(view.Receipts) != 0 || view.AttemptTotals.Accepted != 0 || view.AttemptTotals.Suppressed != 1 {
+		t.Fatalf("durable flag did not remain terminal: sends=%d view=%+v", len(sender.payloads), view)
+	}
+}
+
+func TestGovernanceLegacyUnknownEpisodeNeverSendsButNewEpisodeResamples(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 19, 13, 45, 0, 0, time.UTC)
+	snapshot := governanceSnapshot(now)
+	// This deliberately uses the pre-disposition storage shape. In particular,
+	// the old false boolean cannot prove that the episode was created enabled.
+	raw, err := json.Marshal(map[string]any{
+		"alert_settings": map[string]any{"mode": state.AlertModeActOnly},
+		"governance_occurrences": []map[string]any{{
+			"fingerprint": snapshot.Candidates[0].Fingerprint, "display_id": "gov-legacy", "kind": string(snapshot.Candidates[0].Kind),
+			"state": string(snapshot.Candidates[0].State), "severity": string(snapshot.Candidates[0].Severity),
+			"title": snapshot.Candidates[0].Title, "body": snapshot.Candidates[0].Body, "destination": string(snapshot.Candidates[0].Destination),
+			"occurred_at": now, "first_seen_at": now, "last_seen_at": now,
+			"delivery_suppressed_at_creation": false,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ensureGovernanceKeys(t, store)
+	addGovernanceTarget(t, store, "device", "sub")
+	sender := &recordingSender{}
+	dispatcher := &GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
+	view, err := dispatcher.Observe(t.Context(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.payloads) != 0 || len(view.Receipts) != 0 || view.AttemptTotals.Suppressed != 1 {
+		t.Fatalf("legacy episode delivered or lacked forensic accounting: sends=%d view=%+v", len(sender.payloads), view)
+	}
+	empty := governanceSnapshot(now.Add(time.Minute))
+	empty.Candidates = nil
+	now = now.Add(time.Minute)
+	if _, err := dispatcher.Observe(t.Context(), empty); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	snapshot.Candidates[0].OccurredAt = now
+	view, err = dispatcher.Observe(t.Context(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.payloads) != 1 || len(view.Receipts) != 1 || len(view.Occurrences) != 2 || view.Occurrences[1].DisplayID == "gov-legacy" {
+		t.Fatalf("new episode did not resample enabled mode: sends=%d view=%+v", len(sender.payloads), view)
+	}
+}
+
+func TestGovernanceResolvedNoneEpisodeCanDeliverWhenReopened(t *testing.T) {
+	t.Parallel()
+	store := governanceStore(t, state.AlertModeNone)
+	addGovernanceTarget(t, store, "device", "sub")
+	now := time.Date(2026, 7, 19, 14, 0, 0, 0, time.UTC)
+	sender := &recordingSender{}
+	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
+	view, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Occurrences) != 1 || len(sender.payloads) != 0 {
+		t.Fatalf("first episode view=%+v sends=%d", view, len(sender.payloads))
+	}
+	firstDisplayID := view.Occurrences[0].DisplayID
+
+	now = now.Add(time.Minute)
+	empty := governanceSnapshot(now)
+	empty.Candidates = nil
+	if _, err := dispatcher.Observe(t.Context(), empty); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAlertMode(state.AlertModeActOnly); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	view, err = dispatcher.Observe(t.Context(), governanceSnapshot(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.payloads) != 1 || len(view.Receipts) != 1 {
+		t.Fatalf("reopened episode sends=%d receipts=%+v", len(sender.payloads), view.Receipts)
+	}
+	if len(view.Occurrences) != 2 || view.Occurrences[0].ResolvedAt.IsZero() || view.Occurrences[1].DisplayID == firstDisplayID || !view.Occurrences[1].ResolvedAt.IsZero() {
+		t.Fatalf("episode identities=%+v", view.Occurrences)
 	}
 }
 
@@ -670,6 +1126,24 @@ func governanceSnapshot(now time.Time) rpc.NudgesSnapshotResult {
 type recordingSender struct {
 	payloads []push.Payload
 	results  map[string]state.PushAttempt
+}
+
+type threadSafeRecordingSender struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *threadSafeRecordingSender) Send(_ context.Context, sub state.PushSubscription, _ state.VAPIDKeys, _ push.Payload) state.PushAttempt {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return state.PushAttempt{SubscriptionID: sub.ID, OK: true, Class: state.GovernanceTransportAccepted}
+}
+
+func (s *threadSafeRecordingSender) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 type blockingGovernanceSender struct {

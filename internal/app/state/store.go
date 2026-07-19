@@ -1,6 +1,7 @@
 package state
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -51,7 +52,26 @@ const (
 	GovernanceDeliveryOverflow    = "overflow"
 )
 
-var ErrGovernanceOverflow = errors.New("governance evidence overflow")
+var (
+	ErrGovernanceOverflow            = errors.New("governance evidence overflow")
+	ErrAlertHistoryOverflow          = errors.New("alert history overflow: unread retention limit reached")
+	ErrAttentionReadRegression       = errors.New("attention read cursor cannot regress")
+	ErrAttentionReadBeyondHighWater  = errors.New("attention read cursor exceeds high-water sequence")
+	ErrAttentionReferencesIncomplete = errors.New("attention references are incomplete through requested sequence")
+	ErrAttentionSequenceExhausted    = errors.New("attention sequence exhausted")
+	ErrInvalidPersistedState         = errors.New("invalid persisted app state")
+)
+
+const (
+	AttentionKindCanary     = "canary"
+	AttentionKindGovernance = "governance"
+)
+
+const (
+	GovernanceDispositionEligible             = "eligible"
+	GovernanceDispositionSuppressedAtCreation = "suppressed_at_creation"
+	GovernanceDispositionLegacyUnknown        = "legacy_unknown"
+)
 
 const (
 	governanceRetention       = 90 * 24 * time.Hour
@@ -71,21 +91,23 @@ type Store struct {
 }
 
 type Data struct {
-	Devices                []DeviceGrant               `json:"devices,omitempty"`
-	AlertSettings          AlertSettings               `json:"alert_settings"`
-	PushSubscriptions      []PushSubscription          `json:"push_subscriptions,omitempty"`
-	AlertHistory           []AlertRecord               `json:"alert_history,omitempty"`
-	VAPID                  *VAPIDKeys                  `json:"vapid,omitempty"`
-	LastPush               *PushAttempt                `json:"last_push,omitempty"`
-	ProposalAudit          []ProposalAuditItem         `json:"proposal_audit,omitempty"`
-	RelayRoute             *RelayRoute                 `json:"relay_route,omitempty"`
-	GovernanceOccurrences  []GovernanceOccurrence      `json:"governance_occurrences,omitempty"`
-	GovernanceAttempts     []GovernanceAttempt         `json:"governance_attempts,omitempty"`
-	GovernanceReceipts     []GovernanceReceipt         `json:"governance_receipts,omitempty"`
-	GovernanceHealth       GovernanceDeliveryHealth    `json:"governance_delivery_health"`
-	GovernanceTotals       GovernanceAttemptTotals     `json:"governance_attempt_totals"`
-	GovernanceHealthTotals GovernanceHealthEventTotals `json:"governance_health_event_totals"`
-	DiagnosticStatus       GovernanceDiagnosticStatus  `json:"diagnostic_status"`
+	Devices                 []DeviceGrant               `json:"devices,omitempty"`
+	AlertSettings           AlertSettings               `json:"alert_settings"`
+	PushSubscriptions       []PushSubscription          `json:"push_subscriptions,omitempty"`
+	AlertHistory            []AlertRecord               `json:"alert_history,omitempty"`
+	VAPID                   *VAPIDKeys                  `json:"vapid,omitempty"`
+	LastPush                *PushAttempt                `json:"last_push,omitempty"`
+	ProposalAudit           []ProposalAuditItem         `json:"proposal_audit,omitempty"`
+	RelayRoute              *RelayRoute                 `json:"relay_route,omitempty"`
+	GovernanceOccurrences   []GovernanceOccurrence      `json:"governance_occurrences,omitempty"`
+	GovernanceAttempts      []GovernanceAttempt         `json:"governance_attempts,omitempty"`
+	GovernanceReceipts      []GovernanceReceipt         `json:"governance_receipts,omitempty"`
+	GovernanceHealth        GovernanceDeliveryHealth    `json:"governance_delivery_health"`
+	GovernanceTotals        GovernanceAttemptTotals     `json:"governance_attempt_totals"`
+	GovernanceHealthTotals  GovernanceHealthEventTotals `json:"governance_health_event_totals"`
+	DiagnosticStatus        GovernanceDiagnosticStatus  `json:"diagnostic_status"`
+	AttentionHighWaterSeq   uint64                      `json:"attention_high_water_seq"`
+	AttentionReadThroughSeq uint64                      `json:"attention_read_through_seq"`
 }
 
 type DeviceGrant struct {
@@ -133,15 +155,16 @@ type PushSubscription struct {
 }
 
 type AlertRecord struct {
-	ID          string    `json:"id"`
-	Fingerprint string    `json:"fingerprint"`
-	Action      string    `json:"action,omitempty"`
-	Severity    string    `json:"severity,omitempty"`
-	Account     string    `json:"account,omitempty"`
-	Mode        string    `json:"mode,omitempty"`
-	Title       string    `json:"title"`
-	Body        string    `json:"body"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID           string    `json:"id"`
+	Fingerprint  string    `json:"fingerprint"`
+	Action       string    `json:"action,omitempty"`
+	Severity     string    `json:"severity,omitempty"`
+	Account      string    `json:"account,omitempty"`
+	Mode         string    `json:"mode,omitempty"`
+	Title        string    `json:"title"`
+	Body         string    `json:"body"`
+	CreatedAt    time.Time `json:"created_at"`
+	AttentionSeq uint64    `json:"attention_seq"`
 }
 
 type PushAttempt struct {
@@ -157,20 +180,41 @@ type PushAttempt struct {
 // GovernanceOccurrence is durable app transport state. Fingerprint is the
 // daemon's opaque semantic identity and is never exposed by Governance().
 type GovernanceOccurrence struct {
-	Fingerprint string    `json:"fingerprint"`
-	DisplayID   string    `json:"display_id"`
-	Kind        string    `json:"kind"`
-	State       string    `json:"state"`
-	Severity    string    `json:"severity"`
-	Title       string    `json:"title"`
-	Body        string    `json:"body"`
-	Destination string    `json:"destination"`
-	OccurredAt  time.Time `json:"occurred_at"`
-	DueAt       time.Time `json:"due_at,omitzero"`
-	ExpiresAt   time.Time `json:"expires_at,omitzero"`
-	FirstSeenAt time.Time `json:"first_seen_at"`
-	LastSeenAt  time.Time `json:"last_seen_at"`
-	ResolvedAt  time.Time `json:"resolved_at,omitzero"`
+	Fingerprint         string    `json:"fingerprint"`
+	DisplayID           string    `json:"display_id"`
+	Kind                string    `json:"kind"`
+	State               string    `json:"state"`
+	Severity            string    `json:"severity"`
+	Title               string    `json:"title"`
+	Body                string    `json:"body"`
+	Destination         string    `json:"destination"`
+	OccurredAt          time.Time `json:"occurred_at"`
+	DueAt               time.Time `json:"due_at,omitzero"`
+	ExpiresAt           time.Time `json:"expires_at,omitzero"`
+	FirstSeenAt         time.Time `json:"first_seen_at"`
+	LastSeenAt          time.Time `json:"last_seen_at"`
+	ResolvedAt          time.Time `json:"resolved_at,omitzero"`
+	AttentionSeq        uint64    `json:"attention_seq"`
+	DeliveryDisposition string    `json:"delivery_disposition"`
+}
+
+// Attention is the shared durable unread cursor for the Alerts inbox. Legacy
+// rows have sequence zero and are intentionally excluded from UnreadCount.
+type AttentionRef struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+type Attention struct {
+	UnreadCount    int            `json:"unread_count"`
+	HighWaterSeq   uint64         `json:"high_water_seq"`
+	ReadThroughSeq uint64         `json:"read_through_seq"`
+	UnreadRefs     []AttentionRef `json:"unread_refs"`
+}
+
+type attentionEntry struct {
+	seq uint64
+	ref AttentionRef
 }
 
 type GovernanceAttempt struct {
@@ -315,6 +359,21 @@ func Open(dir string) (*Store, error) {
 	}
 	if s.data.AlertSettings.Mode == "" {
 		s.data.AlertSettings.Mode = AlertModeWatchAndAct
+	} else if !validAlertMode(s.data.AlertSettings.Mode) {
+		return nil, fmt.Errorf("%w: invalid alert mode %q", ErrInvalidPersistedState, s.data.AlertSettings.Mode)
+	}
+	for i := range s.data.GovernanceOccurrences {
+		disposition := s.data.GovernanceOccurrences[i].DeliveryDisposition
+		if disposition == "" {
+			s.data.GovernanceOccurrences[i].DeliveryDisposition = GovernanceDispositionLegacyUnknown
+			continue
+		}
+		if !validGovernanceDisposition(disposition) {
+			return nil, fmt.Errorf("%w: invalid governance delivery disposition %q", ErrInvalidPersistedState, disposition)
+		}
+	}
+	if err := s.validateAttentionState(); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -361,14 +420,160 @@ func (s *Store) AlertSettings() AlertSettings {
 	return s.data.AlertSettings
 }
 
+func (s *Store) Attention() Attention {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attentionLocked()
+}
+
+// MarkAttentionRead durably advances the shared read cursor to application
+// render state reported by a client. It is not proof of human attention or
+// physical delivery.
+func (s *Store) MarkAttentionRead(throughSeq uint64) (Attention, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if throughSeq < s.data.AttentionReadThroughSeq {
+		return s.attentionLocked(), ErrAttentionReadRegression
+	}
+	if throughSeq > s.data.AttentionHighWaterSeq {
+		return s.attentionLocked(), ErrAttentionReadBeyondHighWater
+	}
+	if throughSeq > s.data.AttentionReadThroughSeq && !s.attentionReferencesCompleteThroughLocked(throughSeq) {
+		return s.attentionLocked(), ErrAttentionReferencesIncomplete
+	}
+	if throughSeq == s.data.AttentionReadThroughSeq {
+		return s.attentionLocked(), nil
+	}
+	prior := s.data.AttentionReadThroughSeq
+	s.data.AttentionReadThroughSeq = throughSeq
+	if err := s.save(); err != nil {
+		s.data.AttentionReadThroughSeq = prior
+		return s.attentionLocked(), err
+	}
+	return s.attentionLocked(), nil
+}
+
+func (s *Store) attentionLocked() Attention {
+	entries := make([]attentionEntry, 0)
+	for _, record := range s.data.AlertHistory {
+		if record.AttentionSeq > s.data.AttentionReadThroughSeq && record.AttentionSeq <= s.data.AttentionHighWaterSeq {
+			entries = append(entries, attentionEntry{seq: record.AttentionSeq, ref: AttentionRef{Kind: AttentionKindCanary, ID: record.ID}})
+		}
+	}
+	for _, occurrence := range s.data.GovernanceOccurrences {
+		if occurrence.AttentionSeq > s.data.AttentionReadThroughSeq && occurrence.AttentionSeq <= s.data.AttentionHighWaterSeq {
+			entries = append(entries, attentionEntry{seq: occurrence.AttentionSeq, ref: AttentionRef{Kind: AttentionKindGovernance, ID: occurrence.DisplayID}})
+		}
+	}
+	slices.SortFunc(entries, func(a, b attentionEntry) int {
+		if order := cmp.Compare(a.seq, b.seq); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(a.ref.Kind, b.ref.Kind); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.ref.ID, b.ref.ID)
+	})
+	refs := make([]AttentionRef, len(entries))
+	for i, entry := range entries {
+		refs[i] = entry.ref
+	}
+	return Attention{UnreadCount: len(refs), HighWaterSeq: s.data.AttentionHighWaterSeq, ReadThroughSeq: s.data.AttentionReadThroughSeq, UnreadRefs: refs}
+}
+
+func (s *Store) attentionReferencesCompleteThroughLocked(throughSeq uint64) bool {
+	seen := make(map[uint64]struct{})
+	add := func(seq uint64) bool {
+		if seq <= s.data.AttentionReadThroughSeq || seq > throughSeq {
+			return true
+		}
+		if _, duplicate := seen[seq]; duplicate {
+			return false
+		}
+		seen[seq] = struct{}{}
+		return true
+	}
+	for _, record := range s.data.AlertHistory {
+		if !add(record.AttentionSeq) {
+			return false
+		}
+	}
+	for _, occurrence := range s.data.GovernanceOccurrences {
+		if !add(occurrence.AttentionSeq) {
+			return false
+		}
+	}
+	return uint64(len(seen)) == throughSeq-s.data.AttentionReadThroughSeq
+}
+
+func (s *Store) validateAttentionState() error {
+	readThrough := s.data.AttentionReadThroughSeq
+	highWater := s.data.AttentionHighWaterSeq
+	if readThrough > highWater {
+		return fmt.Errorf("%w: attention read-through %d exceeds high-water %d", ErrInvalidPersistedState, readThrough, highWater)
+	}
+	sequences := make(map[uint64]struct{})
+	unreadRefs := make(map[AttentionRef]struct{})
+	validate := func(seq uint64, ref AttentionRef) error {
+		if seq == 0 {
+			return nil
+		}
+		if seq > highWater {
+			return fmt.Errorf("%w: attention sequence %d exceeds high-water %d", ErrInvalidPersistedState, seq, highWater)
+		}
+		if _, duplicate := sequences[seq]; duplicate {
+			return fmt.Errorf("%w: duplicate attention sequence %d", ErrInvalidPersistedState, seq)
+		}
+		sequences[seq] = struct{}{}
+		if seq <= readThrough {
+			return nil
+		}
+		if strings.TrimSpace(ref.ID) == "" {
+			return fmt.Errorf("%w: empty unread %s attention id", ErrInvalidPersistedState, ref.Kind)
+		}
+		if _, duplicate := unreadRefs[ref]; duplicate {
+			return fmt.Errorf("%w: duplicate unread attention reference %s/%s", ErrInvalidPersistedState, ref.Kind, ref.ID)
+		}
+		unreadRefs[ref] = struct{}{}
+		return nil
+	}
+	for _, record := range s.data.AlertHistory {
+		if err := validate(record.AttentionSeq, AttentionRef{Kind: AttentionKindCanary, ID: record.ID}); err != nil {
+			return err
+		}
+	}
+	for _, occurrence := range s.data.GovernanceOccurrences {
+		if err := validate(occurrence.AttentionSeq, AttentionRef{Kind: AttentionKindGovernance, ID: occurrence.DisplayID}); err != nil {
+			return err
+		}
+	}
+	if uint64(len(unreadRefs)) != highWater-readThrough {
+		return fmt.Errorf("%w: attention sequence gap between read-through %d and high-water %d", ErrInvalidPersistedState, readThrough, highWater)
+	}
+	return nil
+}
+
+func (s *Store) nextAttentionSeqLocked() (uint64, error) {
+	if s.data.AttentionHighWaterSeq == ^uint64(0) {
+		return 0, ErrAttentionSequenceExhausted
+	}
+	s.data.AttentionHighWaterSeq++
+	return s.data.AttentionHighWaterSeq, nil
+}
+
 func (s *Store) SetAlertMode(mode string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !validAlertMode(mode) {
 		return fmt.Errorf("invalid alert mode %q", mode)
 	}
+	prior := s.data.AlertSettings.Mode
 	s.data.AlertSettings.Mode = mode
-	return s.save()
+	if err := s.save(); err != nil {
+		s.data.AlertSettings.Mode = prior
+		return err
+	}
+	return nil
 }
 
 func (s *Store) AddDevice(d DeviceGrant) error {
@@ -661,20 +866,19 @@ func governanceDisplayID(fingerprint string, episode int, at time.Time) string {
 }
 
 func (s *Store) UpsertGovernanceOccurrence(rec GovernanceOccurrence, now time.Time) (GovernanceOccurrence, bool, error) {
-	created := true
-	s.mu.Lock()
-	for _, existing := range s.data.GovernanceOccurrences {
-		if existing.Fingerprint == rec.Fingerprint && existing.ResolvedAt.IsZero() {
-			created = false
-			break
-		}
+	if strings.TrimSpace(rec.Fingerprint) == "" {
+		return GovernanceOccurrence{}, false, errors.New("governance occurrence fingerprint required")
 	}
-	s.mu.Unlock()
-	observed, err := s.ObserveGovernanceOccurrences([]GovernanceOccurrence{rec}, false, now)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	observed, created, err := s.observeGovernanceOccurrencesLocked([]GovernanceOccurrence{rec}, false, now.UTC())
 	if err != nil {
 		return GovernanceOccurrence{}, false, err
 	}
-	return observed[0], created, nil
+	if len(observed) != 1 {
+		return GovernanceOccurrence{}, false, errors.New("governance occurrence was not active at observation time")
+	}
+	return observed[0], created[0], nil
 }
 
 // ObserveGovernanceOccurrences applies one daemon observation in a single
@@ -689,13 +893,21 @@ func (s *Store) ObserveGovernanceOccurrences(records []GovernanceOccurrence, aut
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	observed, _, err := s.observeGovernanceOccurrencesLocked(records, authoritative, now)
+	return observed, err
+}
+
+func (s *Store) observeGovernanceOccurrencesLocked(records []GovernanceOccurrence, authoritative bool, now time.Time) ([]GovernanceOccurrence, []bool, error) {
 	priorOccurrences := append([]GovernanceOccurrence(nil), s.data.GovernanceOccurrences...)
 	priorAttempts := append([]GovernanceAttempt(nil), s.data.GovernanceAttempts...)
 	priorReceipts := append([]GovernanceReceipt(nil), s.data.GovernanceReceipts...)
+	priorHighWater := s.data.AttentionHighWaterSeq
+	priorReadThrough := s.data.AttentionReadThroughSeq
 	changed := false
 	active := make(map[string]bool, len(records))
 	resolvedIDs := map[string]bool{}
 	result := make([]GovernanceOccurrence, 0, len(records))
+	created := make([]bool, 0, len(records))
 	for i := range s.data.GovernanceOccurrences {
 		occurrence := &s.data.GovernanceOccurrences[i]
 		if occurrence.ResolvedAt.IsZero() && !occurrence.ExpiresAt.IsZero() && !now.Before(occurrence.ExpiresAt) {
@@ -722,6 +934,8 @@ func (s *Store) ObserveGovernanceOccurrences(records []GovernanceOccurrence, aut
 		}
 		if found >= 0 {
 			prior := s.data.GovernanceOccurrences[found]
+			incoming.AttentionSeq = prior.AttentionSeq
+			incoming.DeliveryDisposition = prior.DeliveryDisposition
 			incoming.DisplayID = prior.DisplayID
 			incoming.FirstSeenAt = prior.FirstSeenAt
 			incoming.LastSeenAt = prior.LastSeenAt
@@ -739,6 +953,7 @@ func (s *Store) ObserveGovernanceOccurrences(records []GovernanceOccurrence, aut
 			}
 			if !expired {
 				result = append(result, incoming)
+				created = append(created, false)
 			}
 			continue
 		}
@@ -750,8 +965,25 @@ func (s *Store) ObserveGovernanceOccurrences(records []GovernanceOccurrence, aut
 		}
 		if len(s.data.GovernanceOccurrences) >= s.governanceMaxItems {
 			s.data.GovernanceOccurrences = priorOccurrences
+			s.data.GovernanceAttempts = priorAttempts
 			s.data.GovernanceReceipts = priorReceipts
-			return nil, s.setGovernanceOverflowLocked(now)
+			s.data.AttentionHighWaterSeq = priorHighWater
+			s.data.AttentionReadThroughSeq = priorReadThrough
+			return nil, nil, s.setGovernanceOverflowLocked(now)
+		}
+		attentionSeq, err := s.nextAttentionSeqLocked()
+		if err != nil {
+			s.data.GovernanceOccurrences = priorOccurrences
+			s.data.GovernanceAttempts = priorAttempts
+			s.data.GovernanceReceipts = priorReceipts
+			s.data.AttentionHighWaterSeq = priorHighWater
+			s.data.AttentionReadThroughSeq = priorReadThrough
+			return nil, nil, err
+		}
+		incoming.AttentionSeq = attentionSeq
+		incoming.DeliveryDisposition = GovernanceDispositionEligible
+		if s.data.AlertSettings.Mode == AlertModeNone {
+			incoming.DeliveryDisposition = GovernanceDispositionSuppressedAtCreation
 		}
 		incoming.DisplayID = governanceDisplayID(incoming.Fingerprint, episodes+1, now)
 		incoming.FirstSeenAt = now
@@ -759,6 +991,7 @@ func (s *Store) ObserveGovernanceOccurrences(records []GovernanceOccurrence, aut
 		incoming.ResolvedAt = time.Time{}
 		s.data.GovernanceOccurrences = append(s.data.GovernanceOccurrences, incoming)
 		result = append(result, incoming)
+		created = append(created, true)
 		changed = true
 	}
 	if authoritative {
@@ -787,25 +1020,28 @@ func (s *Store) ObserveGovernanceOccurrences(records []GovernanceOccurrence, aut
 	if !changed {
 		if s.hasVolatileGovernanceWriteFailureLocked() {
 			if err := s.saveGovernanceLocked(now); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
-		return result, nil
+		return result, created, nil
 	}
 	if err := s.saveGovernanceLocked(now); err != nil {
 		s.data.GovernanceOccurrences = priorOccurrences
 		s.data.GovernanceAttempts = priorAttempts
 		s.data.GovernanceReceipts = priorReceipts
-		return nil, err
+		s.data.AttentionHighWaterSeq = priorHighWater
+		s.data.AttentionReadThroughSeq = priorReadThrough
+		return nil, nil, err
 	}
-	return result, nil
+	return result, created, nil
 }
 
 func sameGovernanceOccurrenceSemantics(a, b GovernanceOccurrence) bool {
 	return a.Fingerprint == b.Fingerprint && a.DisplayID == b.DisplayID && a.Kind == b.Kind && a.State == b.State &&
 		a.Severity == b.Severity && a.Title == b.Title && a.Body == b.Body && a.Destination == b.Destination &&
 		a.OccurredAt.Equal(b.OccurredAt) && a.DueAt.Equal(b.DueAt) && a.ExpiresAt.Equal(b.ExpiresAt) && a.FirstSeenAt.Equal(b.FirstSeenAt) &&
-		a.ResolvedAt.Equal(b.ResolvedAt)
+		a.ResolvedAt.Equal(b.ResolvedAt) && a.AttentionSeq == b.AttentionSeq &&
+		a.DeliveryDisposition == b.DeliveryDisposition
 }
 
 func (s *Store) ResolveGovernanceOccurrences(activeFingerprints []string, now time.Time) error {
@@ -1255,23 +1491,30 @@ func (s *Store) CompactGovernance(now time.Time) error {
 	defer s.mu.Unlock()
 	cutoff := now.UTC().Add(-governanceRetention)
 	removed := map[string]bool{}
+	unreadOccurrences := map[string]bool{}
 	occurrences := make([]GovernanceOccurrence, 0, len(s.data.GovernanceOccurrences))
 	for _, occurrence := range s.data.GovernanceOccurrences {
-		if !occurrence.ResolvedAt.IsZero() && occurrence.ResolvedAt.Before(cutoff) {
+		attentionRead := occurrence.AttentionSeq == 0 || occurrence.AttentionSeq <= s.data.AttentionReadThroughSeq
+		if attentionRead && !occurrence.ResolvedAt.IsZero() && occurrence.ResolvedAt.Before(cutoff) {
 			removed[occurrence.DisplayID] = true
 			continue
+		}
+		if !attentionRead {
+			unreadOccurrences[occurrence.DisplayID] = true
 		}
 		occurrences = append(occurrences, occurrence)
 	}
 	priorOccurrences := append([]GovernanceOccurrence(nil), s.data.GovernanceOccurrences...)
 	priorAttempts := append([]GovernanceAttempt(nil), s.data.GovernanceAttempts...)
 	priorReceipts := append([]GovernanceReceipt(nil), s.data.GovernanceReceipts...)
+	priorHighWater := s.data.AttentionHighWaterSeq
+	priorReadThrough := s.data.AttentionReadThroughSeq
 	s.data.GovernanceOccurrences = occurrences
 	s.data.GovernanceAttempts = slices.DeleteFunc(s.data.GovernanceAttempts, func(attempt GovernanceAttempt) bool {
-		return removed[attempt.OccurrenceID] || (!attempt.RetiredAt.IsZero() && attempt.RetiredAt.Before(cutoff))
+		return removed[attempt.OccurrenceID] || (!unreadOccurrences[attempt.OccurrenceID] && !attempt.RetiredAt.IsZero() && attempt.RetiredAt.Before(cutoff))
 	})
 	s.data.GovernanceReceipts = slices.DeleteFunc(s.data.GovernanceReceipts, func(receipt GovernanceReceipt) bool {
-		return removed[receipt.OccurrenceID] || (!receipt.RetiredAt.IsZero() && receipt.RetiredAt.Before(cutoff))
+		return removed[receipt.OccurrenceID] || (!unreadOccurrences[receipt.OccurrenceID] && !receipt.RetiredAt.IsZero() && receipt.RetiredAt.Before(cutoff))
 	})
 	if len(removed) == 0 && len(s.data.GovernanceAttempts) == len(priorAttempts) && len(s.data.GovernanceReceipts) == len(priorReceipts) {
 		if s.hasVolatileGovernanceWriteFailureLocked() {
@@ -1283,6 +1526,8 @@ func (s *Store) CompactGovernance(now time.Time) error {
 		s.data.GovernanceOccurrences = priorOccurrences
 		s.data.GovernanceAttempts = priorAttempts
 		s.data.GovernanceReceipts = priorReceipts
+		s.data.AttentionHighWaterSeq = priorHighWater
+		s.data.AttentionReadThroughSeq = priorReadThrough
 		return err
 	}
 	return nil
@@ -1405,11 +1650,69 @@ func validDiagnosticState(state string) bool {
 func (s *Store) RecordAlert(rec AlertRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data.AlertHistory = append([]AlertRecord{rec}, s.data.AlertHistory...)
-	if len(s.data.AlertHistory) > 100 {
-		s.data.AlertHistory = s.data.AlertHistory[:100]
+	return s.recordAlertLocked(rec)
+}
+
+// RecordAlertIfNew atomically deduplicates a semantic Canary occurrence and
+// records its durable inbox row under the same store transaction.
+func (s *Store) RecordAlertIfNew(rec AlertRecord) (bool, error) {
+	if strings.TrimSpace(rec.Fingerprint) == "" {
+		return false, errors.New("alert fingerprint required")
 	}
-	return s.save()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.data.AlertHistory {
+		if existing.Fingerprint == rec.Fingerprint {
+			return false, nil
+		}
+	}
+	if err := s.recordAlertLocked(rec); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) recordAlertLocked(rec AlertRecord) error {
+	if strings.TrimSpace(rec.ID) == "" {
+		return errors.New("alert id required")
+	}
+	for _, existing := range s.data.AlertHistory {
+		if existing.ID == rec.ID {
+			return fmt.Errorf("alert id %q already exists", rec.ID)
+		}
+	}
+	priorHistory := append([]AlertRecord(nil), s.data.AlertHistory...)
+	priorHighWater := s.data.AttentionHighWaterSeq
+	priorReadThrough := s.data.AttentionReadThroughSeq
+	for len(s.data.AlertHistory) >= 100 {
+		evict := -1
+		for i, record := range slices.Backward(s.data.AlertHistory) {
+			seq := record.AttentionSeq
+			if seq == 0 || seq <= s.data.AttentionReadThroughSeq {
+				evict = i
+				break
+			}
+		}
+		if evict < 0 {
+			s.data.AlertHistory = priorHistory
+			return ErrAlertHistoryOverflow
+		}
+		s.data.AlertHistory = slices.Delete(s.data.AlertHistory, evict, evict+1)
+	}
+	attentionSeq, err := s.nextAttentionSeqLocked()
+	if err != nil {
+		s.data.AlertHistory = priorHistory
+		return err
+	}
+	rec.AttentionSeq = attentionSeq
+	s.data.AlertHistory = append([]AlertRecord{rec}, s.data.AlertHistory...)
+	if err := s.save(); err != nil {
+		s.data.AlertHistory = priorHistory
+		s.data.AttentionHighWaterSeq = priorHighWater
+		s.data.AttentionReadThroughSeq = priorReadThrough
+		return err
+	}
+	return nil
 }
 
 func (s *Store) AlertHistory(limit int) []AlertRecord {
@@ -1423,11 +1726,26 @@ func (s *Store) AlertHistory(limit int) []AlertRecord {
 	return out
 }
 
-func (s *Store) ClearAlertHistory() error {
+func (s *Store) ClearAlertHistory() (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data.AlertHistory = nil
-	return s.save()
+	prior := append([]AlertRecord(nil), s.data.AlertHistory...)
+	retained := make([]AlertRecord, 0, len(s.data.AlertHistory))
+	for _, record := range s.data.AlertHistory {
+		if record.AttentionSeq != 0 && record.AttentionSeq > s.data.AttentionReadThroughSeq {
+			retained = append(retained, record)
+		}
+	}
+	cleared := len(s.data.AlertHistory) - len(retained)
+	if cleared == 0 {
+		return 0, nil
+	}
+	s.data.AlertHistory = retained
+	if err := s.save(); err != nil {
+		s.data.AlertHistory = prior
+		return 0, err
+	}
+	return cleared, nil
 }
 
 func (s *Store) HasAlertFingerprint(fp string) bool {
@@ -1593,6 +1911,15 @@ func (s *Store) save() error {
 func validAlertMode(mode string) bool {
 	switch mode {
 	case AlertModeNone, AlertModeActOnly, AlertModeWatchAndAct:
+		return true
+	default:
+		return false
+	}
+}
+
+func validGovernanceDisposition(disposition string) bool {
+	switch disposition {
+	case GovernanceDispositionEligible, GovernanceDispositionSuppressedAtCreation, GovernanceDispositionLegacyUnknown:
 		return true
 	default:
 		return false

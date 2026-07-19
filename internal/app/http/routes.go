@@ -91,6 +91,8 @@ func Register(deps Dependencies) {
 	srv.PUT("/api/alerts/settings", h.requireAuth(h.handlePutAlertSettings))
 	srv.GET("/api/alerts", h.requireAuth(h.handleAlerts))
 	srv.DELETE("/api/alerts", h.requireAuth(h.handleClearAlerts))
+	srv.GET("/api/attention", h.requireAuth(h.handleAttention))
+	srv.POST("/api/attention/read", h.requireAuth(h.handleAttentionRead))
 	srv.GET("/api/orders/open", h.requireAuth(h.handleOrdersOpen))
 	srv.GET("/api/orders/{id}", h.requireAuth(h.handleOrderStatus))
 	srv.POST("/api/orders/{id}/cancel", h.requireAuth(h.handleOrderCancel))
@@ -338,7 +340,8 @@ func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) 
 		"snapshot":         h.deps.Live.Snapshot(),
 		"settings":         h.settingsSnapshot(r.Context()),
 		"alert_settings":   h.deps.Store.AlertSettings(),
-		"alerts":           h.deps.Store.AlertHistory(20),
+		"alerts":           alertHistoryDTOs(h.deps.Store.AlertHistory(20)),
+		"attention":        h.deps.Store.Attention(),
 		"last_push":        h.deps.Store.LastPush(),
 		"relay":            h.deps.Relay.Status(),
 		"vapid_public_key": vapid.PublicKey,
@@ -452,6 +455,32 @@ func (h *handler) handleGovernance(w nethttp.ResponseWriter, _ *nethttp.Request)
 	writeJSON(w, h.governanceDTO())
 }
 
+func (h *handler) handleAttention(w nethttp.ResponseWriter, _ *nethttp.Request) {
+	writeJSON(w, h.deps.Store.Attention())
+}
+
+func (h *handler) handleAttentionRead(w nethttp.ResponseWriter, r *nethttp.Request) {
+	throughSeq, err := decodeAttentionReadRequest(r)
+	if err != nil {
+		writeError(w, nethttp.StatusBadRequest, "invalid attention read request")
+		return
+	}
+	attention, err := h.deps.Store.MarkAttentionRead(throughSeq)
+	if err != nil {
+		if errors.Is(err, state.ErrAttentionReadRegression) || errors.Is(err, state.ErrAttentionReadBeyondHighWater) {
+			writeError(w, nethttp.StatusBadRequest, err.Error())
+			return
+		}
+		if errors.Is(err, state.ErrAttentionReferencesIncomplete) {
+			writeError(w, nethttp.StatusConflict, err.Error())
+			return
+		}
+		writeError(w, nethttp.StatusInternalServerError, "persist attention read cursor")
+		return
+	}
+	writeJSON(w, attention)
+}
+
 func (h *handler) handleGovernanceCutoverReview(w nethttp.ResponseWriter, r *nethttp.Request) {
 	if err := decodeEmptyJSONObject(r); err != nil {
 		writeError(w, nethttp.StatusBadRequest, "governance cutover review body must be an empty JSON object")
@@ -478,6 +507,7 @@ func (h *handler) handleGovernanceCutoverReview(w nethttp.ResponseWriter, r *net
 		writeError(w, nethttp.StatusBadGateway, "invalid governance cutover review result")
 		return
 	}
+	h.deps.Live.PollNudgesOnce(r.Context())
 	writeJSON(w, result)
 }
 
@@ -673,12 +703,35 @@ func (h *handler) handlePutAlertSettings(w nethttp.ResponseWriter, r *nethttp.Re
 }
 
 func (h *handler) handleAlerts(w nethttp.ResponseWriter, _ *nethttp.Request) {
-	writeJSON(w, h.deps.Store.AlertHistory(50))
+	writeJSON(w, alertHistoryDTOs(h.deps.Store.AlertHistory(100)))
+}
+
+type alertHistoryDTO struct {
+	ID          string    `json:"id"`
+	Fingerprint string    `json:"fingerprint"`
+	Action      string    `json:"action,omitempty"`
+	Severity    string    `json:"severity,omitempty"`
+	Account     string    `json:"account,omitempty"`
+	Mode        string    `json:"mode,omitempty"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func alertHistoryDTOs(records []state.AlertRecord) []alertHistoryDTO {
+	out := make([]alertHistoryDTO, len(records))
+	for i, record := range records {
+		out[i] = alertHistoryDTO{
+			ID: record.ID, Fingerprint: record.Fingerprint, Action: record.Action, Severity: record.Severity,
+			Account: record.Account, Mode: record.Mode, Title: record.Title, Body: record.Body, CreatedAt: record.CreatedAt,
+		}
+	}
+	return out
 }
 
 func (h *handler) handleClearAlerts(w nethttp.ResponseWriter, r *nethttp.Request) {
-	cleared := len(h.deps.Store.AlertHistory(0))
-	if err := h.deps.Store.ClearAlertHistory(); err != nil {
+	cleared, err := h.deps.Store.ClearAlertHistory()
+	if err != nil {
 		writeError(w, nethttp.StatusInternalServerError, err.Error())
 		return
 	}
@@ -866,6 +919,31 @@ func decodeJSON(r *nethttp.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	return dec.Decode(dst)
+}
+
+func decodeAttentionReadRequest(r *nethttp.Request) (uint64, error) {
+	defer r.Body.Close()
+	dec := json.NewDecoder(r.Body)
+	start, err := dec.Token()
+	if err != nil || start != json.Delim('{') {
+		return 0, errors.New("attention read body must be an object")
+	}
+	key, err := dec.Token()
+	if err != nil || key != "through_seq" {
+		return 0, errors.New("attention read body must contain through_seq")
+	}
+	var throughSeq *uint64
+	if err := dec.Decode(&throughSeq); err != nil || throughSeq == nil {
+		return 0, errors.New("through_seq must be an unsigned integer")
+	}
+	end, err := dec.Token()
+	if err != nil || end != json.Delim('}') {
+		return 0, errors.New("attention read body must contain only through_seq")
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return 0, errors.New("attention read body must contain exactly one object")
+	}
+	return *throughSeq, nil
 }
 
 func writeJSON(w nethttp.ResponseWriter, v any) {

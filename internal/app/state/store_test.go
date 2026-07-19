@@ -3,15 +3,24 @@ package state
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-func TestClearAlertHistoryRemovesRecordedAlerts(t *testing.T) {
+func attentionMatches(got, want Attention) bool {
+	if got.UnreadCount != want.UnreadCount || got.HighWaterSeq != want.HighWaterSeq || got.ReadThroughSeq != want.ReadThroughSeq {
+		return false
+	}
+	return want.UnreadRefs == nil || reflect.DeepEqual(got.UnreadRefs, want.UnreadRefs)
+}
+
+func TestClearAlertHistoryPreservesUnreadAndReportsActualCount(t *testing.T) {
 	t.Parallel()
 	store, err := Open(t.TempDir())
 	if err != nil {
@@ -29,12 +38,911 @@ func TestClearAlertHistoryRemovesRecordedAlerts(t *testing.T) {
 	if got := store.AlertHistory(10); len(got) != 1 {
 		t.Fatalf("AlertHistory len=%d, want 1", len(got))
 	}
-	if err := store.ClearAlertHistory(); err != nil {
+	cleared, err := store.ClearAlertHistory()
+	if err != nil {
 		t.Fatalf("ClearAlertHistory: %v", err)
 	}
-	if got := store.AlertHistory(10); len(got) != 0 {
-		t.Fatalf("AlertHistory len=%d, want 0", len(got))
+	if cleared != 0 {
+		t.Fatalf("cleared=%d, want 0 unread rows removed", cleared)
 	}
+	if got := store.AlertHistory(10); len(got) != 1 || got[0].ID != "alert-1" {
+		t.Fatalf("clear erased unread history: %+v", got)
+	}
+}
+
+func TestAttentionSnapshotReturnsOrderedAllowlistedRefs(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "canary-1", Fingerprint: "private-canary", Account: "private-account"}); err != nil {
+		t.Fatal(err)
+	}
+	governance, _, err := store.UpsertGovernanceOccurrence(GovernanceOccurrence{Fingerprint: "private-governance", Kind: "policy_drift"}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := store.Attention()
+	wantRefs := []AttentionRef{{Kind: AttentionKindCanary, ID: "canary-1"}, {Kind: AttentionKindGovernance, ID: governance.DisplayID}}
+	if got.UnreadCount != len(wantRefs) || !reflect.DeepEqual(got.UnreadRefs, wantRefs) {
+		t.Fatalf("attention=%+v want refs=%+v", got, wantRefs)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope) != 4 {
+		t.Fatalf("attention public fields=%v", envelope)
+	}
+	var publicRefs []map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["unread_refs"], &publicRefs); err != nil {
+		t.Fatal(err)
+	}
+	if len(publicRefs) != 2 {
+		t.Fatalf("public refs=%v", publicRefs)
+	}
+	for _, ref := range publicRefs {
+		if len(ref) != 2 || ref["kind"] == nil || ref["id"] == nil {
+			t.Fatalf("attention ref is not an exact kind/id allowlist: %v", ref)
+		}
+	}
+	for _, private := range []string{"private-canary", "private-governance", "private-account", "attention_seq", "fingerprint", "account"} {
+		if strings.Contains(string(raw), private) {
+			t.Fatalf("attention leaked %q: %s", private, raw)
+		}
+	}
+}
+
+func TestGovernanceEpisodeSamplesModeAtCreationAndPreservesSuppression(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAlertMode(AlertModeNone); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	created, _, err := store.UpsertGovernanceOccurrence(GovernanceOccurrence{Fingerprint: "episode", Kind: "policy_drift"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.DeliveryDisposition != GovernanceDispositionSuppressedAtCreation {
+		t.Fatal("episode created under none was not durably suppressed")
+	}
+	if err := store.SetAlertMode(AlertModeActOnly); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.ObserveGovernanceOccurrences([]GovernanceOccurrence{{Fingerprint: "episode", Kind: "updated"}}, true, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated) != 1 || updated[0].DeliveryDisposition != GovernanceDispositionSuppressedAtCreation {
+		t.Fatalf("update weakened suppression boundary: %+v", updated)
+	}
+	public, err := json.Marshal(store.Governance(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(public), "delivery_disposition") {
+		t.Fatalf("private suppression field leaked in governance DTO: %s", public)
+	}
+}
+
+func TestGovernanceEpisodeModeSampleFollowsStoreLockOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		modeOwnsFirst  bool
+		wantSuppressed bool
+	}{
+		{name: "creation owns lock while off", wantSuppressed: true},
+		{name: "enable owns lock before creation", modeOwnsFirst: true, wantSuppressed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetAlertMode(AlertModeNone); err != nil {
+				t.Fatal(err)
+			}
+			locked := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			store.saveObserver = func() {
+				once.Do(func() {
+					close(locked)
+					<-release
+				})
+			}
+
+			type occurrenceResult struct {
+				row GovernanceOccurrence
+				err error
+			}
+			occurrenceDone := make(chan occurrenceResult, 1)
+			modeDone := make(chan error, 1)
+			create := func() {
+				rows, err := store.ObserveGovernanceOccurrences([]GovernanceOccurrence{{Fingerprint: tc.name, Kind: "policy_drift"}}, true, time.Now().UTC())
+				var row GovernanceOccurrence
+				if len(rows) == 1 {
+					row = rows[0]
+				}
+				occurrenceDone <- occurrenceResult{row: row, err: err}
+			}
+			enable := func() { modeDone <- store.SetAlertMode(AlertModeActOnly) }
+
+			if tc.modeOwnsFirst {
+				go enable()
+				<-locked
+				go create()
+			} else {
+				go create()
+				<-locked
+				go enable()
+			}
+			close(release)
+			if err := <-modeDone; err != nil {
+				t.Fatal(err)
+			}
+			result := <-occurrenceDone
+			if result.err != nil {
+				t.Fatal(result.err)
+			}
+			gotSuppressed := result.row.DeliveryDisposition == GovernanceDispositionSuppressedAtCreation
+			if gotSuppressed != tc.wantSuppressed {
+				t.Fatalf("suppressed=%v want %v row=%+v", gotSuppressed, tc.wantSuppressed, result.row)
+			}
+		})
+	}
+}
+
+func TestSetAlertModeFailureRollsBackSampledMode(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.saveHook = func(string) error { return errors.New("injected mode save failure") }
+	if err := store.SetAlertMode(AlertModeNone); err == nil {
+		t.Fatal("SetAlertMode succeeded")
+	}
+	if got := store.AlertSettings().Mode; got != AlertModeWatchAndAct {
+		t.Fatalf("failed mode save changed in-memory authority to %q", got)
+	}
+}
+
+func TestGovernanceForensicSaveFailureKeepsTerminalEpisodeBoundary(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAlertMode(AlertModeNone); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	occurrence, _, err := store.UpsertGovernanceOccurrence(GovernanceOccurrence{Fingerprint: "suppressed", Kind: "policy_drift"}, now)
+	if err != nil || occurrence.DeliveryDisposition != GovernanceDispositionSuppressedAtCreation {
+		t.Fatalf("occurrence=%+v err=%v", occurrence, err)
+	}
+	store.saveHook = func(string) error { return errors.New("injected forensic save failure") }
+	attempt := GovernanceAttempt{
+		OccurrenceID: occurrence.DisplayID,
+		TargetRef:    GovernanceTargetRef("governance", "episode-suppressed"),
+		ReceiptKey:   GovernanceReceiptKey(occurrence.DisplayID, GovernanceTargetRef("governance", "episode-suppressed")),
+		At:           now,
+		Class:        GovernanceTransportSuppressed,
+	}
+	if err := store.RecordGovernanceAttempt(attempt, false); err == nil {
+		t.Fatal("forensic attempt unexpectedly persisted")
+	}
+	store.saveHook = nil
+	if len(store.data.GovernanceAttempts) != 0 || store.data.GovernanceTotals.Suppressed != 0 || store.data.GovernanceOccurrences[0].DeliveryDisposition != GovernanceDispositionSuppressedAtCreation {
+		t.Fatalf("failed forensic save weakened boundary or left partial accounting: %+v", store.data)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reopened.data.GovernanceOccurrences) != 1 || reopened.data.GovernanceOccurrences[0].DeliveryDisposition != GovernanceDispositionSuppressedAtCreation || len(reopened.data.GovernanceAttempts) != 0 || reopened.data.GovernanceTotals.Accepted != 0 {
+		t.Fatalf("reopened boundary/accounting=%+v", reopened.data)
+	}
+}
+
+func TestAttentionCanaryCreationIncrementsUnread(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "canary-1", Fingerprint: "fp-1", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	history := store.AlertHistory(10)
+	if len(history) != 1 || history[0].AttentionSeq != 1 {
+		t.Fatalf("history=%+v, want first attention sequence", history)
+	}
+	if got := store.Attention(); !attentionMatches(got, Attention{UnreadCount: 1, HighWaterSeq: 1}) {
+		t.Fatalf("attention=%+v", got)
+	}
+}
+
+func TestAttentionGovernanceEpisodeLifecycle(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC)
+	record := GovernanceOccurrence{Fingerprint: "episode", Kind: "policy_drift", State: "open", OccurredAt: now}
+	first, created, err := store.UpsertGovernanceOccurrence(record, now)
+	if err != nil || !created || first.AttentionSeq != 1 {
+		t.Fatalf("first=%+v created=%v err=%v", first, created, err)
+	}
+	if _, err := store.ObserveGovernanceOccurrences([]GovernanceOccurrence{record}, true, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	record.State = "updated"
+	updated, err := store.ObserveGovernanceOccurrences([]GovernanceOccurrence{record}, true, now.Add(2*time.Minute))
+	if err != nil || len(updated) != 1 || updated[0].AttentionSeq != first.AttentionSeq {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	if err := store.ResolveGovernanceOccurrences(nil, now.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Attention(); !attentionMatches(got, Attention{UnreadCount: 1, HighWaterSeq: 1}) {
+		t.Fatalf("attention after update/resolution=%+v", got)
+	}
+	second, created, err := store.UpsertGovernanceOccurrence(record, now.Add(4*time.Minute))
+	if err != nil || !created || second.AttentionSeq != 2 || second.DisplayID == first.DisplayID {
+		t.Fatalf("second=%+v created=%v err=%v", second, created, err)
+	}
+	if got := store.Attention(); !attentionMatches(got, Attention{UnreadCount: 2, HighWaterSeq: 2}) {
+		t.Fatalf("attention after reopened episode=%+v", got)
+	}
+}
+
+func TestAttentionLegacyRowsDoNotCreateUnread(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	raw := `{"alert_settings":{"mode":"watch_and_act"},"alert_history":[{"id":"legacy-alert"}],"governance_occurrences":[{"fingerprint":"legacy-governance","display_id":"legacy-display"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Attention(); !attentionMatches(got, Attention{}) {
+		t.Fatalf("legacy attention=%+v, want no rollout unread flood", got)
+	}
+	if history := store.AlertHistory(1); len(history) != 1 || history[0].AttentionSeq != 0 {
+		t.Fatalf("legacy alert=%+v", history)
+	}
+}
+
+func TestOpenMigratesLegacyGovernanceDispositionAndDefaultsBlankMode(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"alert_settings":{"mode":""},"governance_occurrences":[{"fingerprint":"legacy","display_id":"gov-legacy","kind":"policy_drift"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.data.AlertSettings.Mode != AlertModeWatchAndAct {
+		t.Fatalf("legacy blank mode=%q", store.data.AlertSettings.Mode)
+	}
+	if got := store.data.GovernanceOccurrences[0].DeliveryDisposition; got != GovernanceDispositionLegacyUnknown {
+		t.Fatalf("legacy disposition=%q", got)
+	}
+}
+
+func TestOpenRejectsCorruptPersistedAuthority(t *testing.T) {
+	t.Parallel()
+	fixtures := map[string]string{
+		"invalid mode":        `{"alert_settings":{"mode":"surprise"}}`,
+		"invalid disposition": `{"alert_settings":{"mode":"act_only"},"governance_occurrences":[{"fingerprint":"g","display_id":"gov","delivery_disposition":"surprise"}]}`,
+		"cursor inversion":    `{"alert_settings":{"mode":"act_only"},"attention_high_water_seq":1,"attention_read_through_seq":2}`,
+		"sequence gap":        `{"alert_settings":{"mode":"act_only"},"attention_high_water_seq":2,"alert_history":[{"id":"a","attention_seq":1}]}`,
+		"duplicate sequence":  `{"alert_settings":{"mode":"act_only"},"attention_high_water_seq":1,"alert_history":[{"id":"a","attention_seq":1},{"id":"b","attention_seq":1}]}`,
+		"duplicate refs":      `{"alert_settings":{"mode":"act_only"},"attention_high_water_seq":2,"alert_history":[{"id":"same","attention_seq":1},{"id":"same","attention_seq":2}]}`,
+		"out of range":        `{"alert_settings":{"mode":"act_only"},"attention_high_water_seq":1,"alert_history":[{"id":"a","attention_seq":2}]}`,
+		"empty unread id":     `{"alert_settings":{"mode":"act_only"},"attention_high_water_seq":1,"alert_history":[{"id":"","attention_seq":1}]}`,
+	}
+	for name, raw := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(dir); !errors.Is(err, ErrInvalidPersistedState) {
+				t.Fatalf("Open err=%v, want ErrInvalidPersistedState", err)
+			}
+		})
+	}
+}
+
+func TestRecordAlertIfNewIsAtomicAcrossConcurrentFingerprintObservations(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const observers = 32
+	start := make(chan struct{})
+	results := make(chan bool, observers)
+	errs := make(chan error, observers)
+	var wg sync.WaitGroup
+	for range observers {
+		wg.Go(func() {
+			<-start
+			created, err := store.RecordAlertIfNew(AlertRecord{ID: "canary-atomic", Fingerprint: "fp-atomic"})
+			results <- created
+			errs <- err
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+	createdCount := 0
+	for created := range results {
+		if created {
+			createdCount++
+		}
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if createdCount != 1 || len(store.AlertHistory(0)) != 1 {
+		t.Fatalf("created=%d history=%+v", createdCount, store.AlertHistory(0))
+	}
+	attention := store.Attention()
+	if attention.HighWaterSeq != 1 || attention.UnreadCount != 1 || len(attention.UnreadRefs) != 1 {
+		t.Fatalf("attention=%+v", attention)
+	}
+}
+
+func TestRecordAlertRequiresUniqueNonEmptyDurableID(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(AlertRecord{}); err == nil {
+		t.Fatal("RecordAlert accepted an empty public id")
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "stable"}); err != nil {
+		t.Fatal(err)
+	}
+	before := store.Attention()
+	if err := store.RecordAlert(AlertRecord{ID: "stable", Fingerprint: "different"}); err == nil {
+		t.Fatal("RecordAlert accepted a duplicate public id")
+	}
+	if got := store.Attention(); !reflect.DeepEqual(got, before) || len(store.AlertHistory(0)) != 1 {
+		t.Fatalf("rejected id changed state: attention=%+v history=%+v", got, store.AlertHistory(0))
+	}
+}
+
+func TestUpsertGovernanceOccurrenceCreatedIsLinearizable(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const observers = 32
+	start := make(chan struct{})
+	created := make(chan bool, observers)
+	errs := make(chan error, observers)
+	var wg sync.WaitGroup
+	for range observers {
+		wg.Go(func() {
+			<-start
+			_, wasCreated, err := store.UpsertGovernanceOccurrence(GovernanceOccurrence{Fingerprint: "governance-atomic", Kind: "policy_drift"}, time.Now().UTC())
+			created <- wasCreated
+			errs <- err
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(created)
+	close(errs)
+	createdCount := 0
+	for value := range created {
+		if value {
+			createdCount++
+		}
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if createdCount != 1 || len(store.data.GovernanceOccurrences) != 1 || store.data.AttentionHighWaterSeq != 1 {
+		t.Fatalf("created=%d occurrences=%+v high_water=%d", createdCount, store.data.GovernanceOccurrences, store.data.AttentionHighWaterSeq)
+	}
+}
+
+func TestMarkAttentionReadMonotonicIdempotentAndRenderedHighWaterRace(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	rendered := store.Attention()
+	if err := store.RecordAlert(AlertRecord{ID: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	marked, err := store.MarkAttentionRead(rendered.HighWaterSeq)
+	if err != nil || !attentionMatches(marked, Attention{UnreadCount: 1, HighWaterSeq: 2, ReadThroughSeq: 1}) {
+		t.Fatalf("marked=%+v err=%v", marked, err)
+	}
+	saves := 0
+	store.saveObserver = func() { saves++ }
+	if got, err := store.MarkAttentionRead(1); err != nil || !reflect.DeepEqual(got, marked) || saves != 0 {
+		t.Fatalf("idempotent mark got=%+v err=%v saves=%d", got, err, saves)
+	}
+	if _, err := store.MarkAttentionRead(0); !errors.Is(err, ErrAttentionReadRegression) {
+		t.Fatalf("regression err=%v", err)
+	}
+	if _, err := store.MarkAttentionRead(3); !errors.Is(err, ErrAttentionReadBeyondHighWater) {
+		t.Fatalf("beyond-high-water err=%v", err)
+	}
+	if got := store.Attention(); !reflect.DeepEqual(got, marked) {
+		t.Fatalf("invalid mark changed attention: %+v", got)
+	}
+}
+
+func TestMarkAttentionReadFailureRollsBackCursor(t *testing.T) {
+	for _, stage := range []string{"write", "rename"} {
+		t.Run(stage, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.RecordAlert(AlertRecord{ID: "unread"}); err != nil {
+				t.Fatal(err)
+			}
+			store.saveHook = func(got string) error {
+				if got == stage {
+					return errors.New("injected mark-read failure")
+				}
+				return nil
+			}
+			if _, err := store.MarkAttentionRead(1); err == nil {
+				t.Fatal("MarkAttentionRead succeeded")
+			}
+			want := Attention{UnreadCount: 1, HighWaterSeq: 1}
+			if got := store.Attention(); !attentionMatches(got, want) {
+				t.Fatalf("failed mark changed in-memory cursor: %+v", got)
+			}
+			reopened, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := reopened.Attention(); !attentionMatches(got, want) {
+				t.Fatalf("failed mark changed persisted cursor: %+v", got)
+			}
+		})
+	}
+}
+
+func TestAttentionPersistsAcrossReopen(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.UpsertGovernanceOccurrence(GovernanceOccurrence{Fingerprint: "g", Kind: "policy_drift"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkAttentionRead(1); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Attention(); !attentionMatches(got, Attention{UnreadCount: 1, HighWaterSeq: 2, ReadThroughSeq: 1}) {
+		t.Fatalf("reopened attention=%+v", got)
+	}
+}
+
+func TestAttentionCreationFailureRollsBackRowsAndCounters(t *testing.T) {
+	for _, stage := range []string{"write", "rename"} {
+		t.Run("canary/"+stage, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.RecordAlert(AlertRecord{ID: "baseline"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.MarkAttentionRead(1); err != nil {
+				t.Fatal(err)
+			}
+			store.saveHook = func(got string) error {
+				if got == stage {
+					return errors.New("injected alert save failure")
+				}
+				return nil
+			}
+			if err := store.RecordAlert(AlertRecord{ID: "failed"}); err == nil {
+				t.Fatal("RecordAlert succeeded")
+			}
+			want := Attention{HighWaterSeq: 1, ReadThroughSeq: 1}
+			if got := store.Attention(); !attentionMatches(got, want) || len(store.AlertHistory(10)) != 1 {
+				t.Fatalf("failed alert state: attention=%+v history=%+v", got, store.AlertHistory(10))
+			}
+			reopened, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !attentionMatches(reopened.Attention(), want) || len(reopened.AlertHistory(10)) != 1 {
+				t.Fatalf("reopened failed alert state: attention=%+v history=%+v", reopened.Attention(), reopened.AlertHistory(10))
+			}
+		})
+		t.Run("governance/"+stage, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.RecordAlert(AlertRecord{ID: "baseline"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.MarkAttentionRead(1); err != nil {
+				t.Fatal(err)
+			}
+			store.saveHook = func(got string) error {
+				if got == stage {
+					return errors.New("injected governance save failure")
+				}
+				return nil
+			}
+			if _, _, err := store.UpsertGovernanceOccurrence(GovernanceOccurrence{Fingerprint: "failed", Kind: "policy_drift"}, time.Now().UTC()); err == nil {
+				t.Fatal("governance creation succeeded")
+			}
+			want := Attention{HighWaterSeq: 1, ReadThroughSeq: 1}
+			if got := store.Attention(); !attentionMatches(got, want) || len(store.Governance(time.Now().UTC()).Occurrences) != 0 {
+				t.Fatalf("failed governance state: attention=%+v governance=%+v", got, store.Governance(time.Now().UTC()))
+			}
+			reopened, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !attentionMatches(reopened.Attention(), want) || len(reopened.Governance(time.Now().UTC()).Occurrences) != 0 {
+				t.Fatalf("reopened failed governance state: attention=%+v governance=%+v", reopened.Attention(), reopened.Governance(time.Now().UTC()))
+			}
+		})
+	}
+}
+
+func TestAlertRetentionRejectsUnreadAndEvictsOldestRead(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 100 {
+		if err := store.RecordAlert(AlertRecord{ID: fmt.Sprintf("alert-%03d", i+1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "overflow"}); !errors.Is(err, ErrAlertHistoryOverflow) {
+		t.Fatalf("overflow err=%v", err)
+	}
+	if got := store.Attention(); !attentionMatches(got, Attention{UnreadCount: 100, HighWaterSeq: 100}) {
+		t.Fatalf("overflow changed attention=%+v", got)
+	}
+	if _, err := store.MarkAttentionRead(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "fresh"}); err != nil {
+		t.Fatal(err)
+	}
+	history := store.AlertHistory(0)
+	if len(history) != 100 || history[0].ID != "fresh" {
+		t.Fatalf("retained history len=%d newest=%+v", len(history), history[0])
+	}
+	for _, record := range history {
+		if record.AttentionSeq == 1 {
+			t.Fatal("oldest read row was not evicted")
+		}
+	}
+	if got := store.Attention(); !attentionMatches(got, Attention{UnreadCount: 100, HighWaterSeq: 101, ReadThroughSeq: 1}) {
+		t.Fatalf("attention after read eviction=%+v", got)
+	}
+}
+
+func TestAlertRetentionEvictsLegacyRows(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	legacy := make([]AlertRecord, 100)
+	for i := range legacy {
+		legacy[i].ID = fmt.Sprintf("legacy-%03d", i)
+	}
+	raw, err := json.Marshal(Data{AlertSettings: AlertSettings{Mode: AlertModeWatchAndAct}, AlertHistory: legacy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "fresh"}); err != nil {
+		t.Fatal(err)
+	}
+	history := store.AlertHistory(0)
+	if len(history) != 100 || history[0].AttentionSeq != 1 || history[len(history)-1].ID != "legacy-098" {
+		t.Fatalf("legacy retention=%+v", history)
+	}
+	if got := store.Attention(); !attentionMatches(got, Attention{UnreadCount: 1, HighWaterSeq: 1}) {
+		t.Fatalf("attention=%+v", got)
+	}
+}
+
+func TestClearAlertHistoryRemovesOnlyLegacyAndReadRows(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "read"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkAttentionRead(1); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.data.AlertHistory = append(store.data.AlertHistory, AlertRecord{ID: "legacy"})
+	store.mu.Unlock()
+	if err := store.RecordAlert(AlertRecord{ID: "unread"}); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := store.ClearAlertHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 2 {
+		t.Fatalf("cleared=%d, want legacy plus read row", cleared)
+	}
+	history := store.AlertHistory(0)
+	if len(history) != 1 || history[0].ID != "unread" {
+		t.Fatalf("retained history=%+v", history)
+	}
+	want := Attention{UnreadCount: 1, HighWaterSeq: 2, ReadThroughSeq: 1, UnreadRefs: []AttentionRef{{Kind: AttentionKindCanary, ID: "unread"}}}
+	if got := store.Attention(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("attention=%+v want=%+v", got, want)
+	}
+}
+
+func TestClearAlertHistorySaveFailureRollsBackEverything(t *testing.T) {
+	for _, stage := range []string{"write", "rename"} {
+		t.Run(stage, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.RecordAlert(AlertRecord{ID: "read"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.MarkAttentionRead(1); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.RecordAlert(AlertRecord{ID: "unread"}); err != nil {
+				t.Fatal(err)
+			}
+			beforeHistory := store.AlertHistory(0)
+			beforeAttention := store.Attention()
+			store.saveHook = func(got string) error {
+				if got == stage {
+					return errors.New("injected clear failure")
+				}
+				return nil
+			}
+			cleared, err := store.ClearAlertHistory()
+			if err == nil || cleared != 0 {
+				t.Fatalf("cleared=%d err=%v", cleared, err)
+			}
+			if got := store.AlertHistory(0); !reflect.DeepEqual(got, beforeHistory) || !reflect.DeepEqual(store.Attention(), beforeAttention) {
+				t.Fatalf("in-memory rollback history=%+v attention=%+v", got, store.Attention())
+			}
+			reopened, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := reopened.AlertHistory(0); !reflect.DeepEqual(got, beforeHistory) || !reflect.DeepEqual(reopened.Attention(), beforeAttention) {
+				t.Fatalf("reopened rollback history=%+v attention=%+v", got, reopened.Attention())
+			}
+		})
+	}
+}
+
+func TestAttentionRefsCoverCappedCanaryAndGovernanceHistory(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 100 {
+		if err := store.RecordAlert(AlertRecord{ID: fmt.Sprintf("canary-%03d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	governance, _, err := store.UpsertGovernanceOccurrence(GovernanceOccurrence{Fingerprint: "governance", Kind: "policy_drift"}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	attention := store.Attention()
+	if attention.UnreadCount != 101 || attention.UnreadCount != len(attention.UnreadRefs) || attention.HighWaterSeq != 101 {
+		t.Fatalf("attention=%+v", attention)
+	}
+	if attention.UnreadRefs[0] != (AttentionRef{Kind: AttentionKindCanary, ID: "canary-000"}) || attention.UnreadRefs[100] != (AttentionRef{Kind: AttentionKindGovernance, ID: governance.DisplayID}) {
+		t.Fatalf("ordered refs first=%+v last=%+v", attention.UnreadRefs[0], attention.UnreadRefs[100])
+	}
+	if got := store.AlertHistory(0); len(got) != 100 {
+		t.Fatalf("full retained Canary history len=%d", len(got))
+	}
+}
+
+func TestAttentionConcurrentCreationSnapshotIsCoherentAndOrdered(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const pairs = 24
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range pairs {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := store.RecordAlert(AlertRecord{ID: fmt.Sprintf("canary-%02d", i)}); err != nil {
+				t.Errorf("RecordAlert: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, _, err := store.UpsertGovernanceOccurrence(GovernanceOccurrence{Fingerprint: fmt.Sprintf("governance-%02d", i), Kind: "policy_drift"}, time.Now().UTC()); err != nil {
+				t.Errorf("UpsertGovernanceOccurrence: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	attention := store.Attention()
+	if attention.UnreadCount != pairs*2 || attention.UnreadCount != len(attention.UnreadRefs) || attention.HighWaterSeq != pairs*2 {
+		t.Fatalf("attention=%+v", attention)
+	}
+	seqByRef := make(map[AttentionRef]uint64, pairs*2)
+	store.mu.Lock()
+	for _, record := range store.data.AlertHistory {
+		seqByRef[AttentionRef{Kind: AttentionKindCanary, ID: record.ID}] = record.AttentionSeq
+	}
+	for _, occurrence := range store.data.GovernanceOccurrences {
+		seqByRef[AttentionRef{Kind: AttentionKindGovernance, ID: occurrence.DisplayID}] = occurrence.AttentionSeq
+	}
+	store.mu.Unlock()
+	var prior uint64
+	for _, ref := range attention.UnreadRefs {
+		seq := seqByRef[ref]
+		if seq <= prior {
+			t.Fatalf("refs are not ordered by immutable sequence: prior=%d seq=%d ref=%+v", prior, seq, ref)
+		}
+		prior = seq
+	}
+}
+
+func TestAttentionReaderOverlappingLockedCreationGetsCoherentSnapshot(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	creationLocked := make(chan struct{})
+	releaseCreation := make(chan struct{})
+	store.saveObserver = func() {
+		close(creationLocked)
+		<-releaseCreation
+	}
+	creationDone := make(chan error, 1)
+	go func() {
+		creationDone <- store.RecordAlert(AlertRecord{ID: "overlap"})
+	}()
+	<-creationLocked
+	readerStarted := make(chan struct{})
+	readerDone := make(chan Attention, 1)
+	go func() {
+		close(readerStarted)
+		readerDone <- store.Attention()
+	}()
+	<-readerStarted
+	close(releaseCreation)
+	if err := <-creationDone; err != nil {
+		t.Fatal(err)
+	}
+	got := <-readerDone
+	want := Attention{UnreadCount: 1, HighWaterSeq: 1, UnreadRefs: []AttentionRef{{Kind: AttentionKindCanary, ID: "overlap"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("overlapping reader saw mixed snapshot: got=%+v want=%+v", got, want)
+	}
+}
+
+func TestAttentionMissingReferenceFailsClosed(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(AlertRecord{ID: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.data.AlertHistory = store.data.AlertHistory[:1]
+	store.mu.Unlock()
+	if _, err := store.MarkAttentionRead(2); !errors.Is(err, ErrAttentionReferencesIncomplete) {
+		t.Fatalf("missing-ref mark err=%v", err)
+	}
+	attention := store.Attention()
+	if attention.ReadThroughSeq != 0 || attention.UnreadCount != 1 || len(attention.UnreadRefs) != 1 || attention.UnreadRefs[0].ID != "second" {
+		t.Fatalf("missing ref advanced or fabricated attention: %+v", attention)
+	}
+}
+
+func TestAttentionSequenceExhaustionRollsBackSingleAndPartialBatch(t *testing.T) {
+	t.Run("canary", func(t *testing.T) {
+		store, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		store.data.AttentionHighWaterSeq = ^uint64(0)
+		store.data.AttentionReadThroughSeq = ^uint64(0)
+		if err := store.RecordAlert(AlertRecord{ID: "overflow"}); !errors.Is(err, ErrAttentionSequenceExhausted) {
+			t.Fatalf("RecordAlert err=%v", err)
+		}
+		if len(store.data.AlertHistory) != 0 || store.data.AttentionHighWaterSeq != ^uint64(0) {
+			t.Fatalf("exhausted Canary mutation survived: %+v", store.data)
+		}
+	})
+	t.Run("governance partial batch", func(t *testing.T) {
+		store, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		store.data.AttentionHighWaterSeq = ^uint64(0) - 1
+		store.data.AttentionReadThroughSeq = ^uint64(0) - 1
+		_, err = store.ObserveGovernanceOccurrences([]GovernanceOccurrence{
+			{Fingerprint: "first", Kind: "policy_drift"},
+			{Fingerprint: "second", Kind: "reconcile_exception"},
+		}, true, time.Now().UTC())
+		if !errors.Is(err, ErrAttentionSequenceExhausted) {
+			t.Fatalf("ObserveGovernanceOccurrences err=%v", err)
+		}
+		if len(store.data.GovernanceOccurrences) != 0 || store.data.AttentionHighWaterSeq != ^uint64(0)-1 || store.data.AttentionReadThroughSeq != ^uint64(0)-1 {
+			t.Fatalf("partial exhausted batch survived: %+v", store.data)
+		}
+	})
 }
 
 func TestRelayRoutePersistsAndFiltersByRemoteURL(t *testing.T) {
@@ -222,6 +1130,30 @@ func TestGovernanceRetentionNeverEvictsBindingTruthAndFailsLoudOnOverflow(t *tes
 	}
 }
 
+func TestGovernanceOccurrenceOverflowRollsBackPartialBatchAttention(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.governanceMaxItems = 1
+	now := time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC)
+	_, err = store.ObserveGovernanceOccurrences([]GovernanceOccurrence{
+		{Fingerprint: "first", Kind: "policy_drift"},
+		{Fingerprint: "second", Kind: "reconcile_exception"},
+	}, true, now)
+	if !errors.Is(err, ErrGovernanceOverflow) {
+		t.Fatalf("overflow err=%v", err)
+	}
+	if got := store.Attention(); !attentionMatches(got, Attention{}) {
+		t.Fatalf("partial batch advanced attention=%+v", got)
+	}
+	view := store.Governance(now)
+	if len(view.Occurrences) != 0 || view.DeliveryHealth.State != GovernanceDeliveryOverflow {
+		t.Fatalf("partial batch survived overflow: %+v", view)
+	}
+}
+
 func TestGovernanceResolvedDetailRetainsNinetyDaysThenCompacts(t *testing.T) {
 	t.Parallel()
 	store, err := Open(t.TempDir())
@@ -239,12 +1171,47 @@ func TestGovernanceResolvedDetailRetainsNinetyDaysThenCompacts(t *testing.T) {
 	if err := store.ResolveGovernanceOccurrences(nil, now.AddDate(0, 0, -99)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.MarkAttentionRead(store.Attention().HighWaterSeq); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.CompactGovernance(now); err != nil {
 		t.Fatal(err)
 	}
 	view := store.Governance(now)
 	if len(view.Occurrences) != 0 || len(view.Attempts) != 0 || store.HasGovernanceReceipt("old-receipt") || view.AttemptTotals.Accepted != 1 {
 		t.Fatalf("expired resolved detail survived compaction: %+v", view)
+	}
+}
+
+func TestCompactGovernanceRetainsUnreadUntilMarkedRead(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC)
+	old := now.Add(-100 * 24 * time.Hour)
+	occurrence, _, err := store.UpsertGovernanceOccurrence(GovernanceOccurrence{Fingerprint: "unread-old", Kind: "policy_drift", OccurredAt: old}, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ResolveGovernanceOccurrences(nil, old.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompactGovernance(now); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Governance(now).Occurrences; len(got) != 1 || got[0].DisplayID != occurrence.DisplayID {
+		t.Fatalf("unread old occurrence compacted: %+v", got)
+	}
+	if _, err := store.MarkAttentionRead(occurrence.AttentionSeq); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompactGovernance(now); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Governance(now).Occurrences; len(got) != 0 {
+		t.Fatalf("read old occurrence survived compaction: %+v", got)
 	}
 }
 
@@ -538,6 +1505,16 @@ func TestGovernanceCompletedTargetEvidenceRetainsReceiptUntilCompaction(t *testi
 	view := store.Governance(now)
 	if len(view.Attempts) != 1 || view.Attempts[0].RetiredAt.IsZero() || len(view.Receipts) != 1 || view.Receipts[0].RetiredAt.IsZero() || view.AttemptTotals.Accepted != 1 {
 		t.Fatalf("retained completed target evidence=%+v", view)
+	}
+	if err := store.CompactGovernance(view.Attempts[0].RetiredAt.Add(governanceRetention + time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	unread := store.Governance(now)
+	if len(unread.Attempts) != 1 || len(unread.Receipts) != 1 {
+		t.Fatalf("unread governance evidence compacted: %+v", unread)
+	}
+	if _, err := store.MarkAttentionRead(occ.AttentionSeq); err != nil {
+		t.Fatal(err)
 	}
 	if err := store.CompactGovernance(view.Attempts[0].RetiredAt.Add(governanceRetention + time.Second)); err != nil {
 		t.Fatal(err)
@@ -842,7 +1819,11 @@ func TestCompactGovernanceFailureRestoresDeepCopiedEvidence(t *testing.T) {
 	if err := store.ResolveGovernanceOccurrences(nil, old.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.MarkAttentionRead(store.Attention().HighWaterSeq); err != nil {
+		t.Fatal(err)
+	}
 	before := store.Governance(now)
+	beforeAttention := store.Attention()
 	store.saveHook = func(stage string) error {
 		if stage == "rename" {
 			return errors.New("injected compact rename failure")
@@ -854,7 +1835,7 @@ func TestCompactGovernanceFailureRestoresDeepCopiedEvidence(t *testing.T) {
 	}
 	store.saveHook = nil
 	after := store.Governance(now)
-	if !reflect.DeepEqual(after.Occurrences, before.Occurrences) || !reflect.DeepEqual(after.Attempts, before.Attempts) || !reflect.DeepEqual(after.Receipts, before.Receipts) || after.AttemptTotals != before.AttemptTotals {
+	if !reflect.DeepEqual(after.Occurrences, before.Occurrences) || !reflect.DeepEqual(after.Attempts, before.Attempts) || !reflect.DeepEqual(after.Receipts, before.Receipts) || after.AttemptTotals != before.AttemptTotals || !reflect.DeepEqual(store.Attention(), beforeAttention) {
 		t.Fatalf("visible state changed after failed compaction:\nbefore=%+v\nafter=%+v", before, after)
 	}
 	reopened, err := Open(dir)

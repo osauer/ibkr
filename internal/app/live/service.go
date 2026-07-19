@@ -21,6 +21,7 @@ type Service struct {
 	canaryEvery time.Duration
 	now         func() time.Time
 
+	pollMu      sync.Mutex
 	mu          sync.Mutex
 	snapshot    Snapshot
 	hashes      map[string]string
@@ -138,6 +139,8 @@ func (s *Service) Start(ctx context.Context) {
 }
 
 func (s *Service) pollStatus(ctx context.Context) Snapshot {
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
 	now := s.now().UTC()
 	s.mu.Lock()
 	snap := cloneSnapshot(s.snapshot)
@@ -204,6 +207,8 @@ func (s *Service) runMarketQuoteStream(ctx context.Context, item marketQuoteCont
 }
 
 func (s *Service) PollOnce(ctx context.Context) Snapshot {
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
 	now := s.now().UTC()
 	s.mu.Lock()
 	snap := cloneSnapshot(s.snapshot)
@@ -440,6 +445,8 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 // polling account or market surfaces. Daemon evaluator health remains inside
 // Nudges; this method owns only app transport freshness.
 func (s *Service) PollNudgesOnce(ctx context.Context) Snapshot {
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
 	now := s.now().UTC()
 	s.mu.Lock()
 	snap := cloneSnapshot(s.snapshot)

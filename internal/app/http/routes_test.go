@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,95 @@ func TestBootstrapRequiresAuth(t *testing.T) {
 	handler.ServeHTTP(res, req)
 	if res.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d, want 401; body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestAttentionRoutesAndBootstrapAreAuthenticatedAndTyped(t *testing.T) {
+	t.Parallel()
+	srv, store, _ := newGovernanceTestHandlerWithoutPoll(t, routeFakeClient{})
+	handler := srv.Handler()
+	if err := store.RecordAlert(state.AlertRecord{ID: "canary"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/api/attention", nil),
+		httptest.NewRequest(http.MethodPost, "/api/attention/read", strings.NewReader(`{"through_seq":1}`)),
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated %s %s status=%d", request.Method, request.URL.Path, response.Code)
+		}
+	}
+
+	cookie := routeSessionCookie(t, handler)
+	get := httptest.NewRequest(http.MethodGet, "/api/attention", nil)
+	get.AddCookie(cookie)
+	getResponse := httptest.NewRecorder()
+	handler.ServeHTTP(getResponse, get)
+	var attention state.Attention
+	wantAttention := state.Attention{UnreadCount: 1, HighWaterSeq: 1, UnreadRefs: []state.AttentionRef{{Kind: state.AttentionKindCanary, ID: "canary"}}}
+	if getResponse.Code != http.StatusOK || json.Unmarshal(getResponse.Body.Bytes(), &attention) != nil || !reflect.DeepEqual(attention, wantAttention) {
+		t.Fatalf("GET attention status=%d attention=%+v body=%s", getResponse.Code, attention, getResponse.Body.String())
+	}
+
+	bootstrap := httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil)
+	bootstrap.AddCookie(cookie)
+	bootstrapResponse := httptest.NewRecorder()
+	handler.ServeHTTP(bootstrapResponse, bootstrap)
+	var boot struct {
+		Attention state.Attention `json:"attention"`
+	}
+	if bootstrapResponse.Code != http.StatusOK || json.Unmarshal(bootstrapResponse.Body.Bytes(), &boot) != nil || !reflect.DeepEqual(boot.Attention, attention) {
+		t.Fatalf("bootstrap status=%d attention=%+v body=%s", bootstrapResponse.Code, boot.Attention, bootstrapResponse.Body.String())
+	}
+
+	mark := httptest.NewRequest(http.MethodPost, "/api/attention/read", strings.NewReader(`{"through_seq":1}`))
+	mark.AddCookie(cookie)
+	markResponse := httptest.NewRecorder()
+	handler.ServeHTTP(markResponse, mark)
+	wantAttention = state.Attention{HighWaterSeq: 1, ReadThroughSeq: 1, UnreadRefs: []state.AttentionRef{}}
+	if markResponse.Code != http.StatusOK || json.Unmarshal(markResponse.Body.Bytes(), &attention) != nil || !reflect.DeepEqual(attention, wantAttention) {
+		t.Fatalf("mark status=%d attention=%+v body=%s", markResponse.Code, attention, markResponse.Body.String())
+	}
+}
+
+func TestAttentionReadRejectsInvalidBodiesAndCursors(t *testing.T) {
+	t.Parallel()
+	srv, store, _ := newGovernanceTestHandlerWithoutPoll(t, routeFakeClient{})
+	handler := srv.Handler()
+	if err := store.RecordAlert(state.AlertRecord{ID: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(state.AlertRecord{ID: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	cookie := routeSessionCookie(t, handler)
+	mark := httptest.NewRequest(http.MethodPost, "/api/attention/read", strings.NewReader(`{"through_seq":1}`))
+	mark.AddCookie(cookie)
+	markResponse := httptest.NewRecorder()
+	handler.ServeHTTP(markResponse, mark)
+	if markResponse.Code != http.StatusOK {
+		t.Fatalf("initial mark status=%d body=%s", markResponse.Code, markResponse.Body.String())
+	}
+	want := state.Attention{UnreadCount: 1, HighWaterSeq: 2, ReadThroughSeq: 1, UnreadRefs: []state.AttentionRef{{Kind: state.AttentionKindCanary, ID: "b"}}}
+
+	bodies := []string{
+		``, `{}`, `null`, `[]`, `{"through_seq":null}`, `{"other":1}`, `{"through_seq":1,"other":2}`,
+		`{"through_seq":-1}`, `{"through_seq":1.5}`, `{"through_seq":"1"}`, `{"through_seq":1,"through_seq":2}`,
+		`{"through_seq":1}{"through_seq":1}`, `{"through_seq":0}`, `{"through_seq":3}`,
+	}
+	for _, body := range bodies {
+		request := httptest.NewRequest(http.MethodPost, "/api/attention/read", strings.NewReader(body))
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("body=%q status=%d response=%s", body, response.Code, response.Body.String())
+		}
+		if got := store.Attention(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("body=%q changed attention=%+v", body, got)
+		}
 	}
 }
 
@@ -220,6 +310,59 @@ func TestGovernanceCutoverReviewUsesFixedPairedParamsAndDoesNotMutateAppState(t 
 			after := governanceAppStateForTest(t, store, reviewedAt)
 			if !bytes.Equal(after, before) {
 				t.Fatalf("cutover review mutated app governance state:\nbefore=%s\nafter=%s", before, after)
+			}
+		})
+	}
+}
+
+func TestGovernanceCutoverReviewPollsNudgesOnlyAfterValidatedSuccess(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	validResult := &rpc.NudgesCutoverReviewResult{
+		OK: true, ReviewedAt: now, CoverageFrom: now.Add(-time.Hour),
+		Evidence: rpc.NudgeCutoverReviewEvidencePairedDeviceForegroundRender,
+	}
+	t.Run("success refreshes current state", func(t *testing.T) {
+		client := &cutoverRouteClient{result: validResult, nudges: readyRouteNudges(now)}
+		srv, _, _ := newGovernanceTestHandlerWithoutPoll(t, client)
+		handler := srv.Handler()
+		cookie := routeSessionCookie(t, handler)
+		request := httptest.NewRequest(http.MethodPost, "/api/governance/cutover-review", nil)
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || client.nudgeCalls != 1 {
+			t.Fatalf("status=%d cutover_calls=%d nudge_calls=%d body=%s", response.Code, client.calls, client.nudgeCalls, response.Body.String())
+		}
+		current := httptest.NewRequest(http.MethodGet, "/api/governance", nil)
+		current.AddCookie(cookie)
+		currentResponse := httptest.NewRecorder()
+		handler.ServeHTTP(currentResponse, current)
+		var dto GovernanceDTO
+		if currentResponse.Code != http.StatusOK || json.Unmarshal(currentResponse.Body.Bytes(), &dto) != nil || len(dto.Candidates) != 1 || dto.PollSource.State != live.SourceStateCurrent {
+			t.Fatalf("current state not refreshed: status=%d dto=%+v body=%s", currentResponse.Code, dto, currentResponse.Body.String())
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		result *rpc.NudgesCutoverReviewResult
+		err    error
+	}{
+		{name: "nil result"},
+		{name: "invalid result", result: &rpc.NudgesCutoverReviewResult{}},
+		{name: "daemon error", err: &rpc.Error{Code: rpc.CodeBadRequest, Message: "private revalidation failure"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &cutoverRouteClient{result: tc.result, err: tc.err, nudges: readyRouteNudges(now)}
+			srv, _, _ := newGovernanceTestHandlerWithoutPoll(t, client)
+			handler := srv.Handler()
+			cookie := routeSessionCookie(t, handler)
+			request := httptest.NewRequest(http.MethodPost, "/api/governance/cutover-review", nil)
+			request.AddCookie(cookie)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code >= 200 && response.Code < 300 || client.nudgeCalls != 0 {
+				t.Fatalf("invalid cutover claimed success: status=%d nudge_calls=%d body=%s", response.Code, client.nudgeCalls, response.Body.String())
 			}
 		})
 	}
@@ -856,8 +999,18 @@ func TestSettingsRoutesKeepDaemonMarketDataQualityAuthority(t *testing.T) {
 
 func TestClearAlertHistory(t *testing.T) {
 	t.Parallel()
-	handler := newTestHandler(t).Handler()
+	srv, store, _ := newGovernanceTestHandlerWithoutPoll(t, routeFakeClient{})
+	handler := srv.Handler()
 	cookie := routeSessionCookie(t, handler)
+	if err := store.RecordAlert(state.AlertRecord{ID: "read"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkAttentionRead(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAlert(state.AlertRecord{ID: "unread"}); err != nil {
+		t.Fatal(err)
+	}
 
 	clearReq := httptest.NewRequest(http.MethodDelete, "/api/alerts", nil)
 	clearReq.AddCookie(cookie)
@@ -865,6 +1018,13 @@ func TestClearAlertHistory(t *testing.T) {
 	handler.ServeHTTP(clearRes, clearReq)
 	if clearRes.Code != http.StatusOK {
 		t.Fatalf("clear status=%d, want 200; body=%s", clearRes.Code, clearRes.Body.String())
+	}
+	var clearResult struct {
+		OK      bool `json:"ok"`
+		Cleared int  `json:"cleared"`
+	}
+	if err := json.Unmarshal(clearRes.Body.Bytes(), &clearResult); err != nil || !clearResult.OK || clearResult.Cleared != 1 {
+		t.Fatalf("clear result=%+v err=%v body=%s", clearResult, err, clearRes.Body.String())
 	}
 
 	alertsReq := httptest.NewRequest(http.MethodGet, "/api/alerts", nil)
@@ -878,8 +1038,34 @@ func TestClearAlertHistory(t *testing.T) {
 	if err := json.NewDecoder(alertsRes.Body).Decode(&alerts); err != nil {
 		t.Fatalf("decode alerts: %v", err)
 	}
-	if len(alerts) != 0 {
-		t.Fatalf("alerts len=%d, want 0", len(alerts))
+	if len(alerts) != 1 || alerts[0].ID != "unread" {
+		t.Fatalf("alerts=%+v, want unread row retained", alerts)
+	}
+}
+
+func TestAlertsReturnsCompleteBoundedHistory(t *testing.T) {
+	t.Parallel()
+	srv, store, _ := newGovernanceTestHandlerWithoutPoll(t, routeFakeClient{})
+	handler := srv.Handler()
+	for i := range 100 {
+		if err := store.RecordAlert(state.AlertRecord{ID: fmt.Sprintf("alert-%03d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cookie := routeSessionCookie(t, handler)
+	request := httptest.NewRequest(http.MethodGet, "/api/alerts", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var alerts []state.AlertRecord
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &alerts) != nil {
+		t.Fatalf("alerts status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(alerts) != 100 || alerts[0].ID != "alert-099" || alerts[99].ID != "alert-000" {
+		t.Fatalf("bounded history len=%d first=%+v last=%+v", len(alerts), alerts[0], alerts[len(alerts)-1])
+	}
+	if strings.Contains(response.Body.String(), "attention_seq") {
+		t.Fatalf("private attention sequence leaked from alert history: %s", response.Body.String())
 	}
 }
 
@@ -1410,16 +1596,23 @@ func (c governanceRouteClient) Brief(context.Context) (*rpc.BriefResult, error) 
 
 type cutoverRouteClient struct {
 	routeFakeClient
-	params rpc.NudgesCutoverReviewParams
-	result *rpc.NudgesCutoverReviewResult
-	err    error
-	calls  int
+	params     rpc.NudgesCutoverReviewParams
+	result     *rpc.NudgesCutoverReviewResult
+	err        error
+	calls      int
+	nudges     *rpc.NudgesSnapshotResult
+	nudgeCalls int
 }
 
 func (c *cutoverRouteClient) NudgesCutoverReview(_ context.Context, params rpc.NudgesCutoverReviewParams) (*rpc.NudgesCutoverReviewResult, error) {
 	c.calls++
 	c.params = params
 	return c.result, c.err
+}
+
+func (c *cutoverRouteClient) NudgesSnapshot(context.Context) (*rpc.NudgesSnapshotResult, error) {
+	c.nudgeCalls++
+	return c.nudges, nil
 }
 
 func governanceAppStateForTest(t *testing.T, store *state.Store, at time.Time) []byte {

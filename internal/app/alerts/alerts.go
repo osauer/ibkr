@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"math"
 	"strings"
@@ -20,6 +21,8 @@ type Monitor struct {
 	URL           string
 	Now           func() time.Time
 	TradingStatus func() *rpc.TradingStatus
+	// afterRecord is a synchronous test seam for delivery-mode transitions.
+	afterRecord func()
 }
 
 // GovernanceDispatcher transports daemon-authored candidates independently
@@ -73,17 +76,34 @@ func (d *GovernanceDispatcher) Observe(ctx context.Context, snapshot rpc.NudgesS
 		return d.Store.Governance(now), nil
 	}
 
-	if d.Store.AlertSettings().Mode == state.AlertModeNone {
-		for _, occurrence := range occurrences {
-			if err := d.recordMissed(occurrence, "suppressed", state.GovernanceTransportSuppressed, now); err != nil {
+	mode := d.Store.AlertSettings().Mode
+	deliverable := occurrences[:0]
+	for _, occurrence := range occurrences {
+		if occurrence.DeliveryDisposition != state.GovernanceDispositionEligible {
+			target := governanceEpisodeSuppressedTarget
+			if occurrence.DeliveryDisposition == state.GovernanceDispositionLegacyUnknown {
+				target = governanceLegacyUnknownTarget
+			}
+			if err := d.recordMissed(occurrence, target, state.GovernanceTransportSuppressed, now); err != nil {
 				return d.Store.Governance(now), err
 			}
+			continue
 		}
+		if mode == state.AlertModeNone {
+			if err := d.recordMissed(occurrence, governanceSuppressedTarget, state.GovernanceTransportSuppressed, now); err != nil {
+				return d.Store.Governance(now), err
+			}
+			continue
+		}
+		deliverable = append(deliverable, occurrence)
+	}
+	if len(deliverable) == 0 {
 		err := d.Store.SetGovernanceDeliveryHealth(state.GovernanceDeliveryHealth{
 			State: state.GovernanceDeliverySuppressed, Class: state.GovernanceTransportSuppressed, UpdatedAt: now,
 		})
 		return d.Store.Governance(now), err
 	}
+	occurrences = deliverable
 
 	subscriptions := d.Store.ActivePushSubscriptions()
 	if len(subscriptions) == 0 {
@@ -208,7 +228,14 @@ func normalizeGovernanceResult(result state.PushAttempt) string {
 	}
 }
 
-const governanceProbeDisplayID = "gov-0000000000000000"
+const (
+	governanceProbeDisplayID   = "gov-0000000000000000"
+	governanceSuppressedTarget = "suppressed"
+	// This target distinguishes forensic accounting for an episode whose
+	// terminal suppression boundary lives on the occurrence row itself.
+	governanceEpisodeSuppressedTarget = "episode-suppressed"
+	governanceLegacyUnknownTarget     = "legacy-unknown"
+)
 
 func (d *GovernanceDispatcher) recordMissed(occurrence state.GovernanceOccurrence, target, class string, now time.Time) error {
 	targetRef := state.GovernanceTargetRef("governance", target)
@@ -280,22 +307,19 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 	if m.Store == nil {
 		return nil, nil
 	}
-	mode := m.Store.AlertSettings().Mode
-	if !ShouldAlert(mode, canary) {
+	if !canaryOccurrenceEligible(canary) {
 		return nil, nil
 	}
+	modeBeforeRecord := m.Store.AlertSettings().Mode
 	fp := canary.Fingerprint.Key
 	if fp == "" {
 		fp = canary.Fingerprint.Version + ":" + canary.Action + ":" + string(canary.Severity)
-	}
-	if m.Store.HasAlertFingerprint(fp) {
-		return nil, nil
 	}
 	now := time.Now().UTC()
 	if m.Now != nil {
 		now = m.Now().UTC()
 	}
-	rec := RedactedRecord(canary, now)
+	rec := RedactedRecord(canary, fp, now)
 	rec.Fingerprint = fp
 	if m.TradingStatus != nil {
 		if trading := m.TradingStatus(); trading != nil {
@@ -303,8 +327,19 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 			rec.Mode = trading.Mode
 		}
 	}
-	if err := m.Store.RecordAlert(rec); err != nil {
+	created, err := m.Store.RecordAlertIfNew(rec)
+	if err != nil {
 		return nil, []state.PushAttempt{{At: now, AlertID: rec.ID, Error: err.Error()}}
+	}
+	if !created {
+		return nil, nil
+	}
+	if m.afterRecord != nil {
+		m.afterRecord()
+	}
+	modeAfterRecord := m.Store.AlertSettings().Mode
+	if !ShouldAlert(modeBeforeRecord, canary) || !ShouldAlert(modeAfterRecord, canary) {
+		return &rec, nil
 	}
 	payload := push.Payload{
 		Title:    rec.Title,
@@ -327,22 +362,28 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 }
 
 func ShouldAlert(mode string, canary rpc.CanaryResult) bool {
-	if !portfolioAlertRelevant(canary) {
-		return false
-	}
 	switch mode {
 	case state.AlertModeNone:
 		return false
 	case state.AlertModeActOnly:
-		return severityAtLeast(canary.Severity, risk.SeverityAct) ||
-			canary.Action == "defend" ||
-			canary.Action == "rebalance" ||
-			canary.Action == "confirm_inputs"
+		return canaryOccurrenceEligible(canary) && canaryActEligible(canary)
 	case state.AlertModeWatchAndAct, "":
-		return severityAtLeast(canary.Severity, risk.SeverityWatch)
+		return canaryOccurrenceEligible(canary)
 	default:
 		return false
 	}
+}
+
+func canaryOccurrenceEligible(canary rpc.CanaryResult) bool {
+	return portfolioAlertRelevant(canary) &&
+		(severityAtLeast(canary.Severity, risk.SeverityWatch) || canaryActEligible(canary))
+}
+
+func canaryActEligible(canary rpc.CanaryResult) bool {
+	return severityAtLeast(canary.Severity, risk.SeverityAct) ||
+		canary.Action == "defend" ||
+		canary.Action == "rebalance" ||
+		canary.Action == "confirm_inputs"
 }
 
 func portfolioAlertRelevant(canary rpc.CanaryResult) bool {
@@ -367,7 +408,7 @@ func portfolioAlertRelevant(canary rpc.CanaryResult) bool {
 	return false
 }
 
-func RedactedRecord(canary rpc.CanaryResult, now time.Time) state.AlertRecord {
+func RedactedRecord(canary rpc.CanaryResult, fingerprint string, now time.Time) state.AlertRecord {
 	action := strings.TrimSpace(canary.Action)
 	if action == "" {
 		action = "canary"
@@ -379,8 +420,9 @@ func RedactedRecord(canary rpc.CanaryResult, now time.Time) state.AlertRecord {
 		body += "; market confirmation " + canary.MarketConfirmation
 	}
 	body += ". Open ibkr for portfolio details."
+	idHash := sha256.Sum256([]byte(fingerprint + "\x00" + now.UTC().Format(time.RFC3339Nano)))
 	return state.AlertRecord{
-		ID:        fmt.Sprintf("%d", now.UnixNano()),
+		ID:        fmt.Sprintf("canary-%x", idHash[:12]),
 		Action:    action,
 		Severity:  severity,
 		Title:     title,
