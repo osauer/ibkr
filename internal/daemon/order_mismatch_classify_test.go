@@ -74,6 +74,21 @@ func TestClassifyProtectiveMismatchBuyCoverMirror(t *testing.T) {
 	}
 }
 
+func TestCoveredProtectiveOrderMatchesWireStockSecType(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	// Position rows use the wire label "STOCK" while order views use "STK";
+	// a conid-less order must still match its position (2026-07-19 paper
+	// rehearsal caught the false "flat" flag this mismatch produced).
+	views := []rpc.OrderView{mismatchTestView(rpc.OrderActionSell, 1)}
+	pos := &rpc.PositionsResult{Stocks: []rpc.PositionView{{Symbol: "AMD", SecType: "STOCK", Quantity: 1}}}
+
+	reconcileFlatPositionProtectiveOrders(views, pos, now)
+	if got := views[0]; got.ReconciliationKind != "" {
+		t.Fatalf("covered STOCK-labeled position flagged: %+v", got)
+	}
+}
+
 func TestCoveredProtectiveOrderCarriesNoMismatchKind(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)

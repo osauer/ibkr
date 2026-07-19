@@ -1711,7 +1711,11 @@ func orderViewMatchesProposalContract(v rpc.OrderView, p rpc.TradeProposal) bool
 func equivalentStockSecType(a, b string) bool {
 	norm := func(s string) string {
 		s = strings.ToUpper(strings.TrimSpace(s))
-		if s == "ETF" {
+		// Position rows carry the wire label "STOCK"; order views carry
+		// "STK". Both must normalize together or conid-less orders (manual
+		// CLI previews, especially non-US) match no position and get falsely
+		// classified as uncovered (seen live 2026-07-19 paper rehearsal).
+		if s == "ETF" || s == "STOCK" {
 			return "STK"
 		}
 		return s
