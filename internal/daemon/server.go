@@ -325,6 +325,13 @@ type Server struct {
 	// lifecycle events. It is installed before order writes exist so status
 	// and later handlers share one state primitive.
 	orderJournal *orderJournalStore
+	// orderSnapshotFn is the open-order snapshot seam for the reconcile
+	// sweep; nil resolves to the live connector's SnapshotOpenOrders.
+	orderSnapshotFn func(context.Context) (ibkrlib.OpenOrderSnapshot, error)
+	// orderReconcileLoopStarted gates the standing reconcile sweep to one
+	// goroutine per Server lifetime across reconnect-driven
+	// postConnectSetup re-runs.
+	orderReconcileLoopStarted sync.Once
 	// purgeLedger is the fill-backed purge/restore book. It is reduced from
 	// broker lifecycle evidence, not from preview/send attempts, so restore
 	// cannot double a position merely because a local file was edited.
@@ -697,6 +704,12 @@ func (s *Server) infof(format string, args ...any) {
 func (s *Server) warnf(format string, args ...any) {
 	if s.logger != nil {
 		s.logger.Warnf(format, args...)
+	}
+}
+
+func (s *Server) debugf(format string, args ...any) {
+	if s.logger != nil {
+		s.logger.Debugf(format, args...)
 	}
 }
 
@@ -1677,6 +1690,23 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	// through to fresh resolution via the normal path.
 	s.seedFromContractStore(s.connector)
 	s.registerOrderLifecycleJournal(s.connector)
+
+	// Order-journal broker reconcile: a settle-delayed one-shot on EVERY
+	// successful (re)connect — each reconnect is exactly when a terminal
+	// callback may have been missed — plus a Once-gated standing loop.
+	// Both live off serverCtx so daemon shutdown stops them.
+	if s.serverCtx != nil {
+		go func(ctx context.Context) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(orderReconcileConnectDelay):
+				s.reconcileOrderJournalWithBroker(ctx)
+			}
+		}(s.serverCtx)
+		s.orderReconcileLoopStarted.Do(func() {
+			go s.runOrderReconcileLoop(s.serverCtx)
+		})
+	}
 
 	// Spawn the periodic save loop. Guarded by contractCacheSaveStarted
 	// so reconnect-driven postConnectSetup re-runs don't multiply the
@@ -2756,30 +2786,42 @@ func (s *Server) backgroundTasks() []rpc.BackgroundTaskStatus {
 	if s.regimePrewarming.Load() {
 		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "regime-prewarm", Status: "computing"})
 	}
-	if open := s.openBrokerOrderCount(); open > 0 {
+	if scoped, total := s.openBrokerOrderCounts(); total > 0 {
 		// A daemon that idle-exits while protective stops are working goes
 		// dark on fills, cancels, and the order journal exactly when they
-		// matter; stay up while any non-terminal order is on the books.
-		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "open-orders", Status: fmt.Sprintf("%d working", open)})
+		// matter; stay up while any non-terminal order is on the books —
+		// including other-scope rows. The status string leads with the
+		// current-scope count so it agrees with the orders tab, and
+		// discloses the off-scope remainder instead of silently differing.
+		status := fmt.Sprintf("%d working", scoped)
+		if rest := total - scoped; rest > 0 {
+			status = fmt.Sprintf("%d working (+%d other scope)", scoped, rest)
+		}
+		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "open-orders", Status: status})
 	}
 	return tasks
 }
 
-// openBrokerOrderCount reports the number of non-terminal journaled orders.
-// Zero on any journal problem: idle shutdown must not be blocked by a broken
-// state directory.
-func (s *Server) openBrokerOrderCount() int {
+// openBrokerOrderCounts reports non-terminal journaled orders: scoped counts
+// only the connected account/mode (what the orders tab shows), total spans
+// all scopes (what idle shutdown must respect). Zero on any journal problem:
+// idle shutdown must not be blocked by a broken state directory.
+func (s *Server) openBrokerOrderCounts() (scoped, total int) {
 	views, _, err := s.loadOrderViews()
 	if err != nil {
-		return 0
+		return 0, 0
 	}
-	open := 0
+	scope := s.currentBrokerStateScope()
 	for _, v := range views {
-		if v.Open {
-			open++
+		if !v.Open {
+			continue
+		}
+		total++
+		if orderViewMatchesBrokerScope(v, scope) {
+			scoped++
 		}
 	}
-	return open
+	return scoped, total
 }
 
 // isBusy reports whether the daemon has daemon-internal background work

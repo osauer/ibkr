@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v2.2.2 — 2026-07-19 17:50 CEST
+
+### What's new
+
+- **Ghost orders no longer haunt the orders tab.** Protective GTC stops that were cancelled or filled while the daemon wasn't listening used to stay "open" in the local order journal forever, showing up as stale "needs reconcile" rows. The daemon now asks the broker for its actual open-order list after each reconnect (and every 30 minutes) and closes journal rows the broker no longer reports as `Closed (reconciled)`. Broker statements remain authoritative for the final fill-vs-cancel outcome.
+
+### Added
+
+- Broker open-order snapshot reconcile: `reqAllOpenOrders`-based sweep that appends terminal `reconciled-absent` events for journaled orders absent from a complete snapshot. Fail-safe by construction: no complete snapshot → no action; only rows in the connected account/mode scope, with a broker PermID, and quiet past a grace window are eligible. The sweep never sends a broker write — the snapshot request is its only wire interaction, and the append-only journal is never rewritten.
+
+### Fixed
+
+- A cancel request no longer downgrades an order's journaled transmit state, so a missed cancel confirmation can no longer wedge the row permanently write-ineligible ("open" yet not cancel-eligible); the cancel simply stays retryable until broker truth arrives.
+- Broker open-order snapshots cannot mint phantom journal rows: unmatched openOrder/orderStatus callbacks (e.g. manual TWS orders) are observed but not adopted into the daemon's order journal.
+- `ibkr status` background-task line for open orders now leads with the current account/mode count (matching the orders tab) and discloses any off-scope remainder as `(+N other scope)` instead of silently reporting a different total.
+
 ## v2.2.1 — 2026-07-19 08:18 CEST
 
 ### What's new

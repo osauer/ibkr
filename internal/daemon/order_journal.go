@@ -27,6 +27,7 @@ const (
 	orderJournalEventModifyRequested    = "modify-requested"
 	orderJournalEventCancelRequested    = "cancel-requested"
 	orderJournalEventReconciledUnknown  = "reconciled-unknown"
+	orderJournalEventReconciledAbsent   = "reconciled-absent"
 
 	orderSendStateReserved           = "reserved"
 	orderSendStateSendAttempted      = "send_attempted"

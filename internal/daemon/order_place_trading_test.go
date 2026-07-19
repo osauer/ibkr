@@ -224,12 +224,37 @@ func TestOrderCancelAppendsPendingCancelWithoutTerminalState(t *testing.T) {
 	if !res.Accepted || cancelled != 1001 || res.LifecycleStatus != rpc.OrderLifecyclePendingCancel || !res.Order.Open || res.Order.ModifyEligible || res.Order.CancelEligible {
 		t.Fatalf("cancel result = %+v cancelled=%d", res, cancelled)
 	}
+	// The cancel attempt must not regress the order's transmit state: a
+	// missed cancel confirmation previously wedged the row write-ineligible
+	// forever (send_state downgraded to send_attempted).
+	if res.Order.SendState != orderSendStateBrokerAcknowledged {
+		t.Fatalf("result send_state = %q, want preserved broker_acknowledged", res.Order.SendState)
+	}
 	events, err := srv.orderJournal.LoadEvents(0)
 	if err != nil {
 		t.Fatalf("LoadEvents: %v", err)
 	}
-	if events[len(events)-1].Type != orderJournalEventCancelRequested {
-		t.Fatalf("last event = %+v", events[len(events)-1])
+	last := events[len(events)-1]
+	if last.Type != orderJournalEventCancelRequested {
+		t.Fatalf("last event = %+v", last)
+	}
+	if last.SendState != "" {
+		t.Fatalf("cancel event send_state = %q, want empty (merge keeps broker_acknowledged)", last.SendState)
+	}
+	// Re-fold: with the sticky broker Status and preserved send_state the
+	// row stays cancel-RETRYABLE if no cancel confirmation ever arrives.
+	views, _, err := srv.loadOrderViews()
+	if err != nil {
+		t.Fatalf("loadOrderViews: %v", err)
+	}
+	var view rpc.OrderView
+	for _, v := range views {
+		if v.OrderRef == "ord-1" {
+			view = v
+		}
+	}
+	if view.SendState != orderSendStateBrokerAcknowledged || !view.Open || !view.CancelEligible {
+		t.Fatalf("re-folded view = open=%v send_state=%q cancel_eligible=%v, want open broker_acknowledged cancel-retryable", view.Open, view.SendState, view.CancelEligible)
 	}
 }
 

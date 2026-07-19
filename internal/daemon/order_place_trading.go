@@ -209,7 +209,12 @@ func (s *Server) cancelOrder(ctx context.Context, p rpc.OrderCancelParams) (*rpc
 
 	now := s.orderNow()
 	cancelEvent := orderJournalEventFromView(view, orderJournalEventCancelRequested, now)
-	cancelEvent.SendState = orderSendStateSendAttempted
+	// The cancel attempt must not regress the ORDER's transmit state: an
+	// empty SendState leaves the merged view at broker_acknowledged, so a
+	// missed cancel confirmation keeps the row cancel-retryable instead of
+	// wedging it write-ineligible forever (the live PendingCancel/Cancelled
+	// broker callbacks still land as usual and take over when they arrive).
+	cancelEvent.SendState = ""
 	cancelEvent.Origin = normalizedWriteOrigin(p.Origin)
 	cancelEvent.Message = fmt.Sprintf("%s broker cancel attempted", auth.Route)
 	if err := s.orderJournal.Append(cancelEvent); err != nil {
@@ -220,7 +225,6 @@ func (s *Server) cancelOrder(ctx context.Context, p rpc.OrderCancelParams) (*rpc
 		return nil, fmt.Errorf("%s order cancel: %w", auth.Route, err)
 	}
 	view.LastEvent = orderJournalEventCancelRequested
-	view.SendState = orderSendStateSendAttempted
 	view.LifecycleStatus = rpc.OrderLifecyclePendingCancel
 	view.Open = true
 	view.ModifyEligible = false
@@ -470,52 +474,6 @@ func orderJournalEventForDraft(draft rpc.OrderDraft, eventType string, status rp
 		Trail:           cloneTrailSpec(draft.Trail),
 		OpenClose:       draft.OpenClose,
 		Source:          draft.Source,
-	}
-}
-
-func orderJournalEventFromView(view rpc.OrderView, eventType string, at time.Time) orderJournalEvent {
-	return orderJournalEvent{
-		At:              at,
-		Type:            eventType,
-		OrderRef:        view.OrderRef,
-		PreviewTokenID:  view.PreviewTokenID,
-		ReservedOrderID: view.ReservedOrderID,
-		ClientID:        view.ClientID,
-		Account:         view.Account,
-		Endpoint:        view.Endpoint,
-		Mode:            view.Mode,
-		Source:          view.Source,
-		PurgeID:         view.PurgeID,
-		LegID:           view.LegID,
-		BypassPreview:   view.BypassPreview,
-		Symbol:          view.Symbol,
-		SecType:         view.SecType,
-		ConID:           view.ConID,
-		Exchange:        view.Exchange,
-		PrimaryExch:     view.PrimaryExch,
-		Currency:        view.Currency,
-		LocalSymbol:     view.LocalSymbol,
-		TradingClass:    view.TradingClass,
-		Expiry:          view.Expiry,
-		Strike:          view.Strike,
-		Right:           view.Right,
-		Multiplier:      view.Multiplier,
-		Action:          view.Action,
-		OrderType:       view.OrderType,
-		TIF:             view.TIF,
-		TriggerMethod:   view.TriggerMethod,
-		OutsideRTH:      view.OutsideRTH,
-		Quantity:        view.Quantity,
-		LimitPrice:      view.LimitPrice,
-		Trail:           cloneTrailSpec(view.Trail),
-		OpenClose:       view.OpenClose,
-		Status:          view.Status,
-		Filled:          view.Filled,
-		Remaining:       view.Remaining,
-		AvgFillPrice:    view.AvgFillPrice,
-		LastFillPrice:   view.LastFillPrice,
-		WhyHeld:         view.WhyHeld,
-		MktCapPrice:     view.MktCapPrice,
 	}
 }
 

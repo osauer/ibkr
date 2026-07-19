@@ -2970,10 +2970,18 @@ const (
 	OrderLifecycleInactive                 = "inactive"
 	OrderLifecycleUnknownReconcileRequired = "unknown_reconcile_required"
 	// OrderLifecycleExpiredInferred marks a DAY order whose effective session
-	// closed without a terminal broker callback. The daemon never receives a
-	// broker open-order snapshot, so this is local calendar inference — never
-	// broker-confirmed — and such rows stay cancel- and modify-ineligible.
+	// closed without a terminal broker callback. It is local calendar
+	// inference — never broker-confirmed — and such rows stay cancel- and
+	// modify-ineligible. (GTC rows instead heal via the open-order snapshot
+	// reconcile, see OrderLifecycleClosedReconciled.)
 	OrderLifecycleExpiredInferred = "expired_inferred"
+	// OrderLifecycleClosedReconciled marks a journal row that a complete
+	// broker open-order snapshot no longer reported: the terminal callback
+	// (fill, cancel, broker-side expiry) was missed while the daemon was not
+	// listening. The final broker state is unknown — cancelled or filled
+	// outside the daemon's view — so broker statements stay authoritative;
+	// this status only closes the local row.
+	OrderLifecycleClosedReconciled = "closed_reconciled"
 )
 
 // OrdersOpenParams reads the current broker account/mode open-order view.

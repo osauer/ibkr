@@ -457,12 +457,12 @@ func positionViewMatchesOrderView(row rpc.PositionView, view rpc.OrderView) bool
 }
 
 // inferDayOrderExpiry marks non-terminal stock/ETF DAY orders whose effective
-// session closed well in the past as expired_inferred. The daemon never
-// requests a broker open-order snapshot, so a missed terminal callback would
-// otherwise leave the row "open" on every read surface forever — and the
-// duplicate-protection blocker would then refuse to re-protect that symbol.
-// The state is local calendar inference, never broker-confirmed: rows are
-// closed for display and duplicate-suppression but stay cancel-ineligible.
+// session closed well in the past as expired_inferred. It complements the
+// broker open-order snapshot reconcile (order_reconcile.go): calendar
+// inference closes DAY rows immediately after their session, without waiting
+// for the next snapshot sweep, and works even while disconnected. The state
+// is local calendar inference, never broker-confirmed: rows are closed for
+// display and duplicate-suppression but stay cancel-ineligible.
 func inferDayOrderExpiry(views []rpc.OrderView, eventsByKey map[string][]rpc.OrderEvent, now time.Time) {
 	cal := marketcal.New()
 	for i := range views {
@@ -561,6 +561,55 @@ func buildOrderEventsByKey(events []orderJournalEvent) map[string][]rpc.OrderEve
 		})
 	}
 	return out
+}
+
+// orderJournalEventFromView projects a folded view back into a journal event
+// carrying the row's full identity. Lives untagged (not in the trading-build
+// file) because the reconcile sweep needs it in read-only builds too.
+func orderJournalEventFromView(view rpc.OrderView, eventType string, at time.Time) orderJournalEvent {
+	return orderJournalEvent{
+		At:              at,
+		Type:            eventType,
+		OrderRef:        view.OrderRef,
+		PreviewTokenID:  view.PreviewTokenID,
+		ReservedOrderID: view.ReservedOrderID,
+		ClientID:        view.ClientID,
+		Account:         view.Account,
+		Endpoint:        view.Endpoint,
+		Mode:            view.Mode,
+		Source:          view.Source,
+		PurgeID:         view.PurgeID,
+		LegID:           view.LegID,
+		BypassPreview:   view.BypassPreview,
+		Symbol:          view.Symbol,
+		SecType:         view.SecType,
+		ConID:           view.ConID,
+		Exchange:        view.Exchange,
+		PrimaryExch:     view.PrimaryExch,
+		Currency:        view.Currency,
+		LocalSymbol:     view.LocalSymbol,
+		TradingClass:    view.TradingClass,
+		Expiry:          view.Expiry,
+		Strike:          view.Strike,
+		Right:           view.Right,
+		Multiplier:      view.Multiplier,
+		Action:          view.Action,
+		OrderType:       view.OrderType,
+		TIF:             view.TIF,
+		TriggerMethod:   view.TriggerMethod,
+		OutsideRTH:      view.OutsideRTH,
+		Quantity:        view.Quantity,
+		LimitPrice:      view.LimitPrice,
+		Trail:           cloneTrailSpec(view.Trail),
+		OpenClose:       view.OpenClose,
+		Status:          view.Status,
+		Filled:          view.Filled,
+		Remaining:       view.Remaining,
+		AvgFillPrice:    view.AvgFillPrice,
+		LastFillPrice:   view.LastFillPrice,
+		WhyHeld:         view.WhyHeld,
+		MktCapPrice:     view.MktCapPrice,
+	}
 }
 
 func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
@@ -898,6 +947,8 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 		return rpc.OrderLifecycleUnknownReconcileRequired
 	case orderJournalEventReconciledUnknown:
 		return rpc.OrderLifecycleUnknownReconcileRequired
+	case orderJournalEventReconciledAbsent:
+		return rpc.OrderLifecycleClosedReconciled
 	default:
 		if ev.SendState == orderSendStateUncertainSend {
 			return rpc.OrderLifecycleUnknownReconcileRequired
@@ -907,6 +958,12 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 }
 
 func mapOrderViewLifecycleStatus(view rpc.OrderView) string {
+	if view.LastEvent == orderJournalEventReconciledAbsent {
+		// A complete broker open-order snapshot did not include this order:
+		// like the error-135 heal below, broker truth overrides any sticky
+		// earlier Status (a stale "PreSubmitted" must not resurrect the row).
+		return rpc.OrderLifecycleClosedReconciled
+	}
 	if view.LastEvent == orderJournalEventBrokerError && brokerErrorProvesOrderGone(view.LastMessage) {
 		// The broker answered a write aimed at this order ID with "can't
 		// find order": whatever happened while the daemon was not
@@ -1013,7 +1070,7 @@ func brokerOrderStatusIsUncertainPending(status string) bool {
 
 func orderLifecycleStatusIsTerminal(status string) bool {
 	switch status {
-	case rpc.OrderLifecycleFilled, rpc.OrderLifecycleCancelled, rpc.OrderLifecycleRejected, rpc.OrderLifecycleInactive, rpc.OrderLifecycleExpiredInferred:
+	case rpc.OrderLifecycleFilled, rpc.OrderLifecycleCancelled, rpc.OrderLifecycleRejected, rpc.OrderLifecycleInactive, rpc.OrderLifecycleExpiredInferred, rpc.OrderLifecycleClosedReconciled:
 		return true
 	default:
 		return false

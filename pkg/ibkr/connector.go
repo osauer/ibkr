@@ -65,6 +65,16 @@ type Connector struct {
 	orderLifecycleMu sync.RWMutex
 	orderLifecycle   []func(OrderLifecycleEvent)
 
+	// Open-order snapshot plumbing (SnapshotOpenOrders). The flight mutex
+	// serializes callers; the snapshot mutex guards the active collector
+	// pointer read on every openOrder callback. requestAllOpenOrders is a
+	// test seam (same pattern as fetchContractDetails): production resolves
+	// to requestAllOpenOrdersDefault over the live connection.
+	requestAllOpenOrders      func() error
+	openOrderSnapshotFlightMu sync.Mutex
+	openOrderSnapshotMu       sync.Mutex
+	openOrderSnapshot         *openOrderSnapshotCollector
+
 	// orderStatusLogSig dedupes the high-frequency order-status log line.
 	// IBKR re-sends orderStatus frames for unchanged working orders many
 	// times per second (a resting PreSubmitted GTC trail can churn for
@@ -536,6 +546,7 @@ func NewConnector(config *ConnectorConfig) *Connector {
 		pnl:               newPnLCache(),
 	}
 	c.fetchContractDetails = c.FetchContractDetails
+	c.requestAllOpenOrders = c.requestAllOpenOrdersDefault
 	return c
 }
 
@@ -3322,7 +3333,9 @@ func (c *Connector) registerHandlers(conn *Connection) {
 	conn.RegisterHandler(msgExecDetails, func(fields []string) {
 		c.notifyOrderLifecycle(fields)
 	})
-	conn.RegisterHandler(msgOpenOrderEnd, func(fields []string) {})
+	conn.RegisterHandler(msgOpenOrderEnd, func(fields []string) {
+		c.finishOpenOrderSnapshot()
+	})
 
 	// Register system notification handler (msgID 204) for farm status changes
 	conn.RegisterHandler(204, func(fields []string) {})
@@ -5276,6 +5289,9 @@ func (c *Connector) notifyOrderLifecycle(fields []string) {
 	}
 	if ev.Type == OrderLifecycleEventStatus && c.isWhatIfOrderID(ev.OrderID) {
 		return
+	}
+	if ev.Type == OrderLifecycleEventOpenOrder {
+		c.collectOpenOrderSnapshot(ev)
 	}
 	c.dispatchOrderLifecycle(ev)
 }

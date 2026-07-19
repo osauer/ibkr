@@ -40,7 +40,19 @@ func (s *Server) appendOrderLifecycleEvent(ev ibkrlib.OrderLifecycleEvent) {
 	if !ok {
 		return
 	}
-	s.enrichOrderLifecycleEventFromJournal(&journalEvent)
+	matched, viewsLoaded := s.enrichOrderLifecycleEventFromJournal(&journalEvent)
+	if viewsLoaded && !matched &&
+		(ev.Type == ibkrlib.OrderLifecycleEventOpenOrder || ev.Type == ibkrlib.OrderLifecycleEventStatus) {
+		// reqAllOpenOrders snapshots surface ALL of the account's open
+		// orders, including manual TWS orders this journal has never
+		// tracked. The journal's contract is daemon-placed orders only
+		// ("may miss manual orders"), so unmatched openOrder/orderStatus
+		// callbacks are observed, not adopted — journaling them would mint
+		// phantom rows. Keyed on the broker event type: execDetails and
+		// error events keep their existing pass-through behavior.
+		s.debugf("order lifecycle: dropping unmatched %s callback for broker order %d (perm %d)", ev.Type, ev.OrderID, ev.PermID)
+		return
+	}
 	normalizeOrderLifecycleJournalEvent(&journalEvent)
 
 	s.mu.Lock()
@@ -104,17 +116,23 @@ func normalizeOrderLifecycleJournalEvent(ev *orderJournalEvent) {
 	}
 }
 
-func (s *Server) enrichOrderLifecycleEventFromJournal(ev *orderJournalEvent) {
+// enrichOrderLifecycleEventFromJournal copies identity from the matching
+// journal view. matched reports whether an existing row claimed the event;
+// viewsLoaded distinguishes "no match" from "journal unreadable" so callers
+// can fail open on load errors instead of dropping broker evidence.
+func (s *Server) enrichOrderLifecycleEventFromJournal(ev *orderJournalEvent) (matched, viewsLoaded bool) {
 	if s == nil || ev == nil || s.orderJournal == nil {
-		return
+		return false, false
 	}
 	views, _, err := s.loadOrderViews()
 	if err != nil {
-		return
+		return false, false
 	}
 	if view, ok := orderJournalViewForLifecycleEvent(*ev, views); ok {
 		copyOrderJournalIdentityFromView(ev, view)
+		return true, true
 	}
+	return false, true
 }
 
 func orderJournalViewForLifecycleEvent(ev orderJournalEvent, views []rpc.OrderView) (rpc.OrderView, bool) {

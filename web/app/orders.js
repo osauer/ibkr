@@ -381,6 +381,7 @@ const ORDER_LIFECYCLE_LABELS = {
   inactive: "Inactive",
   unknown_reconcile_required: "Needs reconcile",
   expired_inferred: "Expired (inferred)",
+  closed_reconciled: "Closed (reconciled)",
 };
 
 const ORDER_SEND_STATE_LABELS = {

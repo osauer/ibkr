@@ -52,14 +52,19 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
 
 ## Residual risks (accepted)
 
-- A GTC stop with a missed terminal callback stays "open" locally until some
-  write attempt elicits error 135 (the daemon never requests broker open-order
-  snapshots). Until then it duplicate-blocks re-protection of that symbol and
-  blocks purge legs; remediation is `ibkr order cancel <ref>` — now
-  guaranteed to heal via the 135 path. A broker open-order snapshot reconcile
-  remains a possible follow-up.
+- ~~A GTC stop with a missed terminal callback stays "open" locally until
+  some write attempt elicits error 135.~~ Resolved 2026-07-19: the daemon now
+  requests a broker open-order snapshot (`reqAllOpenOrders`) ~45 s after each
+  (re)connect and every 30 minutes (`internal/daemon/order_reconcile.go`).
+  Journal rows absent from a COMPLETE snapshot — current account/mode scope
+  only, PermID set, quiet past a 10-minute grace window — are closed with a
+  terminal `reconciled-absent` event mapping to `closed_reconciled`. The
+  final broker state (cancelled vs filled outside the daemon's view) stays
+  unknown locally; broker statements remain authoritative. The error-135
+  heal remains as the immediate path when a write touches a gone order.
 - IBKR cancels GTC orders broker-side on corporate actions/symbol events; the
-  same 135 heal applies on the next write attempt.
+  snapshot reconcile now catches these within one sweep, and the 135 heal
+  still applies on any earlier write attempt.
 - The duplicate-protective blocker is contract+side keyed, not
   quantity-aware: a standing GTC stop for a smaller quantity blocks
   re-protection after the position grows. With DAY this self-resolved at the
