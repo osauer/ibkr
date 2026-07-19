@@ -19,6 +19,7 @@ All notable changes to this project are documented here. The project adheres to 
 ### Fixed
 
 - A cancel request no longer downgrades an order's journaled transmit state, so a missed cancel confirmation can no longer wedge the row permanently write-ineligible ("open" yet not cancel-eligible); the cancel simply stays retryable until broker truth arrives.
+- Position/order matching now accepts the wire's "STOCK" security-type label as equivalent to "STK". Protective orders journaled without a contract id (hand-previewed drafts, especially non-US routings) previously matched no position and were falsely classified as uncovered, which mislabeled healthy stops as critical and blocked their legitimate modifies. Caught by the paper-account rehearsal on the first real modify attempt.
 - Broker open-order snapshots cannot mint phantom journal rows: unmatched openOrder/orderStatus callbacks (e.g. manual TWS orders) are observed but not adopted into the daemon's order journal.
 - `ibkr status` background-task line for open orders now leads with the current account/mode count (matching the orders tab) and discloses any off-scope remainder as `(+N other scope)` instead of silently reporting a different total.
 
