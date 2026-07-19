@@ -145,6 +145,50 @@ func validateModifyTrailDraft(orderType string, draft rpc.OrderDraft) error {
 	return nil
 }
 
+// validateProtectiveModifyQuantity is the position-mismatch write gate. When
+// a close-only protective order no longer fits the current position, exactly
+// one modify shape is accepted: reduce the quantity to the position's
+// coverage with the trail unchanged. Everything else (re-pricing, partial
+// reductions, increases) is rejected until the size matches the position
+// again. current comes from a FRESH positions read at the caller — a caller
+// that cannot obtain one must fail closed rather than skip this check.
+func validateProtectiveModifyQuantity(view rpc.OrderView, draft rpc.OrderDraft, current float64) error {
+	if !orderViewIsCloseProtective(view) {
+		return nil
+	}
+	remaining := orderViewRemainingQuantity(view)
+	if orderViewActionCanCloseQuantity(view, current, remaining) {
+		return nil
+	}
+	coverage := protectiveCloseCoverage(view, current)
+	if coverage <= 0 {
+		return errBadRequest("position is flat or reversed; this protective order cannot be modified — cancel it instead")
+	}
+	if math.Abs(float64(draft.Quantity)-coverage) > 1e-9 {
+		return errBadRequest(fmt.Sprintf("position no longer covers this protective order; modify must reduce quantity to exactly %.4g", coverage))
+	}
+	if !trailSpecsEquivalent(view.Trail, draft.Trail) {
+		return errBadRequest("protective-order reduce must keep the existing trail parameters unchanged; re-price after the size matches the position")
+	}
+	return nil
+}
+
+func trailSpecsEquivalent(a, b *rpc.OrderTrailSpec) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	eq := func(x, y *float64) bool {
+		if x == nil || y == nil {
+			return x == nil && y == nil
+		}
+		return math.Abs(*x-*y) <= 1e-9
+	}
+	return eq(a.TrailingAmount, b.TrailingAmount) &&
+		eq(a.TrailingPercent, b.TrailingPercent) &&
+		eq(a.LimitOffset, b.LimitOffset) &&
+		math.Abs(a.InitialStopPrice-b.InitialStopPrice) <= 1e-9
+}
+
 func modifyContractForView(view rpc.OrderView, contract rpc.ContractParams) rpc.ContractParams {
 	contract.Symbol = view.Symbol
 	contract.SecType = view.SecType

@@ -32,6 +32,10 @@ type Service struct {
 
 	OnCanary func(context.Context, rpc.CanaryResult)
 	OnNudges func(context.Context, rpc.NudgesSnapshotResult)
+	// OnOrders observes the open-order journal view on the canary cadence.
+	// It exists for the order-mismatch push watch; the SPA reads
+	// /api/orders/open directly and does not consume this hook.
+	OnOrders func(context.Context, rpc.OrdersOpenResult)
 }
 
 type Snapshot struct {
@@ -407,6 +411,14 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 			snap.Sources["rules"] = SourceMeta{UpdatedAt: now}
 			if s.changed("rules", rules) {
 				events = append(events, Event{Type: "rules", Data: rules})
+			}
+		}
+		// Open-order mismatch watch rides the same cadence: read-only journal
+		// view, observer-only (not part of the snapshot contract). Errors are
+		// dropped — the orders tab remains the durable surface.
+		if s.OnOrders != nil {
+			if orders, err := s.client.OrdersOpen(ctx, rpc.OrdersOpenParams{}); err == nil && orders != nil {
+				s.OnOrders(ctx, *orders)
 			}
 		}
 		// The brief composes canary and other daily-discipline inputs, so it

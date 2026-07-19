@@ -2982,6 +2982,10 @@ const (
 	// outside the daemon's view — so broker statements stay authoritative;
 	// this status only closes the local row.
 	OrderLifecycleClosedReconciled = "closed_reconciled"
+
+	OrderReconciliationKindShortEntryFull   = "short_entry_full"
+	OrderReconciliationKindShortEntryExcess = "short_entry_excess"
+	OrderReconciliationSeverityCritical     = "critical"
 )
 
 // OrdersOpenParams reads the current broker account/mode open-order view.
@@ -3506,11 +3510,23 @@ type OrderView struct {
 	LastEvent           string          `json:"last_event,omitempty"`
 	LastMessage         string          `json:"last_message,omitempty"`
 	ReconciliationState string          `json:"reconciliation_state,omitempty"`
-	BrokerTruthAsOf     time.Time       `json:"broker_truth_as_of,omitzero"`
-	UpdatedAt           time.Time       `json:"updated_at,omitzero"`
-	Open                bool            `json:"open"`
-	ModifyEligible      bool            `json:"modify_eligible"`
-	CancelEligible      bool            `json:"cancel_eligible"`
+	// ReconciliationKind classifies a position_mismatch by consequence:
+	// short_entry_full (no coverage left; triggering opens a fresh
+	// opposite-direction position of the full remaining quantity) or
+	// short_entry_excess (partial coverage; triggering closes the position
+	// and opens the excess). Severity is always "critical" for both — the
+	// damaging event is identical; the kinds differ only in the offered fix
+	// (cancel vs reduce). ReduceToQuantity is set only for the excess kind:
+	// the exact quantity a reduce-modify must target.
+	ReconciliationKind     string    `json:"reconciliation_kind,omitempty"`
+	ReconciliationSeverity string    `json:"reconciliation_severity,omitempty"`
+	ShortRiskQuantity      float64   `json:"short_risk_quantity,omitempty"`
+	ReduceToQuantity       float64   `json:"reduce_to_quantity,omitempty"`
+	BrokerTruthAsOf        time.Time `json:"broker_truth_as_of,omitzero"`
+	UpdatedAt              time.Time `json:"updated_at,omitzero"`
+	Open                   bool      `json:"open"`
+	ModifyEligible         bool      `json:"modify_eligible"`
+	CancelEligible         bool      `json:"cancel_eligible"`
 }
 
 type OrdersOpenResult struct {

@@ -83,6 +83,15 @@ func New(opts Options) (*App, error) {
 	liveSvc.OnCanary = func(ctx context.Context, canary rpc.CanaryResult) {
 		monitor.Observe(ctx, canary)
 	}
+	mismatchWatch := &alerts.OrderMismatchWatch{
+		Store:         store,
+		Sender:        pushSender,
+		URL:           opts.PublicURL,
+		TradingStatus: monitor.TradingStatus,
+	}
+	liveSvc.OnOrders = func(ctx context.Context, orders rpc.OrdersOpenResult) {
+		mismatchWatch.Observe(ctx, orders)
+	}
 	dispatcher := alerts.GovernanceDispatcher{Store: store, Sender: pushSender}
 	governanceWorker := alerts.NewGovernanceWorker(&dispatcher)
 	liveSvc.OnNudges = func(ctx context.Context, snapshot rpc.NudgesSnapshotResult) {

@@ -12,6 +12,10 @@ All notable changes to this project are documented here. The project adheres to 
 
 - Broker open-order snapshot reconcile: `reqAllOpenOrders`-based sweep that appends terminal `reconciled-absent` events for journaled orders absent from a complete snapshot. Fail-safe by construction: no complete snapshot → no action; only rows in the connected account/mode scope, with a broker PermID, and quiet past a grace window are eligible. The sweep never sends a broker write — the snapshot request is its only wire interaction, and the append-only journal is never rewritten.
 
+### Added
+
+- Protective-stop mismatch alerts and a guided fix. When a close-only stop no longer matches the position (for example after selling part of it in TWS), the daemon now classifies the consequence — full or partial opposite-direction entry on trigger — and the app shows a red critical row with plain-language risk copy plus a single allowed action: reduce the stop to exactly the held quantity through the normal preview-and-confirm flow (flat positions keep Cancel as the offered fix). The daemon enforces the same reduce-only constraint server-side against a fresh positions read at both preview and confirm, failing closed when position evidence is unavailable or changed. A critical push notification fires once per occurrence via the existing alert path, debounced across two polling passes so transient zeroed position reads can never page the trader, and redacted like canary pushes (no symbols or quantities on the wire).
+
 ### Fixed
 
 - A cancel request no longer downgrades an order's journaled transmit state, so a missed cancel confirmation can no longer wedge the row permanently write-ineligible ("open" yet not cancel-eligible); the cancel simply stays retryable until broker truth arrives.

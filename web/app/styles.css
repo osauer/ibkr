@@ -3683,6 +3683,19 @@ p {
   border-top: 0;
 }
 
+.open-order-row--critical {
+  border-left: 3px solid var(--red);
+  padding-left: 8px;
+  background: var(--red-soft);
+}
+
+.open-order-row__risk {
+  display: block;
+  color: var(--red);
+  font-size: 12px;
+  white-space: normal;
+}
+
 .open-order-row b {
   color: var(--ink);
 }

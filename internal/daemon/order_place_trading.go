@@ -154,6 +154,21 @@ func (s *Server) modifyOrder(ctx context.Context, p rpc.OrderModifyParams) (*rpc
 	modifiedDraft.OrderRef = view.OrderRef
 	modifiedDraft.Contract = modifyContractForView(view, modifiedDraft.Contract)
 	modifiedDraft.OutsideRTH = view.OutsideRTH
+	// Position-mismatch gate for close-protective orders, revalidated at
+	// write time against a FRESH positions read: the position may have
+	// changed since the preview (or the feed may be unhealthy) — either way
+	// the only safe outcomes are "still matches" or a closed-door error,
+	// never a broker write sized to stale evidence. Non-protective modifies
+	// keep their existing position-free path.
+	if orderViewIsCloseProtective(view) {
+		impact, err := s.fetchPreviewPositionImpact(ctx, modifiedDraft.Contract, modifiedDraft.Action, modifiedDraft.Quantity)
+		if err != nil {
+			return nil, fmt.Errorf("%w: order modify needs current position evidence and positions are unavailable: %v", ErrTradingDisabled, err)
+		}
+		if err := validateProtectiveModifyQuantity(view, modifiedDraft, impact.Before); err != nil {
+			return nil, err
+		}
+	}
 	confirm := previewTokenConfirmedEvent(payload, view.ReservedOrderID, now, fmt.Sprintf("preview token confirmed for %s broker modify", auth.Route))
 	confirm.OrderRef = view.OrderRef
 	modify := orderJournalEventForDraft(modifiedDraft, orderJournalEventModifyRequested, status, payload.TokenID, view.ReservedOrderID, now)

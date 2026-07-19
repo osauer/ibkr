@@ -23,11 +23,24 @@ function renderOpenOrders() {
 function openOrderRowElement(order) {
   const row = document.createElement("div");
   row.className = "open-order-row";
+  if (order.reconciliation_severity === "critical") row.classList.add("open-order-row--critical");
   const id = orderIdentity(order);
   const edit = openOrderEdit(order);
   const trading = state.snapshot?.trading || {};
   const modifyGate = orderModifyGate(order, trading);
   const cancelGate = orderCancelGate(order, trading);
+  if (modifyGate.reduceOnly) {
+    // The only legal modify for a mismatched protective order is quantity ->
+    // covered position with the trail verbatim; pin the edit state so the
+    // preview body cannot drift from that shape (the daemon rejects any
+    // other shape server-side regardless).
+    edit.quantity = orderReduceToQuantity(order);
+    edit.limit_price = order.limit_price > 0 ? order.limit_price : null;
+    edit.trailing_percent = order.trail?.trailing_percent > 0 ? order.trail.trailing_percent : null;
+    edit.trailing_amount = order.trail?.trailing_amount > 0 ? order.trail.trailing_amount : null;
+    edit.initial_stop = order.trail?.initial_stop_price > 0 ? order.trail.initial_stop_price : null;
+    edit.limit_offset = order.trail?.limit_offset > 0 ? order.trail.limit_offset : null;
+  }
 
   const main = document.createElement("div");
   main.className = "open-order-row__main";
@@ -46,6 +59,13 @@ function openOrderRowElement(order) {
     order.endpoint,
   ].filter(Boolean).join(" / ") || "journal view";
   main.append(title, meta);
+  const riskCopy = orderMismatchCopy(order);
+  if (riskCopy) {
+    const risk = document.createElement("small");
+    risk.className = "open-order-row__risk";
+    risk.textContent = riskCopy;
+    main.append(risk);
+  }
 
   const editBox = document.createElement("div");
   editBox.className = "open-order-row__edit";
@@ -57,7 +77,7 @@ function openOrderRowElement(order) {
   qty.step = "1";
   qty.value = String(edit.quantity || orderReductionMax(order) || 1);
   qty.setAttribute("aria-label", `Reduction quantity for ${order.symbol || id}`);
-  qty.disabled = !modifyGate.ready || edit.busy;
+  qty.disabled = !modifyGate.ready || Boolean(modifyGate.reduceOnly) || edit.busy;
   qty.addEventListener("change", () => {
     const maxQty = orderReductionMax(order) || 1;
     edit.quantity = Math.min(maxQty, Math.max(1, Math.trunc(Number(qty.value || 1))));
@@ -86,7 +106,10 @@ function openOrderRowElement(order) {
 
   const controls = document.createElement("div");
   controls.className = "open-order-row__controls";
-  const previewButton = orderActionButton("Preview change", modifyGate.ready && !edit.busy, modifyGate.reason);
+  const previewLabel = modifyGate.reduceOnly
+    ? `Reduce stop to ${orderReduceToQuantity(order)}`
+    : "Preview change";
+  const previewButton = orderActionButton(previewLabel, modifyGate.ready && !edit.busy, modifyGate.reason);
   previewButton.addEventListener("click", () => previewOrderModify(order));
   const applyButton = orderActionButton("Apply change", modifyGate.ready && modifyPreviewReady(edit.preview) && !edit.busy, modifyApplyDisabledReason(modifyGate, edit.preview));
   applyButton.addEventListener("click", () => applyOrderModify(order));
@@ -119,7 +142,7 @@ function orderEditNumberInput(order, edit, modifyGate, field, label, placeholder
   input.value = typeof edit[field] === "number" ? String(edit[field]) : "";
   input.placeholder = placeholder;
   input.setAttribute("aria-label", `${label} for ${order.symbol || orderIdentity(order)}`);
-  input.disabled = !modifyGate.ready || edit.busy;
+  input.disabled = !modifyGate.ready || Boolean(modifyGate.reduceOnly) || edit.busy;
   input.addEventListener("change", () => {
     const next = Number(input.value || 0);
     edit[field] = Number.isFinite(next) && next > 0 ? next : null;
@@ -303,7 +326,18 @@ function orderReductionMax(order) {
 function orderModifyGate(order, trading) {
   if (!orderIdentity(order)) return { ready: false, reason: "Order id unavailable" };
   if (!trading.can_write) return { ready: false, reason: "Broker writes are not enabled by trading.status" };
-  if ("modify_eligible" in order && order.modify_eligible !== true) return { ready: false, reason: "This order is not modify eligible" };
+  if ("modify_eligible" in order && order.modify_eligible !== true) {
+    if (order.open !== false && orderReduceToQuantity(order) > 0) {
+      // Position-mismatch rows disable generic modify but keep exactly one
+      // shape: reduce the stop to the covered position, trail unchanged.
+      // The daemon enforces the same constraint server-side.
+      return { ready: true, reduceOnly: true, reason: "Position no longer covers this stop; only a reduce to the held quantity is allowed" };
+    }
+    if (order.reconciliation_kind === "short_entry_full") {
+      return { ready: false, reason: "Position is flat; cancel this protective order instead of modifying it" };
+    }
+    return { ready: false, reason: "This order is not modify eligible" };
+  }
   if (order.open === false) return { ready: false, reason: "Only open orders can be modified" };
   const orderType = String(order.order_type || "LMT").toUpperCase();
   if (orderType !== "LMT" && orderType !== "TRAIL" && orderType !== "TRAIL LIMIT") {
@@ -317,6 +351,24 @@ function orderModifyGate(order, trading) {
 function orderIsTrail(order) {
   const orderType = String(order.order_type || "").toUpperCase();
   return orderType === "TRAIL" || orderType === "TRAIL LIMIT";
+}
+
+function orderReduceToQuantity(order) {
+  const value = Number(order.reduce_to_quantity || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function orderMismatchCopy(order) {
+  if (!order.reconciliation_kind) return "";
+  const qty = Number(order.remaining || order.quantity || 0);
+  const risk = Number(order.short_risk_quantity || 0);
+  const selling = String(order.action || "").toUpperCase() === "SELL";
+  const verb = selling ? "sells" : "buys";
+  const side = selling ? "short" : "long";
+  if (order.reconciliation_kind === "short_entry_excess") {
+    return `Stop ${verb} ${qty} but the position covers ${orderReduceToQuantity(order)}. Triggering would open a ${risk}-share ${side} position.`;
+  }
+  return `Position is flat. Triggering would open a ${risk}-share ${side} position. Cancel this stop.`;
 }
 
 function orderCancelGate(order, trading) {

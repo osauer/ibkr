@@ -378,6 +378,41 @@ func reconcileFlatPositionProtectiveOrders(views []rpc.OrderView, pos *rpc.Posit
 		view.ReconciliationState = "position_mismatch"
 		view.BrokerTruthAsOf = now
 		view.LastMessage = fmt.Sprintf("current position %.4g no longer supports close-only protective order remaining %.4g; broker reconciliation required", current, remaining)
+		classifyProtectiveMismatch(view, current, remaining)
+	}
+}
+
+// classifyProtectiveMismatch grades a position_mismatch by its consequence.
+// coverage is the position magnitude available in the order's closing
+// direction; whatever the order's remaining quantity exceeds it by would open
+// a position in the opposite direction on trigger. Both kinds are critical —
+// the damaging event is the same — they differ only in the offered fix:
+// no coverage → cancel; partial coverage → reduce to exactly the coverage.
+func classifyProtectiveMismatch(view *rpc.OrderView, current, remaining float64) {
+	coverage := protectiveCloseCoverage(*view, current)
+	view.ReconciliationSeverity = rpc.OrderReconciliationSeverityCritical
+	if coverage > 0 && coverage < remaining {
+		view.ReconciliationKind = rpc.OrderReconciliationKindShortEntryExcess
+		view.ShortRiskQuantity = remaining - coverage
+		view.ReduceToQuantity = coverage
+		return
+	}
+	view.ReconciliationKind = rpc.OrderReconciliationKindShortEntryFull
+	view.ShortRiskQuantity = remaining
+}
+
+// protectiveCloseCoverage is the position quantity available in the order's
+// closing direction: long shares for a SELL close, short magnitude for a BUY
+// cover. Zero or negative means the position cannot absorb any part of the
+// order.
+func protectiveCloseCoverage(view rpc.OrderView, current float64) float64 {
+	switch strings.ToUpper(strings.TrimSpace(view.Action)) {
+	case rpc.OrderActionSell:
+		return current
+	case rpc.OrderActionBuy:
+		return -current
+	default:
+		return 0
 	}
 }
 

@@ -352,6 +352,12 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		if err := validateModifyDraft(replaceView, draft); err != nil {
 			return nil, err
 		}
+		// Position-mismatch gate: position.Before is this preview's fresh
+		// positions read (the preview already failed closed above if
+		// positions were unavailable).
+		if err := validateProtectiveModifyQuantity(replaceView, draft, position.Before); err != nil {
+			return nil, err
+		}
 		draft.Contract = modifyContractForView(replaceView, draft.Contract)
 	}
 	var whatIf rpc.OrderWhatIfResult
