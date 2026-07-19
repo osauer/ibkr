@@ -11,6 +11,7 @@ import (
 	"net"
 	nethttp "net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -550,15 +551,30 @@ func (h *handler) handleGetSettings(w nethttp.ResponseWriter, r *nethttp.Request
 }
 
 func (h *handler) handlePatchSettings(w nethttp.ResponseWriter, r *nethttp.Request) {
-	defer r.Body.Close()
-	var raw json.RawMessage
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&raw); err != nil {
+	var patch map[string]json.RawMessage
+	if err := decodeJSON(r, &patch); err != nil {
 		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
-	settings, err := h.deps.Daemon.UpdateSettings(r.Context(), raw)
+	if patch == nil {
+		writeError(w, nethttp.StatusBadRequest, "settings patch must be a JSON object")
+		return
+	}
+	if _, ok := patch["trading"]; ok {
+		writeError(w, nethttp.StatusBadRequest, "trading settings are not writable from the app; use the CLI")
+		return
+	}
+
+	// Origin is server-assigned, never client-claimed: every authenticated
+	// app caller is a paired device regardless of what the body says.
+	delete(patch, "origin")
+	patch["origin"] = json.RawMessage(strconv.Quote(rpc.OrderOriginPairedDevice))
+	forwardedPatch, err := json.Marshal(patch)
+	if err != nil {
+		writeError(w, nethttp.StatusInternalServerError, err.Error())
+		return
+	}
+	settings, err := h.deps.Daemon.UpdateSettings(r.Context(), forwardedPatch)
 	if err != nil {
 		writeDaemonSettingsError(w, err)
 		return

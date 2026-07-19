@@ -680,6 +680,96 @@ func TestSettingsGetPatchRequiresAuthAndRejectsReadOnly(t *testing.T) {
 	}
 }
 
+func TestPatchSettingsReplacesClientClaimedOrigin(t *testing.T) {
+	t.Parallel()
+	client := &routeSettingsPatchCaptureClient{}
+	handler := newTestHandlerWithClient(t, client).Handler()
+	cookie := routeSessionCookie(t, handler)
+	req := httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader([]byte(`{
+		"origin":"human-tty",
+		"features":{"purge_restore":{"enabled":false}}
+	}`)))
+	req.AddCookie(cookie)
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200; body=%s", res.Code, res.Body.String())
+	}
+	if client.calls != 1 {
+		t.Fatalf("daemon update calls=%d, want 1", client.calls)
+	}
+	var forwarded map[string]json.RawMessage
+	if err := json.Unmarshal(client.patch, &forwarded); err != nil {
+		t.Fatalf("decode forwarded patch: %v", err)
+	}
+	var origin string
+	if err := json.Unmarshal(forwarded["origin"], &origin); err != nil {
+		t.Fatalf("decode forwarded origin: %v", err)
+	}
+	if origin != rpc.OrderOriginPairedDevice {
+		t.Fatalf("forwarded origin=%q, want %q", origin, rpc.OrderOriginPairedDevice)
+	}
+	if got := string(forwarded["features"]); got != `{"purge_restore":{"enabled":false}}` {
+		t.Fatalf("forwarded features=%s, want unchanged feature patch", got)
+	}
+}
+
+func TestPatchSettingsRejectsTradingBeforeDaemonCall(t *testing.T) {
+	t.Parallel()
+	client := &routeSettingsPatchCaptureClient{}
+	handler := newTestHandlerWithClient(t, client).Handler()
+	cookie := routeSessionCookie(t, handler)
+	req := httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader([]byte(`{"trading":{"freeze":false}}`)))
+	req.AddCookie(cookie)
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400; body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "trading settings are not writable from the app; use the CLI") {
+		t.Fatalf("body=%q, want app trading rejection", res.Body.String())
+	}
+	if client.calls != 0 {
+		t.Fatalf("daemon update calls=%d, want 0", client.calls)
+	}
+}
+
+func TestPatchSettingsForwardsFeatureToggleWithPairedDeviceOrigin(t *testing.T) {
+	t.Parallel()
+	client := &routeSettingsPatchCaptureClient{}
+	handler := newTestHandlerWithClient(t, client).Handler()
+	cookie := routeSessionCookie(t, handler)
+	req := httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader([]byte(`{"features":{"purge_restore":{"enabled":false}}}`)))
+	req.AddCookie(cookie)
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200; body=%s", res.Code, res.Body.String())
+	}
+	if client.calls != 1 {
+		t.Fatalf("daemon update calls=%d, want 1", client.calls)
+	}
+	var forwarded struct {
+		Origin   string          `json:"origin"`
+		Features json.RawMessage `json:"features"`
+	}
+	if err := json.Unmarshal(client.patch, &forwarded); err != nil {
+		t.Fatalf("decode forwarded patch: %v", err)
+	}
+	if forwarded.Origin != rpc.OrderOriginPairedDevice {
+		t.Fatalf("forwarded origin=%q, want %q", forwarded.Origin, rpc.OrderOriginPairedDevice)
+	}
+	if got := string(forwarded.Features); got != `{"purge_restore":{"enabled":false}}` {
+		t.Fatalf("forwarded features=%s, want unchanged feature patch", got)
+	}
+}
+
 func TestSettingsRoutesKeepDaemonMarketDataQualityAuthority(t *testing.T) {
 	t.Parallel()
 	liveSvc := live.New(routeSettingsStatusClient{status: "live-snapshot"}, time.Minute, time.Minute)
@@ -1542,6 +1632,18 @@ func (routeFakeClient) Settings(context.Context) (*rpc.PlatformSettings, error) 
 type routeSettingsStatusClient struct {
 	routeFakeClient
 	status string
+}
+
+type routeSettingsPatchCaptureClient struct {
+	routeFakeClient
+	calls int
+	patch json.RawMessage
+}
+
+func (c *routeSettingsPatchCaptureClient) UpdateSettings(_ context.Context, patch json.RawMessage) (*rpc.PlatformSettings, error) {
+	c.calls++
+	c.patch = append(c.patch[:0], patch...)
+	return c.Settings(context.Background())
 }
 
 func (c routeSettingsStatusClient) Settings(ctx context.Context) (*rpc.PlatformSettings, error) {
