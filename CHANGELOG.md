@@ -2,12 +2,23 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-## v2.1.2 — 2026-07-18 22:14 CEST
+## v2.2.0 — 2026-07-19 07:22 CEST
 
 ### What's new
 
+- **The risk constitution now nudges instead of nagging.** Governance follow-ups that used to rely on the operator remembering them — reconcile coming due, a drawdown tier consuming its budget, policy drift between siblings — surface as advisory nudges in the paired app and the daily brief. Everything stays shadow/advisory: no nudge blocks an order, and the monthly governance pulse is acknowledged with one tap on the paired device. **Action required:** none; nudges activate only under an approved v4 risk policy and stay silent otherwise.
 - **The regime dashboard's gamma indicator measures the market again.** A gateway quirk was silently zeroing every call leg's open interest, which forced the dealer-gamma reading permanently negative — a data artifact, not a market signal. Open-interest capture is now right-aware, and per-leg call OI in `ibkr chain` is correct again.
 - The HYG/SPY credit row now degrades gracefully to the latest official close when a live tick is missing, instead of erroring out and destabilizing regime stage transitions.
+
+### Added
+
+- Risk-governance nudges (advisory/shadow): the daemon derives typed nudge candidates — reconcile due, drawdown tier consumption, sibling policy drift, monthly governance pulse — strictly from active, fully approved, internally consistent v4 policy authority; any unhealthy or pre-v4 posture suppresses candidates with a disclosed typed reason rather than a clean-empty result. Shadow occurrences are timestamped at the first qualifying preview and survive restarts.
+- `nudges.cutover_review`: a fixed-shape, paired-device-only acknowledgement for the governance cutover review. The daemon authenticates the paired session, revalidates the canonical policy report at write time, pins the reviewed coverage and report fingerprint into daemon-owned evidence, and keeps identical retries idempotent while conflicting or stale retries fail closed. It acknowledges review only — it cannot submit broker writes, change freeze or limits, or weaken policy.
+- The paired app delivers nudges through alerts and the governance panel, and `POST /api/governance/cutover-review` accepts only an empty body: origin and evidence are fixed server-side, hostile payloads are rejected before the daemon call, and daemon errors return without private text. The daily brief (`ibkr brief`) renders the monthly governance aggregate.
+
+### Security
+
+- `PATCH /api/settings` on the paired-app route now rejects any `trading.*` patch with a 400 before the daemon is called (the CLI remains the only trading-settings surface), and assigns `origin` server-side as `paired_device`, discarding whatever origin the client body claims.
 
 ### Fixed
 
