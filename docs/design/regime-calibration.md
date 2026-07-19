@@ -199,7 +199,10 @@ Rationale highlights:
   (`StreakStore.Get`), which lives daemon-side where banding happens.
 - **Panic is untouched.** SPY −4%/−7% tape triggers stay as they are; tape is
   never depth/streak-gated. Real crashes escalate immediately through the
-  panic path and through fast-path depths regardless of streaks.
+  panic path and through fast-path depths regardless of streaks. (The
+  2026-07-19 closed-date pass adds a session gate, not a depth/streak gate:
+  frozen closed-date prints cannot fire the tape branches, live trading-date
+  prints keep immediate escalation — see Part 2.)
 - Deleting `regime-streaks.json` mid-stress demotes an ongoing confirmation
   to provisional until fast-path depth or two fresh sessions re-establish it.
   Accepted: the store is daemon-owned runtime state, not user-facing.
@@ -227,6 +230,26 @@ without any red:
 - `early_warning` — unchanged, and explicitly the home of provisional reds:
   `rawRed ≥ 1 || yellow ≥ 3 || provisional present || SPY ≤ −1.5% || VIX +10%`.
 - `opportunity` / `stabilization` / `quiet` — unchanged.
+
+**Closed-date tape gating (added 2026-07-19).** Every tape term above reads
+the direct SPY/VIX day-change prints, which freeze at last-session values on
+official non-trading dates and can even reset independently while closed (the
+2026-07-18/19 weekend journal held `early_warning`/watch on a half-reset
+Saturday print: SPY change collapsed to 0.00 while VIX kept Friday's +12%).
+The stage arms, the governor's SPY/VIX co-sign arms, and the pure-tape panic
+exemption therefore require a confirmable session — `tape_session_state !=
+closed_date`, classified by `rpc.TapeSessionFor` (marketcal US-equity date
+state; the shared copy the canary tape row also keys on), stamped by the
+daemon at snapshot time and by the backtest replay from the observation
+clock, empty-and-fail-open outside embedded calendar coverage. Cluster-driven
+terms and the status-gated term-inversion co-sign are untouched. The isolated
+equity-vol corroboration inside cluster combination deliberately stays
+session-blind (decision 2026-07-19: bounded residual — it can only preserve a
+red that live-session banding produced, and its worst weekend effect is
+cluster-grade early warning; revisit with journal evidence). The rulebook's
+regime-stage latch skips closed-date snapshots so the last trading-date stage
+ages into the carried worse-of(carried, calm) path instead of a weekend stage
+re-latching fresh.
 
 On 2026-06-12 this yields: HYG red provisional (depth 0.07% < 0.25%, streak
 1 < 2), gamma red provisional (prior-trading-date compute) → `eligibleRed =

@@ -7,13 +7,15 @@ function renderPortfolioRisk(positions, account) {
   const portfolio = positions.portfolio || {};
   const baseCurrency = portfolio.base_currency || account.base_currency || "";
   renderPortfolioDeltaPosture(portfolio, account);
-  renderSensitiveText("portfolioDailyTheta", riskMoney(
+  // These two spans are screen-reader-only; without a spoken label the bare
+  // money values read as unlabeled numbers, so the label travels inside.
+  renderSensitiveText("portfolioDailyTheta", "Theta per day " + riskMoney(
     portfolio.daily_theta_base ?? portfolio.daily_theta_ccy,
     portfolio.daily_theta_base_currency || portfolio.daily_theta_ccy_currency || baseCurrency,
   ), hasNumericValue(portfolio.daily_theta_base ?? portfolio.daily_theta_ccy));
   $("portfolioGreeksCoverage").textContent = greeksCoverage(portfolio, positions);
   $("portfolioGreeksMeaning").textContent = greeksMeaning(portfolio, positions);
-  renderSensitiveText("portfolioFxSensitivity", riskMoney(
+  renderSensitiveText("portfolioFxSensitivity", "FX 1% sensitivity " + riskMoney(
     portfolio.fx_sensitivity_per_pct,
     portfolio.fx_base_currency || baseCurrency,
   ), hasNumericValue(portfolio.fx_sensitivity_per_pct));
@@ -151,7 +153,10 @@ function renderExposureVisual(exposures) {
   }
 
   const totalShown = normalized.reduce((sum, exposure) => sum + exposure.pct, 0);
-  const remainder = Math.max(0, 100 - totalShown);
+  // A sub-half-percent residue rounds to a "0%" legend chip, which reads as
+  // a data bug; the bar simply absorbs it instead.
+  let remainder = Math.max(0, 100 - totalShown);
+  if (remainder < 0.5) remainder = 0;
   const trackBase = totalShown + remainder || totalShown;
 
   const track = document.createElement("div");

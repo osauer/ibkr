@@ -95,8 +95,14 @@ func renderBrief(env *Env, res rpc.BriefResult) {
 		}
 	}
 	briefLine(env, "dealer gamma", res.Market.Gamma.BriefRowState, gamma)
+	// Action and severity are usually the same word; printing both reads as a
+	// stutter, so the pair collapses when equal (the SPA does the same).
+	severity := res.Market.Canary.Severity
+	if strings.EqualFold(severity, res.Market.Canary.Action) {
+		severity = ""
+	}
 	briefLine(env, "canary", res.Market.Canary.BriefRowState,
-		briefJoin(res.Market.Canary.Action, res.Market.Canary.Severity, res.Market.Canary.Summary))
+		briefJoin(res.Market.Canary.Action, severity, res.Market.Canary.Summary))
 
 	fmt.Fprintln(env.Stdout, "\nB  Calendar")
 	session := briefJoin(res.Calendar.Session.Market, res.Calendar.Session.State)
@@ -118,9 +124,17 @@ func renderBrief(env *Env, res rpc.BriefResult) {
 		acct += " · day " + formatMoneyCcy(*res.Portfolio.Account.DailyPnLBase, res.Portfolio.Account.BaseCurrency)
 	}
 	briefLine(env, "account", res.Portfolio.Account.BriefRowState, acct)
-	movers := make([]string, 0, len(res.Portfolio.Movers.Rows))
+	movers := make([]string, 0, len(res.Portfolio.Movers.Rows)+1)
 	for _, mover := range res.Portfolio.Movers.Rows {
 		movers = append(movers, fmt.Sprintf("%s %s", mover.Symbol, formatMoneyCcy(mover.DailyPnLBase, res.Portfolio.Account.BaseCurrency)))
+	}
+	if res.Portfolio.Movers.OtherPnLBase != nil && res.Portfolio.Movers.OtherCount > 0 {
+		unit := "others"
+		if res.Portfolio.Movers.OtherCount == 1 {
+			unit = "other"
+		}
+		movers = append(movers, fmt.Sprintf("%d %s %s", res.Portfolio.Movers.OtherCount, unit,
+			formatMoneyCcy(*res.Portfolio.Movers.OtherPnLBase, res.Portfolio.Account.BaseCurrency)))
 	}
 	briefLine(env, "movers", res.Portfolio.Movers.BriefRowState, strings.Join(movers, " · "))
 	briefLine(env, "premium at risk", res.Portfolio.PremiumAtRisk.BriefRowState, briefMoney(res.Portfolio.PremiumAtRisk))
@@ -132,16 +146,32 @@ func renderBrief(env *Env, res rpc.BriefResult) {
 	briefLine(env, "working orders", res.Portfolio.WorkingOrders.BriefRowState, orders)
 
 	fmt.Fprintln(env.Stdout, "\nD  Risk & limits")
-	capital := briefJoin(res.RiskLimits.Capital.Tier, res.RiskLimits.Capital.Enforcement)
+	capital := ""
+	if res.RiskLimits.Capital.Tier != "" {
+		capital = "tier " + res.RiskLimits.Capital.Tier
+	}
+	if res.RiskLimits.Capital.Enforcement != "" {
+		capital = briefJoin(capital, "enforcement "+res.RiskLimits.Capital.Enforcement)
+	}
 	if res.RiskLimits.Capital.ConsumedPct != nil {
 		capital = briefJoin(capital, fmt.Sprintf("%.1f%% consumed", *res.RiskLimits.Capital.ConsumedPct))
+	}
+	if !res.RiskLimits.Capital.PeakAsOf.IsZero() {
+		capital = briefJoin(capital, "peak set "+res.RiskLimits.Capital.PeakAsOf.Local().Format("2006-01-02 15:04"))
 	}
 	briefLine(env, "capital", res.RiskLimits.Capital.BriefRowState, capital)
 	latch := "open"
 	if res.RiskLimits.Latch.Latched {
 		latch = "LATCHED"
 		if res.RiskLimits.Latch.AgeDays != nil {
-			latch += fmt.Sprintf(" · %d day(s)", *res.RiskLimits.Latch.AgeDays)
+			unit := "days"
+			if *res.RiskLimits.Latch.AgeDays == 1 {
+				unit = "day"
+			}
+			latch += fmt.Sprintf(" · %d %s", *res.RiskLimits.Latch.AgeDays, unit)
+		}
+		if res.RiskLimits.Latch.ConsumedPctAtLatch != nil {
+			latch += fmt.Sprintf(" · engaged at %.1f%%", *res.RiskLimits.Latch.ConsumedPctAtLatch)
 		}
 	}
 	briefLine(env, "drawdown latch", res.RiskLimits.Latch.BriefRowState, latch)

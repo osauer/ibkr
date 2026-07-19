@@ -228,7 +228,10 @@ func applyRegimeSeverityGovernor(state *LifecycleState, r *RegimeSnapshotResult,
 	if state.Stage != LifecycleConfirmedStress && state.Stage != LifecyclePanic {
 		return
 	}
-	tapePanic := state.Stage == LifecyclePanic && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0)
+	// The exemption requires a confirmable tape: a frozen closed-date print
+	// is neither its own co-signature nor its own evidence quality, so a
+	// cluster-driven panic on a closed date stays governable.
+	tapePanic := state.Stage == LifecyclePanic && regimeTapeConfirmable(*r) && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0)
 	pending := regimePendingBacktestClusters(r, state.ConfirmedBy)
 	if len(pending) > 0 && !tapePanic && !regimeTapeCosign(r) {
 		from := state.Severity
@@ -280,13 +283,31 @@ func severityRank(severity string) int {
 // regimeTapeCosign reports whether the tape itself corroborates stress in
 // this snapshot: SPY down 1.5%+, VIX up 10%+, or a fresh same-session
 // VIX-term inversion. While threshold sets are pending_backtest, "act"
-// requires one of these as the second witness.
+// requires one of these as the second witness. The SPY/VIX change arms
+// (arms 1-2) require a confirmable tape — a frozen closed-date print cannot
+// co-sign — which closes the closed-date slice of the arms-1-2 freshness gap
+// from the 2026-07-18 calibration review; their intraweek staleness gap
+// remains open. Arm 3 keeps its own status gate unchanged.
 func regimeTapeCosign(r *RegimeSnapshotResult) bool {
-	if pctAtMost(r.HYGSPYDivergence.SPYChangePct, -1.5) || pctAtLeast(r.VIXTermStructure.VIXChangePct, 10.0) {
+	if regimeTapeConfirmable(*r) &&
+		(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -1.5) || pctAtLeast(r.VIXTermStructure.VIXChangePct, 10.0)) {
 		return true
 	}
 	return r.VIXTermStructure.Status == RegimeStatusOK &&
 		r.VIXTermStructure.Ratio != nil && *r.VIXTermStructure.Ratio >= 1.0
+}
+
+// regimeTapeConfirmable reports whether direct SPY/VIX day-change prints may
+// enter or hold tape-driven lifecycle terms for this snapshot. On an official
+// closed date (weekend/holiday per TapeSessionFor) the day-change anchors are
+// frozen last-session values, so tape terms evaluate as not firing; the
+// cluster-driven terms are untouched. Empty state — outside embedded calendar
+// coverage, or a builder that never stamped the session — fails open to full
+// effect, so historical replay and older corpora behave exactly as before.
+// Weekday pre/post/overnight prints are live (VIX prints overnight on
+// weekdays) and keep full effect by design.
+func regimeTapeConfirmable(r RegimeSnapshotResult) bool {
+	return r.TapeSessionState != TapeSessionClosedDate
 }
 
 // regimePendingBacktestClusters returns the confirming clusters whose red
@@ -599,36 +620,49 @@ func lifecycleFingerprint(state LifecycleState) Fingerprint {
 
 // regimeLifecyclePanic: three deep/fresh/persistent independent reds, or
 // tape-grade crashes. Eligible reds only — provisional evidence never
-// reaches the panic tally.
+// reaches the panic tally. Tape arms require a confirmable session: a frozen
+// closed-date print cannot enter (or, on re-evaluation, hold) panic.
 func regimeLifecyclePanic(r RegimeSnapshotResult, t regimeClusterTally) bool {
-	return t.eligibleRed >= 3 ||
-		(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0) && t.eligibleRed >= 1) ||
-		pctAtMost(r.HYGSPYDivergence.SPYChangePct, -7.0)
+	if t.eligibleRed >= 3 {
+		return true
+	}
+	return regimeTapeConfirmable(r) &&
+		((pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0) && t.eligibleRed >= 1) ||
+			pctAtMost(r.HYGSPYDivergence.SPYChangePct, -7.0))
 }
 
 func regimeLifecycleConfirmedStress(r RegimeSnapshotResult, t regimeClusterTally) bool {
-	return t.eligibleRed >= 2 ||
-		(t.eligibleRed >= 1 && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -2.5)) ||
-		(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0) && t.yellow >= 2) ||
-		(t.eligibleRed >= 1 && pctAtLeast(r.VIXTermStructure.VIXChangePct, 20.0))
+	if t.eligibleRed >= 2 {
+		return true
+	}
+	return regimeTapeConfirmable(r) &&
+		((t.eligibleRed >= 1 && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -2.5)) ||
+			(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0) && t.yellow >= 2) ||
+			(t.eligibleRed >= 1 && pctAtLeast(r.VIXTermStructure.VIXChangePct, 20.0)))
 }
 
 // regimeLifecycleEarlyWarning is the home of provisional reds: any raw red
 // (eligible or not) warns immediately, even though only eligible reds may
-// confirm.
+// confirm. The direct tape triggers require a confirmable session; cluster
+// evidence warns on any date.
 func regimeLifecycleEarlyWarning(r RegimeSnapshotResult, t regimeClusterTally, unconfirmed []string) bool {
 	return t.eligibleRed+t.provisionalRed >= 1 ||
 		t.red >= 1 ||
 		t.yellow >= 3 ||
 		len(unconfirmed) > 0 ||
-		pctAtMost(r.HYGSPYDivergence.SPYChangePct, -1.5) ||
-		pctAtLeast(r.VIXTermStructure.VIXChangePct, 10.0)
+		(regimeTapeConfirmable(r) &&
+			(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -1.5) ||
+				pctAtLeast(r.VIXTermStructure.VIXChangePct, 10.0)))
 }
 
+// Opportunity and stabilization are tape-driven recovery stages: a frozen
+// closed-date rally print is last session's news, so neither stage is
+// enterable on a closed date and the machine reads quiet instead.
 func regimeLifecycleOpportunity(r RegimeSnapshotResult, t regimeClusterTally) bool {
 	return t.red == 0 &&
 		t.yellow <= 1 &&
 		t.ranked >= 3 &&
+		regimeTapeConfirmable(r) &&
 		pctAtLeast(r.HYGSPYDivergence.SPYChangePct, 1.5) &&
 		pctAtMost(r.VIXTermStructure.VIXChangePct, -10.0)
 }
@@ -637,6 +671,7 @@ func regimeLifecycleStabilization(r RegimeSnapshotResult, t regimeClusterTally) 
 	return t.red == 0 &&
 		t.yellow > 0 &&
 		t.yellow <= 2 &&
+		regimeTapeConfirmable(r) &&
 		(pctAtLeast(r.HYGSPYDivergence.SPYChangePct, 1.0) || pctAtMost(r.VIXTermStructure.VIXChangePct, -10.0))
 }
 
@@ -789,16 +824,17 @@ func regimeLifecycleEvidence(cb RegimeClusterBands, r RegimeSnapshotResult) []Li
 			Confirmed: confirmedSignal,
 		})
 	}
+	confirmable := regimeTapeConfirmable(r)
 	if r.HYGSPYDivergence.SPYChangePct != nil {
-		out = append(out, tapeLifecycleEvidence("spy", *r.HYGSPYDivergence.SPYChangePct, -1.5, -2.5))
+		out = append(out, tapeLifecycleEvidence("spy", *r.HYGSPYDivergence.SPYChangePct, -1.5, -2.5, confirmable))
 	}
 	if r.VIXTermStructure.VIXChangePct != nil {
-		out = append(out, tapeLifecycleEvidence("vix", *r.VIXTermStructure.VIXChangePct, 10, 20))
+		out = append(out, tapeLifecycleEvidence("vix", *r.VIXTermStructure.VIXChangePct, 10, 20, confirmable))
 	}
 	return out
 }
 
-func tapeLifecycleEvidence(source string, observed, watch, act float64) LifecycleEvidence {
+func tapeLifecycleEvidence(source string, observed, watch, act float64, confirmable bool) LifecycleEvidence {
 	ev := LifecycleEvidence{Source: source, Signal: "tape", Timing: "current"}
 	switch source {
 	case "spy":
@@ -832,6 +868,15 @@ func tapeLifecycleEvidence(source string, observed, watch, act float64) Lifecycl
 			ev.Severity = "observe"
 		}
 	}
+	// Closed-date demotion mirrors the canary tape row: the bucket keeps the
+	// frozen print's factual magnitude, but a print that cannot confirm is
+	// never contemporaneous act-grade evidence — it reads as a forward
+	// warning to re-check at the next open, severity observe, unconfirmed.
+	if !confirmable && ev.Bucket != "green" {
+		ev.Timing = LifecycleTimingForwardWarning
+		ev.Severity = "observe"
+		ev.Confirmed = false
+	}
 	return ev
 }
 
@@ -856,6 +901,13 @@ func strongestLifecycleBand(bands ...string) string {
 	return ""
 }
 
+// isolatedLifecycleEquityVolConfirmed corroborates an isolated equity-vol
+// red inside cluster-band combination (BuildRegimeClusterBands). The SPY/VIX
+// change terms here deliberately stay session-blind (Oliver, 2026-07-19,
+// closed-date gating pass): they only preserve a red that live-session
+// banding already produced, and with the stage tape arms closed-date-gated
+// the worst residual is cluster-grade early warning. Revisit with journal
+// evidence if weekend audits show frozen corroboration mattering.
 func isolatedLifecycleEquityVolConfirmed(r RegimeSnapshotResult) bool {
 	if r.VIXTermStructure.Band == "red" {
 		return true

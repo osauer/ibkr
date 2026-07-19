@@ -117,6 +117,19 @@ function protectionCoverageNoStopSummary(coverage = {}) {
     };
   }
   if (hasNumericValue(coverage.unprotected_notional_base)) {
+    // A zero notional with uncovered rows means the rows could not be valued
+    // (stale or delisted marks), not that nothing is exposed — "€0" there is
+    // false comfort, so the row count leads instead.
+    if (coverage.unprotected_notional_base <= 0 && issueCount > 0) {
+      return {
+        text: `${issueCount} ${issueCount === 1 ? "row" : "rows"}`,
+        title: [
+          `${issueCount} uncovered stock/ETF ${issueCount === 1 ? "row" : "rows"} whose notional is zero or unavailable (stale or delisted marks); a euro amount would be false comfort.`,
+          stale,
+        ].filter(Boolean).join(" "),
+        risk: true,
+      };
+    }
     const text = compactWholeMoney(coverage.unprotected_notional_base, baseCurrency);
     const label = issueCount > 0
       ? `${issueCount} ${issueCount === 1 ? "stock/ETF row has" : "stock/ETF rows have"} uncovered quantity`

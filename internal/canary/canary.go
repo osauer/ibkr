@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/regimerows"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -2306,27 +2305,11 @@ func canaryTapeEvidence(m CanaryMarketSummary) string {
 	return strings.Join(parts, "; ")
 }
 
-// canaryTapeSession classifies the official US cash-equity calendar date for
-// direct-tape severity. Trading dates (regular and early-close) keep full
-// severity at any hour — pre/post/overnight prints are live and the tape row
-// exists to catch them. Closed dates (weekend/holiday) freeze the SPY/VIX
-// day-change anchors at last-session values (which can even reset
-// independently while closed), so shocks demote to observe until the next
-// open re-evaluates them from live prints. Outside embedded calendar
-// coverage the state stays empty and severity behaves as before.
+// canaryTapeSession delegates to the shared rpc.TapeSessionFor policy copy —
+// the regime lifecycle keys its closed-date tape gating on the same
+// classification, and two hand-maintained calendars would drift.
 func canaryTapeSession(now time.Time) (state, reason string, nextOpen *time.Time) {
-	sess, err := marketcal.New().SessionAt(marketcal.MarketUSEquity, now)
-	if err != nil {
-		return "", "", nil
-	}
-	switch sess.State {
-	case marketcal.StateClosed, marketcal.StateHoliday:
-		return rpc.TapeSessionClosedDate, sess.Reason, sess.NextOpen
-	case marketcal.StateRegular, marketcal.StateEarlyClose:
-		return rpc.TapeSessionTradingDate, "", nil
-	default:
-		return "", "", nil
-	}
+	return rpc.TapeSessionFor(now)
 }
 
 // canaryTapeConfirmable reports whether direct SPY/VIX day-change prints may

@@ -58,6 +58,17 @@ func (s *Server) latchRulesRegimeStage(res *rpc.RegimeSnapshotResult) {
 	if res == nil {
 		return
 	}
+	if res.TapeSessionState == rpc.TapeSessionClosedDate {
+		// Closed-date snapshots hold the previous latch (Oliver, 2026-07-19,
+		// closed-date tape-gating pass): with tape terms gated, a
+		// weekend/holiday stage is cluster-only and must neither re-freshen
+		// nor relax the rulebook bucket. The last trading-date stage instead
+		// ages past RegimeStageMaxAgeMinutes into the existing carried
+		// worse-of(carried, calm) path — stale regime data can hold or
+		// tighten a verdict but never relax it — and the first live snapshot
+		// at the next open re-latches fresh.
+		return
+	}
 	bucket := bucketRegimeStage(res.Lifecycle.Stage)
 	if bucket == "" {
 		return // hold the previous latch

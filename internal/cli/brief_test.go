@@ -32,7 +32,7 @@ func TestRenderBriefFiveSectionsAndDegradation(t *testing.T) {
 			WorkingOrders: rpc.BriefCountRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "journal"}},
 		},
 		RiskLimits: rpc.BriefRiskSection{
-			Capital:     rpc.BriefCapitalRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "unapproved"}},
+			Capital:     rpc.BriefCapitalRow{BriefRowState: rpc.BriefRowState{Status: "attention", Detail: "block tier breached"}, Tier: "block", Enforcement: "shadow"},
 			Latch:       rpc.BriefLatchRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "open"}},
 			Overrides:   rpc.BriefOverridesRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "none"}},
 			PolicyDrift: rpc.BriefPolicyDriftRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "match"}},
@@ -47,7 +47,7 @@ func TestRenderBriefFiveSectionsAndDegradation(t *testing.T) {
 	}
 	renderBrief(env, res)
 	got := stdout.String()
-	for _, want := range []string{"A  Market", "B  Calendar", "C  Portfolio", "D  Risk & limits", "E  Process", "gateway unavailable", "nil greeks excluded", "no delta baseline yet"} {
+	for _, want := range []string{"A  Market", "B  Calendar", "C  Portfolio", "D  Risk & limits", "E  Process", "gateway unavailable", "nil greeks excluded", "no delta baseline yet", "attention", "tier block · enforcement shadow"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("brief render missing %q:\n%s", want, got)
 		}

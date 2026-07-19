@@ -3,6 +3,7 @@ package rpc
 import (
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/risk"
 )
 
@@ -154,11 +155,37 @@ type CanaryMarketSummary struct {
 	TapeNextOpen      *time.Time `json:"tape_next_open,omitempty"`
 }
 
-// TapeSessionState values for CanaryMarketSummary. Trading dates keep full
-// direct-tape severity at any hour (pre/post/overnight moves are live prints
-// the tape-shock row exists to catch); closed dates demote frozen tape shocks
-// to observe until the next open re-evaluates them from live prints.
+// TapeSessionState values shared by CanaryMarketSummary and
+// RegimeSnapshotResult. Trading dates keep full direct-tape severity at any
+// hour (pre/post/overnight moves are live prints the tape-shock row exists to
+// catch); closed dates demote frozen tape shocks to observe and bar them from
+// entering or holding tape-driven lifecycle stages until the next open
+// re-evaluates them from live prints.
 const (
 	TapeSessionTradingDate = "trading_date"
 	TapeSessionClosedDate  = "closed_date"
 )
+
+// TapeSessionFor classifies the official US cash-equity calendar date at now
+// for direct-tape severity — the single policy copy behind both the canary
+// tape row and the regime lifecycle tape terms. Trading dates (regular and
+// early-close) keep full severity at any hour: pre/post/overnight prints are
+// live (VIX prints overnight on weekdays). Closed dates (weekend/holiday)
+// freeze the SPY/VIX day-change anchors at last-session values — which can
+// even reset independently while closed — so frozen shocks carry evidence but
+// confirm nothing until the next open. Outside embedded calendar coverage the
+// state stays empty and consumers fail open to full severity.
+func TapeSessionFor(now time.Time) (state, reason string, nextOpen *time.Time) {
+	sess, err := marketcal.New().SessionAt(marketcal.MarketUSEquity, now)
+	if err != nil {
+		return "", "", nil
+	}
+	switch sess.State {
+	case marketcal.StateClosed, marketcal.StateHoliday:
+		return TapeSessionClosedDate, sess.Reason, sess.NextOpen
+	case marketcal.StateRegular, marketcal.StateEarlyClose:
+		return TapeSessionTradingDate, "", nil
+	default:
+		return "", "", nil
+	}
+}

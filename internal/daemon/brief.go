@@ -457,10 +457,16 @@ func (s *Server) composeBrief(ctx context.Context) (*rpc.BriefResult, *rpc.Rules
 	constitution := renderAuthority.policy
 	recon := s.buildReconReport()
 
+	// A closed official session downgrades expected coldness (paused event
+	// sources, an idle gamma cache) from degraded to disclosed-normal; an
+	// unavailable calendar conservatively counts as open so real gaps keep
+	// their full weight.
+	sessionOpen := calErr != nil || cal == nil || cal.Session.IsOpen
+
 	res.Market = composeBriefMarket(now, acct, pos, regime, breadth, gamma, marketEvents,
-		acctErr, posErr, regimeErr, breadthErr, marketEventsErr)
-	res.Calendar = composeBriefCalendar(cal, marketEvents, rules, calErr, marketEventsErr)
-	res.Portfolio = s.composeBriefPortfolio(acct, pos, acctErr, posErr)
+		acctErr, posErr, regimeErr, breadthErr, marketEventsErr, sessionOpen)
+	res.Calendar = composeBriefCalendar(cal, marketEvents, rules, calErr, marketEventsErr, sessionOpen)
+	res.Portfolio = s.composeBriefPortfolio(acct, pos, acctErr, posErr, sessionOpen)
 	res.RiskLimits = composeBriefRisk(policy, now)
 	res.Process = s.composeBriefProcessForAuthority(policy, constitution, recon, rules, renderAuthority, now)
 	res.StampTarget, res.StampTargetReason = s.briefStampTarget(policy, constitution, now)
@@ -551,7 +557,7 @@ func (s *Server) briefPolicyResultForAuthority(acct *rpc.AccountResult, acctErr 
 
 func composeBriefMarket(now time.Time, acct *rpc.AccountResult, pos *rpc.PositionsResult,
 	regime *rpc.RegimeSnapshotResult, breadth *rpc.BreadthSPXResult, gamma *rpc.GammaZeroSPXResult,
-	events *rpc.MarketEventsResult, acctErr, posErr, regimeErr, breadthErr, eventsErr error) rpc.BriefMarketSection {
+	events *rpc.MarketEventsResult, acctErr, posErr, regimeErr, breadthErr, eventsErr error, sessionOpen bool) rpc.BriefMarketSection {
 	out := rpc.BriefMarketSection{}
 	if regimeErr != nil || regime == nil {
 		out.Regime.BriefRowState = briefUnavailable("regime snapshot unavailable: " + errText(regimeErr))
@@ -579,7 +585,7 @@ func composeBriefMarket(now time.Time, acct *rpc.AccountResult, pos *rpc.Positio
 	if breadth != nil {
 		out.Breadth.AsOf, out.Breadth.DataType = breadth.AsOf, breadth.DataType
 	}
-	out.Gamma = composeBriefGamma(gamma)
+	out.Gamma = composeBriefGamma(gamma, sessionOpen)
 	canaryInput := rpc.CanaryInput{Now: now}
 	if acct != nil {
 		canaryInput.Account = *acct
@@ -605,12 +611,19 @@ func composeBriefMarket(now time.Time, acct *rpc.AccountResult, pos *rpc.Positio
 	return out
 }
 
-func composeBriefGamma(env *rpc.GammaZeroSPXResult) rpc.BriefGammaRow {
+func composeBriefGamma(env *rpc.GammaZeroSPXResult, sessionOpen bool) rpc.BriefGammaRow {
 	row := rpc.BriefGammaRow{BriefRowState: briefUnavailable("dealer gamma cache is unavailable")}
 	if env == nil {
 		return row
 	}
 	if env.Status != rpc.GammaZeroStatusReady || env.Result == nil {
+		// A cold or still-computing cache while the market is closed is the
+		// expected weekend/overnight state, not a data incident; degraded is
+		// reserved for abnormal-for-session gaps and hard errors.
+		if !sessionOpen && (env.Status == rpc.GammaZeroStatusCold || env.Status == rpc.GammaZeroStatusComputing) {
+			row.BriefRowState = briefOK("dealer gamma cache is idle while the market is closed; it resumes with the next session")
+			return row
+		}
 		row.BriefRowState = briefDegraded("dealer gamma source is " + env.Status)
 		return row
 	}
@@ -632,7 +645,7 @@ func composeBriefGamma(env *rpc.GammaZeroSPXResult) rpc.BriefGammaRow {
 	return row
 }
 
-func composeBriefCalendar(cal *rpc.MarketCalendarResult, events *rpc.MarketEventsResult, rules *rpc.RulesResult, calErr, eventsErr error) rpc.BriefCalendarSection {
+func composeBriefCalendar(cal *rpc.MarketCalendarResult, events *rpc.MarketEventsResult, rules *rpc.RulesResult, calErr, eventsErr error, sessionOpen bool) rpc.BriefCalendarSection {
 	out := rpc.BriefCalendarSection{}
 	if calErr != nil || cal == nil {
 		out.Session.BriefRowState = briefUnavailable("market calendar unavailable: " + errText(calErr))
@@ -644,7 +657,7 @@ func composeBriefCalendar(cal *rpc.MarketCalendarResult, events *rpc.MarketEvent
 			out.Session.NextOpen = *s.NextOpen
 		}
 	}
-	out.MarketEvents = briefMarketEventRows(events, rules, eventsErr)
+	out.MarketEvents = briefMarketEventRows(events, rules, eventsErr, sessionOpen)
 	states := []rpc.BriefRowState{out.Session.BriefRowState}
 	for _, row := range out.MarketEvents {
 		states = append(states, row.BriefRowState)
@@ -653,7 +666,7 @@ func composeBriefCalendar(cal *rpc.MarketCalendarResult, events *rpc.MarketEvent
 	return out
 }
 
-func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult, sourceErr error) []rpc.BriefMarketEventRow {
+func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult, sourceErr error, sessionOpen bool) []rpc.BriefMarketEventRow {
 	kinds := []string{"earnings", "halt", "ssr", "borrow"}
 	sets := map[string]map[string]struct{}{}
 	for _, kind := range kinds {
@@ -684,24 +697,125 @@ func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult
 		}
 	}
 	rows := make([]rpc.BriefMarketEventRow, 0, len(kinds))
-	degraded := sourceErr != nil || events == nil || briefSourceHealthDegraded(events.SourceHealth)
+	hardErr := sourceErr != nil || events == nil
 	for _, kind := range kinds {
 		syms := mapKeysSorted(sets[kind])
-		state := briefOK(fmt.Sprintf("%d held symbol(s) flagged", len(syms)))
-		if degraded || (kind == "earnings" && rules == nil) {
+		flagged := fmt.Sprintf("%d held %s flagged", len(syms), pluralNoun(len(syms), "symbol"))
+		state := briefOK(flagged)
+		worst, lastChecked := briefEventKindHealth(events, kind)
+		switch {
+		case hardErr || (kind == "earnings" && rules == nil):
 			state = briefDegraded(fmt.Sprintf("%d known; one or more event sources are degraded", len(syms)))
+		case worst == "" || worst == "ok":
+			// healthy source: flagged copy stands as-is
+		case sessionOpen || worst == rpc.SourceStatusDegraded || worst == rpc.SourceStatusPartial:
+			// Abnormal-for-session states keep their weight even while the
+			// market is closed: degraded/partial mean the source misbehaved,
+			// not that it went idle.
+			state = briefDegraded(flagged + "; source health is " + worst + briefLastChecked(lastChecked))
+		default:
+			// stale/unknown while closed: no fresh update is expected, and the
+			// copy claims only what the code verified — the health state and
+			// when the source last reported.
+			state = briefOK(flagged + "; no fresh update expected while the market is closed (source health " + worst + briefLastChecked(lastChecked) + ")")
+		}
+		if kind == "earnings" && len(syms) > 0 {
+			if unknown := briefUnknownEarningsRules(rules); len(unknown) > 0 {
+				verb := "report"
+				if len(unknown) == 1 {
+					verb = "reports"
+				}
+				state = briefAttention(fmt.Sprintf("%d held earnings upcoming while the %s %s %s unknown; the rulebook cannot confirm earnings sizing is frozen",
+					len(syms), strings.Join(unknown, " and "), pluralNoun(len(unknown), "rule"), verb))
+			}
 		}
 		rows = append(rows, rpc.BriefMarketEventRow{BriefRowState: state, Kind: kind, Count: len(syms), Symbols: syms})
 	}
 	return rows
 }
 
-func (s *Server) composeBriefPortfolio(acct *rpc.AccountResult, pos *rpc.PositionsResult, acctErr, posErr error) rpc.BriefPortfolioSection {
+// briefEventKindHealth maps one brief event kind to its own source-health rows
+// so an unrelated source (for example an unreachable borrow-fee feed) cannot
+// degrade every event row. It returns the worst matching status and the newest
+// matching observation time; empty means no matching source reported.
+func briefEventKindHealth(events *rpc.MarketEventsResult, kind string) (string, time.Time) {
+	if events == nil {
+		return "", time.Time{}
+	}
+	match := func(source string) bool {
+		source = strings.ToLower(source)
+		switch kind {
+		case "halt":
+			return strings.Contains(source, "halt") || strings.Contains(source, "luld")
+		case "ssr":
+			return strings.Contains(source, "reg_sho") || strings.Contains(source, "ssr")
+		case "borrow":
+			return strings.Contains(source, "borrow")
+		default:
+			return false
+		}
+	}
+	rank := map[string]int{rpc.SourceStatusOK: 0, rpc.SourceStatusStale: 1, rpc.SourceStatusUnknown: 2, rpc.SourceStatusPartial: 3, rpc.SourceStatusDegraded: 4}
+	worst, worstRank := "", -1
+	var lastChecked time.Time
+	for _, row := range events.SourceHealth {
+		if !match(row.Source) {
+			continue
+		}
+		if r, known := rank[row.Status]; known && r > worstRank {
+			worst, worstRank = row.Status, r
+		} else if !known && row.Status != "" && worstRank < len(rank) {
+			worst, worstRank = row.Status, len(rank)
+		}
+		if row.AsOf.After(lastChecked) {
+			lastChecked = row.AsOf
+		}
+	}
+	return worst, lastChecked
+}
+
+func briefLastChecked(at time.Time) string {
+	if at.IsZero() {
+		return ""
+	}
+	return "; last checked " + at.In(time.Local).Format("2006-01-02 15:04")
+}
+
+func pluralNoun(count int, noun string) string {
+	if count == 1 {
+		return noun
+	}
+	return noun + "s"
+}
+
+// briefUnknownEarningsRules cross-links the earnings event row to the rules
+// that govern earnings behavior. This is disclosure only — it names which
+// governing rules cannot currently be evaluated; it gates nothing.
+func briefUnknownEarningsRules(rules *rpc.RulesResult) []string {
+	if rules == nil {
+		return nil
+	}
+	governing := map[string]bool{"earnings_size_freeze": true, "overwrite_earnings": true}
+	var unknown []string
+	for _, row := range rules.Rules {
+		if governing[row.ID] && row.Status == risk.RuleStatusUnknown {
+			unknown = append(unknown, strings.ReplaceAll(row.ID, "_", " "))
+		}
+	}
+	slices.Sort(unknown)
+	return unknown
+}
+
+func (s *Server) composeBriefPortfolio(acct *rpc.AccountResult, pos *rpc.PositionsResult, acctErr, posErr error, sessionOpen bool) rpc.BriefPortfolioSection {
 	out := rpc.BriefPortfolioSection{}
 	if acctErr != nil || acct == nil {
 		out.Account.BriefRowState = briefUnavailable("account summary unavailable: " + errText(acctErr))
 	} else {
-		out.Account = rpc.BriefAccountRow{BriefRowState: briefOK("account summary in base currency"),
+		detail := "account summary in base currency"
+		if !sessionOpen {
+			detail = "account summary in base currency; market closed — daily P&L is from the last completed session"
+		}
+		out.Account = rpc.BriefAccountRow{BriefRowState: briefOK(detail),
 			DailyPnLBase: acct.DailyPnL, BaseCurrency: acct.BaseCurrency, AsOf: acct.AsOf}
 		if acct.NetLiquidation > 0 {
 			out.Account.EquityBase = new(acct.NetLiquidation)
@@ -718,9 +832,18 @@ func (s *Server) composeBriefPortfolio(acct *rpc.AccountResult, pos *rpc.Positio
 		out.PremiumAtRisk.BriefRowState = briefUnavailable("positions unavailable")
 		out.HedgeCost.BriefRowState = briefUnavailable("positions unavailable")
 	} else {
-		out.Movers = briefMovers(pos)
+		out.Movers = briefMovers(pos, sessionOpen)
 		out.PremiumAtRisk = briefPremiumAtRisk(pos, out.Account.BaseCurrency)
 		out.HedgeCost = briefHedgeCost(pos, out.Account.BaseCurrency)
+		// The premium-at-risk headline includes every long option leg. When a
+		// hedge-candidate leg cannot be classified, the protective share of
+		// that premium is unknown, so the row's confidence must say so even
+		// though the amount itself is complete.
+		if out.HedgeCost.ExcludedLegs > 0 && out.PremiumAtRisk.Status == rpc.BriefStatusOK {
+			out.PremiumAtRisk.BriefRowState = briefDegraded(fmt.Sprintf(
+				"long-option market value in base currency; %d hedge-candidate %s cannot be classified, so the protective share of this premium is unknown",
+				out.HedgeCost.ExcludedLegs, pluralNoun(out.HedgeCost.ExcludedLegs, "leg")))
+		}
 	}
 	out.WorkingOrders = s.briefWorkingOrders()
 	out.BriefRowState = briefSectionState("portfolio", out.Account.BriefRowState, out.Movers.BriefRowState,
@@ -728,21 +851,35 @@ func (s *Server) composeBriefPortfolio(acct *rpc.AccountResult, pos *rpc.Positio
 	return out
 }
 
-func briefMovers(pos *rpc.PositionsResult) rpc.BriefMoversRow {
-	row := rpc.BriefMoversRow{BriefRowState: briefOK("top positions by absolute daily P&L")}
-	for _, p := range append(slices.Clone(pos.Stocks), pos.Options...) {
-		if p.DailyPnLBase != nil {
-			row.Rows = append(row.Rows, rpc.BriefMover{Symbol: strings.ToUpper(p.Symbol), DailyPnLBase: *p.DailyPnLBase})
+// briefMovers aggregates daily P&L by underlying — the same basis as the
+// Underlyings panel — so the two surfaces reconcile. The residual beyond the
+// top rows is disclosed so the row's implied total matches the account-level
+// daily attribution instead of silently truncating.
+func briefMovers(pos *rpc.PositionsResult, sessionOpen bool) rpc.BriefMoversRow {
+	detail := "daily P&L by underlying, largest absolute first; position-level sums can differ from the account row by fees and FX"
+	if !sessionOpen {
+		detail += " (market closed — last session)"
+	}
+	row := rpc.BriefMoversRow{BriefRowState: briefOK(detail)}
+	for _, group := range pos.ByUnderlying {
+		if group.GroupDailyPnLBase != nil {
+			row.Rows = append(row.Rows, rpc.BriefMover{Symbol: strings.ToUpper(group.Underlying), DailyPnLBase: *group.GroupDailyPnLBase})
 		}
 	}
 	sort.SliceStable(row.Rows, func(i, j int) bool {
 		return math.Abs(row.Rows[i].DailyPnLBase) > math.Abs(row.Rows[j].DailyPnLBase)
 	})
 	if len(row.Rows) > briefMoverLimit {
+		var rest float64
+		for _, mover := range row.Rows[briefMoverLimit:] {
+			rest += mover.DailyPnLBase
+		}
+		row.OtherPnLBase = &rest
+		row.OtherCount = len(row.Rows) - briefMoverLimit
 		row.Rows = row.Rows[:briefMoverLimit]
 	}
 	if len(row.Rows) == 0 {
-		row.BriefRowState = briefDegraded("no position daily P&L values are available")
+		row.BriefRowState = briefDegraded("no per-underlying daily P&L values are available")
 	}
 	return row
 }
@@ -765,7 +902,7 @@ func briefPremiumAtRisk(pos *rpc.PositionsResult, base string) rpc.BriefMoneyCov
 		row.AmountBase = new(sum)
 	}
 	if row.ExcludedLegs > 0 {
-		row.BriefRowState = briefDegraded(fmt.Sprintf("%d long option leg(s) excluded because base market value is unavailable", row.ExcludedLegs))
+		row.BriefRowState = briefDegraded(fmt.Sprintf("%d long option %s excluded because base market value is unavailable", row.ExcludedLegs, pluralNoun(row.ExcludedLegs, "leg")))
 	} else if row.IncludedLegs == 0 {
 		row.BriefRowState = briefOK("no long option positions")
 		zero := 0.0
@@ -802,7 +939,7 @@ func briefHedgeCost(pos *rpc.PositionsResult, base string) rpc.BriefMoneyCoverag
 		row.AmountBase = new(sum)
 	}
 	if row.ExcludedLegs > 0 {
-		row.BriefRowState = briefDegraded(fmt.Sprintf("%d candidate hedge leg(s) excluded because classification Greeks/theta/FX are unavailable", row.ExcludedLegs))
+		row.BriefRowState = briefDegraded(fmt.Sprintf("%d candidate hedge %s excluded because classification Greeks/theta/FX are unavailable", row.ExcludedLegs, pluralNoun(row.ExcludedLegs, "leg")))
 	} else if row.IncludedLegs == 0 {
 		row.BriefRowState = briefOK("no rulebook-classified hedge legs")
 		zero := 0.0
@@ -837,15 +974,33 @@ func composeBriefRisk(policy *rpc.RiskPolicyResult, now time.Time) rpc.BriefRisk
 	c := policy.Capital
 	out.Capital = rpc.BriefCapitalRow{BriefRowState: briefOK("constitution capital state"), Tier: c.Tier,
 		Enforcement: c.Enforcement, ConsumedPct: c.ConsumedPct, DrawdownBase: c.DrawdownBase,
-		AdjustedPeakBase: c.AdjustedPeakBase, BaseCurrency: c.BaseCurrency}
-	if len(policy.Unapproved) > 0 || c.Tier == risk.CapitalTierUnapproved || c.ConsumedPct == nil {
-		out.Capital.BriefRowState = briefDegraded("one or more capital inputs or policy decisions are unapproved")
+		AdjustedPeakBase: c.AdjustedPeakBase, PeakAsOf: c.PeakAsOf, BaseCurrency: c.BaseCurrency}
+	// The capital status derives from the values it shows: a breached tier or
+	// a fully consumed budget can never render ok, whatever produced it. In
+	// shadow enforcement the copy says so plainly rather than implying a
+	// block that does not exist yet.
+	blockDetail := "drawdown block tier is breached; risk-increasing orders are the enforcement target"
+	if strings.EqualFold(c.Enforcement, "shadow") {
+		blockDetail = "drawdown block tier is breached; shadow enforcement journals what would block — nothing is blocked yet, and reductions and closes stay available"
 	}
-	out.Latch = rpc.BriefLatchRow{BriefRowState: briefOK("drawdown latch is not engaged"), Latched: c.BlockLatched, At: c.LatchedAt}
+	switch {
+	case c.Tier == risk.CapitalTierBlock || c.BlockLatched || (c.ConsumedPct != nil && *c.ConsumedPct >= 100):
+		out.Capital.BriefRowState = briefAttention(blockDetail)
+	case c.Tier == risk.CapitalTierWarn:
+		out.Capital.BriefRowState = briefAttention("advisory drawdown tier is breached; consumed risk capital needs eyes")
+	case len(policy.Unapproved) > 0 || c.Tier == risk.CapitalTierUnapproved || c.ConsumedPct == nil:
+		out.Capital.BriefRowState = briefDegraded("one or more capital inputs or policy decisions are unapproved")
+	case c.Tier == risk.CapitalTierUnknown:
+		out.Capital.BriefRowState = briefDegraded("capital state cannot be evaluated from current inputs")
+	}
+	out.Latch = rpc.BriefLatchRow{BriefRowState: briefOK("drawdown latch is not engaged"), Latched: c.BlockLatched, At: c.LatchedAt,
+		ConsumedPctAtLatch: c.LatchConsumedPct}
 	if c.BlockLatched {
 		age := max(int(now.Sub(c.LatchedAt).Hours()/24), 0)
 		out.Latch.AgeDays = &age
-		out.Latch.Detail = "drawdown latch remains engaged until a human reset"
+		// An engaged latch is an active risk state, not a healthy steady
+		// state; it holds attention until the journaled human reset.
+		out.Latch.BriefRowState = briefAttention("drawdown latch is engaged and remains so until a human reset")
 	}
 	out.Overrides.BriefRowState = briefOK("no active overrides")
 	for _, o := range policy.Overrides {
@@ -854,7 +1009,12 @@ func composeBriefRisk(policy *rpc.RiskPolicyResult, now time.Time) rpc.BriefRisk
 		}
 	}
 	if len(out.Overrides.Rows) > 0 {
-		out.Overrides.Detail = fmt.Sprintf("%d active override(s)", len(out.Overrides.Rows))
+		verb := "widen"
+		if len(out.Overrides.Rows) == 1 {
+			verb = "widens"
+		}
+		out.Overrides.BriefRowState = briefAttention(fmt.Sprintf("%d active %s temporarily %s policy controls",
+			len(out.Overrides.Rows), pluralNoun(len(out.Overrides.Rows), "override"), verb))
 	}
 	out.PolicyDrift.BriefRowState = briefOK("all approval pins match")
 	for _, pin := range policy.Inventory {
@@ -1010,7 +1170,19 @@ func (s *Server) briefRulesDelta(current *rpc.RulesResult) rpc.BriefRulesDeltaRo
 	}
 	slices.Sort(row.Added)
 	slices.Sort(row.Removed)
-	if row.RulebookFingerprintChanged || len(row.Transitions)+len(row.Added)+len(row.Removed) > 0 {
+	actTransitions := 0
+	for _, t := range row.Transitions {
+		if t.To == risk.RuleStatusAct {
+			actTransitions++
+		}
+	}
+	switch {
+	case actTransitions > 0:
+		// A transition into act is a risk deterioration, not a bookkeeping
+		// delta; it must not hide under data-quality vocabulary.
+		row.BriefRowState = briefAttention(fmt.Sprintf("rulebook changed since the last stamped brief; %d %s worsened to act",
+			actTransitions, pluralNoun(actTransitions, "rule")))
+	case row.RulebookFingerprintChanged || len(row.Transitions)+len(row.Added)+len(row.Removed) > 0:
 		row.BriefRowState = briefDegraded("rulebook changed since the last stamped brief")
 	}
 	return row
@@ -1130,6 +1302,9 @@ func briefContentFingerprint(res *rpc.BriefResult) string {
 func briefOK(detail string) rpc.BriefRowState {
 	return rpc.BriefRowState{Status: rpc.BriefStatusOK, Detail: nonEmptyString(detail, "available")}
 }
+func briefAttention(detail string) rpc.BriefRowState {
+	return rpc.BriefRowState{Status: rpc.BriefStatusAttention, Detail: nonEmptyString(detail, "needs attention")}
+}
 func briefDegraded(detail string) rpc.BriefRowState {
 	return rpc.BriefRowState{Status: rpc.BriefStatusDegraded, Detail: nonEmptyString(detail, "degraded")}
 }
@@ -1137,21 +1312,38 @@ func briefUnavailable(detail string) rpc.BriefRowState {
 	return rpc.BriefRowState{Status: rpc.BriefStatusUnavailable, Detail: nonEmptyString(detail, "unavailable")}
 }
 
+// briefSectionState rolls a section up to its worst child — attention
+// outranks data problems — and states completeness separately in the detail
+// so an all-green header can never sit above a row that needs eyes.
 func briefSectionState(name string, rows ...rpc.BriefRowState) rpc.BriefRowState {
-	ok, unavailable := 0, 0
+	ok, attention, unavailable := 0, 0, 0
 	for _, row := range rows {
 		switch row.Status {
 		case rpc.BriefStatusOK:
 			ok++
+		case rpc.BriefStatusAttention:
+			attention++
 		case rpc.BriefStatusUnavailable:
 			unavailable++
 		}
 	}
+	degraded := len(rows) - ok - attention - unavailable
 	if len(rows) > 0 && unavailable == len(rows) {
 		return briefUnavailable(name + " section unavailable")
 	}
+	if attention > 0 {
+		verb := "need"
+		if attention == 1 {
+			verb = "needs"
+		}
+		detail := fmt.Sprintf("%s: %d of %d %s %s attention", name, attention, len(rows), pluralNoun(len(rows), "row"), verb)
+		if degraded+unavailable > 0 {
+			detail += fmt.Sprintf("; %d degraded or unavailable", degraded+unavailable)
+		}
+		return briefAttention(detail)
+	}
 	if ok != len(rows) {
-		return briefDegraded(name + " section contains disclosed degraded or unavailable rows")
+		return briefDegraded(fmt.Sprintf("%s: %d of %d %s degraded or unavailable", name, degraded+unavailable, len(rows), pluralNoun(len(rows), "row")))
 	}
 	return briefOK(name + " section complete")
 }

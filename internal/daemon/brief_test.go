@@ -810,6 +810,11 @@ func TestBriefRulesDeltaAndReload(t *testing.T) {
 		!slices.Equal(delta.Added, []string{"added"}) || !slices.Equal(delta.Removed, []string{"removed"}) || !delta.BaselineAt.Equal(at) {
 		t.Fatalf("delta=%+v", delta)
 	}
+	// The kept rule worsened to act: a risk deterioration lifts the row to
+	// attention instead of hiding under data-quality vocabulary.
+	if delta.Status != rpc.BriefStatusAttention || !strings.Contains(delta.Detail, "worsened to act") {
+		t.Fatalf("act transition must render attention: %+v", delta.BriefRowState)
+	}
 	if got := (&Server{briefState: &briefStateStore{path: filepath.Join(dir, "missing.json")}}).briefRulesDelta(current); got.Detail != "no delta baseline yet" {
 		t.Fatalf("no-baseline detail=%q", got.Detail)
 	}
@@ -861,5 +866,226 @@ func TestUnreconciledClockSharedProjection(t *testing.T) {
 	never := risk.EvaluateUnreconciledClock(&maxDays, time.Time{}, time.Time{}, now)
 	if !never.Stale || !never.Deadline.IsZero() || never.DaysRemaining != nil {
 		t.Fatalf("never clock=%+v", never)
+	}
+}
+
+func TestBriefRiskStatusDerivesFromValues(t *testing.T) {
+	now := time.Date(2026, 7, 19, 20, 0, 0, 0, time.UTC)
+	base := func() *rpc.RiskPolicyResult {
+		consumed := 10.0
+		return &rpc.RiskPolicyResult{Status: rpc.RiskPolicyStatusActive,
+			Capital: rpc.CapitalStateReport{Tier: risk.CapitalTierOK, Enforcement: "shadow", ConsumedPct: &consumed}}
+	}
+
+	blocked := base()
+	consumed := 1589.7
+	blocked.Capital.Tier = risk.CapitalTierBlock
+	blocked.Capital.ConsumedPct = &consumed
+	blocked.Capital.BlockLatched = true
+	blocked.Capital.LatchedAt = now.Add(-4 * 24 * time.Hour)
+	blocked.Capital.PeakAsOf = now.Add(-3 * time.Hour)
+	latchPct := 30.41
+	blocked.Capital.LatchConsumedPct = &latchPct
+	blocked.Capital.Enforcement = "shadow"
+	out := composeBriefRisk(blocked, now)
+	if out.Capital.Status != rpc.BriefStatusAttention || out.Latch.Status != rpc.BriefStatusAttention {
+		t.Fatalf("blocked tier must render attention: capital=%+v latch=%+v", out.Capital.BriefRowState, out.Latch.BriefRowState)
+	}
+	if out.Capital.PeakAsOf.IsZero() || out.Latch.ConsumedPctAtLatch == nil || *out.Latch.ConsumedPctAtLatch != latchPct {
+		t.Fatalf("provenance must flow into the brief: capital=%+v latch=%+v", out.Capital, out.Latch)
+	}
+	if !strings.Contains(out.Capital.Detail, "shadow enforcement journals what would block") {
+		t.Fatalf("shadow enforcement must not imply an active block: %q", out.Capital.Detail)
+	}
+	if out.Latch.AgeDays == nil || *out.Latch.AgeDays != 4 || !out.Latch.Latched {
+		t.Fatalf("latch row=%+v", out.Latch)
+	}
+	if out.Status != rpc.BriefStatusAttention || !strings.Contains(out.Detail, "need attention") {
+		t.Fatalf("section must roll up worst child: %+v", out.BriefRowState)
+	}
+
+	warn := base()
+	warn.Capital.Tier = risk.CapitalTierWarn
+	if got := composeBriefRisk(warn, now); got.Capital.Status != rpc.BriefStatusAttention {
+		t.Fatalf("warn tier=%+v", got.Capital.BriefRowState)
+	}
+
+	overConsumed := base()
+	full := 120.0
+	overConsumed.Capital.ConsumedPct = &full
+	if got := composeBriefRisk(overConsumed, now); got.Capital.Status != rpc.BriefStatusAttention {
+		t.Fatalf("consumed>=100%% with ok tier must still render attention: %+v", got.Capital.BriefRowState)
+	}
+
+	unapproved := base()
+	unapproved.Capital.Tier = risk.CapitalTierUnapproved
+	unapproved.Capital.ConsumedPct = nil
+	if got := composeBriefRisk(unapproved, now); got.Capital.Status != rpc.BriefStatusDegraded {
+		t.Fatalf("unapproved=%+v", got.Capital.BriefRowState)
+	}
+
+	override := base()
+	override.Overrides = []rpc.OverrideRecord{{Control: "drawdown.block", Active: true, ExpiresAt: now.Add(time.Hour)}}
+	got := composeBriefRisk(override, now)
+	if got.Overrides.Status != rpc.BriefStatusAttention || len(got.Overrides.Rows) != 1 {
+		t.Fatalf("active override=%+v", got.Overrides)
+	}
+
+	if got := composeBriefRisk(base(), now); got.Status != rpc.BriefStatusOK || got.Detail != "risk and limits section complete" {
+		t.Fatalf("healthy section=%+v", got.BriefRowState)
+	}
+}
+
+func TestBriefSectionStateWorstChildAndCompleteness(t *testing.T) {
+	att := briefSectionState("risk", briefOK(""), briefAttention(""), briefDegraded(""))
+	if att.Status != rpc.BriefStatusAttention || !strings.Contains(att.Detail, "1 of 3 rows needs attention") || !strings.Contains(att.Detail, "1 degraded or unavailable") {
+		t.Fatalf("attention rollup=%+v", att)
+	}
+	deg := briefSectionState("market", briefOK(""), briefDegraded(""), briefUnavailable(""))
+	if deg.Status != rpc.BriefStatusDegraded || !strings.Contains(deg.Detail, "2 of 3 rows degraded or unavailable") {
+		t.Fatalf("degraded rollup=%+v", deg)
+	}
+	if got := briefSectionState("x", briefUnavailable(""), briefUnavailable("")); got.Status != rpc.BriefStatusUnavailable {
+		t.Fatalf("all-unavailable rollup=%+v", got)
+	}
+	if got := briefSectionState("x", briefOK("")); got.Status != rpc.BriefStatusOK || got.Detail != "x section complete" {
+		t.Fatalf("ok rollup=%+v", got)
+	}
+}
+
+func TestBriefClosedSessionDowngradesExpectedColdness(t *testing.T) {
+	asOf := time.Date(2026, 7, 17, 21, 58, 0, 0, time.UTC)
+	events := &rpc.MarketEventsResult{SourceHealth: []rpc.SourceHealth{
+		{Source: "trading_halts", Status: rpc.SourceStatusStale, AsOf: asOf},
+		{Source: "reg_sho_threshold", Status: rpc.SourceStatusOK, AsOf: asOf},
+		{Source: "borrow_fee", Status: rpc.SourceStatusDegraded, AsOf: asOf},
+	}}
+	rules := &rpc.RulesResult{}
+
+	byKind := func(rows []rpc.BriefMarketEventRow) map[string]rpc.BriefMarketEventRow {
+		out := map[string]rpc.BriefMarketEventRow{}
+		for _, row := range rows {
+			out[row.Kind] = row
+		}
+		return out
+	}
+
+	closed := byKind(briefMarketEventRows(events, rules, nil, false))
+	if row := closed["halt"]; row.Status != rpc.BriefStatusOK || !strings.Contains(row.Detail, "no fresh update expected while the market is closed") || !strings.Contains(row.Detail, "last checked") {
+		t.Fatalf("closed stale halt row=%+v", row.BriefRowState)
+	}
+	if row := closed["ssr"]; row.Status != rpc.BriefStatusOK || strings.Contains(row.Detail, "market is closed") {
+		t.Fatalf("healthy ssr source must render plain ok: %+v", row.BriefRowState)
+	}
+	// Degraded is abnormal-for-session and keeps its weight even while closed.
+	if row := closed["borrow"]; row.Status != rpc.BriefStatusDegraded || !strings.Contains(row.Detail, "source health is degraded") {
+		t.Fatalf("closed degraded borrow row=%+v", row.BriefRowState)
+	}
+
+	open := byKind(briefMarketEventRows(events, rules, nil, true))
+	if row := open["halt"]; row.Status != rpc.BriefStatusDegraded {
+		t.Fatalf("open-session stale source must stay degraded: %+v", row.BriefRowState)
+	}
+	if row := open["borrow"]; row.Status != rpc.BriefStatusDegraded {
+		t.Fatalf("open-session degraded source must stay degraded: %+v", row.BriefRowState)
+	}
+
+	for _, row := range briefMarketEventRows(nil, rules, errors.New("positions unavailable"), false) {
+		if row.Status != rpc.BriefStatusDegraded {
+			t.Fatalf("hard source error must degrade even closed: %s=%+v", row.Kind, row.BriefRowState)
+		}
+	}
+
+	cold := &rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusCold}
+	if got := composeBriefGamma(cold, false); got.Status != rpc.BriefStatusOK || !strings.Contains(got.Detail, "market is closed") {
+		t.Fatalf("closed cold gamma=%+v", got.BriefRowState)
+	}
+	if got := composeBriefGamma(cold, true); got.Status != rpc.BriefStatusDegraded {
+		t.Fatalf("open cold gamma=%+v", got.BriefRowState)
+	}
+	if got := composeBriefGamma(&rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusError}, false); got.Status != rpc.BriefStatusDegraded {
+		t.Fatalf("gamma error must degrade even closed: %+v", got.BriefRowState)
+	}
+}
+
+func TestBriefEarningsRowEscalatesWhenGoverningRuleUnknown(t *testing.T) {
+	rules := &rpc.RulesResult{
+		Rules:    []risk.RuleRow{{ID: "earnings_size_freeze", Status: risk.RuleStatusUnknown}},
+		Earnings: []rpc.EarningsInfo{{Symbol: "MSFT", Date: "2026-07-29", Source: "fetched"}},
+	}
+	rows := briefMarketEventRows(&rpc.MarketEventsResult{}, rules, nil, false)
+	var earnings, halt rpc.BriefMarketEventRow
+	for _, row := range rows {
+		switch row.Kind {
+		case "earnings":
+			earnings = row
+		case "halt":
+			halt = row
+		}
+	}
+	if earnings.Status != rpc.BriefStatusAttention || !strings.Contains(earnings.Detail, "earnings size freeze") || earnings.Count != 1 {
+		t.Fatalf("earnings row must escalate on unknown governing rule: %+v", earnings)
+	}
+	if halt.Status != rpc.BriefStatusOK {
+		t.Fatalf("halt row must not inherit the earnings escalation: %+v", halt.BriefRowState)
+	}
+
+	rules.Rules[0].Status = risk.RuleStatusPass
+	for _, row := range briefMarketEventRows(&rpc.MarketEventsResult{}, rules, nil, false) {
+		if row.Kind == "earnings" && row.Status != rpc.BriefStatusOK {
+			t.Fatalf("passing governing rule must not escalate: %+v", row.BriefRowState)
+		}
+	}
+}
+
+func TestBriefMoversAggregateByUnderlyingWithResidual(t *testing.T) {
+	pos := &rpc.PositionsResult{ByUnderlying: []rpc.PositionGroup{
+		{Underlying: "spy", GroupDailyPnLBase: new(10263.60)},
+		{Underlying: "MSFT", GroupDailyPnLBase: new(-1568.26)},
+		{Underlying: "CRWV", GroupDailyPnLBase: new(796.02)},
+		{Underlying: "NOW", GroupDailyPnLBase: new(-740.90)},
+		{Underlying: "BB", GroupDailyPnLBase: new(-1361.14)},
+		{Underlying: "HGENQ"},
+	}}
+	row := briefMovers(pos, false)
+	if len(row.Rows) != 3 || row.Rows[0].Symbol != "SPY" || row.Rows[1].Symbol != "MSFT" || row.Rows[2].Symbol != "BB" {
+		t.Fatalf("rows=%+v", row.Rows)
+	}
+	if row.OtherPnLBase == nil || row.OtherCount != 2 {
+		t.Fatalf("residual=%+v count=%d", row.OtherPnLBase, row.OtherCount)
+	}
+	if diff := *row.OtherPnLBase - (796.02 - 740.90); diff < -0.001 || diff > 0.001 {
+		t.Fatalf("residual sum=%v", *row.OtherPnLBase)
+	}
+	if !strings.Contains(row.Detail, "by underlying") || !strings.Contains(row.Detail, "last session") {
+		t.Fatalf("detail=%q", row.Detail)
+	}
+	if open := briefMovers(pos, true); strings.Contains(open.Detail, "last session") {
+		t.Fatalf("open-session detail=%q", open.Detail)
+	}
+	if got := briefMovers(&rpc.PositionsResult{}, true); got.Status != rpc.BriefStatusDegraded {
+		t.Fatalf("empty movers=%+v", got.BriefRowState)
+	}
+}
+
+func TestBriefPremiumDisclosesUnknownHedgeClassification(t *testing.T) {
+	s := newRiskPolicyTestServer(t, dailyBriefPolicyTOML())
+	pos := &rpc.PositionsResult{Options: []rpc.PositionView{
+		{Symbol: "NOW", SecType: "OPT", Right: "C", Quantity: 10, MarketValueBase: new(4265.0)},
+		{Symbol: "SPY", SecType: "OPT", Right: "P", Quantity: 50, Multiplier: 100, MarketValueBase: new(54544.0)},
+	}}
+	acct := &rpc.AccountResult{NetLiquidation: 230175, DailyPnL: new(7389.46), BaseCurrency: "EUR"}
+	out := s.composeBriefPortfolio(acct, pos, nil, nil, false)
+	if out.PremiumAtRisk.Status != rpc.BriefStatusDegraded || !strings.Contains(out.PremiumAtRisk.Detail, "protective share") {
+		t.Fatalf("premium must disclose unknown hedge classification: %+v", out.PremiumAtRisk)
+	}
+	if out.PremiumAtRisk.IncludedLegs != 2 || out.PremiumAtRisk.AmountBase == nil {
+		t.Fatalf("premium amount must stay complete: %+v", out.PremiumAtRisk)
+	}
+	if out.HedgeCost.ExcludedLegs != 1 {
+		t.Fatalf("hedge=%+v", out.HedgeCost)
+	}
+	if !strings.Contains(out.Account.Detail, "market closed") {
+		t.Fatalf("closed-session account detail=%q", out.Account.Detail)
 	}
 }

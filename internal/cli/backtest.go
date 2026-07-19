@@ -2105,6 +2105,14 @@ func regimeBacktestInput(obs RegimeBacktestObservation) (rpc.RegimeSnapshotResul
 	if regime.AsOf.IsZero() {
 		regime.AsOf = asOf
 	}
+	// Replay stamps the tape session from the observation clock exactly like
+	// the daemon does at snapshot time (session state is derived policy, not
+	// raw corpus input). Date-only observations clock 15:59 ET inside their
+	// observation date (backtestDateAsOf), so trading-day rows classify
+	// trading_date; dates outside embedded calendar coverage stay empty and
+	// the lifecycle tape terms fail open — historical corpora replay
+	// unchanged.
+	regime.TapeSessionState, regime.TapeSessionReason, regime.TapeNextOpen = rpc.TapeSessionFor(asOf)
 	backfillBacktestRegimeComposite(&regime)
 	if regime.Fingerprint.Key == "" {
 		regime.Fingerprint = rpc.BuildRegimeFingerprint(&regime)

@@ -1831,19 +1831,31 @@ type RegimeSnapshotParams struct{}
 // pointers so "not arrived yet" vs "exactly zero" stays
 // distinguishable.
 type RegimeSnapshotResult struct {
-	AsOf             time.Time              `json:"as_of"`
-	Fingerprint      Fingerprint            `json:"fingerprint"`
-	Lifecycle        LifecycleState         `json:"lifecycle,omitzero"`
-	Summary          RegimeSummary          `json:"summary"`
-	Posture          RegimePosture          `json:"posture,omitzero"`
-	VIXTermStructure RegimeVIXTerm          `json:"vix_term_structure"`
-	VolOfVol         RegimeVolOfVol         `json:"vol_of_vol"`
-	HYGSPYDivergence RegimeHYGSPYDivergence `json:"hyg_spy_divergence"`
-	CreditSpreads    RegimeCreditSpreads    `json:"credit_spreads"`
-	FundingStress    RegimeFundingStress    `json:"funding_stress"`
-	USDJPY           RegimeUSDJPY           `json:"usd_jpy"`
-	GammaZero        RegimeGammaZero        `json:"gamma_zero"`
-	Breadth          RegimeBreadth          `json:"breadth"`
+	AsOf time.Time `json:"as_of"`
+	// TapeSessionState classifies the official US cash-equity calendar date
+	// this snapshot was taken on (TapeSessionFor). On a closed date
+	// (weekend/holiday) the direct SPY/VIX day-change prints are frozen
+	// last-session values — the anchors can even reset independently while
+	// closed — so they carry evidence but cannot enter or hold tape-driven
+	// lifecycle stages. Empty means outside embedded calendar coverage:
+	// tape terms keep full effect (fail-open). Excluded from the regime
+	// fingerprint projection so weekday/weekend tickover alone never
+	// re-fires alerts.
+	TapeSessionState  string                 `json:"tape_session_state,omitempty"`
+	TapeSessionReason string                 `json:"tape_session_reason,omitempty"`
+	TapeNextOpen      *time.Time             `json:"tape_next_open,omitempty"`
+	Fingerprint       Fingerprint            `json:"fingerprint"`
+	Lifecycle         LifecycleState         `json:"lifecycle,omitzero"`
+	Summary           RegimeSummary          `json:"summary"`
+	Posture           RegimePosture          `json:"posture,omitzero"`
+	VIXTermStructure  RegimeVIXTerm          `json:"vix_term_structure"`
+	VolOfVol          RegimeVolOfVol         `json:"vol_of_vol"`
+	HYGSPYDivergence  RegimeHYGSPYDivergence `json:"hyg_spy_divergence"`
+	CreditSpreads     RegimeCreditSpreads    `json:"credit_spreads"`
+	FundingStress     RegimeFundingStress    `json:"funding_stress"`
+	USDJPY            RegimeUSDJPY           `json:"usd_jpy"`
+	GammaZero         RegimeGammaZero        `json:"gamma_zero"`
+	Breadth           RegimeBreadth          `json:"breadth"`
 	// Composite carries the daemon-side rollup the CLI shows above the
 	// indicator rows (verdict + ranked/unranked counts), so MCP consumers
 	// don't have to recompute it from per-row Status fields. Populated on

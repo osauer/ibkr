@@ -287,9 +287,10 @@ func TestRegimeDecisionJournalDedupesAndHeartbeats(t *testing.T) {
 	dir := t.TempDir()
 	j := &regimeDecisionJournal{path: filepath.Join(dir, "regime-decisions.jsonl")}
 	res := &rpc.RegimeSnapshotResult{
-		Fingerprint: rpc.Fingerprint{Version: "v", Key: "sha256:aaa"},
-		Lifecycle:   rpc.LifecycleState{Stage: rpc.LifecycleQuiet, Severity: "observe"},
-		Composite:   rpc.RegimeComposite{Verdict: "Normal regime"},
+		Fingerprint:      rpc.Fingerprint{Version: "v", Key: "sha256:aaa"},
+		TapeSessionState: rpc.TapeSessionClosedDate,
+		Lifecycle:        rpc.LifecycleState{Stage: rpc.LifecycleQuiet, Severity: "observe"},
+		Composite:        rpc.RegimeComposite{Verdict: "Normal regime"},
 	}
 	now := time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC)
 	if err := j.append(now, res); err != nil {
@@ -322,6 +323,9 @@ func TestRegimeDecisionJournalDedupesAndHeartbeats(t *testing.T) {
 		}
 		if decoded.V != 1 || decoded.Stage == "" {
 			t.Fatalf("line %d = %+v, want v1 with stage", i, decoded)
+		}
+		if decoded.TapeSession != rpc.TapeSessionClosedDate {
+			t.Fatalf("line %d tape_session = %q, want the snapshot's session state journaled", i, decoded.TapeSession)
 		}
 	}
 }

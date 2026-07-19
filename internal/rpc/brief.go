@@ -15,7 +15,13 @@ const (
 	// brief. The daemon accepts human origins only.
 	MethodBriefAck = "brief.ack"
 
+	// Brief row statuses separate risk conditions from data conditions:
+	// attention means the underlying VALUES describe a state a trader must
+	// look at (latched drawdown, breached tier, active override); degraded
+	// and unavailable describe input quality only and must never be used to
+	// signal a risk condition, nor vice versa.
 	BriefStatusOK          = "ok"
+	BriefStatusAttention   = "attention"
 	BriefStatusDegraded    = "degraded"
 	BriefStatusUnavailable = "unavailable"
 
@@ -60,7 +66,9 @@ type BriefAckResult struct {
 }
 
 // BriefRowState is embedded by every brief row and section. Detail is
-// human-facing disclosure; Status is one of ok, degraded, or unavailable.
+// human-facing disclosure; Status is one of ok, attention, degraded, or
+// unavailable. Sections roll up their worst child (attention outranks
+// degraded) and state completeness in Detail.
 type BriefRowState struct {
 	Status string `json:"status"`
 	Detail string `json:"detail"`
@@ -151,9 +159,15 @@ type BriefMover struct {
 	DailyPnLBase float64 `json:"daily_pnl_base"`
 }
 
+// BriefMoversRow aggregates daily P&L by underlying (stock plus option legs
+// per name — the same basis as the Underlyings panel) so the two surfaces
+// reconcile. OtherPnLBase/OtherCount carry the residual beyond the top rows
+// so the row's implied total matches the account daily P&L attribution.
 type BriefMoversRow struct {
 	BriefRowState
-	Rows []BriefMover `json:"rows"`
+	Rows         []BriefMover `json:"rows"`
+	OtherPnLBase *float64     `json:"other_daily_pnl_base,omitempty"`
+	OtherCount   int          `json:"other_count,omitempty"`
 }
 
 type BriefMoneyCoverageRow struct {
@@ -184,7 +198,11 @@ type BriefCapitalRow struct {
 	ConsumedPct      *float64 `json:"consumed_pct,omitempty"`
 	DrawdownBase     *float64 `json:"drawdown_base,omitempty"`
 	AdjustedPeakBase *float64 `json:"adjusted_peak_base,omitempty"`
-	BaseCurrency     string   `json:"base_currency,omitempty"`
+	// PeakAsOf is when the current adjusted peak was observed. Provenance,
+	// not decoration: a peak stamped during a closed session or a reconnect
+	// window is the tell that exposes a poisoned observation.
+	PeakAsOf     time.Time `json:"peak_as_of,omitzero"`
+	BaseCurrency string    `json:"base_currency,omitempty"`
 }
 
 type BriefLatchRow struct {
@@ -192,6 +210,9 @@ type BriefLatchRow struct {
 	Latched bool      `json:"latched"`
 	At      time.Time `json:"latched_at,omitzero"`
 	AgeDays *int      `json:"age_days,omitempty"`
+	// ConsumedPctAtLatch is the consumed share recorded when the latch
+	// engaged, so later data glitches cannot rewrite why it fired.
+	ConsumedPctAtLatch *float64 `json:"consumed_pct_at_latch,omitempty"`
 }
 
 type BriefOverride struct {

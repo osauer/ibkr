@@ -1481,6 +1481,37 @@ func TestRegimeBacktestBuilderPreservesTapeChangeFields(t *testing.T) {
 	}
 }
 
+// TestRegimeBacktestInputStampsTapeSession pins the replay-side session
+// stamp: replay classifies exactly like the daemon does at snapshot time, so
+// live closed-date gating and backtest replay can never drift. Date-only
+// observations clock 15:59 ET inside their date (trading_date on trading
+// days); dates outside embedded calendar coverage stay empty and fail open,
+// which is what keeps the historical sourced corpora reporting identical
+// metrics.
+func TestRegimeBacktestInputStampsTapeSession(t *testing.T) {
+	t.Parallel()
+
+	in, _ := regimeBacktestInput(RegimeBacktestObservation{Date: "2026-07-17"}) // Friday, in coverage
+	if in.TapeSessionState != rpc.TapeSessionTradingDate {
+		t.Fatalf("trading-day stamp = %q, want trading_date", in.TapeSessionState)
+	}
+
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saturday := time.Date(2026, 7, 18, 12, 0, 0, 0, loc)
+	in, _ = regimeBacktestInput(RegimeBacktestObservation{AsOf: saturday})
+	if in.TapeSessionState != rpc.TapeSessionClosedDate {
+		t.Fatalf("weekend stamp = %q, want closed_date", in.TapeSessionState)
+	}
+
+	in, _ = regimeBacktestInput(RegimeBacktestObservation{Date: "2017-01-24"}) // outside coverage
+	if in.TapeSessionState != "" {
+		t.Fatalf("outside-coverage stamp = %q, want empty (fail-open)", in.TapeSessionState)
+	}
+}
+
 func TestOpportunityBacktestSampleProducesMarketOutcomeMetrics(t *testing.T) {
 	t.Parallel()
 	rows := readOpportunityBacktestFixture(t)

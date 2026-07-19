@@ -887,6 +887,11 @@ p {
   background: var(--surface);
 }
 
+.brief-row.brief-status--attention {
+  border-left-color: var(--orange);
+  background: rgba(255, 107, 44, 0.05);
+}
+
 .brief-row.brief-status--degraded {
   border-left-color: var(--amber);
 }
@@ -919,6 +924,11 @@ p {
 .brief-status--ok {
   background: rgba(40, 199, 111, 0.1);
   color: #148247;
+}
+
+.brief-status--attention {
+  background: rgba(255, 107, 44, 0.16);
+  color: #b34a10;
 }
 
 .brief-status--degraded {
@@ -1229,6 +1239,11 @@ p {
   margin: 0;
   font-size: 11px;
   color: var(--muted);
+}
+
+.canary-rules__note--attention {
+  color: #b34a10;
+  font-weight: 640;
 }
 
 .canary-rules-detail {
@@ -2092,6 +2107,13 @@ p {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.underlying-pnl-basis {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
 }
 
 .underlying-pnl-card {

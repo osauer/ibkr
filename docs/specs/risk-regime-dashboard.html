@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: risk-regime-dashboard.md sha256:070e819c13c618720b260f05694cdf0c44eb17d21e354e85b8fd67a8c304fc19 -->
+<!-- md-source: risk-regime-dashboard.md sha256:a7cf06140e6a2a88f2bdc3803476f73bc548a2f46430263f512cb6382f09e7dd -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -16,7 +16,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-07-19T22:33:00+02:00",
+    "dateModified": "2026-07-19T23:01:00+02:00",
     "description": "ibkr regime reports the broad-market stress lifecycle: quiet, early_warning, confirmed_stress, panic, stabilization, opportunity, or data_quality. It is an...",
     "headline": "Risk Regime Dashboard Contract",
     "isPartOf": {
@@ -158,7 +158,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="risk-regime-dashboard-contract">Risk Regime Dashboard Contract</h1>
-<p><strong>Updated:</strong> 2026-07-19 22:33 CEST</p>
+<p><strong>Updated:</strong> 2026-07-19 23:01 CEST</p>
 <p><code>ibkr regime</code> reports the broad-market stress lifecycle: <code>quiet</code>, <code>early_warning</code>, <code>confirmed_stress</code>, <code>panic</code>, <code>stabilization</code>, <code>opportunity</code>, or <code>data_quality</code>. It is an evidence-balance read, not a prediction, trading system, portfolio planner, or investment recommendation.</p>
 <p>Use it to answer one question: are several independent market-risk indicators confirming each other, or is the market still broadly calm?</p>
 <p>Canary may consume this output, but canary owns account and portfolio action. A portfolio concentration problem can be real even while the broad market regime is calm.</p>
@@ -296,6 +296,7 @@
 <li>While a confirming cluster's threshold set carries <code>pending_backtest</code>, heuristic evidence without a fresh tape co-sign (SPY &lt;= -1.5%, VIX +10%, or a same-session term inversion) reads one severity rung down: <code>confirmed_stress</code> -&gt; watch, 3-red <code>panic</code> -&gt; act. Pure-tape panic (SPY &lt;= -4%/-7%) always reaches urgent. Promotion out of <code>pending_backtest</code> happens per versioned threshold-set label via the backtest plan.</li>
 <li>If a confirming cluster's source health is stale/partial/degraded, severity caps at watch (evidence-keyed: an unrelated dead feed does not mute a fresh confirmation).</li>
 </ol>
+<p>Closed-date tape gating (2026-07-19): every lifecycle term that reads the direct SPY/VIX day-change prints requires an official trading date. The daemon stamps <code>tape_session_state</code> (embedded NYSE calendar) on each regime snapshot and journals it as <code>tape_session</code>; the backtest replay stamps the same classification from the observation clock. On closed dates (weekend or holiday) frozen last-session prints cannot enter or hold <code>panic</code>, <code>confirmed_stress</code>, <code>early_warning</code>, <code>opportunity</code>, or <code>stabilization</code>, cannot co-sign heuristic confirmation (the term-inversion co-sign keeps its own status gate), and cannot claim the pure-tape panic severity exemption; the tape evidence rows keep the frozen print's magnitude but read forward-warning / observe / unconfirmed. Cluster-driven terms are untouched, so real cluster reds still warn and confirm on any date. Weekday pre/post/overnight prints keep full effect (they are live), and dates outside embedded calendar coverage leave the state empty so tape terms fail open. The trading rulebook's regime-stage latch skips closed-date snapshots: the last trading-date stage governs weekend rule thresholds through the existing carried worse-of path instead of a frozen-print or cluster-only weekend stage re-latching fresh.</p>
 <p>Display tone follows governed severity, not just stage: <code>confirmed_stress</code> with <code>severity: watch</code> remains an amber/watch headline, preserving red for act-grade stress and <code>risk_off</code> for full risk-off conditions. The condition label still stays "Confirmed stress regime" so the evidence balance is not watered down.</p>
 <h2 id="composite-logic">Composite Logic</h2>
 <p>The headline label is a single wording table shared by <code>composite.verdict</code> and <code>posture.label</code> (<code>rpc.RegimeHeadline</code>); CLI, MCP, and SPA render the served string:</p>

@@ -39,10 +39,15 @@ const regimeDecisionHeartbeat = time.Hour
 // gate evidence, and decision output to measure false-alarm and recall
 // rates offline and to replay incidents.
 type regimeDecisionLine struct {
-	V           int                                `json:"v"`
-	TS          time.Time                          `json:"ts"`
-	SessionKey  string                             `json:"session_key"`
-	Fingerprint string                             `json:"fingerprint"`
+	V           int       `json:"v"`
+	TS          time.Time `json:"ts"`
+	SessionKey  string    `json:"session_key"`
+	Fingerprint string    `json:"fingerprint"`
+	// TapeSession discloses the official-calendar classification the tape
+	// terms ran under ("trading_date"/"closed_date"; empty outside embedded
+	// coverage), so weekend/holiday journal lines are self-explaining in
+	// calibration audits.
+	TapeSession string                             `json:"tape_session,omitempty"`
 	Stage       string                             `json:"stage"`
 	Severity    string                             `json:"severity"`
 	Readiness   string                             `json:"readiness"`
@@ -114,6 +119,7 @@ func (j *regimeDecisionJournal) append(now time.Time, res *rpc.RegimeSnapshotRes
 		TS:          now,
 		SessionKey:  nyTradingSessionKey(nyTime(now)),
 		Fingerprint: fp,
+		TapeSession: res.TapeSessionState,
 		Stage:       res.Lifecycle.Stage,
 		Severity:    res.Lifecycle.Severity,
 		Readiness:   res.Lifecycle.Readiness,

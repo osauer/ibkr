@@ -56,9 +56,12 @@ function renderAccountDailyPnlPct(account = {}) {
   const el = $("dailyPnlPct");
   if (!el) return;
   const value = accountDailyPnlPct(account);
+  const closed = marketSessionClosed();
   el.className = "account-pnl-pct " + signedClass(value);
-  el.textContent = typeof value === "number" ? `${signedPct(value)} today` : "--";
-  el.title = "Daily P/L as a percentage of estimated start-of-day net liquidation";
+  el.textContent = typeof value === "number" ? `${signedPct(value)} ${closed ? "last session" : "today"}` : "--";
+  el.title = closed
+    ? "Daily P/L of the last completed session as a percentage of estimated start-of-day net liquidation; the market is closed."
+    : "Daily P/L as a percentage of estimated start-of-day net liquidation";
 }
 
 function accountDailyPnlPct(account = {}) {
@@ -210,6 +213,23 @@ function setUnderlyingActionButtonState(id, enabled, reason) {
 function renderUnderlyingPnlSummary(totals) {
   setUnderlyingSummaryPnl("underlyingWinnerPnl", totals.winner, totals.winnerCurrency);
   setUnderlyingSummaryPnl("underlyingLoserPnl", totals.loser, totals.loserCurrency);
+  // The winner/loser buckets and the brief's Movers row share one basis —
+  // daily P/L attributed per underlying — and this line says so on screen,
+  // with the session context, so the two surfaces reconcile by inspection.
+  const basis = $("underlyingPnlBasis");
+  if (basis) {
+    const hasTotals = hasNumericValue(totals.winner) || hasNumericValue(totals.loser);
+    basis.hidden = !hasTotals;
+    basis.textContent = `Daily P/L by underlying · all held names${marketSessionClosed() ? " · last session" : ""}`;
+  }
+}
+
+// marketSessionClosed reads the served official us-equity calendar (never the
+// market-strip selection override): held-book daily P/L freezes when the
+// primary session closes, and that is the honest stamp for these totals.
+function marketSessionClosed() {
+  const session = state.snapshot?.market_calendar?.session;
+  return Boolean(session && session.is_open === false);
 }
 
 function setUnderlyingSummaryPnl(id, value, currency) {

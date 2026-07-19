@@ -136,8 +136,12 @@ type CapitalStateReport struct {
 	FlowSource               string    `json:"flow_source,omitempty"` // declared | statement
 	DrawdownBase             *float64  `json:"drawdown_base,omitempty"`
 	ConsumedPct              *float64  `json:"consumed_pct,omitempty"`
-	BlockLatched             bool      `json:"block_latched"`
-	LatchedAt                time.Time `json:"latched_at,omitzero"`
+	BlockLatched bool      `json:"block_latched"`
+	LatchedAt    time.Time `json:"latched_at,omitzero"`
+	// LatchConsumedPct is the consumed share at the moment the latch engaged.
+	// Disclosed so a later data glitch inflating the live ConsumedPct cannot
+	// retroactively misrepresent why the latch fired.
+	LatchConsumedPct *float64 `json:"latch_consumed_pct,omitempty"`
 	LastReconciledAt         time.Time `json:"last_reconciled_at,omitzero"`
 	LastReconcileReportID    string    `json:"last_reconcile_report_id,omitempty"`
 	LastReconcileSource      string    `json:"last_reconcile_source,omitempty"` // human | automatic

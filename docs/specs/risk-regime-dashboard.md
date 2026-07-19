@@ -1,6 +1,6 @@
 # Risk Regime Dashboard Contract
 
-**Updated:** 2026-07-19 22:33 CEST
+**Updated:** 2026-07-19 23:01 CEST
 
 `ibkr regime` reports the broad-market stress lifecycle: `quiet`,
 `early_warning`, `confirmed_stress`, `panic`, `stabilization`, `opportunity`,
@@ -258,6 +258,25 @@ Severity governance, applied after stage selection and disclosed in
 2. If a confirming cluster's source health is stale/partial/degraded, severity
    caps at watch (evidence-keyed: an unrelated dead feed does not mute a fresh
    confirmation).
+
+Closed-date tape gating (2026-07-19): every lifecycle term that reads the
+direct SPY/VIX day-change prints requires an official trading date. The
+daemon stamps `tape_session_state` (embedded NYSE calendar) on each regime
+snapshot and journals it as `tape_session`; the backtest replay stamps the
+same classification from the observation clock. On closed dates (weekend or
+holiday) frozen last-session prints cannot enter or hold `panic`,
+`confirmed_stress`, `early_warning`, `opportunity`, or `stabilization`,
+cannot co-sign heuristic confirmation (the term-inversion co-sign keeps its
+own status gate), and cannot claim the pure-tape panic severity exemption;
+the tape evidence rows keep the frozen print's magnitude but read
+forward-warning / observe / unconfirmed. Cluster-driven terms are untouched,
+so real cluster reds still warn and confirm on any date. Weekday
+pre/post/overnight prints keep full effect (they are live), and dates outside
+embedded calendar coverage leave the state empty so tape terms fail open. The
+trading rulebook's regime-stage latch skips closed-date snapshots: the last
+trading-date stage governs weekend rule thresholds through the existing
+carried worse-of path instead of a frozen-print or cluster-only weekend stage
+re-latching fresh.
 
 Display tone follows governed severity, not just stage: `confirmed_stress`
 with `severity: watch` remains an amber/watch headline, preserving red for

@@ -53,6 +53,11 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 		func(c context.Context) rpc.RegimeBreadth { return fetchRegimeBreadth(c, s) },
 		s.regimeContentionMessage,
 	)
+	// Official-calendar tape session, stamped once from the snapshot clock so
+	// lifecycle gating, the decisions journal, and every serve surface read
+	// the same classification. Closed dates bar frozen SPY/VIX prints from
+	// entering or holding tape-driven lifecycle stages (fail-open when empty).
+	res.TapeSessionState, res.TapeSessionReason, res.TapeNextOpen = rpc.TapeSessionFor(res.AsOf)
 	// Classification + confirmation policy run once, here: band (with
 	// red-exit hysteresis), streak tick, cadence freshness, and
 	// eligibility per row. Every downstream consumer — composite,

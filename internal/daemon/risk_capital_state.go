@@ -301,6 +301,16 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 	flows, _, _ := st.effectiveFlowsLocked(c)
 	adjusted := equityBase - flows
 	if !st.state.Seeded || adjusted > st.state.AdjustedPeakBase {
+		// Every peak ratchet is journaled: the peak is monotonic runtime
+		// state that a single bad equity observation (e.g. a reconnect-window
+		// glitch) can poison, and an unexplained jump must be diagnosable
+		// after the fact from the journal alone.
+		appendRiskPolicyJournal(map[string]any{
+			"version": 1, "at": now.UTC(), "kind": "adjusted_peak_advanced",
+			"from_base": st.state.AdjustedPeakBase, "to_base": adjusted,
+			"seed": !st.state.Seeded, "equity_base": equityBase, "equity_as_of": asOf.UTC(),
+			"policy_fingerprint": constitutionFingerprint(c),
+		})
 		st.state.Seeded = true
 		st.state.AdjustedPeakBase = adjusted
 		st.state.PeakAsOf = asOf
@@ -690,6 +700,7 @@ func (st *riskCapitalStore) reportLocked(c *risk.Constitution, obs *risk.Capital
 		ConsumedPct:              v.ConsumedPct,
 		BlockLatched:             st.state.BlockLatched,
 		LatchedAt:                st.state.LatchedAt,
+		LatchConsumedPct:         latchConsumedPct(st.state),
 		LastReconciledAt:         st.lastReconciledAt,
 		LastReconcileReportID:    st.lastReconcileReportID,
 		LastReconcileSource:      st.lastReconcileSource,
@@ -720,6 +731,17 @@ func (st *riskCapitalStore) reportLocked(c *risk.Constitution, obs *risk.Capital
 		rep.CumExternalFlowsBase = &flows
 	}
 	return rep
+}
+
+// latchConsumedPct discloses the consumed share recorded at latch engagement,
+// so a later data glitch inflating the live consumed percentage cannot
+// retroactively misrepresent why the latch fired.
+func latchConsumedPct(state riskCapitalStateFileV1) *float64 {
+	if !state.BlockLatched || state.LatchConsumedPct == 0 {
+		return nil
+	}
+	pct := state.LatchConsumedPct
+	return &pct
 }
 
 // ActiveOverrides prunes expired overrides and returns the full record list

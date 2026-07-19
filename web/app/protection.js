@@ -109,11 +109,26 @@ function renderProtectionDerisk() {
   const eligible = reduceEligibleHoldings();
   section.hidden = eligible.length === 0;
   if (eligible.length === 0) return;
-  $("protectionDeriskPercent").value = String(d.percent);
+  // The trim sizes by Δ-adjusted risk; when the portfolio delta itself is
+  // unavailable the control would be flying blind, so it greys out and says
+  // why on the control instead of offering a preview that cannot size.
+  const portfolio = state.snapshot?.positions?.portfolio || {};
+  const deltaUnavailable = !hasNumericValue(portfolio.dollar_delta_base ?? portfolio.dollar_delta_ccy);
+  const percentPicker = $("protectionDeriskPercent");
+  percentPicker.value = String(d.percent);
+  percentPicker.disabled = deltaUnavailable;
   const previewBtn = $("protectionDeriskPreview");
-  previewBtn.disabled = d.busy !== "";
+  previewBtn.disabled = d.busy !== "" || deltaUnavailable;
+  previewBtn.title = deltaUnavailable ? "Portfolio delta is unavailable — the trim needs portfolio Greeks to size a basket." : "";
   if (d.busy === "preview") previewBtn.textContent = "Previewing…";
   else previewBtn.textContent = deriskPreviewExpired() ? "Preview again" : "Preview";
+  if (deltaUnavailable && d.busy === "" && !d.result && !d.submitted) {
+    $("protectionDeriskState").textContent = "Delta unavailable — trimming needs portfolio Greeks, which are missing in this snapshot.";
+    renderProtectionDeriskBasket();
+    const cancelHidden = $("protectionDeriskCancel");
+    cancelHidden.hidden = true;
+    return;
+  }
   const cancelBtn = $("protectionDeriskCancel");
   cancelBtn.hidden = !(d.busy === "preview" || (d.busy === "" && (d.result || d.submitted)));
   cancelBtn.textContent = d.submitted ? "Dismiss" : "Cancel";
@@ -446,6 +461,18 @@ function protectionThetaSummary(proposals = {}, rows = []) {
     };
   }
   if ((proposals.blockers || []).length === 0 && counts.theta_hygiene === 0) {
+    // "€0.00 pending" is only honest when the engine could actually see the
+    // book's Greeks; with partial coverage a zero means "could not evaluate",
+    // which must render as unavailable rather than as comfort.
+    const portfolio = state.snapshot?.positions?.portfolio || {};
+    const total = Number(portfolio.greeks_total || 0);
+    const covered = Number(portfolio.greeks_coverage || 0);
+    if (total > 0 && covered < total) {
+      return {
+        value: null,
+        title: `Greeks are unavailable for ${total - covered} of ${total} option legs, so theta-hygiene proposals cannot be fully evaluated in this snapshot.`,
+      };
+    }
     return {
       value: 0,
       currency: baseCurrency || protectionCoverageBaseCurrency(currentProtectionCoverage() || {}),

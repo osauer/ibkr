@@ -294,6 +294,26 @@ func TestRulesRegimeStagePersistence(t *testing.T) {
 		t.Errorf("data_quality stage cleared the latch: %+v", st)
 	}
 
+	// Closed-date snapshots hold the previous latch too: a weekend
+	// cluster-only "quiet" must not re-freshen or relax the bucket; the last
+	// trading-date stage ages into the carried worse-of path instead.
+	s.latchRulesRegimeStage(&rpc.RegimeSnapshotResult{
+		TapeSessionState: rpc.TapeSessionClosedDate,
+		Lifecycle:        rpc.LifecycleState{Stage: rpc.LifecycleQuiet},
+	})
+	if st := s.rulesRegimeStageSnapshot(); st.Bucket != risk.RegimeBucketConfirmed {
+		t.Errorf("closed-date snapshot moved the latch: %+v", st)
+	}
+
+	// The first live trading-date snapshot re-latches fresh.
+	s.latchRulesRegimeStage(&rpc.RegimeSnapshotResult{
+		TapeSessionState: rpc.TapeSessionTradingDate,
+		Lifecycle:        rpc.LifecycleState{Stage: rpc.LifecycleQuiet},
+	})
+	if st := s.rulesRegimeStageSnapshot(); st.Bucket != risk.RegimeBucketCalm {
+		t.Errorf("trading-date snapshot did not re-latch: %+v", st)
+	}
+
 	// A skewed stored bucket is re-derived from the stage on load.
 	path, err := defaultTradingStatePath(rulesRegimeStageFile)
 	if err != nil {

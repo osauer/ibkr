@@ -53,13 +53,16 @@ function renderRulesCard(rules) {
     brief.appendChild(pill);
   }
   const note = $("canaryRulesNote");
+  const noteParts = [];
+  const eventNote = unknownEventRuleNote(rules);
+  if (eventNote) noteParts.push(eventNote);
   const degraded = (rules.input_health || []).filter((h) => h.status && h.status !== "ok");
   if (rules.status === "degraded" && degraded.length) {
-    note.hidden = false;
-    note.textContent = `Inputs degraded (${degraded.map((h) => `${h.source}: ${h.status}`).join(", ")}) — unknown rows are not passes.`;
-  } else {
-    note.hidden = true;
+    noteParts.push(`Inputs degraded (${degraded.map((h) => `${h.source}: ${h.status}`).join(", ")}) — unknown rows are not passes.`);
   }
+  note.hidden = noteParts.length === 0;
+  note.textContent = noteParts.join(" ");
+  note.classList.toggle("canary-rules__note--attention", Boolean(eventNote));
 
   const button = $("canaryRulesToggle");
   button.setAttribute("aria-expanded", state.rulesDetailOpen ? "true" : "false");
@@ -68,6 +71,24 @@ function renderRulesCard(rules) {
   if (state.rulesDetailOpen) {
     renderRulesGrid(rules, order);
   }
+}
+
+// unknownEventRuleNote cross-links live held-name events to the rules that
+// govern them: upcoming earnings with the earnings rules unknown is exactly
+// the moment a silent "unknown" costs the most, so it gets named out loud.
+// Display-only — the daemon's verdicts and ranking stay authoritative.
+function unknownEventRuleNote(rules) {
+  const governing = { earnings_size_freeze: true, overwrite_earnings: true };
+  const unknownRules = (rules.rules || [])
+    .filter((r) => governing[r.id] && r.status === "unknown")
+    .map((r) => (r.number ? `rule ${r.number} (${r.title || labelize(r.id || "")})` : labelize(r.id || "")));
+  if (unknownRules.length === 0) return "";
+  const upcoming = (rules.earnings || [])
+    .filter((e) => e.date && e.source !== "unknown")
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    .map((e) => `${normalizeSymbol(e.symbol)} ${e.date}`);
+  if (upcoming.length === 0) return "";
+  return `Earnings ahead (${upcoming.join(" · ")}) while ${unknownRules.join(" and ")} ${unknownRules.length === 1 ? "is" : "are"} unknown — the freeze cannot be confirmed.`;
 }
 
 function renderRulesGrid(rules, order) {

@@ -96,7 +96,7 @@ function renderMarketSection(section) {
       percentValue(section.gamma, "gap_pct", "Gap", true),
       fieldValue(section.gamma, "gamma_sign", "Sign"),
     )),
-    briefRow("Canary", section.canary, joinValues(section.canary?.action, section.canary?.severity, section.canary?.summary)),
+    briefRow("Canary", section.canary, joinValues(...canaryHeadline(section.canary), section.canary?.summary)),
   ]);
 }
 
@@ -125,6 +125,17 @@ function heldNameEventsUnavailable(sources) {
   return Boolean(sources?.positions?.error);
 }
 
+// The daemon reports canary action and severity as separate fields that are
+// usually the same word; printing "watch · watch" reads as a stutter, so the
+// pair collapses when equal and labels itself when it genuinely differs.
+function canaryHeadline(canary = {}) {
+  const action = String(canary?.action || "").trim();
+  const severity = String(canary?.severity || "").trim();
+  if (!action && !severity) return [];
+  if (!action || !severity || action.toLowerCase() === severity.toLowerCase()) return [action || severity];
+  return [action, `severity ${severity}`];
+}
+
 function renderPortfolioSection(section) {
   const account = section.account || {};
   const currency = account.base_currency || "";
@@ -133,7 +144,7 @@ function renderPortfolioSection(section) {
       moneyValue(account, "equity_base", currency, "Equity"),
       moneyValue(account, "daily_pnl_base", currency, "Daily P/L"),
     )),
-    briefRow("Movers", section.movers, (section.movers?.rows || []).map((row) => `${row.symbol || "--"} ${money(row.daily_pnl_base, currency)}`).join(" · ")),
+    briefRow("Movers", section.movers, moversValue(section.movers, currency)),
     briefRow("Premium at risk", section.premium_at_risk, moneyCoverageValue(section.premium_at_risk)),
     briefRow("Hedge cost / day", section.hedge_cost, moneyCoverageValue(section.hedge_cost)),
     briefRow("Working orders", section.working_orders, integerValue(section.working_orders, "count", "Count")),
@@ -144,15 +155,17 @@ function renderRiskSection(section) {
   const capital = section.capital || {};
   return briefSection("D", "Risk & limits", section, [
     briefRow("Capital", capital, joinValues(
-      capital.tier,
-      capital.enforcement,
+      fieldValue(capital, "tier", "Tier"),
+      fieldValue(capital, "enforcement", "Enforcement"),
       percentValue(capital, "consumed_pct", "Consumed"),
       moneyValue(capital, "drawdown_base", capital.base_currency, "Drawdown"),
       moneyValue(capital, "adjusted_peak_base", capital.base_currency, "Adjusted peak"),
+      capital.peak_as_of ? `peak set ${dateTimeValue(capital.peak_as_of)}` : "",
     )),
     briefRow("Drawdown latch", section.latch, joinValues(
       hasField(section.latch, "latched") ? (section.latch.latched ? "latched" : "open") : "",
-      integerValue(section.latch, "age_days", "Age", " day(s)"),
+      latchAgeValue(section.latch),
+      percentValue(section.latch, "consumed_pct_at_latch", "Engaged at"),
       dateValue(section.latch?.latched_at),
     )),
     briefRow("Active overrides", section.overrides, (section.overrides?.rows || []).map((row) => joinValues(row.control, dateTimeValue(row.expires_at))).join(" · ")),
@@ -169,7 +182,7 @@ function renderProcessSection(section, brief) {
       integerValue(section.reconcile, "days_remaining", "Days remaining"),
     )),
     briefRow("Auto-extend", section.auto_extend, joinValues(section.auto_extend?.report_id, dateTimeValue(section.auto_extend?.at))),
-    renderOneTapRow(section.one_tap || {}, brief),
+    renderOneTapRow(section.one_tap || {}, brief, section.rules_delta || {}),
     briefRow("Rules delta", section.rules_delta, rulesDeltaValue(section.rules_delta || {})),
   ];
   if (Object.prototype.hasOwnProperty.call(section, "monthly_pulse") && section.monthly_pulse) {
@@ -207,7 +220,7 @@ function artefactValue(artefact) {
     const completedAt = dateTimeValue(artefact.completed_at);
     return completedAt ? `completed ${completedAt}` : "completed";
   }
-  return artefact.cadence === "weekly" ? "not completed this week" : "not completed today";
+  return artefact.cadence === "weekly" ? "not yet completed this week" : "not yet completed today";
 }
 
 function briefSection(letter, title, section, rows, className = "") {
@@ -248,7 +261,7 @@ function briefRow(label, row = {}, value = "", className = "") {
   return el;
 }
 
-function renderOneTapRow(row, brief) {
+function renderOneTapRow(row, brief, rulesDelta = {}) {
   const el = briefRow("One-tap sign-off", row, row.report_id || "--");
   const blockers = document.createElement("ul");
   blockers.className = "brief-blockers";
@@ -267,10 +280,23 @@ function renderOneTapRow(row, brief) {
     button.id = "briefSignoffButton";
     button.type = "button";
     button.className = "primary brief-signoff";
-    button.textContent = outcome.busy ? `Signing off report ${reportID}` : `Sign off report ${reportID} — clean`;
+    // The row value above already prints the raw report id; the tap target
+    // speaks trader language, scopes the claim to what the report actually
+    // attests (statement reconcile), and keeps the exact id in its tooltip.
+    button.textContent = outcome.busy ? "Signing off the reconcile report" : "Sign off this reconcile report — statement clean";
+    button.title = `Report ${reportID}`;
     button.disabled = outcome.busy;
     button.addEventListener("click", () => submitReconcileSignoff(fingerprint, reportID));
     el.append(button);
+    // Signability is statement-scoped by design; when the rulebook changed
+    // since the last stamped brief, the caveat sits on the control so the
+    // sign-off cannot borrow the delta's ambiguity.
+    if (rulesDeltaUnclean(rulesDelta)) {
+      const caveat = document.createElement("p");
+      caveat.className = "brief-action-message brief-signoff-caveat";
+      caveat.textContent = "Note: the rulebook changed since the last stamped brief — review the Rules delta row before signing.";
+      el.append(caveat);
+    }
   }
   const message = outcome.error || outcome.result?.message || (outcome.result?.ok ? `Report ${reportID} signed off.` : "");
   if (message) {
@@ -398,7 +424,21 @@ function statusBadge(status) {
 
 function statusClass(status) {
   const normalized = String(status || "").toLowerCase();
-  return ["ok", "degraded", "unavailable"].includes(normalized) ? `brief-status--${normalized}` : "";
+  return ["ok", "attention", "degraded", "unavailable"].includes(normalized) ? `brief-status--${normalized}` : "";
+}
+
+function latchAgeValue(latch = {}) {
+  if (!hasField(latch, "age_days") || !Number.isFinite(latch.age_days)) return "";
+  const days = Math.trunc(latch.age_days);
+  return `Age ${days} ${days === 1 ? "day" : "days"}`;
+}
+
+function moversValue(movers = {}, currency) {
+  const parts = (movers?.rows || []).map((row) => `${row.symbol || "--"} ${money(row.daily_pnl_base, currency)}`);
+  if (typeof movers?.other_daily_pnl_base === "number" && movers?.other_count > 0) {
+    parts.push(`${movers.other_count} other${movers.other_count === 1 ? "" : "s"} ${money(movers.other_daily_pnl_base, currency)}`);
+  }
+  return parts.join(" · ");
 }
 
 function moneyCoverageValue(row = {}) {
@@ -407,6 +447,13 @@ function moneyCoverageValue(row = {}) {
     integerValue(row, "included_legs", "Included legs"),
     integerValue(row, "excluded_legs", "Excluded legs"),
   );
+}
+
+function rulesDeltaUnclean(row = {}) {
+  return row.rulebook_fingerprint_changed === true ||
+    (row.transitions || []).length > 0 ||
+    (row.added || []).length > 0 ||
+    (row.removed || []).length > 0;
 }
 
 function rulesDeltaValue(row = {}) {
