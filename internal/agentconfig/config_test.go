@@ -92,38 +92,6 @@ func TestCodexHookAndBrowserPolicyAreWired(t *testing.T) {
 	}
 }
 
-// The delegation runner hands a headless Codex agent write access to a
-// worktree. Its safety comes from what it refuses to pass through: no
-// approval-policy overrides and no sandbox/hook-trust bypasses, so denials
-// fail closed instead of asking nobody. A bypass flag added "temporarily"
-// would silently convert every delegated run into an unsandboxed agent.
-func TestDelegationRunnerStaysFailClosed(t *testing.T) {
-	path := repoPath("scripts", "codex-implement.sh")
-	info, err := os.Stat(path)
-	if err != nil || info.Mode()&0o111 == 0 {
-		t.Fatalf("runner %s missing or not executable: info=%v err=%v", path, info, err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := string(data)
-	if !strings.Contains(script, "codex exec") {
-		t.Fatal("runner no longer invokes codex exec; update this gate with the new shape")
-	}
-	for _, banned := range []string{
-		"--dangerously-bypass-approvals-and-sandbox",
-		"--dangerously-bypass-hook-trust",
-		"danger-full-access",
-		"approval_policy",
-		"--yolo",
-	} {
-		if strings.Contains(script, banned) {
-			t.Errorf("runner contains %q; headless delegation must stay fail-closed", banned)
-		}
-	}
-}
-
 func TestRepoSkillDoesNotShadowInstalledIBKRSkill(t *testing.T) {
 	canonical, err := os.ReadFile(repoPath("skills", "ibkr", "SKILL.md"))
 	if err != nil {

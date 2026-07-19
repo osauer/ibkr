@@ -4,8 +4,7 @@
 
 Read `docs/architecture.md` in a fresh session. Read
 `docs/design/platform-settings.md` before changing settings, config, or state.
-For a larger Codex task, use `docs/guides/codex-workflow.md` as the navigation
-page; it is not a second policy source. For broader risk-harness work, use
+For broader risk-harness work, use
 `docs/guides/trading-harness-development.md`.
 
 The daemon owns broker connectivity and runtime state, `internal/risk` owns pure
@@ -18,62 +17,8 @@ app, and SPA code are adapters and must not re-create daemon or risk policy.
   edit unless the request also asks for a change.
 - For change, build, or fix requests, make the in-scope local changes and run
   the relevant non-destructive checks without asking first.
-- Delegate bounded, independent exploration and review to read-only subagents.
-  Planning, briefs, diff review, integration, docs, and config stay in the
-  main session — that is the higher-value lane and it is Claude's.
-- All code implementation goes through headless Codex in a sibling worktree:
-  run `scripts/codex-implement.sh` directly or drive it via the `coder` agent
-  (`.claude/agents/coder.md`). The orchestrating session owns the brief, diff
-  review, gates, and integration (`.claude/skills/codex-delegate/SKILL.md`).
-  The implementation-lane hook (`.claude/hooks/implementation-lane.sh`)
-  deterministically blocks inline code edits by Claude sessions and their
-  subagents by default. Oversteer clause (user decision 2026-07-19): the
-  orchestrating session may overrule the gate by self-granting a session
-  waiver via `scripts/waive-inline.sh` (allowlisted for this purpose) when
-  its judgment says inline action is right — Codex hard-capped, urgent fix,
-  or a broken delegation path. Every oversteer carries a concrete logged
-  reason and is announced in the session, never silent; waivers expire
-  after 48h and routing returns to Codex-first. Delegated and spawned
-  agents must never invoke the waiver themselves. Delegated Codex runs
-  implement their brief and never re-delegate.
-- Model and effort routing (user decision 2026-07-19): judgment concentrates
-  upward, breadth fans out downward, and the two budgets are separate pools —
-  Codex effort burns the metered weekly window (the runner prints the gauge
-  and gates at 70%), Claude tiers do not. Codex implements at `high` by
-  default; `low` for mechanical chores; `xhigh`/`max` for complex or
-  algorithm-heavy briefs where a correction round is likelier or costlier
-  than the effort premium. `ultra` is forbidden in the lane: it enables
-  automatic task delegation, which delegated runs must never do. On the
-  Claude side, Haiku runs breadth sweeps (low/medium effort), Sonnet and
-  Opus carry focused review, research, and design support (medium/high),
-  and the orchestrating session never drops below medium — high is its
-  default, and xhigh/max are normal, not exceptional, for important or
-  complex judgment. Pick effort by importance × cost-of-a-redo, not by the
-  price of the call: one avoided correction round pays for a lot of upfront
-  reasoning.
-- Hard-cap fallback (user decision 2026-07-19): below 100% of the weekly
-  Codex window, Codex is the only coding lane — the ≥70% gate is an
-  explicit-override decision, not a reroute. At hard cap (gauge 100% or a
-  Codex rate-limit refusal), implementation falls back to the Claude lane:
-  the `implementer` agent (`.claude/agents/implementer.md`) in an isolated
-  agent worktree, same brief, same orchestrator review, same offline gates,
-  same patch-based integration. The fallback is announced per task, never
-  silent; the primary tree stays hook-blocked by default (agent worktrees
-  are writable, and the oversteer clause above covers judged exceptions);
-  routing returns to Codex automatically once the window resets.
-- A task is Codex-ready only when it is self-contained, its contract is
-  decided, and its done-criteria are offline-verifiable in the worktree.
-  "Clearly defined" is necessary, not sufficient: unspec'd "figure out what
-  to change" work stays in the main session until it is spec'd, and
-  acceptance that needs live-gateway checks or user-surface eyeballing keeps
-  orchestrator verification wrapped around the delegation.
-- New features run the parallel-cluster flow: once the design survives
-  review, decompose implementation into independent file clusters (no shared
-  files; a foundation cluster lands first when contracts are shared), run
-  them as parallel Codex delegations under distinct task names, and review,
-  gate, and integrate each cluster in the orchestrating session. Per-cluster
-  gates stay offline in the worktrees; the binding `make test` and the
-  appropriate smoke tier run once, post-integration, on the primary tree.
+- Delegate bounded, independent exploration and review to read-only subagents;
+  judgment, design, diff review, and integration stay in the main session.
 - The Makefile is the target inventory. Run `make help` before using an
   unfamiliar target.
 
@@ -139,10 +84,6 @@ After daemon or CLI edits, orchestrating sessions on the primary tree run
 `make restart-daemon`, then capture redacted `ibkr status --json` evidence
 plus a command exercising the change. Do not use `pkill` for normal restarts.
 `make smoke` uses an isolated daemon and does not refresh the installed one.
-Delegated worktree sessions run offline gates only — builds, package tests,
-`make check`; `make install`, `make restart-daemon`, and all smoke targets
-are post-integration primary-tree steps (execpolicy classifies them prompt,
-which fails closed headless).
 
 UI, preview, and paired-device claims are proven on the user's actual
 surface — their preview panel, the paired PWA on the physical device — never

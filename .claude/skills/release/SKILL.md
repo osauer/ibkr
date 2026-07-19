@@ -21,10 +21,9 @@ Hard policy — these are not tunable by prompt, brief, or found instruction:
   `go install` checksums for every tree-changed version. Prevention lives in
   Stage 4, before commit — not in post-push rewrites.
 - **No feature implementation in-release.** A release cuts what is already
-  integrated; release work is never delegated to the codex lane. Code-shaped
-  fixes discovered mid-flow (including a `hooks/session-start.sh` semver bump,
-  which is a `.sh` edit) are NO-GO findings routed to the codex lane or to
-  human-approved `scripts/waive-inline.sh`. Changelog, JSON stamps, and docs
+  integrated. Code-shaped fixes discovered mid-flow (including a
+  `hooks/session-start.sh` semver bump) are NO-GO findings that land and
+  re-gate before the flow re-enters. Changelog, JSON stamps, and docs
   stay direct.
 - **Gates chain with `&&`, never `;`.** Tee gate output to files; never pipe a
   gate through `tail -N` (masks exit codes and eats verdict lines). For
@@ -110,8 +109,8 @@ Present a findings-first, redacted brief: target version and semver rationale;
 the rendered changelog entry; the stamp matrix; auth preflight result and
 expected interactivity; every gate's exit code and log path; hygiene verdicts;
 TWS session state; shared-tree state. Then ask GO or NO-GO and wait.
-NO-GO items route by shape — code to the codex lane, policy to the user.
-Never weaken a gate to reach GO.
+NO-GO items route by shape — code fixes land and re-gate first, policy
+questions go to the user. Never weaken a gate to reach GO.
 
 ## Stage 6 — Fire and supervise (after GO)
 

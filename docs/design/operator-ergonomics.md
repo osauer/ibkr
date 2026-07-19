@@ -221,7 +221,7 @@ exist only in the operator's TOML.
 
 ## Implementation record — risk-policy v3 (2026-07-18)
 
-Shipped and active 2026-07-18 evening, Codex-only lane, all gates green
+Shipped and active 2026-07-18 evening, all gates green
 (worktree race tests, primary `make test`, daemon restart, full `make smoke`).
 
 - **Scope chosen by the operator (interview, same day):** v3 = clean-report
@@ -289,7 +289,7 @@ Shipped and active 2026-07-18 evening, Codex-only lane, all gates green
 
 ## Implementation record — L1 brief surface (2026-07-18)
 
-Both slices shipped 2026-07-18 evening through the Codex-only lane.
+Both slices shipped 2026-07-18 evening.
 Daemon/RPC/CLI: commit 73bc12d — worktree `make check` + race tests, primary
 `make test`, `make restart-daemon`, full `make smoke` PASS with zero skips.
 PWA card: integrated the same evening — worktree `make app-check` +

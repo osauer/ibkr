@@ -315,13 +315,12 @@ registry-version-check: ## Ensure server.json version tracks .claude-plugin/plug
 # weeks blocking the read-only `ibkr orders` journal view, caught only by
 # a human. Table-driven behavior cases keep both failure directions gated:
 # false-allow (agent reaches a write) and false-block (read paths break).
-hook-behavior-check: ## Run table-driven allow/block cases against the broker and implementation-lane hooks
+hook-behavior-check: ## Run table-driven allow/block cases against the broker hooks
 	@bash hooks/ibkr-pre-tool-use_test.sh
 	@HOOK_UNDER_TEST=.codex/hooks/ibkr-pre-tool-use.sh bash hooks/ibkr-pre-tool-use_test.sh
-	@bash .claude/hooks/implementation-lane_test.sh
 
 agent-config-check: hook-behavior-check ## Validate project agent config, hooks, and read-only reviewer roles
-	@bash -n hooks/ibkr-pre-tool-use.sh .codex/hooks/ibkr-pre-tool-use.sh scripts/codex-implement.sh .claude/hooks/implementation-lane.sh scripts/waive-inline.sh
+	@bash -n hooks/ibkr-pre-tool-use.sh .codex/hooks/ibkr-pre-tool-use.sh
 	@jq -e . .codex/hooks.json >/dev/null
 	@jq -e . .claude/settings.json >/dev/null
 	@go test ./internal/agentconfig/

@@ -162,12 +162,10 @@ func TestAgentPolicyDocsDoNotClaimLiveAgentHardBlock(t *testing.T) {
 		"../../docs/design/agent-origin-gating.md",
 		"../../docs/design/trading-paper-smoke.md",
 		"../../docs/guides/agent-session-hygiene.md",
-		"../../docs/guides/codex-workflow.md",
 		"../../docs/templates/daemon-cli-trading-contract.md",
 		"../../skills/ibkr/SKILL.md",
 		"../../skills/ibkr/schemas.md",
 		"../../.agents/skills/ibkr-harness/SKILL.md",
-		"../../.claude/skills/codex-delegate/SKILL.md",
 		"../../.claude-plugin/plugin.json",
 		"../../.codex/rules/ibkr.rules",
 	}

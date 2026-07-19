@@ -41,11 +41,7 @@ Measured benchmark from the audit: the same fix+test+commit work cost
 ~80k context/call in a fresh worktree agent vs 300–450k/call inline in a
 fat main session — a 4–6x difference. Exploration/verification belongs in
 read-only agents; long reviews run in the background while the
-main session continues. These economics are now structural: since
-2026-07-18 all code implementation runs through the hook-enforced Codex
-delegation lane in a sibling worktree
-(`.claude/skills/codex-delegate/SKILL.md`), so the fresh-context shape is
-the only shape for code.
+main session continues.
 
 **Batch tiny probes; read by range.** 524 sub-2KB-output one-liners
 (grep/ls/status) were issued from >200k contexts in two days, each paying a
@@ -53,8 +49,7 @@ full-context round-trip (~156M tokens raw). Batch independent probes 3–4:1
 into one programmatic or parallel call. Use ranged reads around the
 hit instead of whole-file dumps (one 35KB whole-file read was carried by
 651 subsequent calls); `git diff --stat` first, then scoped diffs. Use
-`apply_patch` for intentional docs/config edits so changes stay reviewable;
-code edits are not available inline — they go through the delegation lane.
+`apply_patch` for intentional edits so changes stay reviewable.
 
 **Waits are background jobs, not polls.** Foreground sleeps and repeated
 one-shot status greps from a large context burned ~7M tokens/day plus

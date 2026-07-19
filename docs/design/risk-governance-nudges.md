@@ -431,9 +431,8 @@ separate operation from receipt/dedupe retention.
 
 ## Implementation Clusters
 
-All code implementation uses the headless Codex lane. The foundation lands
+Implementation decomposes into independent clusters: the foundation lands
 first; later clusters start from that integrated base and own disjoint files.
-Delegates run offline gates only.
 
 ### Cluster 0: shared policy and RPC foundation
 
@@ -593,7 +592,8 @@ make app-refresh-smoke APP_SMOKE_BROWSER=webkit
 make app-lifecycle-smoke APP_SMOKE_BROWSER=webkit
 ```
 
-The worktree delegates do not run install, restart, or smoke targets.
+Install, restart, and smoke targets run once, post-integration, on the
+primary tree.
 
 ### Redacted runtime evidence
 

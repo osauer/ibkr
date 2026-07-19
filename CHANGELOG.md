@@ -22,6 +22,10 @@ All notable changes to this project are documented here. The project adheres to 
 - Broker open-order snapshots cannot mint phantom journal rows: unmatched openOrder/orderStatus callbacks (e.g. manual TWS orders) are observed but not adopted into the daemon's order journal.
 - `ibkr status` background-task line for open orders now leads with the current account/mode count (matching the orders tab) and discloses any off-scope remainder as `(+N other scope)` instead of silently reporting a different total.
 
+### Removed
+
+- The Codex delegation lane (agent development process, no product change): the implementation-lane hook, delegation runner, waiver valve, and lane policy are retired — agent sessions implement inline again. The lane and its reactivation runbook are archived in `docs/archive/codex-delegation-lane.md`.
+
 ## v2.2.1 — 2026-07-19 08:18 CEST
 
 ### What's new
