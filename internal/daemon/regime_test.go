@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -35,6 +36,12 @@ import (
 // contract so the test fake can't drift away from what the gateway
 // is actually being asked for.
 type fakeDeps struct {
+	// now pins the fetchers' clock (regimeDeps.now). Zero means
+	// regimeTestNow — a mid-RTH Wednesday — so calendar-keyed branches
+	// (the closed-date day-change pin, off-hours banding) behave
+	// identically no matter when the suite runs. Closed-date tests set
+	// an explicit weekend/holiday instant.
+	now       time.Time
 	snapshots map[string]fakeQuote
 	// rich holds the Week52High value the snapshotWith52WHigh dep
 	// returns for a given symbol. Tests that don't set an entry simulate
@@ -69,7 +76,12 @@ type fakeHistory struct {
 }
 
 func (f *fakeDeps) build() *regimeDeps {
+	nw := f.now
+	if nw.IsZero() {
+		nw = regimeTestNow
+	}
 	return &regimeDeps{
+		now: func() time.Time { return nw },
 		snapshot: func(_ context.Context, sym string, _ time.Duration) (float64, float64, string) {
 			if f.snapshotCalls == nil {
 				f.snapshotCalls = make(map[string]int)
@@ -105,6 +117,30 @@ func (f *fakeDeps) build() *regimeDeps {
 			}
 		},
 	}
+}
+
+// regimeTestNow pins fetcher clock reads to a mid-RTH Wednesday
+// (2026-07-15 14:00 ET). Without a pinned clock the closed-date
+// day-change pin and the off-hours banding branch key on the real
+// calendar and the suite behaves differently on weekends — the same
+// flake class the canary suite pinned with canaryTestNow.
+var regimeTestNow = time.Date(2026, 7, 15, 18, 0, 0, 0, time.UTC)
+
+// regimeTestClosedSunday is an official non-trading date (Sunday
+// 2026-07-19 16:06 ET) whose last two completed sessions are Thu
+// 2026-07-16 and Fri 2026-07-17 — the live incident's calendar.
+var regimeTestClosedSunday = time.Date(2026, 7, 19, 20, 6, 0, 0, time.UTC)
+
+// makeDatedBars synthesises daily bars carrying wire-format YYYYMMDD
+// session labels (what HMDS returns), oldest-first, so the closed-date
+// pin's exact-date matching has real labels to match against.
+func makeDatedBars(points map[string]float64) []ibkrlib.HistoricalBar {
+	dates := slices.Sorted(maps.Keys(points))
+	out := make([]ibkrlib.HistoricalBar, 0, len(dates))
+	for _, d := range dates {
+		out = append(out, ibkrlib.HistoricalBar{Date: strings.ReplaceAll(d, "-", ""), Close: points[d]})
+	}
+	return out
 }
 
 // makeBars synthesises N daily bars with a constant close. Oldest-
@@ -259,6 +295,83 @@ func TestFetchRegimeVIXTerm(t *testing.T) {
 			t.Errorf("VIXChangePct must populate even when ratio leg fails")
 		}
 	})
+
+	// Closed-date day-change pinning: on an official non-trading date the
+	// change fields come from the official closes of the last two
+	// completed sessions, never from the frozen print vs whatever the
+	// tick-9 anchor drifted to. Live incident calendar: Sunday
+	// 2026-07-19, Friday truly closed VIX +12.19% (18.77 vs 16.73). The
+	// fake's tick-9 anchor equals the print — the observed weekend reset,
+	// which the old math rendered as +0.00%.
+	t.Run("closed_date_pins_change_to_official_closes", func(t *testing.T) {
+		deps := (&fakeDeps{
+			now: regimeTestClosedSunday,
+			snapshots: map[string]fakeQuote{
+				"VIX":   {price: 18.77, prevClose: 18.77, dataType: rpc.MarketDataFrozen},
+				"VIX3M": {price: 21.0, dataType: rpc.MarketDataFrozen},
+			},
+			bars: map[string]fakeHistory{
+				"VIX": {bars: makeDatedBars(map[string]float64{
+					"2026-07-14": 17.1,
+					"2026-07-15": 16.9,
+					"2026-07-16": 16.73,
+					"2026-07-17": 18.77,
+				})},
+			},
+		}).build()
+		got := fetchRegimeVIXTerm(ctx, deps)
+		if got.VIXPrevClose == nil || *got.VIXPrevClose != 16.73 {
+			t.Fatalf("VIXPrevClose=%v, want Thursday official close 16.73", got.VIXPrevClose)
+		}
+		if got.VIXChangePct == nil || *got.VIXChangePct < 12.19 || *got.VIXChangePct > 12.20 {
+			t.Errorf("VIXChangePct=%v, want ≈+12.19 (Friday close-to-close), not the reset anchor's 0.00", got.VIXChangePct)
+		}
+		if !strings.Contains(got.VIXChangeBasis, "official closes 2026-07-16 → 2026-07-17") || !strings.Contains(got.VIXChangeBasis, "weekend") {
+			t.Errorf("VIXChangeBasis=%q, want official-close session span with the weekend reason", got.VIXChangeBasis)
+		}
+		if got.Ratio == nil {
+			t.Errorf("ratio leg must be untouched by the day-change pin")
+		}
+		if slices.Contains(got.FieldsMissing, "vix_day_change") {
+			t.Errorf("fields_missing=%v, must not flag vix_day_change on a successful pin", got.FieldsMissing)
+		}
+	})
+
+	// A failed pin withholds the change fields entirely — a drifted tick
+	// anchor must never backfill. Series here is stale: Friday never
+	// arrived in the bars.
+	t.Run("closed_date_without_usable_bars_withholds_change", func(t *testing.T) {
+		var warns []string
+		deps := (&fakeDeps{
+			now: regimeTestClosedSunday,
+			snapshots: map[string]fakeQuote{
+				"VIX":   {price: 18.77, prevClose: 16.73, dataType: rpc.MarketDataFrozen},
+				"VIX3M": {price: 21.0, dataType: rpc.MarketDataFrozen},
+			},
+			bars: map[string]fakeHistory{
+				"VIX": {bars: makeDatedBars(map[string]float64{
+					"2026-07-15": 16.9,
+					"2026-07-16": 16.73,
+				})},
+			},
+			warnLog: &warns,
+		}).build()
+		got := fetchRegimeVIXTerm(ctx, deps)
+		if got.VIXChangePct != nil || got.VIXPrevClose != nil {
+			t.Errorf("change=%v prev=%v, want both nil: tick anchors must not backfill a failed pin", got.VIXChangePct, got.VIXPrevClose)
+		}
+		if got.VIXChangeBasis != "" {
+			t.Errorf("VIXChangeBasis=%q, want empty on a failed pin", got.VIXChangeBasis)
+		}
+		if !slices.Contains(got.FieldsMissing, "vix_day_change") {
+			t.Errorf("fields_missing=%v, want vix_day_change", got.FieldsMissing)
+		}
+		if !slices.ContainsFunc(warns, func(s string) bool {
+			return strings.Contains(s, "VIX closed-date day change") && strings.Contains(s, "withholding")
+		}) {
+			t.Errorf("expected a withhold warn naming the missing sessions, got %v", warns)
+		}
+	})
 }
 
 func TestFetchRegimeVolOfVol(t *testing.T) {
@@ -399,6 +512,111 @@ func TestFetchRegimeHYGSPY(t *testing.T) {
 		// (530 - 525) / 525 * 100 ≈ 0.9524
 		if got.SPYChangePct == nil || *got.SPYChangePct < 0.95 || *got.SPYChangePct > 0.96 {
 			t.Errorf("SPYChangePct=%v, want ≈0.95", got.SPYChangePct)
+		}
+	})
+
+	// Closed-date pinning, SPY side. Sunday 2026-07-19 live incident: the
+	// tick-9 anchor had rolled onto the last print (rendering +0.00%)
+	// while Friday's true close-to-close was −0.99%. The pin must ignore
+	// both weekend snapshot values, leave the price tick alone, and pull
+	// the change from the official closes. week52High is set so the SPY
+	// history call is uniquely the pin's (no 365d fallback fetch).
+	t.Run("closed_date_pins_spy_change_to_official_closes", func(t *testing.T) {
+		fake := &fakeDeps{
+			now: regimeTestClosedSunday,
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataFrozen},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 750.72, prevClose: 750.72, week52High: 760.0, dataType: rpc.MarketDataFrozen},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+				"SPY": {bars: makeDatedBars(map[string]float64{
+					"2026-07-16": 758.22,
+					"2026-07-17": 750.72,
+				})},
+			},
+		}
+		got := fetchRegimeHYGSPY(ctx, fake.build())
+		if got.SPYPrevClose == nil || *got.SPYPrevClose != 758.22 {
+			t.Fatalf("SPYPrevClose=%v, want Thursday official close 758.22", got.SPYPrevClose)
+		}
+		if got.SPYChange == nil || *got.SPYChange < -7.51 || *got.SPYChange > -7.49 {
+			t.Errorf("SPYChange=%v, want −7.50 (official closes)", got.SPYChange)
+		}
+		if got.SPYChangePct == nil || *got.SPYChangePct > -0.98 || *got.SPYChangePct < -1.0 {
+			t.Errorf("SPYChangePct=%v, want ≈−0.99 (Friday close-to-close), not the reset anchor's 0.00", got.SPYChangePct)
+		}
+		if !strings.Contains(got.SPYChangeBasis, "official closes 2026-07-16 → 2026-07-17") {
+			t.Errorf("SPYChangeBasis=%q, want the official-close session span", got.SPYChangeBasis)
+		}
+		if got.SPYPrice == nil || *got.SPYPrice != 750.72 {
+			t.Errorf("SPYPrice=%v, want the tick untouched — only the change fields pin", got.SPYPrice)
+		}
+		if want := []int{regimeTapePinLookbackDays}; !slices.Equal(fake.historyCalls["SPY"], want) {
+			t.Errorf("SPY history calls=%v, want %v (pin window only)", fake.historyCalls["SPY"], want)
+		}
+	})
+
+	// Holiday flavor of the same calendar key (marketcal StateHoliday):
+	// Labor Day Monday 2026-09-07 pins Thu 2026-09-03 → Fri 2026-09-04
+	// and the basis names the holiday.
+	t.Run("closed_date_holiday_pins_and_names_reason", func(t *testing.T) {
+		deps := (&fakeDeps{
+			now: time.Date(2026, 9, 7, 15, 0, 0, 0, time.UTC),
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataFrozen},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 505.0, week52High: 540.0, dataType: rpc.MarketDataFrozen},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+				"SPY": {bars: makeDatedBars(map[string]float64{
+					"2026-09-03": 500.0,
+					"2026-09-04": 505.0,
+				})},
+			},
+		}).build()
+		got := fetchRegimeHYGSPY(ctx, deps)
+		if got.SPYChangePct == nil || *got.SPYChangePct < 0.99 || *got.SPYChangePct > 1.01 {
+			t.Fatalf("SPYChangePct=%v, want ≈+1.00", got.SPYChangePct)
+		}
+		if !strings.Contains(got.SPYChangeBasis, "official closes 2026-09-03 → 2026-09-04") || !strings.Contains(got.SPYChangeBasis, "Labor Day") {
+			t.Errorf("SPYChangeBasis=%q, want session span + holiday name", got.SPYChangeBasis)
+		}
+	})
+
+	// A failed SPY pin (history error on the closed date) withholds the
+	// change fields instead of falling back to drifted weekend anchors.
+	t.Run("closed_date_spy_history_error_withholds_change", func(t *testing.T) {
+		var warns []string
+		deps := (&fakeDeps{
+			now: regimeTestClosedSunday,
+			snapshots: map[string]fakeQuote{
+				"HYG": {price: 80.0, dataType: rpc.MarketDataFrozen},
+			},
+			rich: map[string]fakeRichQuote{
+				"SPY": {price: 750.72, prevClose: 750.72, week52High: 760.0, dataType: rpc.MarketDataFrozen},
+			},
+			bars: map[string]fakeHistory{
+				"HYG": {bars: makeBars(60, 79.5)},
+				"SPY": {err: errors.New("HMDS unavailable")},
+			},
+			warnLog: &warns,
+		}).build()
+		got := fetchRegimeHYGSPY(ctx, deps)
+		if got.SPYChangePct != nil || got.SPYChange != nil || got.SPYPrevClose != nil {
+			t.Errorf("change fields=%v/%v/%v, want all nil on a failed pin", got.SPYChange, got.SPYChangePct, got.SPYPrevClose)
+		}
+		if !slices.Contains(got.FieldsMissing, "spy_day_change") {
+			t.Errorf("fields_missing=%v, want spy_day_change", got.FieldsMissing)
+		}
+		if !slices.ContainsFunc(warns, func(s string) bool {
+			return strings.Contains(s, "SPY closed-date day change") && strings.Contains(s, "HMDS unavailable")
+		}) {
+			t.Errorf("expected history-error warn, got %v", warns)
 		}
 	})
 

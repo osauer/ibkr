@@ -278,6 +278,20 @@ trading-date stage governs weekend rule thresholds through the existing
 carried worse-of path instead of a frozen-print or cluster-only weekend stage
 re-latching fresh.
 
+Closed-date tape values (2026-07-19): the day-change numbers themselves are
+pinned on those same dates. The gateway's last print and its tick-9
+previous-close anchor can each reset independently while the market is closed
+(the live Sunday exhibit read SPY +0.00% beside VIX +12.19% while Friday truly
+closed SPY −0.99% / VIX +12.19% — a pair no market ever printed), so on
+official non-trading dates the daemon computes `spy_change` / `spy_change_pct`
+/ `vix_change_pct` from the official daily closes of the last two completed
+sessions and names the span in `spy_change_basis` / `vix_change_basis`
+("official closes 2026-07-16 → 2026-07-17 (weekend)"). Bars are matched by
+exact official session date; when the closes cannot be resolved the change
+fields are withheld (`fields_missing: spy_day_change` / `vix_day_change`)
+rather than backfilled from drifted snapshots. Price ticks, the VIX/VIX3M
+ratio, and banding inputs are unchanged — only the day-change fields pin.
+
 Display tone follows governed severity, not just stage: `confirmed_stress`
 with `severity: watch` remains an amber/watch headline, preserving red for
 act-grade stress and `risk_off` for full risk-off conditions. The condition
