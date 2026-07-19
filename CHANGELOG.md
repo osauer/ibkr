@@ -2,19 +2,22 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
-## v2.2.2 — 2026-07-19 17:50 CEST
+## v2.2.1 — 2026-07-19 19:49 CEST
 
 ### What's new
 
 - **Ghost orders no longer haunt the orders tab.** Protective GTC stops that were cancelled or filled while the daemon wasn't listening used to stay "open" in the local order journal forever, showing up as stale "needs reconcile" rows. The daemon now asks the broker for its actual open-order list after each reconnect (and every 30 minutes) and closes journal rows the broker no longer reports as `Closed (reconciled)`. Broker statements remain authoritative for the final fill-vs-cancel outcome.
+- **A stop that no longer matches its position now defends itself.** Sell part of a protected position outside the platform and the app flags the stop in red, explains that triggering it would open the excess in the opposite direction, sends one push notification, and offers a single guided fix: reduce the stop to the shares still held. Nothing adjusts automatically, and the daemon refuses the fix when position evidence is missing or has moved.
+- **Releases no longer wait on a human for the registry step.** The MCP Registry entry is published automatically by a GitHub Actions workflow when the release goes out; the release pipeline now verifies that publish happened instead of prompting for a device code. The interactive login remains only as a fallback when the workflow fails.
 
 ### Added
 
-- Broker open-order snapshot reconcile: `reqAllOpenOrders`-based sweep that appends terminal `reconciled-absent` events for journaled orders absent from a complete snapshot. Fail-safe by construction: no complete snapshot → no action; only rows in the connected account/mode scope, with a broker PermID, and quiet past a grace window are eligible. The sweep never sends a broker write — the snapshot request is its only wire interaction, and the append-only journal is never rewritten.
+- Broker open-order snapshot reconcile: `reqAllOpenOrders`-based sweep that appends terminal `reconciled-absent` events for journaled orders absent from a complete snapshot. Fail-safe by construction: no complete snapshot means no action, and only rows in the connected account/mode scope, with a broker PermID, and quiet past a grace window are eligible. The sweep never sends a broker write. The snapshot request is its only wire interaction, and the append-only journal is never rewritten.
+- Protective-stop mismatch alerts and a guided fix. When a close-only stop no longer matches the position (for example after selling part of it in TWS), the daemon classifies the consequence (full or partial opposite-direction entry on trigger) and the app shows a red critical row with plain-language risk copy plus a single allowed action: reduce the stop to exactly the held quantity through the normal preview-and-confirm flow (flat positions keep Cancel as the offered fix). The daemon enforces the same reduce-only constraint server-side against a fresh positions read at both preview and confirm, failing closed when position evidence is unavailable or changed. A critical push notification fires once per occurrence via the existing alert path, debounced across two polling passes so transient zeroed position reads can never page the trader, and redacted like canary pushes (no symbols or quantities on the wire).
 
-### Added
+### Changed
 
-- Protective-stop mismatch alerts and a guided fix. When a close-only stop no longer matches the position (for example after selling part of it in TWS), the daemon now classifies the consequence — full or partial opposite-direction entry on trigger — and the app shows a red critical row with plain-language risk copy plus a single allowed action: reduce the stop to exactly the held quantity through the normal preview-and-confirm flow (flat positions keep Cancel as the offered fix). The daemon enforces the same reduce-only constraint server-side against a fresh positions read at both preview and confirm, failing closed when position evidence is unavailable or changed. A critical push notification fires once per occurrence via the existing alert path, debounced across two polling passes so transient zeroed position reads can never page the trader, and redacted like canary pushes (no symbols or quantities on the wire).
+- The release pipeline's registry leg is verify-first: after the GitHub release is created, it polls the public MCP Registry for the exact released version (about four minutes, reporting the Actions `registry-publish` run status while it waits) and succeeds without operator interaction once the workflow-published entry appears. Only on timeout does it fall back to the previous interactive device-code login and direct publish. Standalone `make registry-publish` keeps its direct login+publish behavior as the manual heal, and the release preflight reminder now notes a browser is needed only if the automated publish fails.
 
 ### Fixed
 
@@ -25,17 +28,7 @@ All notable changes to this project are documented here. The project adheres to 
 
 ### Removed
 
-- The Codex delegation lane (agent development process, no product change): the implementation-lane hook, delegation runner, waiver valve, and lane policy are retired — agent sessions implement inline again. The lane and its reactivation runbook are archived in `docs/archive/codex-delegation-lane.md`.
-
-## v2.2.1 — 2026-07-19 08:18 CEST
-
-### What's new
-
-- **Releases no longer wait on a human for the registry step.** The MCP Registry entry is published automatically by a GitHub Actions workflow when the release goes out; the release pipeline now verifies that publish happened instead of prompting for a device code. The interactive login remains only as a fallback when the workflow fails.
-
-### Changed
-
-- The release pipeline's registry leg is verify-first: after the GitHub release is created, it polls the public MCP Registry for the exact released version (about four minutes, reporting the Actions `registry-publish` run status while it waits) and succeeds without operator interaction once the workflow-published entry appears. Only on timeout does it fall back to the previous interactive device-code login and direct publish. Standalone `make registry-publish` keeps its direct login+publish behavior as the manual heal, and the release preflight reminder now notes a browser is needed only if the automated publish fails.
+- The Codex delegation lane (agent development process, no product change): the implementation-lane hook, delegation runner, waiver valve, and lane policy are retired, and agent sessions implement inline again. The lane and its reactivation runbook are archived in `docs/archive/codex-delegation-lane.md`.
 
 ## v2.2.0 — 2026-07-19 07:22 CEST
 
