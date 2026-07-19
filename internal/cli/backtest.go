@@ -2116,24 +2116,32 @@ func canaryBacktestAsOf(obs CanaryBacktestObservation) time.Time {
 	if !obs.AsOf.IsZero() {
 		return obs.AsOf
 	}
-	if obs.Date != "" {
-		if t, err := time.Parse("2006-01-02", obs.Date); err == nil {
-			return t
-		}
-	}
-	return time.Time{}
+	return backtestDateAsOf(obs.Date)
 }
 
 func regimeBacktestAsOf(obs RegimeBacktestObservation) time.Time {
 	if !obs.AsOf.IsZero() {
 		return obs.AsOf
 	}
-	if obs.Date != "" {
-		if t, err := time.Parse("2006-01-02", obs.Date); err == nil {
-			return t
-		}
+	return backtestDateAsOf(obs.Date)
+}
+
+// backtestDateAsOf stamps a date-only observation inside that date's regular
+// NY session (15:59 ET). Midnight UTC would land on the prior NY evening —
+// often a weekend — and session-aware severity would then misread an
+// end-of-date snapshot as a closed-date one.
+func backtestDateAsOf(date string) time.Time {
+	if date == "" {
+		return time.Time{}
 	}
-	return time.Time{}
+	t, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return time.Time{}
+	}
+	if loc, lerr := time.LoadLocation("America/New_York"); lerr == nil {
+		return time.Date(t.Year(), t.Month(), t.Day(), 15, 59, 0, 0, loc)
+	}
+	return t
 }
 
 func opportunityBacktestAsOf(obs OpportunityBacktestObservation) time.Time {

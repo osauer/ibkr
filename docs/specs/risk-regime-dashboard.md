@@ -1,6 +1,6 @@
 # Risk Regime Dashboard Contract
 
-**Updated:** 2026-06-02 07:48 CEST
+**Updated:** 2026-07-19 22:33 CEST
 
 `ibkr regime` reports the broad-market stress lifecycle: `quiet`,
 `early_warning`, `confirmed_stress`, `panic`, `stabilization`, `opportunity`,
@@ -137,7 +137,11 @@ strengthening, which is the direction that can pressure yen-funded carry trades.
 USD/JPY can still show a red row by itself. For the cluster count, an isolated
 FX red is treated as a yellow watch until another independent cluster confirms
 stress. Canary may still act on a fast carry unwind when direct SPY/VIX tape or
-breadth confirms the move.
+breadth confirms the move. On official non-trading dates (weekend or holiday)
+frozen last-session SPY/VIX prints cannot supply that tape confirmation — in
+the canary only the breadth arm can, until live prints return at the next
+open, and the canary's direct tape-shock row demotes to observe with
+confirm-at-next-open guidance.
 
 | Row | Green | Yellow | Red |
 | --- | --- | --- | --- |

@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: risk-regime-dashboard.md sha256:ce27f0dda4869e32d9965e325b809e681fb98457d5edfc0e86a570a770202e84 -->
+<!-- md-source: risk-regime-dashboard.md sha256:070e819c13c618720b260f05694cdf0c44eb17d21e354e85b8fd67a8c304fc19 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -16,7 +16,7 @@
       "name": "Oliver Sauer",
       "url": "https://github.com/osauer"
     },
-    "dateModified": "2026-06-02T07:48:00+02:00",
+    "dateModified": "2026-07-19T22:33:00+02:00",
     "description": "ibkr regime reports the broad-market stress lifecycle: quiet, early_warning, confirmed_stress, panic, stabilization, opportunity, or data_quality. It is an...",
     "headline": "Risk Regime Dashboard Contract",
     "isPartOf": {
@@ -158,7 +158,7 @@
   </header>
   <main class="wrap doc">
 <h1 id="risk-regime-dashboard-contract">Risk Regime Dashboard Contract</h1>
-<p><strong>Updated:</strong> 2026-06-02 07:48 CEST</p>
+<p><strong>Updated:</strong> 2026-07-19 22:33 CEST</p>
 <p><code>ibkr regime</code> reports the broad-market stress lifecycle: <code>quiet</code>, <code>early_warning</code>, <code>confirmed_stress</code>, <code>panic</code>, <code>stabilization</code>, <code>opportunity</code>, or <code>data_quality</code>. It is an evidence-balance read, not a prediction, trading system, portfolio planner, or investment recommendation.</p>
 <p>Use it to answer one question: are several independent market-risk indicators confirming each other, or is the market still broadly calm?</p>
 <p>Canary may consume this output, but canary owns account and portfolio action. A portfolio concentration problem can be real even while the broad market regime is calm.</p>
@@ -237,7 +237,7 @@
 <h3 id="fx-carry">FX Carry</h3>
 <p>This cluster watches USD/JPY as a proxy for global carry-trade pressure. When the yen strengthens quickly, leveraged risk trades can unwind at the same time. That does not predict every selloff, but it is useful confirmation when other clusters are also deteriorating.</p>
 <p>USD/JPY is quoted as yen per U.S. dollar. A falling USD/JPY means the yen is strengthening, which is the direction that can pressure yen-funded carry trades.</p>
-<p>USD/JPY can still show a red row by itself. For the cluster count, an isolated FX red is treated as a yellow watch until another independent cluster confirms stress. Canary may still act on a fast carry unwind when direct SPY/VIX tape or breadth confirms the move.</p>
+<p>USD/JPY can still show a red row by itself. For the cluster count, an isolated FX red is treated as a yellow watch until another independent cluster confirms stress. Canary may still act on a fast carry unwind when direct SPY/VIX tape or breadth confirms the move. On official non-trading dates (weekend or holiday) frozen last-session SPY/VIX prints cannot supply that tape confirmation — in the canary only the breadth arm can, until live prints return at the next open, and the canary's direct tape-shock row demotes to observe with confirm-at-next-open guidance.</p>
 <table>
 <thead><tr><th>Row</th><th>Green</th><th>Yellow</th><th>Red</th></tr></thead>
 <tbody>

@@ -143,4 +143,22 @@ type CanaryMarketSummary struct {
 	SPYChangePct               *float64 `json:"spy_change_pct,omitempty"`
 	VIX                        *float64 `json:"vix,omitempty"`
 	VIXChangePct               *float64 `json:"vix_change_pct,omitempty"`
+	// TapeSessionState classifies the official US cash-equity calendar date
+	// the canary ran on. On a closed date (weekend/holiday) the direct
+	// SPY/VIX day-change prints are frozen last-session values — the anchors
+	// can even reset independently while closed — so they carry evidence but
+	// cannot confirm severity. Empty means outside embedded calendar
+	// coverage: severity behaves as before (fail-open).
+	TapeSessionState  string     `json:"tape_session_state,omitempty"`
+	TapeSessionReason string     `json:"tape_session_reason,omitempty"`
+	TapeNextOpen      *time.Time `json:"tape_next_open,omitempty"`
 }
+
+// TapeSessionState values for CanaryMarketSummary. Trading dates keep full
+// direct-tape severity at any hour (pre/post/overnight moves are live prints
+// the tape-shock row exists to catch); closed dates demote frozen tape shocks
+// to observe until the next open re-evaluates them from live prints.
+const (
+	TapeSessionTradingDate = "trading_date"
+	TapeSessionClosedDate  = "closed_date"
+)

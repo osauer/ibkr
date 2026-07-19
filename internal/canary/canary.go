@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/regimerows"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -578,6 +579,7 @@ func summarizeCanaryMarket(r rpc.RegimeSnapshotResult, now time.Time) CanaryMark
 		VIX:           r.VIXTermStructure.VIX,
 		VIXChangePct:  r.VIXTermStructure.VIXChangePct,
 	}
+	out.TapeSessionState, out.TapeSessionReason, out.TapeNextOpen = canaryTapeSession(now)
 	contextClusters := canaryMarketContextClusters(r, now)
 	// Shared rpc combination: raw worst-of bands, eligibility-keyed
 	// isolated-red downgrades, and the eligible/provisional split. Canary
@@ -916,6 +918,12 @@ func canaryTapeShockRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryR
 	spyCrash := pctAtMost(m.SPYChangePct, canaryPolicy.SPYCrashPct)
 	vixSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct)
 	vixHardSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXHardSpikePct)
+	if !canaryTapeConfirmable(m) {
+		if spyDrop || vixSpike {
+			return canaryRow("Index tape shock", "", risk.SeverityObserve, canaryTapeDemotedGuidance(m), evidence)
+		}
+		return canaryRow("Index tape shock", "", risk.SeverityObserve, "No direct SPY/VIX overnight tape shock.", evidence)
+	}
 	confirmed := (spyDrop && vixSpike) || m.EligibleRedClusters >= 1
 	switch {
 	case spyCrash && confirmed:
@@ -1110,18 +1118,21 @@ func canaryPartialMarketPressure(m CanaryMarketSummary) bool {
 	return m.RedClusters >= 1 ||
 		m.YellowClusters >= 3 ||
 		len(m.UnconfirmedRedClusterNames) > 0 ||
-		pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct) ||
-		pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct)
+		(canaryTapeConfirmable(m) &&
+			(pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct) ||
+				pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct)))
 }
 
 func canaryConfirmedConstructiveTape(m CanaryMarketSummary) bool {
-	return pctAtLeast(m.SPYChangePct, canaryPolicy.SPYHardRallyPct) ||
-		pctAtMost(m.VIXChangePct, canaryPolicy.VIXHardCrushPct)
+	return canaryTapeConfirmable(m) &&
+		(pctAtLeast(m.SPYChangePct, canaryPolicy.SPYHardRallyPct) ||
+			pctAtMost(m.VIXChangePct, canaryPolicy.VIXHardCrushPct))
 }
 
 func canaryPartialConstructiveTape(m CanaryMarketSummary) bool {
-	return pctAtLeast(m.SPYChangePct, canaryPolicy.SPYRallyPct) ||
-		pctAtMost(m.VIXChangePct, canaryPolicy.VIXCrushPct)
+	return canaryTapeConfirmable(m) &&
+		(pctAtLeast(m.SPYChangePct, canaryPolicy.SPYRallyPct) ||
+			pctAtMost(m.VIXChangePct, canaryPolicy.VIXCrushPct))
 }
 
 func canaryPortfolioFit(p CanaryPortfolioSummary, signals []risk.Signal) string {
@@ -1238,8 +1249,9 @@ func canaryHasConfirmedConstructiveSignal(signals []risk.Signal) bool {
 
 func canaryPanicMarket(m CanaryMarketSummary) bool {
 	return m.EligibleRedClusters >= 3 ||
-		pctAtMost(m.SPYChangePct, canaryPolicy.SPYCrashPct) ||
-		(pctAtLeast(m.VIXChangePct, canaryPolicy.VIXHardSpikePct) && m.EligibleRedClusters >= 1)
+		(canaryTapeConfirmable(m) &&
+			(pctAtMost(m.SPYChangePct, canaryPolicy.SPYCrashPct) ||
+				(pctAtLeast(m.VIXChangePct, canaryPolicy.VIXHardSpikePct) && m.EligibleRedClusters >= 1)))
 }
 
 func canaryAction(direction risk.SignalDirection, severity risk.SignalSeverity, marketConfirmation, portfolioFit, inputHealth string) string {
@@ -1452,6 +1464,12 @@ func canaryPnLSignals(p CanaryPortfolioSummary) []risk.Signal {
 
 func canaryTapeSignals(p CanaryPortfolioSummary, m CanaryMarketSummary) []risk.Signal {
 	out := []risk.Signal{}
+	if !canaryTapeConfirmable(m) {
+		// Closed market date: the frozen day-change prints stay visible as
+		// evidence on the tape row, but emit no defensive or constructive
+		// tape signals until live prints return at the next open.
+		return out
+	}
 	spyDrop := pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct)
 	vixSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct)
 	confirmedDrop := (spyDrop && vixSpike) || m.EligibleRedClusters >= 1
@@ -2278,10 +2296,63 @@ func canaryTapeEvidence(m CanaryMarketSummary) string {
 	} else {
 		parts = append(parts, "VIX change unavailable")
 	}
+	if m.TapeSessionState == rpc.TapeSessionClosedDate {
+		closed := "market closed"
+		if m.TapeSessionReason != "" {
+			closed += " (" + m.TapeSessionReason + ")"
+		}
+		parts = append(parts, closed+" — frozen last-session prints")
+	}
 	return strings.Join(parts, "; ")
 }
 
+// canaryTapeSession classifies the official US cash-equity calendar date for
+// direct-tape severity. Trading dates (regular and early-close) keep full
+// severity at any hour — pre/post/overnight prints are live and the tape row
+// exists to catch them. Closed dates (weekend/holiday) freeze the SPY/VIX
+// day-change anchors at last-session values (which can even reset
+// independently while closed), so shocks demote to observe until the next
+// open re-evaluates them from live prints. Outside embedded calendar
+// coverage the state stays empty and severity behaves as before.
+func canaryTapeSession(now time.Time) (state, reason string, nextOpen *time.Time) {
+	sess, err := marketcal.New().SessionAt(marketcal.MarketUSEquity, now)
+	if err != nil {
+		return "", "", nil
+	}
+	switch sess.State {
+	case marketcal.StateClosed, marketcal.StateHoliday:
+		return rpc.TapeSessionClosedDate, sess.Reason, sess.NextOpen
+	case marketcal.StateRegular, marketcal.StateEarlyClose:
+		return rpc.TapeSessionTradingDate, "", nil
+	default:
+		return "", "", nil
+	}
+}
+
+// canaryTapeConfirmable reports whether direct SPY/VIX day-change prints may
+// carry severity or confirm stress right now.
+func canaryTapeConfirmable(m CanaryMarketSummary) bool {
+	return m.TapeSessionState != rpc.TapeSessionClosedDate
+}
+
+func canaryTapeDemotedGuidance(m CanaryMarketSummary) string {
+	msg := "Frozen last-session tape shock on a closed market date"
+	if m.TapeSessionReason != "" {
+		msg += " (" + m.TapeSessionReason + ")"
+	}
+	msg += "; confirm at next open"
+	if m.TapeNextOpen != nil {
+		msg += " " + m.TapeNextOpen.Format("Mon 15:04 MST")
+	}
+	return msg + "."
+}
+
 func canaryConfirmedTapeStress(m CanaryMarketSummary) bool {
+	if !canaryTapeConfirmable(m) {
+		// Frozen prints cannot confirm; only the cluster-side carry-unwind
+		// arm (fx red + breadth) may still fire.
+		return canaryFastCarryUnwind(m)
+	}
 	spyDrop := pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct)
 	spyHardDrop := pctAtMost(m.SPYChangePct, canaryPolicy.SPYHardDropPct)
 	vixSpike := pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct)
@@ -2297,8 +2368,10 @@ func canaryFastCarryUnwind(m CanaryMarketSummary) bool {
 	if !fxRed {
 		return false
 	}
-	return pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct) ||
-		pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct) ||
+	tapeConfirms := canaryTapeConfirmable(m) &&
+		(pctAtMost(m.SPYChangePct, canaryPolicy.SPYDropPct) ||
+			pctAtLeast(m.VIXChangePct, canaryPolicy.VIXSpikePct))
+	return tapeConfirms ||
 		slices.Contains(m.YellowClusterNames, "breadth") ||
 		slices.Contains(m.RedClusterNames, "breadth")
 }

@@ -4018,3 +4018,19 @@ func clusterHasRebalanceWatch(res CanaryBacktestResult, name string) bool {
 	}
 	return false
 }
+
+func TestBacktestDateAsOfStampsInsideRegularSession(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	got := backtestDateAsOf("2020-03-09")
+	want := time.Date(2020, 3, 9, 15, 59, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Fatalf("backtestDateAsOf = %v, want %v (15:59 ET inside the observation date)", got, want)
+	}
+	if !backtestDateAsOf("").IsZero() || !backtestDateAsOf("not-a-date").IsZero() {
+		t.Fatal("empty/invalid dates must stay zero")
+	}
+}
