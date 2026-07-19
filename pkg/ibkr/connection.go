@@ -647,14 +647,24 @@ func (c *Connection) dialEndpoint(ctx context.Context, useTLS bool) (net.Conn, e
 	return tlsConn, nil
 }
 
+// closeConnection tears down the socket and drops the buffered transport
+// state. It must only run while no reader goroutine is alive: readMessages
+// dereferences c.conn and c.scanner without a lock, so Disconnect closes the
+// socket first and calls this only after the goroutine wait succeeds.
 func (c *Connection) closeConnection() {
-	if c.conn != nil {
-		_ = c.conn.Close()
-	}
+	c.closeSocket()
 	c.conn = nil
 	c.reader = nil
 	c.writer = nil
 	c.scanner = nil
+}
+
+// closeSocket unblocks a reader parked on Read() without touching the fields
+// that reader still dereferences.
+func (c *Connection) closeSocket() {
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
 }
 
 // SetPacketLogger installs a packet logger invoked for every outbound frame.
@@ -933,9 +943,11 @@ func (c *Connection) Disconnect() error {
 		c.cancel()
 	}
 
-	// Close TCP connection before waiting so a reader parked on Read() exits
-	// promptly even when Disconnect is called from a disconnected/degraded state.
-	c.closeConnection()
+	// Close the TCP socket before waiting so a reader parked on Read() exits
+	// promptly even when Disconnect is called from a disconnected/degraded
+	// state. Only the socket is closed here: the reader goroutine still
+	// dereferences c.conn/c.scanner, so the fields are dropped after the wait.
+	c.closeSocket()
 
 	// Wait for goroutines to finish, bounded. The readMessages goroutine
 	// only checks stopChan between Read() calls, so a reader parked on a
@@ -950,7 +962,10 @@ func (c *Connection) Disconnect() error {
 	}()
 	select {
 	case <-waitDone:
+		c.closeConnection()
 	case <-time.After(2 * time.Second):
+		// The parked reader may still dereference the transport fields, so
+		// they stay in place; the next connectAttempt replaces them anyway.
 		connectLogger.Warnf("Disconnect: goroutines still running after 2s; closing socket to unblock (Client ID: %d)", c.config.ClientID)
 	}
 
