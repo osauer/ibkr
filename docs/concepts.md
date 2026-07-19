@@ -1,6 +1,6 @@
 # Concepts
 
-Updated: 2026-07-18 21:37 CEST
+Updated: 2026-07-19 19:40 CEST
 
 What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in [`docs/specs/`](./specs/); this page is the user's mental model.
 
@@ -85,6 +85,14 @@ Unknown and null mean unavailable, not false or zero. Source health reports whet
 Rule 201 / short-sale restriction is not a V1 protection driver. If added later, it should be context-only unless the order path is directly short-sale relevant.
 
 `ibkr market-events --symbol GME --json` evaluates explicit symbols. Omitting symbols evaluates held stock/ETF underlyings, which requires a usable positions snapshot from the daemon/gateway.
+
+---
+
+## Protective stops
+
+A protective stop is only protective while it matches the position. Sell part of the position somewhere else, in TWS for instance, and the stop keeps its old size. If it then triggers, it closes what is left and opens the remainder in the opposite direction. The daemon treats that state as critical: the paired app shows the row in red with the consequence spelled out, one push notification goes to the phone, and the row offers a single fix that reduces the stop to the quantity still held. The fix runs through the normal preview and confirm flow. The daemon re-reads the live position at both steps and refuses when position evidence is missing or has moved. Nothing is adjusted automatically.
+
+The order journal underneath heals itself. After every reconnect, and every 30 minutes, the daemon asks the broker for its actual open-order list; journaled orders the broker no longer reports are closed locally as `closed_reconciled`. A cancel or fill that happened while the daemon was offline can no longer leave a stale "open" row behind.
 
 ---
 

@@ -1,6 +1,6 @@
 # Agentic use
 
-Updated: 2026-07-18 21:37 CEST
+Updated: 2026-07-19 19:40 CEST
 
 `ibkr mcp` makes read/status CLI operations and preview-only stock/ETF order drafts available to MCP clients: Claude Code, claude-desktop, or any other host that speaks the protocol. The same daemon serves the CLI and MCP. The MCP layer is a thin adapter over the existing RPCs. Official market calendars and stock/ETF quotes are also available; quote resources can be read once or subscribed to for streaming updates.
 
@@ -110,6 +110,12 @@ Returns the % of S&P names above their 50-DMA (the tactical signal) and per-row 
 → Claude invokes `ibkr_trading_status`, then `ibkr_order_preview` only if the local preview gate is ready.
 
 Returns a draft order, quote inputs, position impact, notional, warnings, and preview-token fields. `token_minted` means the local daemon created a preview artifact. `submit_eligible` means broker WhatIf accepted the exact draft and a future write path could consider the token. If broker WhatIf is unavailable or rejected, `token_minted` can still be true while `submit_eligible` and compatibility field `executable` are false. The preview itself does not place, modify, cancel, or transmit any broker order.
+
+### "Why is my AAPL stop showing red?"
+
+→ Claude invokes `ibkr_orders_open` and `ibkr_positions`, then explains the mismatch.
+
+A protective stop that no longer matches its position (a partial sale in TWS is the usual cause) is classified critical, with the consequence stated plainly: triggering would close the shares still held and open the excess in the opposite direction. Claude can read and explain that state. The fix lives on the paired device: the app offers one guided action that reduces the stop to the held quantity through the normal preview and confirm steps, and the daemon re-checks the live position at both steps. The order journal behind these reads also reconciles itself against the broker's open-order list after each reconnect and every 30 minutes, so a cancel that happened while the daemon was offline closes its row as `closed_reconciled` instead of lingering as a stale open order.
 
 ## What Claude can't do here
 
