@@ -79,6 +79,20 @@ const (
 // gateway-independent, side-effect-free read.
 type NudgesSnapshotParams struct{}
 
+func (NudgesSnapshotParams) MarshalJSON() ([]byte, error) {
+	return []byte("{}"), nil
+}
+
+func (params *NudgesSnapshotParams) UnmarshalJSON(data []byte) error {
+	type wire NudgesSnapshotParams
+	var decoded wire
+	if err := decodeExactNudgeJSONObject(data, nil, &decoded); err != nil {
+		return err
+	}
+	*params = NudgesSnapshotParams(decoded)
+	return nil
+}
+
 // NudgesCutoverReviewParams carries only the fixed paired-surface evidence
 // labels. The daemon, not this DTO, authenticates the origin and authorizes
 // the advisory evidence write against current broker-backed report health.

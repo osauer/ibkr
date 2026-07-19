@@ -9,6 +9,59 @@ import (
 	"time"
 )
 
+func TestNudgesSnapshotParamsExactEmptyObject(t *testing.T) {
+	if got := reflect.TypeFor[NudgesSnapshotParams]().NumField(); got != 0 {
+		t.Fatalf("NudgesSnapshotParams has %d fields, want empty contract", got)
+	}
+	raw, err := json.Marshal(NudgesSnapshotParams{})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if string(raw) != "{}" {
+		t.Fatalf("json.Marshal() = %s, want {}", raw)
+	}
+
+	for _, valid := range []string{"{}", " { } ", "\n{\n}\t"} {
+		var params NudgesSnapshotParams
+		if err := json.Unmarshal([]byte(valid), &params); err != nil {
+			t.Fatalf("valid empty object %q rejected: %v", valid, err)
+		}
+		roundTrip, err := json.Marshal(params)
+		if err != nil {
+			t.Fatalf("round-trip marshal for %q: %v", valid, err)
+		}
+		if string(roundTrip) != "{}" {
+			t.Fatalf("round-trip for %q = %s, want {}", valid, roundTrip)
+		}
+	}
+}
+
+func TestNudgesSnapshotParamsRejectsHostileShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"unknown key", `{"unknown":1}`},
+		{"case variant key", `{"Unknown":1}`},
+		{"duplicate keys", `{"unknown":1,"unknown":2}`},
+		{"null", `null`},
+		{"array", `[]`},
+		{"boolean", `true`},
+		{"number", `0`},
+		{"string", `""`},
+		{"trailing object", `{} {}`},
+		{"trailing scalar", `{} true`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var params NudgesSnapshotParams
+			if err := json.Unmarshal([]byte(tt.raw), &params); err == nil {
+				t.Fatalf("hostile snapshot params accepted: %s", tt.raw)
+			}
+		})
+	}
+}
+
 func TestNudgesCutoverReviewContractWireShape(t *testing.T) {
 	if MethodNudgesCutoverReview != "nudges.cutover_review" {
 		t.Fatalf("method = %q, want stable cutover-review method", MethodNudgesCutoverReview)
