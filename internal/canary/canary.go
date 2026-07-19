@@ -891,12 +891,17 @@ func canaryMarketRow(m CanaryMarketSummary) CanaryRow {
 	case canaryFastCarryUnwind(m):
 		return canaryRow("Fast carry unwind", risk.DirectionDefensive, risk.SeverityAct, "Reduce fragile beta and short-vol exposure; FX stress is confirmed by tape or breadth.", evidence)
 	case m.RedClusters >= 2:
-		return canaryRow("Stress pending confirmation", risk.DirectionDefensive, risk.SeverityWatch, "Stress clusters are visible but not confirmation-eligible (depth, persistence, or freshness missing); hold de-risking at watch.", evidence)
+		return canaryRow("Stress pending confirmation", risk.DirectionDefensive, risk.SeverityWatch, "Stress clusters are visible but not confirmed yet (need more depth, persistence, or fresh data); hold de-risking at watch.", evidence)
 	case m.RedClusters == 1 && m.YellowClusters >= 1:
 		return canaryRow("Early stress filtered", risk.DirectionDefensive, risk.SeverityWatch, "Wait for a second independent red cluster before major de-risking.", evidence)
 	case m.YellowClusters >= 3:
 		return canaryRow("Deteriorating tape", risk.DirectionDefensive, risk.SeverityWatch, "Freeze new risk and review hedges; no urgent action without red confirmation.", evidence)
 	default:
+		if len(m.UnconfirmedRedClusterNames) > 0 {
+			// The overall summary calls this warning out; the check still
+			// passes, and saying why here keeps the two from contradicting.
+			return canaryRow("Market stress", "", risk.SeverityObserve, "An early warning is flashing ("+canaryClusterList(m.UnconfirmedRedClusterNames)+" red, not confirmed); below the de-risking trigger.", evidence)
+		}
 		return canaryRow("Market stress", "", risk.SeverityObserve, "No market-regime de-risking trigger.", evidence)
 	}
 }
@@ -957,7 +962,7 @@ func canaryConcentrationRow(p CanaryPortfolioSummary, m CanaryMarketSummary) Can
 		return canaryRow("Largest concentration", risk.DirectionDefensive, risk.SeverityAct, fmt.Sprintf("Trim this concentration before smaller positions; cap it below %.0f%% NLV in stress.", canaryPolicy.SingleNameTargetPct), evidence)
 	}
 	if pct >= canaryPolicy.SingleNameExposureWatchPct || deltaPct >= canaryPolicy.SingleNameDeltaWatchPct {
-		return canaryRow("Largest concentration", risk.DirectionRebalance, risk.SeverityWatch, "Concentration is above risk limits; rebalance this title without treating it as confirmed market stress.", evidence)
+		return canaryRow("Largest concentration", risk.DirectionRebalance, risk.SeverityWatch, "Concentration is above risk limits; rebalance this position without treating it as confirmed market stress.", evidence)
 	}
 	return canaryRow("Largest concentration", "", risk.SeverityObserve, "No concentration trim required by the canary.", evidence)
 }
@@ -1042,16 +1047,16 @@ func canaryOptionsRow(p CanaryPortfolioSummary, pos rpc.PositionsResult, m Canar
 
 func canaryDataQualityRow(m CanaryMarketSummary, r rpc.RegimeSnapshotResult) CanaryRow {
 	if canaryHasMarketDataIssue(m) && (m.RedClusters > 0 || m.YellowClusters > 0) {
-		return canaryRow("Ambiguity filter", risk.DirectionDataQuality, risk.SeverityWatch, "Verify incomplete inputs before escalation; do not suppress confirmed independent red signals.", canaryAmbiguityEvidence(m))
+		return canaryRow("Ambiguity filter", risk.DirectionDataQuality, risk.SeverityWatch, "Some market inputs cannot be confirmed right now; treat the stress readings as tentative until those inputs report.", canaryAmbiguityEvidence(m))
 	}
 	if canaryHasMarketDataIssue(m) {
-		return canaryRow("Ambiguity filter", risk.DirectionDataQuality, risk.SeverityWatch, "Refresh or verify incomplete market inputs; keep the canary on watch until coverage and freshness recover.", canaryAmbiguityEvidence(m))
+		return canaryRow("Ambiguity filter", risk.DirectionDataQuality, risk.SeverityWatch, "Some market inputs are incomplete; treat this snapshot as partial until coverage and freshness recover.", canaryAmbiguityEvidence(m))
 	}
 	if m.RankedClusters < 4 {
-		return canaryRow("Data quality gate", risk.DirectionDataQuality, risk.SeverityWatch, "Verify market coverage before action; wait for at least four ranked regime clusters.", canaryMarketEvidence(m))
+		return canaryRow("Data quality gate", risk.DirectionDataQuality, risk.SeverityWatch, "Verify market coverage before action; fewer than four of six market clusters are reporting.", canaryMarketEvidence(m))
 	}
 	if r.GammaZero.Status == rpc.RegimeStatusComputing || r.Breadth.Status == rpc.RegimeStatusComputing {
-		return canaryRow("Data quality gate", risk.DirectionDataQuality, risk.SeverityWatch, "Do not escalate on gamma/breadth until the daemon finishes the cached compute.", canaryMarketEvidence(m))
+		return canaryRow("Data quality gate", risk.DirectionDataQuality, risk.SeverityWatch, "Do not escalate on gamma/breadth while their data is still computing.", canaryMarketEvidence(m))
 	}
 	return canaryRow("Data quality gate", "", risk.SeverityObserve, "Market data coverage is sufficient for the canary policy.", canaryMarketEvidence(m))
 }
@@ -1313,9 +1318,9 @@ func canaryDecisionSummary(r CanaryResult) string {
 	case canaryActionWatch:
 		if r.PortfolioFit == canaryPortfolioFitLow {
 			if r.MarketConfirmation == canaryMarketConfirmed {
-				return "Market stress is confirmed, but current portfolio exposure is low; keep watch without staging reductions."
+				return "Market stress is confirmed, but your exposure is low; keep watching — no reductions needed."
 			}
-			return canaryPartialMarketSummary(r.Market) + ", but current portfolio exposure is low; keep watch without staging reductions."
+			return canaryPartialMarketSummary(r.Market) + ", but your exposure is low; keep watching — no reductions needed."
 		}
 		if r.MarketConfirmation == canaryMarketPartial {
 			return canaryPartialMarketSummary(r.Market) + " and the portfolio is exposed; freeze new risk and stage reductions."
@@ -1334,9 +1339,9 @@ func canaryDecisionSummary(r CanaryResult) string {
 
 func canaryPartialMarketSummary(m CanaryMarketSummary) string {
 	if m.EligibleRedClusters == 0 && len(m.UnconfirmedRedClusterNames) > 0 {
-		return "A provisional market warning is visible"
+		return "An early market warning is flashing (" + canaryClusterList(m.UnconfirmedRedClusterNames) + " red, not confirmed yet)"
 	}
-	return "Market pressure is developing"
+	return "Market pressure is building"
 }
 
 func canarySignals(p CanaryPortfolioSummary, pos rpc.PositionsResult, m CanaryMarketSummary, r rpc.RegimeSnapshotResult) []risk.Signal {
@@ -2235,33 +2240,41 @@ func canaryWarningLine(w rpc.RegimeWarning) string {
 	return fmt.Sprintf("%s: %s", scope, msg)
 }
 
+// canaryMarketEvidence renders only the cluster facts that carry information:
+// zero-count buckets never render, and the reporting fraction appears only
+// while coverage is incomplete.
 func canaryMarketEvidence(m CanaryMarketSummary) string {
-	red := strings.Join(m.RedClusterNames, ",")
-	yellow := strings.Join(m.YellowClusterNames, ",")
-	unconfirmedRed := strings.Join(m.UnconfirmedRedClusterNames, ",")
-	if red == "" {
-		red = "none"
+	parts := []string{}
+	if m.RedClusters > 0 {
+		parts = append(parts, fmt.Sprintf("%d red (%s)", m.RedClusters, canaryClusterList(m.RedClusterNames)))
 	}
-	if yellow == "" {
-		yellow = "none"
+	if m.YellowClusters > 0 {
+		parts = append(parts, fmt.Sprintf("%d yellow (%s)", m.YellowClusters, canaryClusterList(m.YellowClusterNames)))
 	}
-	out := fmt.Sprintf("%d red clusters (%s), %d yellow (%s), %d/%d ranked",
-		m.RedClusters, red, m.YellowClusters, yellow, m.RankedClusters, m.RankedClusters+m.UnrankedClusters)
-	if unconfirmedRed != "" {
-		out += "; unconfirmed red " + unconfirmedRed
+	if len(parts) == 0 {
+		parts = append(parts, "no stressed clusters")
 	}
-	return out
+	if len(m.UnconfirmedRedClusterNames) > 0 {
+		parts = append(parts, "red but unconfirmed: "+canaryClusterList(m.UnconfirmedRedClusterNames))
+	}
+	total := m.RankedClusters + m.UnrankedClusters
+	if m.RankedClusters < total {
+		parts = append(parts, fmt.Sprintf("%d of %d clusters reporting", m.RankedClusters, total))
+	}
+	return strings.Join(parts, "; ")
 }
 
+// Trigger levels render next to the observed numbers so a reading can be
+// judged as near-miss or comfortable without opening the policy.
 func canaryTapeEvidence(m CanaryMarketSummary) string {
 	parts := []string{}
 	if m.SPYChangePct != nil {
-		parts = append(parts, fmt.Sprintf("SPY %+.2f%%", *m.SPYChangePct))
+		parts = append(parts, fmt.Sprintf("SPY %+.2f%% (drop trigger %.1f%%)", *m.SPYChangePct, canaryPolicy.SPYDropPct))
 	} else {
 		parts = append(parts, "SPY change unavailable")
 	}
 	if m.VIXChangePct != nil {
-		parts = append(parts, fmt.Sprintf("VIX %+.2f%%", *m.VIXChangePct))
+		parts = append(parts, fmt.Sprintf("VIX %+.2f%% (spike trigger %+.0f%%)", *m.VIXChangePct, canaryPolicy.VIXSpikePct))
 	} else {
 		parts = append(parts, "VIX change unavailable")
 	}
@@ -2335,7 +2348,7 @@ func formatProtectionCoverageEvidence(c *rpc.ProtectionCoverageSummary) string {
 		return "coverage unavailable"
 	}
 	parts := []string{nonEmpty(c.Status, "unknown")}
-	if c.UnprotectedNotionalBase != nil {
+	if c.UnprotectedNotionalBase != nil && *c.UnprotectedNotionalBase != 0 {
 		parts = append(parts, "unprotected "+formatMoneyCcy(*c.UnprotectedNotionalBase, c.UnprotectedNotionalBaseCurrency))
 	}
 	if c.Counts.Unprotected > 0 {

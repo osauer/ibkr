@@ -244,7 +244,7 @@ function canarySummaryText(canary, snap = {}) {
   if (canaryHasProvisionalOnlyMarketWarning(canary)) {
     const fit = String(canary.portfolio_fit || "").toLowerCase();
     const exposure = ["high", "medium"].includes(fit) ? " and portfolio exposure is elevated" : "";
-    return `Provisional market warning${exposure}; review evidence before treating this as confirmed stress.`;
+    return `Early market warning, not confirmed yet${exposure}; review evidence before treating this as confirmed stress.`;
   }
   if (!canaryInputCheckBlocksAction(canary)) return fallback;
 

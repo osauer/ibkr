@@ -106,7 +106,7 @@ func TestRenderCanaryTextShowsActionEvidenceAndInputHealth(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"Action     WATCH",
-		"Guidance   Market stress is confirmed, but current portfolio exposure is low; keep watch without staging reductions.",
+		"Guidance   Market stress is confirmed, but your exposure is low; keep watching — no reductions needed.",
 		"Next step  Stage defensive review",
 		"Why this fired",
 		"Market weather",

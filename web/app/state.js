@@ -46,7 +46,6 @@ const state = {
   proposalMarketCalendars: {},
   proposalMarketCalendarBusy: {},
   selectedAlertID: null,
-  alertFilter: "all",
   clearedAlertFingerprint: localStorage.getItem("ibkrClearedAlertFingerprint") || "",
   ordersOpen: null,
   openOrderEdits: {},

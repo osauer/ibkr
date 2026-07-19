@@ -277,7 +277,7 @@ func TestAppJSCanaryDetailUsesSourceBackedEvidenceRows(t *testing.T) {
 
 	for _, want := range []string{
 		"function sourceHealthMentions(source, needle)",
-		"Provisional market warning",
+		"Early market warning, not confirmed yet",
 		"market-event sources",
 	} {
 		if !strings.Contains(js, want) {

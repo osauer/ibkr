@@ -1,4 +1,4 @@
-import { clearAlerts, enablePush, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility } from "./alerts.js";
+import { clearAlerts, dismissCurrentSignals, enablePush, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility } from "./alerts.js";
 import { completePairing } from "./auth.js";
 import { renderBriefCard, setupBriefVisibility } from "./brief.js";
 import { canaryStageLabel, canarySummaryText, firstClause, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderMarketContext, renderRegimePanel, renderRulesCard } from "./canary.js";
@@ -179,14 +179,7 @@ document.querySelectorAll("#alertSegments button").forEach((button) => {
   button.addEventListener("click", () => setAlertMode(button.dataset.mode));
 });
 
-document.querySelectorAll("[data-alert-filter]").forEach((button) => {
-  button.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    state.alertFilter = button.dataset.alertFilter || "all";
-    renderAlerts();
-  });
-});
+$("dismissCurrentButton").addEventListener("click", dismissCurrentSignals);
 
 $("enablePushButton").addEventListener("click", enablePush);
 $("safeNotificationTestButton").addEventListener("click", sendSafeNotificationTest);

@@ -496,10 +496,11 @@ test("an older matched watermark cannot swallow a newer event returned after his
   assert.equal(historyMarkReadCalls, 0);
 });
 
-test("acknowledgement exposes complete unread evidence instead of silently reading a filtered-out row", async () => {
+test("acknowledgement renders complete unread evidence before marking it read", async () => {
+  // The page has no severity filter: every history row renders, so unread
+  // evidence can never be silently read while hidden.
   const harness = loadAlerts();
   harness.state.activeTab = "alerts";
-  harness.state.alertFilter = "warnings";
   let markReadCalls = 0;
   harness.context.fetch = async (url) => {
     if (url === "/api/attention") return response(attention(1, 14, 13, [{ kind: "canary", id: "info-14" }]));
@@ -512,7 +513,6 @@ test("acknowledgement exposes complete unread evidence instead of silently readi
     throw new Error(`unintercepted request ${url}`);
   };
   assert.equal(await harness.exports.acknowledgeAttention({ retry: false }), true);
-  assert.equal(harness.state.alertFilter, "all", "complete unread evidence must render through the All filter");
   assert.match(visibleText(harness.elements.get("alertHistoryList")), /Informational evidence/);
   assert.equal(markReadCalls, 1);
 });
@@ -620,4 +620,44 @@ test("device status distinguishes permission from an actual browser subscription
   assert.equal(await harness.exports.refreshPushState(), "browser subscribed");
   assert.equal(harness.elements.get("pushState").textContent, "browser subscribed");
   assert.equal(harness.elements.get("pushState").textContent.includes("private-endpoint"), false);
+});
+
+test("act day dominates: act rows sort first, dismiss never hides them, counter stays truthful", () => {
+  const harness = loadAlerts();
+  harness.state.snapshot.trading = {};
+  harness.state.snapshot.canary = {
+    as_of: "2026-07-19T19:00:00Z",
+    fingerprint: { key: "canary-current" },
+    portfolio_fit: "high",
+    severity: "urgent",
+    action: "defend",
+    summary: "Market stress is confirmed against a vulnerable portfolio; review defensive actions.",
+    portfolio: {},
+    rows: [
+      { title: "Portfolio canary", severity: "urgent", guidance: "overall summary", evidence: "" },
+      { title: "Ambiguity filter", severity: "watch", direction: "data_quality", guidance: "Some market inputs are incomplete.", evidence: "stale gamma" },
+      { title: "Index tape shock", severity: "watch", direction: "defensive", guidance: "Freeze new risk.", evidence: "SPY -1.80%" },
+      { title: "Immediate margin safety", severity: "urgent", direction: "defensive", guidance: "Move to cash-heavy / near-flat now.", evidence: "cushion 8%" },
+      { title: "Portfolio P&L shock", severity: "observe", guidance: "No daily P&L shock signal.", evidence: "daily P&L -0.2% NLV" },
+    ],
+  };
+  harness.exports.renderAlerts();
+  assert.equal(harness.elements.get("alertCount").textContent, "1 act · 1 watch · 1 data");
+  assert.equal(harness.elements.get("currentSignalCount").textContent, "2", "section counts decisions, not data caveats");
+  const list = harness.elements.get("currentSignalList");
+  const classNames = list.children.map((child) => child.className);
+  assert.match(classNames[0], /alert-row--risk/, "act row must render first");
+  assert.match(classNames[1], /alert-row--warn/, "watch row follows act");
+  assert.match(classNames[2], /alert-section__subhead/, "data caveats sit in their own band");
+  assert.match(classNames[3], /alert-row--warn/, "data row renders after the divider");
+  assert.match(visibleText(list.children[0]), /Immediate margin safety/);
+
+  harness.state.clearedAlertFingerprint = "canary-current";
+  harness.exports.renderAlerts();
+  assert.equal(harness.elements.get("alertCount").textContent, "1 act · 1 watch · 1 data", "dismiss must not change the counter");
+  const visibleRows = harness.elements.get("currentSignalList").children.filter((child) => String(child.className).includes("alert-row"));
+  assert.equal(visibleRows.length, 1, "only the act row stays visible after dismiss");
+  assert.match(visibleText(harness.elements.get("currentSignalList")), /Immediate margin safety/);
+  assert.equal(harness.elements.get("alertsPassedChecks").hidden, true, "passed checks hide while dismissed");
+  assert.equal(harness.elements.get("dismissCurrentButton").hidden, true, "dismiss control disappears once used");
 });

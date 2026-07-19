@@ -193,7 +193,12 @@ test("poll-source rendering preserves allowlisted state and fails candidates clo
     harness.state.snapshot.sources.nudges = source;
     harness.state.snapshot.nudges.candidates = [{ title: "Retained candidate", body: "must stay hidden", severity: "act", destination: "alerts" }];
     harness.exports.renderGovernance();
-    assert.equal(harness.elements.get("governanceCurrentState").textContent, source.state);
+    // The chip renders a plain word ("waiting" for not_observed); the raw
+    // enum stays visible in the source-health evidence below.
+    assert.equal(
+      harness.elements.get("governanceCurrentState").textContent,
+      source.state === "not_observed" ? "waiting" : source.state,
+    );
     const sourceCopy = harness.elements.get("governanceSourceHealth").textContent;
     assert.match(sourceCopy, new RegExp(source.state));
     assert.match(sourceCopy, new RegExp(source.reason));

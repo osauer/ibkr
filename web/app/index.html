@@ -395,74 +395,76 @@
             <span class="alert-active-count" id="alertCount">0 Active</span>
           </summary>
           <div class="alerts-body">
-            <div class="alerts-filter-bar">
-              <span class="segments" id="alertViewSegments" aria-label="Alert filter">
-                <button class="active" type="button" data-alert-filter="all">All</button>
-                <button type="button" data-alert-filter="warnings">Warnings</button>
-                <button type="button" data-alert-filter="info">Info</button>
-              </span>
-            </div>
-            <section class="alert-section" aria-label="Current signal">
+            <p class="alerts-status" id="alertsStatusLine" role="status" hidden></p>
+            <section class="alert-section" aria-label="Needs attention">
               <div class="alert-section__head">
-                <span>Current Signal</span>
-                <b id="currentSignalCount">0</b>
+                <span>Needs attention</span>
+                <span class="alert-section__tools">
+                  <button class="text-button" id="dismissCurrentButton" type="button" hidden>Hide until signal changes</button>
+                  <b id="currentSignalCount">0</b>
+                </span>
               </div>
               <div class="list" id="currentSignalList"></div>
             </section>
-            <section class="alert-section" aria-label="Canary history">
-              <div class="alert-section__head">
-                <span>Canary history</span>
-                <b id="alertHistoryCount">0</b>
-              </div>
-              <div class="list" id="alertHistoryList"></div>
-            </section>
-            <details class="previous-alerts" id="previousContextAlerts">
-              <summary>
-                <span>Previous Context</span>
-                <b id="previousContextCount">0</b>
-              </summary>
-              <div class="list" id="previousContextList"></div>
+            <details class="alerts-passed" id="alertsPassedChecks" hidden>
+              <summary id="alertsPassedSummary">Checks passed</summary>
+              <div class="list list--passed" id="alertsPassedList"></div>
             </details>
-            <div class="alerts-toolbar">
-              <span id="alertsHint">No alert history yet.</span>
-              <button class="text-button" id="clearAlertsButton" type="button">Clear alerts</button>
-            </div>
+            <details class="previous-alerts" id="alertsHistorySection" hidden>
+              <summary>
+                <span>Signal history</span>
+                <b id="alertHistoryCount">0</b>
+              </summary>
+              <div class="list" id="alertHistoryList"></div>
+              <div class="previous-context" id="previousContextAlerts" hidden>
+                <div class="alert-section__head">
+                  <span>From a previous context — no longer apply</span>
+                  <b id="previousContextCount">0</b>
+                </div>
+                <div class="list" id="previousContextList"></div>
+              </div>
+              <div class="alerts-toolbar">
+                <span id="alertsHint">No alert history yet.</span>
+                <button class="text-button" id="clearAlertsButton" type="button">Clear history</button>
+              </div>
+            </details>
             <section class="governance-section" aria-labelledby="governanceHeading">
               <div class="governance-heading">
                 <div>
                   <span>Risk &amp; process</span>
-                  <b id="governanceHeading">Governance evidence</b>
+                  <b id="governanceHeading">Process checks</b>
                 </div>
                 <span class="governance-state" id="governanceCurrentState">unavailable</span>
               </div>
-              <section class="governance-block" aria-label="Current risk and process nudges">
+              <p class="governance-summary" id="governanceSummary">Process check status not observed yet.</p>
+              <section class="governance-block" aria-label="Current risk and process nudges" id="governanceCurrentBlock" hidden>
                 <div class="alert-section__head">
                   <span>Current</span>
                   <b id="governanceCurrentCount">--</b>
                 </div>
                 <div class="governance-list" id="governanceCurrentList"></div>
               </section>
-              <section class="governance-coverage" aria-label="Confirmed-flow review">
+              <section class="governance-coverage" aria-label="Confirmed-flow review" id="governanceCoverageBlock" hidden>
                 <span>Confirmed-flow coverage</span>
                 <p id="governanceCoverage">Confirmed-flow coverage unavailable.</p>
                 <button class="text-button" id="governanceCutoverReviewButton" type="button" hidden>Record foreground review</button>
                 <p class="governance-action-status" id="governanceCutoverReviewStatus" role="status"></p>
               </section>
-              <section class="governance-block" aria-label="Governance history">
-                <div class="alert-section__head">
-                  <span>History</span>
-                  <b id="governanceHistoryCount">0</b>
-                </div>
-                <div class="governance-list" id="governanceHistoryList"></div>
-              </section>
-              <section class="governance-delivery-summary" aria-label="Notification delivery state">
-                <div class="governance-delivery__head">
-                  <span>Delivery</span>
-                  <b id="governanceDeliveryHealth">unavailable</b>
-                </div>
-              </section>
               <details class="governance-details" id="governanceEvidenceDetails">
                 <summary>Evidence &amp; delivery details</summary>
+                <section class="governance-block" aria-label="Governance history">
+                  <div class="alert-section__head">
+                    <span>History</span>
+                    <b id="governanceHistoryCount">0</b>
+                  </div>
+                  <div class="governance-list" id="governanceHistoryList"></div>
+                </section>
+                <section class="governance-delivery-summary" aria-label="Notification delivery state">
+                  <div class="governance-delivery__head">
+                    <span>Delivery</span>
+                    <b id="governanceDeliveryHealth">unavailable</b>
+                  </div>
+                </section>
                 <div class="governance-evidence" aria-label="Governance authority evidence">
                   <div>
                     <span>Source health</span>

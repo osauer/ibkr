@@ -24,8 +24,8 @@ func TestGovernanceSurfaceStaticContract(t *testing.T) {
 			t.Errorf("index.html missing governance id %q", id)
 		}
 	}
-	if !strings.Contains(html, ">Canary history<") || strings.Contains(html, ">Alert History<") {
-		t.Fatal("Canary history must be visibly distinct from Risk & process history")
+	if !strings.Contains(html, ">Signal history<") || strings.Contains(html, ">Alert History<") {
+		t.Fatal("Signal history must be visibly distinct from Risk & process history")
 	}
 	detailsAt := strings.Index(html, `id="governanceEvidenceDetails"`)
 	if detailsAt < 0 || strings.Contains(html[detailsAt:strings.Index(html[detailsAt:], `>`)+detailsAt], " open") {

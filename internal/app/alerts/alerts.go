@@ -343,7 +343,7 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 	}
 	payload := push.Payload{
 		Title:    rec.Title,
-		Body:     rec.Body,
+		Body:     rec.Body + " Open ibkr for portfolio details.",
 		URL:      m.URL,
 		AlertID:  rec.ID,
 		Action:   rec.Action,
@@ -408,18 +408,33 @@ func portfolioAlertRelevant(canary rpc.CanaryResult) bool {
 	return false
 }
 
+// RedactedRecord authors the stored in-app history copy. It stays deliberately
+// free of symbols, quantities, and account data because the same record feeds
+// the web-push payload; the push-only call to action is appended in Observe.
 func RedactedRecord(canary rpc.CanaryResult, fingerprint string, now time.Time) state.AlertRecord {
 	action := strings.TrimSpace(canary.Action)
 	if action == "" {
 		action = "canary"
 	}
 	severity := string(canary.Severity)
-	title := "ibkr canary: " + strings.ReplaceAll(action, "_", " ")
-	body := fmt.Sprintf("%s severity", nonEmpty(severity, "watch"))
-	if canary.MarketConfirmation != "" {
-		body += "; market confirmation " + canary.MarketConfirmation
+	title := "Canary: " + strings.ReplaceAll(action, "_", " ")
+	// The severity is restated only when it differs from the action in the
+	// title; "Canary: watch — Watch severity" says one thing twice.
+	body := ""
+	if s := nonEmpty(severity, "watch"); !strings.EqualFold(s, action) {
+		body = capitalize(s) + " severity"
 	}
-	body += ". Open ibkr for portfolio details."
+	if phrase := marketConfirmationPhrase(canary.MarketConfirmation); phrase != "" {
+		if body == "" {
+			body = capitalize(phrase)
+		} else {
+			body += " — " + phrase
+		}
+	}
+	if body == "" {
+		body = "Canary state recorded"
+	}
+	body += "."
 	idHash := sha256.Sum256([]byte(fingerprint + "\x00" + now.UTC().Format(time.RFC3339Nano)))
 	return state.AlertRecord{
 		ID:        fmt.Sprintf("canary-%x", idHash[:12]),
@@ -429,6 +444,32 @@ func RedactedRecord(canary rpc.CanaryResult, fingerprint string, now time.Time) 
 		Body:      body,
 		CreatedAt: now,
 	}
+}
+
+// marketConfirmationPhrase translates the wire enum into reader terms; the
+// enum values themselves must never reach rendered copy.
+func marketConfirmationPhrase(confirmation string) string {
+	switch confirmation {
+	case "confirmed":
+		return "market stress confirmed"
+	case "partial":
+		return "market stress partly confirmed"
+	case "none":
+		return "market stress not confirmed"
+	case "blocked":
+		return "market data blocked"
+	case "":
+		return ""
+	default:
+		return "market confirmation " + confirmation
+	}
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 func severityAtLeast(got risk.SignalSeverity, want risk.SignalSeverity) bool {

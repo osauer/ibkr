@@ -35,7 +35,7 @@ func TestComputeCanaryAmbiguityDoesNotLookSafe(t *testing.T) {
 	if res.PlannerModeHint != risk.PlannerModeConfirmData || res.PlannerReadiness != risk.PlannerReadinessBlocked {
 		t.Fatalf("planner = %s/%s, want confirm_data/blocked", res.PlannerModeHint, res.PlannerReadiness)
 	}
-	if !rowContains(res.Rows, "Ambiguity filter", "Refresh or verify incomplete market inputs") {
+	if !rowContains(res.Rows, "Ambiguity filter", "Some market inputs are incomplete") {
 		t.Fatalf("expected data-quality ambiguity row, rows: %+v", res.Rows)
 	}
 }
@@ -63,7 +63,7 @@ func TestComputeCanaryConfirmedStressWithIncompleteGammaBreadthStillDelevers(t *
 	if res.Action != canaryActionWatch || res.PlannerReadiness != risk.PlannerReadinessPrestage {
 		t.Fatalf("action/readiness = %s/%s, want watch/prestage", res.Action, res.PlannerReadiness)
 	}
-	if !rowContains(res.Rows, "Ambiguity filter", "do not suppress confirmed independent red signals") {
+	if !rowContains(res.Rows, "Ambiguity filter", "treat the stress readings as tentative") {
 		t.Fatalf("expected ambiguity filter disclosure, rows: %+v", res.Rows)
 	}
 }
@@ -170,7 +170,7 @@ func TestComputeCanaryLowExposureMarketWatchDoesNotClaimPortfolioExposed(t *test
 	if strings.Contains(summary, "portfolio is exposed") || strings.Contains(summary, "stage reductions") {
 		t.Fatalf("summary should not claim low-exposure portfolio is exposed: %q", res.Summary)
 	}
-	if !strings.Contains(summary, "portfolio exposure is low") {
+	if !strings.Contains(summary, "your exposure is low") {
 		t.Fatalf("summary should explain low exposure watch posture, got %q", res.Summary)
 	}
 }
@@ -844,7 +844,7 @@ func TestComputeCanaryStaleGreenClusterStillWatches(t *testing.T) {
 	if got := strings.Join(res.Market.StaleClusters, ","); got != "vol" {
 		t.Fatalf("stale clusters = %q, want vol", got)
 	}
-	if !rowContains(res.Rows, "Ambiguity filter", "Refresh or verify incomplete market inputs") {
+	if !rowContains(res.Rows, "Ambiguity filter", "Some market inputs are incomplete") {
 		t.Fatalf("expected stale-data ambiguity row, rows: %+v", res.Rows)
 	}
 	if !strings.Contains(strings.Join(res.Warnings, "\n"), "stale clusters: vol") {

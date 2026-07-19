@@ -3862,6 +3862,10 @@ p {
   border-top: 0;
 }
 
+.alert-row {
+  cursor: pointer;
+}
+
 .alert-row::before {
   width: 9px;
   height: 9px;
@@ -3869,6 +3873,147 @@ p {
   border-radius: 50%;
   background: var(--blue);
   content: "";
+}
+
+.alerts-status {
+  margin: 2px 0 10px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--blue);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.alerts-status--warn {
+  border-left-color: var(--orange);
+}
+
+.alerts-status--risk {
+  border-left-color: var(--red);
+}
+
+.alert-row__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.alert-chip {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--blue-soft, rgba(59, 130, 246, 0.14));
+  color: var(--blue);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.alert-chip--warn {
+  background: rgba(234, 138, 42, 0.14);
+  color: var(--orange);
+}
+
+.alert-chip--risk {
+  background: rgba(217, 65, 65, 0.14);
+  color: var(--red);
+}
+
+.alert-chip--data {
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.alert-row--stale .alert-chip {
+  background: var(--surface-soft);
+  color: var(--muted-2);
+}
+
+.alert-row__details {
+  margin-top: 4px;
+}
+
+.alert-row__details summary {
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.alert-row__details p {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  -webkit-line-clamp: unset;
+}
+
+.alerts-passed {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.alerts-passed summary {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.alerts-passed summary::before {
+  margin-right: 6px;
+  color: var(--green, #2e9e5b);
+  content: "✓";
+  font-weight: 750;
+}
+
+.passed-row {
+  padding: 7px 0 0 18px;
+}
+
+.passed-row b {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.passed-row p {
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.alert-section__tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.alert-section__subhead {
+  padding: 10px 0 2px;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.previous-context {
+  margin-top: 10px;
+}
+
+.governance-summary {
+  margin: 4px 0 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
 }
 
 .alert-row.alert-row--risk::before {

@@ -148,8 +148,6 @@ async function fetchAttentionHistories(epoch, attention) {
   const validatedGovernance = validateGovernanceResponse(governance);
   if (!Array.isArray(alerts) || !validatedGovernance) throw new Error("history malformed");
   if (state.attentionEpoch !== epoch) return null;
-  if (attention.unread_refs.some((ref) => ref.kind === "canary")) state.alertFilter = "all";
-  if (state.attentionEpoch !== epoch) return null;
   state.alerts = alerts;
   if (state.attentionEpoch !== epoch) return null;
   state.governance = validatedGovernance;
@@ -331,41 +329,208 @@ function renderAlertMode() {
   $("alertSettingsStatus").classList.toggle("governance-action-status--error", state.alertSettingsUpdate.error);
 }
 
+// The Alerts page is severity-first: the header counts conditions that need
+// attention (never all-clear rows), passed checks collapse into one disclosure
+// line, and history lives behind a collapsed section. Presence of a row must
+// mean something needs the operator.
 function renderAlerts() {
-  const currentItems = filterAlertItems(liveAlertPreviewsSuppressed() ? [] : currentAlertPreviewItems());
-  const historyItems = filterAlertItems(currentHistoryAlertItems());
-  const previousItems = filterAlertItems(previousContextAlertItems());
-  const activeItems = [...currentItems, ...historyItems];
-  const clearableLivePreview = currentAlertPreviewItems().length > 0 && !liveAlertPreviewsSuppressed();
-  const staleCount = previousContextAlertItems().length;
-  const activeHistoryCount = currentHistoryAlertItems().length;
-  const activePreviewCount = liveAlertPreviewsSuppressed() ? 0 : currentAlertPreviewItems().length;
+  // Conditions are always computed from the full preview set: dismissing rows
+  // hides watch/data noise from the list, never the facts — the header counter
+  // stays truthful, and act-severity rows are never dismissible.
+  const allPreviews = currentAlertPreviewItems();
+  const suppressed = liveAlertPreviewsSuppressed();
+  const attentionItems = allPreviews.filter((item) => alertTone(item) !== "info");
+  const passedItems = allPreviews.filter((item) => alertTone(item) === "info");
+  const historyItems = currentHistoryAlertItems();
+  const firstSeen = firstSeenForCurrentSignal(historyItems);
+  const visibleHistory = historyItems.filter((item) => !firstSeen.ids.has(item.id));
+  const previousItems = previousContextAlertItems();
+  const hasCanary = Boolean(state.snapshot?.canary?.as_of);
+  // History conditions still current (e.g. a protective-stop mismatch) count as
+  // attention when no live preview already covers the same condition. One title
+  // is one condition regardless of how many records it produced, and before the
+  // first canary snapshot arrives no staleness verdict is possible, so history
+  // stays history.
+  const attentionTitles = new Set(attentionItems.map((item) => String(item.title || "").toLowerCase()));
+  const historyConditions = [];
+  if (hasCanary) {
+    const seenTitles = new Set();
+    for (const item of visibleHistory) {
+      const title = String(item.title || "").toLowerCase();
+      if (alertTone(item) === "info" || attentionTitles.has(title) || seenTitles.has(title)) continue;
+      seenTitles.add(title);
+      historyConditions.push(item);
+    }
+  }
+  const conditions = [...attentionItems, ...historyConditions];
+  const acts = conditions.filter((item) => alertTone(item) === "risk").length;
+  const dataIssues = conditions.filter(isDataQualityItem).length;
+  const watches = conditions.filter((item) => alertTone(item) === "warn").length - dataIssues;
+
   const count = $("alertCount");
-  const activeTones = [...currentItems, ...historyItems].map(alertTone);
-  count.textContent = activePreviewCount > 0 || activeHistoryCount > 0
-    ? `${activePreviewCount} current / ${activeHistoryCount} stored`
-    : "0 active";
-  count.classList.toggle("is-zero", activeHistoryCount === 0 && activePreviewCount === 0);
-  count.classList.toggle("has-risk", activeTones.includes("risk"));
-  count.classList.toggle("has-warn", !activeTones.includes("risk") && activeTones.includes("warn"));
-  $("currentSignalCount").textContent = String(activePreviewCount);
-  $("alertHistoryCount").textContent = String(activeHistoryCount);
-  $("previousContextCount").textContent = String(staleCount);
-  $("alertsHint").textContent = state.alerts.length === 0
-    ? liveAlertPreviewsSuppressed() ? "Current canary signals dismissed for this snapshot." : currentCanaryHasPortfolioAlert()
-      ? "Current canary signals from the live snapshot; no alert history recorded yet."
-      : "No portfolio alerts for the current low-exposure snapshot."
-    : staleCount > 0 ? `${staleCount} previous-context alert${staleCount === 1 ? "" : "s"} hidden. Clear history to reset.`
-      : "Tap an alert to inspect it in Canary.";
-  $("clearAlertsButton").textContent = state.alerts.length === 0 && clearableLivePreview ? "Dismiss current" : "Clear alerts";
-  $("clearAlertsButton").disabled = state.alerts.length === 0 && !clearableLivePreview;
-  document.querySelectorAll("[data-alert-filter]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.alertFilter === state.alertFilter);
-  });
-  renderAlertList("currentSignalList", currentItems, "No current canary signal.");
-  renderAlertList("alertHistoryList", historyItems, "No stored alert history for the current context.");
-  renderAlertList("previousContextList", previousItems, "No previous-context alerts.");
-  $("previousContextAlerts").hidden = staleCount === 0;
+  count.textContent = acts > 0 || watches > 0 || dataIssues > 0
+    ? [acts > 0 ? `${acts} act` : "", watches > 0 ? `${watches} watch` : "", dataIssues > 0 ? `${dataIssues} data` : ""].filter(Boolean).join(" · ")
+    : hasCanary ? "All clear" : "--";
+  count.classList.toggle("is-zero", acts === 0 && watches === 0 && dataIssues === 0);
+  count.classList.toggle("has-risk", acts > 0);
+  count.classList.toggle("has-warn", acts === 0 && (watches > 0 || dataIssues > 0));
+
+  renderAlertsStatusLine(firstSeen.at);
+  // The section number counts decisions (act + watch); data caveats render in
+  // their own quieter band below and never inflate it.
+  $("currentSignalCount").textContent = String(acts + watches);
+  const listed = suppressed
+    ? conditions.filter((item) => alertTone(item) === "risk")
+    : conditions;
+  const toneRank = { risk: 0, warn: 1 };
+  const decisionRows = listed.filter((item) => !isDataQualityItem(item))
+    .sort((a, b) => (toneRank[alertTone(a)] ?? 2) - (toneRank[alertTone(b)] ?? 2));
+  const dataRows = listed.filter(isDataQualityItem);
+  renderAttentionList(decisionRows, dataRows,
+    !hasCanary ? "Waiting for the first canary snapshot."
+      : suppressed && conditions.length > 0 ? "Watch and data rows are hidden until the signal changes."
+        : "Nothing needs your attention right now.");
+  renderPassedChecks(suppressed ? [] : passedItems);
+
+  const historyCount = visibleHistory.length + previousItems.length;
+  $("alertsHistorySection").hidden = historyCount === 0;
+  $("alertHistoryCount").textContent = String(historyCount);
+  renderAlertList("alertHistoryList", visibleHistory, "No recorded alerts for the current context.");
+  $("previousContextAlerts").hidden = previousItems.length === 0;
+  $("previousContextCount").textContent = String(previousItems.length);
+  renderAlertList("previousContextList", previousItems, "No alerts from a previous context.");
+  $("alertsHint").textContent = state.alerts.length > 0
+    ? "Clearing removes read history only; live signals are unaffected."
+    : "No alert history recorded yet.";
+  $("clearAlertsButton").disabled = state.alerts.length === 0;
+
+  const dismiss = $("dismissCurrentButton");
+  const dismissible = attentionItems.some((item) => alertTone(item) !== "risk") || passedItems.length > 0;
+  dismiss.hidden = suppressed || !dismissible;
+  dismiss.title = "Hides watch and data rows for this signal. Act rows and the counter are unaffected; rows return when the canary signal changes.";
+}
+
+function renderAttentionList(decisionRows, dataRows, emptyText) {
+  const list = $("currentSignalList");
+  const children = decisionRows.map(alertRowElement);
+  if (dataRows.length > 0) {
+    const divider = document.createElement("div");
+    divider.className = "alert-section__subhead";
+    divider.textContent = `Data caveats (${dataRows.length}) — reasons to discount signals, not decisions`;
+    children.push(divider, ...dataRows.map(alertRowElement));
+  }
+  if (children.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-row";
+    empty.textContent = emptyText;
+    list.replaceChildren(empty);
+    return;
+  }
+  list.replaceChildren(...children);
+}
+
+function marketSessionClosed() {
+  const session = state.snapshot?.market_calendar?.session;
+  return Boolean(session) && session.is_open !== true;
+}
+
+// The one-sentence page lede: the daemon-authored canary summary plus when the
+// condition was first recorded and how fresh the snapshot is.
+function renderAlertsStatusLine(firstSeenAt) {
+  const status = $("alertsStatusLine");
+  const canary = state.snapshot?.canary || {};
+  if (!canary.summary) {
+    status.hidden = true;
+    return;
+  }
+  const parts = [canary.summary];
+  const firstSeen = firstSeenAt ? alertDayTime(firstSeenAt) : "";
+  const asOf = canary.as_of ? alertDayTime(canary.as_of) : "";
+  if (firstSeen && firstSeen !== asOf) parts.push(`First seen ${firstSeen}.`);
+  // A closed market means every price fact on this page is a last-session
+  // print; the stamp must not launder frozen data as fresh.
+  if (asOf) {
+    parts.push(marketSessionClosed()
+      ? `Snapshot ${asOf} · market closed — prices are last-session prints.`
+      : `Data as of ${asOf}.`);
+  }
+  status.textContent = parts.join(" ");
+  status.hidden = false;
+  const tone = alertTone({ severity: canary.severity, action: canary.action });
+  status.classList.toggle("alerts-status--risk", tone === "risk");
+  status.classList.toggle("alerts-status--warn", tone === "warn");
+}
+
+function renderPassedChecks(passedItems) {
+  const details = $("alertsPassedChecks");
+  details.hidden = passedItems.length === 0;
+  if (passedItems.length === 0) return;
+  $("alertsPassedSummary").textContent = `${passedItems.length} check${passedItems.length === 1 ? "" : "s"} passed — no action from these`;
+  $("alertsPassedList").replaceChildren(...passedItems.map((item) => {
+    const row = document.createElement("div");
+    row.className = "passed-row";
+    const title = document.createElement("b");
+    title.textContent = item.title;
+    const fact = document.createElement("p");
+    fact.textContent = [item.body, item.evidence].filter(Boolean).join(" · ");
+    row.append(title, fact);
+    return row;
+  }));
+}
+
+// A stored canary alert whose fingerprint matches the live snapshot is the
+// same condition the page already shows — surface its timestamp as
+// "first seen" instead of rendering a duplicate row.
+function firstSeenForCurrentSignal(historyItems) {
+  const current = currentCanaryFingerprint();
+  const ids = new Set();
+  let at = "";
+  if (!current) return { ids, at };
+  for (const item of historyItems) {
+    if (!isCanarySourceAlert(item) || item.fingerprint !== current) continue;
+    ids.add(item.id);
+    if (!at || (item.created_at && item.created_at < at)) at = item.created_at || at;
+  }
+  return { ids, at };
+}
+
+function isCanarySourceAlert(alert) {
+  return typeof alert?.id === "string" && alert.id.startsWith("canary-");
+}
+
+// Within the last two days a weekday reads naturally; anything older needs a
+// real date — "Sun 09:23 PM" is ambiguous in a history spanning weeks.
+function alertDayTime(value) {
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return "--";
+  const options = Date.now() - at.getTime() > 48 * 3600 * 1000
+    ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }
+    : { weekday: "short", hour: "2-digit", minute: "2-digit" };
+  return at.toLocaleString(undefined, options);
+}
+
+// One plain sentence carries the whole section state; the chip is a matching
+// single word. Raw aggregate/poll enum values never render outside the
+// evidence disclosure.
+function governanceStateChip(current, aggregate, pollState) {
+  if (!current) return pollState === "not_observed" ? "waiting" : pollState;
+  if (aggregate === "ready") return "active";
+  if (aggregate === "degraded") return "degraded";
+  return "paused";
+}
+
+function governanceSummaryCopy(current, aggregate, pollState, candidateCount) {
+  if (!current) {
+    if (pollState === "stale") return "Process check status is stale; showing the last known state.";
+    if (pollState === "not_observed") return "Process check status not observed yet.";
+    return "Process check status is unavailable.";
+  }
+  if (candidateCount > 0) {
+    return candidateCount === 1 ? "1 process reminder needs review below." : `${candidateCount} process reminders need review below.`;
+  }
+  if (aggregate === "ready") return "No process reminders; process data sources are healthy.";
+  if (aggregate === "degraded") return "Process data sources are degraded; reminders may be incomplete.";
+  return "Process checks are paused — data sources are not ready (normal outside market hours), so no reminders can be evaluated.";
 }
 
 const governanceInputNames = ["policy", "reconciliation", "capital", "pins", "cadence", "confirmed_flow"];
@@ -388,14 +553,16 @@ function renderGovernance() {
   const candidates = current && Array.isArray(nudges?.candidates) ? nudges.candidates : [];
   const aggregate = current ? safeGovernanceAggregate(nudges?.source_health?.aggregate) : "unavailable";
 
-  $("governanceCurrentState").textContent = current ? aggregate : pollState;
+  $("governanceCurrentState").textContent = governanceStateChip(current, aggregate, pollState);
   $("governanceCurrentCount").textContent = current ? String(candidates.length) : "--";
+  $("governanceSummary").textContent = governanceSummaryCopy(current, aggregate, pollState, candidates.length);
+  $("governanceCurrentBlock").hidden = !current || candidates.length === 0;
   if (!current) {
     renderGovernanceEmpty("governanceCurrentList", "Current risk & process nudges are unavailable.");
   } else if (candidates.length === 0 && aggregate === "ready") {
     renderGovernanceEmpty("governanceCurrentList", "No current risk & process nudges.");
   } else if (candidates.length === 0) {
-    renderGovernanceEmpty("governanceCurrentList", "Current eligibility is suppressed by source health.");
+    renderGovernanceEmpty("governanceCurrentList", "Paused by source health — an empty list is not a clean result.");
   } else {
     $("governanceCurrentList").replaceChildren(...candidates.map(governanceCandidateElement));
   }
@@ -445,13 +612,17 @@ function renderGovernanceSourceHealth(pollSource = {}, sourceHealth = {}, curren
   }
   const aggregate = safeGovernanceAggregate(sourceHealth?.aggregate);
   const parts = [`${aggregate} · poll ${pollFacts.join(" · ")}`];
+  // Healthy inputs collapse to one line; only inputs that are not ok earn a row.
+  const unhealthy = [];
   for (const name of governanceInputNames) {
     const input = sourceHealth?.[name] || {};
     const status = ["ok", "unapproved", "stale", "unavailable", "error"].includes(input.status) ? input.status : "error";
-    const reason = safeGovernanceReason(input.reason, status === "ok" ? "" : "invalid_health");
+    if (status === "ok") continue;
+    const reason = safeGovernanceReason(input.reason, "invalid_health");
     const asOf = input.as_of ? ` · ${governanceTime(input.as_of)}` : "";
-    parts.push(`${name}: ${status}${reason ? ` · ${reason}` : ""}${asOf}`);
+    unhealthy.push(`${name}: ${status}${reason ? ` · ${reason}` : ""}${asOf}`);
   }
+  parts.push(unhealthy.length === 0 ? "all inputs ok" : unhealthy.join("\n"));
   target.textContent = parts.join("\n");
 }
 
@@ -475,17 +646,23 @@ function renderGovernanceContext(context, current) {
   target.textContent = parts.length > 0 ? parts.join(" · ") : "No typed governance context.";
 }
 
+// The coverage block surfaces inline only while it needs the operator (the
+// one-time cutover review); the reviewed state stays available in the
+// evidence disclosure.
 function renderGovernanceCoverage(coverage, current) {
+  const block = $("governanceCoverageBlock");
   const target = $("governanceCoverage");
   const detail = $("governanceCoverageDetail");
   const button = $("governanceCutoverReviewButton");
   const unresolved = current && coverage?.pre_cutover_flows_unreviewed === true;
   button.hidden = !unresolved;
   if (!current || !coverage?.coverage_from) {
+    block.hidden = true;
     target.textContent = "Confirmed-flow coverage unavailable.";
     detail.textContent = "Confirmed-flow coverage unavailable.";
     return;
   }
+  block.hidden = !unresolved && !state.governanceCutoverReview.state;
   target.textContent = unresolved ? "Pre-cutover flows need foreground review." : "Confirmed-flow coverage is reviewed.";
   detail.textContent = `Coverage from ${governanceTime(coverage.coverage_from)} · pre-cutover flows ${unresolved ? "unreviewed" : "reviewed"}`;
 }
@@ -539,12 +716,24 @@ function renderGovernanceDelivery(governance) {
   const lastAccepted = health.last_push_service_acceptance_at
     ? `last push-service acceptance ${governanceTime(health.last_push_service_acceptance_at)}`
     : "last push-service acceptance not observed";
+  // Counter walls carry no information at zero: render only nonzero facts.
+  const attemptFacts = [
+    ["cumulative", attempts.cumulative_attempts], ["push_service_accepted", attempts.push_service_accepted],
+    ["retryable_failures", attempts.retryable_failures], ["rejected", attempts.rejected],
+    ["retry_pending", attempts.retry_pending], ["dead_subscription", attempts.dead_subscription],
+    ["missed", attempts.missed], ["suppressed", attempts.suppressed],
+    ["interrupted_uncertain", attempts.interrupted_uncertain], ["target_retired", attempts.target_retired],
+  ].filter(([, value]) => safeCount(value) > 0).map(([label, value]) => `${label} ${safeCount(value)}`);
+  const healthFacts = [
+    ["partial_episodes", healthTotals.partial_episodes], ["state_write_failures", healthTotals.state_write_failures],
+    ["recoveries", healthTotals.recoveries], ["overflows", healthTotals.overflows],
+  ].filter(([, value]) => safeCount(value) > 0).map(([label, value]) => `${label} ${safeCount(value)}`);
   $("governanceDeliveryDetail").textContent = [
     lastAccepted,
-    `attempts cumulative ${safeCount(attempts.cumulative_attempts)} · push_service_accepted ${safeCount(attempts.push_service_accepted)} · retryable_failures ${safeCount(attempts.retryable_failures)} · rejected ${safeCount(attempts.rejected)} · retry_pending ${safeCount(attempts.retry_pending)} · dead_subscription ${safeCount(attempts.dead_subscription)} · missed ${safeCount(attempts.missed)} · suppressed ${safeCount(attempts.suppressed)} · interrupted_uncertain ${safeCount(attempts.interrupted_uncertain)} · target_retired ${safeCount(attempts.target_retired)}`,
-    `health partial_episodes ${safeCount(healthTotals.partial_episodes)} · state_write_failures ${safeCount(healthTotals.state_write_failures)} · recoveries ${safeCount(healthTotals.recoveries)} · overflows ${safeCount(healthTotals.overflows)}`,
+    attemptFacts.length > 0 ? `attempts ${attemptFacts.join(" · ")}` : "no delivery attempts recorded",
+    healthFacts.length > 0 ? `health ${healthFacts.join(" · ")}` : "",
     `diagnostic ${diagnosticState}${diagnostic.at ? ` · ${governanceTime(diagnostic.at)}` : ""}`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function renderGovernanceAttempts(attempts) {
@@ -839,51 +1028,59 @@ function renderAlertList(id, items, emptyText) {
 }
 
 function alertRowElement(alert) {
-  const row = document.createElement("button");
-  row.className = "alert-row alert-row--" + alertTone(alert);
+  const tone = alertTone(alert);
+  const row = document.createElement("div");
+  row.className = "alert-row alert-row--" + tone;
   row.classList.toggle("alert-row--stale", alertIsStale(alert));
-  row.type = "button";
   row.classList.toggle("active", alert.id === state.selectedAlertID);
   row.addEventListener("click", () => {
     state.selectedAlertID = alert.id;
     renderAlerts();
     renderSelectedAlert();
-    $("selectedAlertPanel").scrollIntoView({ block: "nearest" });
   });
   const text = document.createElement("div");
   text.className = "alert-row__copy";
+  const head = document.createElement("div");
+  head.className = "alert-row__head";
+  const chip = document.createElement("span");
+  chip.className = `alert-chip alert-chip--${isDataQualityItem(alert) ? "data" : tone}`;
+  chip.textContent = alertIsStale(alert) ? "EXPIRED" : alertChipLabel(alert);
   const title = document.createElement("b");
   title.textContent = alert.title;
+  head.append(chip, title);
   const body = document.createElement("p");
   body.textContent = alert.body;
-  text.append(title, body);
+  text.append(head, body);
+  if (alert.preview && alert.evidence) {
+    const detail = document.createElement("details");
+    detail.className = "alert-row__details";
+    detail.addEventListener("click", (event) => event.stopPropagation());
+    const summary = document.createElement("summary");
+    summary.textContent = "Details";
+    const evidence = document.createElement("p");
+    evidence.textContent = alert.evidence;
+    detail.append(summary, evidence);
+    text.append(detail);
+  }
   const sourceLabel = alertSourceLabel(alert);
   if (sourceLabel) {
     const at = document.createElement("span");
     at.className = "alert-row__source";
     at.textContent = sourceLabel;
-    at.title = alertSourceTitle(alert);
     row.append(text, at);
   } else {
     row.classList.add("alert-row--nosource");
-    row.title = alertSourceTitle(alert);
     row.append(text);
   }
   return row;
 }
 
 function alertSourceLabel(alert) {
-  // Preview alerts only appear under the "Current signal" section header, so
-  // a per-row "current signal" chip would restate it.
+  // Preview alerts already sit under the "Needs attention" header; a per-row
+  // chip would restate it.
   if (alert.preview) return "";
-  if (alertIsStale(alert)) return `stale: ${staleAlertReason(alert)}`;
-  return alert.created_at ? `stored ${shortTime(alert.created_at)}` : "stored history";
-}
-
-function alertSourceTitle(alert) {
-  if (alert.preview) return "Synthetic current Canary preview from the live snapshot";
-  if (alertIsStale(alert)) return `Persisted alert from ${staleAlertReason(alert)}`;
-  return "Persisted alert history for the current Canary context";
+  if (alertIsStale(alert)) return staleAlertReason(alert);
+  return alert.created_at ? `recorded ${alertDayTime(alert.created_at)}` : "recorded";
 }
 
 function renderSelectedAlert() {
@@ -894,21 +1091,24 @@ function renderSelectedAlert() {
   $("selectedAlertTitle").textContent = alert.title || "Canary alert";
   const stale = alertIsStale(alert);
   $("selectedAlertBody").textContent = stale
-    ? `Stale alert from a previous canary/account context. ${alert.body || ""}`.trim()
+    ? `From ${staleAlertReason(alert).startsWith("different") ? "a" : "an"} ${staleAlertReason(alert)} — no longer applies. ${alert.body || ""}`.trim()
     : alert.body || "Open detail for the current canary context.";
   $("selectedAlertTime").textContent = stale
-    ? "not valid for current daemon context"
+    ? "no longer applies to the current context"
     : alert.preview ? "current canary snapshot"
-    : alert.created_at ? `recorded ${shortTime(alert.created_at)}` : "recorded --";
+    : alert.created_at ? `recorded ${alertDayTime(alert.created_at)}` : "recorded --";
 }
 
 function currentCanaryFingerprint() {
   return state.snapshot?.canary?.fingerprint?.key || "";
 }
 
+// Fingerprint staleness applies only to canary-source alerts: other sources
+// (e.g. protective-stop mismatches) carry their own fingerprint scheme and
+// must stay current until their account or mode context changes.
 function alertIsStale(alert) {
   const current = currentCanaryFingerprint();
-  const canaryChanged = Boolean(alert?.fingerprint && current && alert.fingerprint !== current);
+  const canaryChanged = isCanarySourceAlert(alert) && Boolean(alert?.fingerprint && current && alert.fingerprint !== current);
   const trading = state.snapshot?.trading || {};
   const accountChanged = Boolean(alert?.account && trading.account && alert.account !== trading.account);
   const modeChanged = Boolean(alert?.mode && trading.mode && alert.mode !== trading.mode);
@@ -917,11 +1117,11 @@ function alertIsStale(alert) {
 
 function staleAlertReason(alert) {
   const current = currentCanaryFingerprint();
-  if (alert?.fingerprint && current && alert.fingerprint !== current) return "previous signal";
+  if (isCanarySourceAlert(alert) && alert?.fingerprint && current && alert.fingerprint !== current) return "earlier signal";
   const trading = state.snapshot?.trading || {};
-  if (alert?.account && trading.account && alert.account !== trading.account) return "previous account";
-  if (alert?.mode && trading.mode && alert.mode !== trading.mode) return "previous mode";
-  return "previous context";
+  if (alert?.account && trading.account && alert.account !== trading.account) return "different account";
+  if (alert?.mode && trading.mode && alert.mode !== trading.mode) return "different mode";
+  return "earlier context";
 }
 
 function warningMessages(warnings = []) {
@@ -945,17 +1145,6 @@ async function refreshAlerts() {
   } catch {
     // Alert history is secondary; SSE recovery handles app connectivity.
   }
-}
-
-function alertItems() {
-  const history = currentHistoryAlertItems();
-  const previews = liveAlertPreviewsSuppressed() ? [] : currentAlertPreviewItems();
-  if (history.length === 0) return previews;
-  const historyTitles = new Set(history.map((item) => String(item.title || "").toLowerCase()));
-  return [
-    ...history,
-    ...previews.filter((item) => !historyTitles.has(String(item.title || "").toLowerCase())),
-  ].slice(0, 3);
 }
 
 function allAlertItems() {
@@ -985,10 +1174,12 @@ function currentAlertPreviewItems() {
   return rows.map((row, index) => ({
     id: `preview-${index}`,
     title: row.title || labelize(row.severity || "canary"),
-    body: [row.guidance, row.evidence].filter(Boolean).join(" ") || canary.summary || "Current canary context.",
+    body: row.guidance || canary.summary || "Current canary context.",
+    evidence: row.evidence || "",
     created_at: canary.as_of,
     fingerprint: currentCanaryFingerprint(),
     severity: row.severity || canary.severity,
+    direction: row.direction || "",
     preview: true,
   }));
 }
@@ -1017,59 +1208,68 @@ function liveAlertPreviewsSuppressed() {
   return Boolean(current && state.clearedAlertFingerprint === current);
 }
 
-function filterAlertItems(items) {
-  if (state.alertFilter === "warnings") {
-    return items.filter((item) => ["risk", "warn"].includes(alertTone(item)));
-  }
-  if (state.alertFilter === "info") {
-    return items.filter((item) => alertTone(item) === "info");
-  }
-  return items;
-}
-
+// Every per-topic canary row is a candidate; the "Portfolio canary" overall
+// row feeds the status line instead. A synthesized held-name row is appended
+// only when no daemon row already covers held stress.
 function canaryPreviewRows(canary) {
-  const rows = Array.isArray(canary.rows) ? canary.rows : [];
+  const rows = (Array.isArray(canary.rows) ? canary.rows : [])
+    .filter((row) => String(row.title || "") !== "Portfolio canary");
   const heldStress = heldStressItems(canary);
-  if (heldStress.length === 0) return rows.slice(0, 3);
-  const heldRow = {
+  if (heldStress.length === 0) return rows;
+  const hasHeldRow = rows.some((row) => String(row.title || "") === "Held-name stress");
+  if (hasHeldRow) return rows;
+  return [...rows, {
     title: "Held-name stress",
     severity: "watch",
     guidance: "Review material held underlyings before acting.",
     evidence: heldStressSummary(heldStress, 2),
-  };
-  const hasHeldRow = rows.some((row) => {
-    const text = `${row.title || ""} ${row.evidence || ""} ${row.guidance || ""}`.toLowerCase();
-    return text.includes("held") && text.includes("stress");
-  });
-  if (hasHeldRow) return rows.slice(0, 3);
-  return [...rows.slice(0, 2), heldRow];
+  }];
 }
 
+// Severity maps exactly onto the daemon ladder (observe < watch < act <
+// urgent, with order-mismatch "critical"); direction-style actions are the
+// only fallback. No text sniffing.
 function alertTone(alert) {
   const severity = String(alert.severity || "").toLowerCase();
+  if (["urgent", "act", "critical"].includes(severity)) return "risk";
+  if (["watch", "warn", "warning"].includes(severity)) return "warn";
+  if (["observe", "ok", "info"].includes(severity)) return "info";
   const action = String(alert.action || "").toLowerCase();
-  if (["act", "risk", "high", "critical"].includes(severity) || ["defend", "rebalance"].includes(action)) return "risk";
-  if (["watch", "warn", "warning", "medium"].includes(severity)) return "warn";
-  if (["observe", "ok", "info", "low"].includes(severity)) return "info";
-
-  const text = `${alert.title || ""} ${alert.body || ""}`.toLowerCase();
-  if (text.includes("act now") || text.includes("defend now") || text.includes("high severity")) return "risk";
-  if (text.includes("watch") || text.includes("warn") || text.includes("spike") || text.includes("down")) return "warn";
+  if (["defend", "rebalance", "order_mismatch"].includes(action)) return "risk";
   return "info";
 }
 
+const alertToneChip = { risk: "ACT", warn: "WATCH", info: "INFO" };
+
+// Data-quality caveats need eyes but are not market conditions; the chip
+// says which world the row lives in.
+function alertChipLabel(alert) {
+  if (String(alert.direction || "") === "data_quality" && alertTone(alert) === "warn") return "DATA";
+  return alertToneChip[alertTone(alert)];
+}
+
+function isDataQualityItem(alert) {
+  return String(alert.direction || "") === "data_quality" && alertTone(alert) === "warn";
+}
+
+// Clearing history and dismissing the live previews are separate, honestly
+// labeled actions: clear removes read history records only; dismiss suppresses
+// the current snapshot's previews until the canary signal changes.
 async function clearAlerts() {
   const res = await fetch("/api/alerts", { method: "DELETE", credentials: "include" });
   if (!res.ok) return;
   state.alerts = [];
   state.selectedAlertID = null;
-  const fp = currentCanaryFingerprint();
-  if (fp) {
-    state.clearedAlertFingerprint = fp;
-    localStorage.setItem("ibkrClearedAlertFingerprint", fp);
-  }
   renderAlerts();
   renderSelectedAlert();
+}
+
+function dismissCurrentSignals() {
+  const fp = currentCanaryFingerprint();
+  if (!fp) return;
+  state.clearedAlertFingerprint = fp;
+  localStorage.setItem("ibkrClearedAlertFingerprint", fp);
+  renderAlerts();
 }
 
 async function enablePush() {
@@ -1137,4 +1337,4 @@ function canUseWebPush() {
   return hasNotifications() && "PushManager" in globalThis && !!navigator.serviceWorker;
 }
 
-export { acknowledgeAttention, acknowledgeAttentionNow, alertIsStale, alertItems, alertRowElement, alertSourceLabel, alertSourceTitle, alertTone, allAlertItems, applyAttention, applyGovernanceCutoverOverlay, applyGovernanceCutoverReceipt, attentionViewReady, canUseWebPush, canaryHasPortfolioAlert, canaryPreviewRows, clearAlerts, currentAlertPreviewItems, currentCanaryFingerprint, currentCanaryHasPortfolioAlert, currentHistoryAlertItems, enablePush, fetchAttentionHistories, filterAlertItems, governanceAttemptRows, governanceOccurrenceLifecycle, handleAttentionContextChange, hasNotifications, liveAlertPreviewsSuppressed, notificationStateLabel, previousContextAlertItems, refreshAlerts, refreshAttention, refreshGovernance, refreshPushState, renderAlertList, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, scheduleGovernanceRefresh, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility, staleAlertReason, unreadRefsAppear, validateAlertSettings, validateAttention, validateGovernanceResponse, warningMessages };
+export { acknowledgeAttention, acknowledgeAttentionNow, alertIsStale, alertRowElement, alertSourceLabel, alertTone, allAlertItems, applyAttention, applyGovernanceCutoverOverlay, applyGovernanceCutoverReceipt, attentionViewReady, canUseWebPush, canaryHasPortfolioAlert, canaryPreviewRows, clearAlerts, currentAlertPreviewItems, currentCanaryFingerprint, currentCanaryHasPortfolioAlert, currentHistoryAlertItems, dismissCurrentSignals, enablePush, fetchAttentionHistories, firstSeenForCurrentSignal, governanceAttemptRows, governanceOccurrenceLifecycle, handleAttentionContextChange, hasNotifications, liveAlertPreviewsSuppressed, notificationStateLabel, previousContextAlertItems, refreshAlerts, refreshAttention, refreshGovernance, refreshPushState, renderAlertList, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, scheduleGovernanceRefresh, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility, staleAlertReason, unreadRefsAppear, validateAlertSettings, validateAttention, validateGovernanceResponse, warningMessages };
