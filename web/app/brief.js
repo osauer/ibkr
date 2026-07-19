@@ -289,12 +289,17 @@ function renderOneTapRow(row, brief, rulesDelta = {}) {
     button.addEventListener("click", () => submitReconcileSignoff(fingerprint, reportID));
     el.append(button);
     // Signability is statement-scoped by design; when the rulebook changed
-    // since the last stamped brief, the caveat sits on the control so the
-    // sign-off cannot borrow the delta's ambiguity.
-    if (rulesDeltaUnclean(rulesDelta)) {
+    // since the last stamped brief — or the delta cannot be verified at all —
+    // the caveat sits on the control so the sign-off cannot borrow the
+    // delta's ambiguity. Unknown is not clean.
+    const deltaStatus = String(rulesDelta.status || "").toLowerCase();
+    const deltaUnknowable = !rulesDeltaUnclean(rulesDelta) && deltaStatus !== "" && deltaStatus !== "ok";
+    if (rulesDeltaUnclean(rulesDelta) || deltaUnknowable) {
       const caveat = document.createElement("p");
       caveat.className = "brief-action-message brief-signoff-caveat";
-      caveat.textContent = "Note: the rulebook changed since the last stamped brief — review the Rules delta row before signing.";
+      caveat.textContent = deltaUnknowable
+        ? "Note: the rulebook delta cannot be verified right now — unknown is not clean; review the Rules delta row before signing."
+        : "Note: the rulebook changed since the last stamped brief — review the Rules delta row before signing.";
       el.append(caveat);
     }
   }

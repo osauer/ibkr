@@ -981,6 +981,12 @@ func TestBriefClosedSessionDowngradesExpectedColdness(t *testing.T) {
 	if row := closed["borrow"]; row.Status != rpc.BriefStatusDegraded || !strings.Contains(row.Detail, "source health is degraded") {
 		t.Fatalf("closed degraded borrow row=%+v", row.BriefRowState)
 	}
+	// A status outside the known vocabulary is never quiet-eligible: only
+	// stale/unknown may read as expected idleness while the market is closed.
+	weird := &rpc.MarketEventsResult{SourceHealth: []rpc.SourceHealth{{Source: "trading_halts", Status: "auth_failed", AsOf: asOf}}}
+	if row := byKind(briefMarketEventRows(weird, rules, nil, false))["halt"]; row.Status != rpc.BriefStatusDegraded {
+		t.Fatalf("unrecognized status must degrade even closed: %+v", row.BriefRowState)
+	}
 
 	open := byKind(briefMarketEventRows(events, rules, nil, true))
 	if row := open["halt"]; row.Status != rpc.BriefStatusDegraded {

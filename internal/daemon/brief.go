@@ -708,16 +708,21 @@ func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult
 			state = briefDegraded(fmt.Sprintf("%d known; one or more event sources are degraded", len(syms)))
 		case worst == "" || worst == "ok":
 			// healthy source: flagged copy stands as-is
-		case sessionOpen || worst == rpc.SourceStatusDegraded || worst == rpc.SourceStatusPartial:
-			// Abnormal-for-session states keep their weight even while the
-			// market is closed: degraded/partial mean the source misbehaved,
-			// not that it went idle.
-			state = briefDegraded(flagged + "; source health is " + worst + briefLastChecked(lastChecked))
+		case !sessionOpen && (worst == rpc.SourceStatusStale || worst == rpc.SourceStatusUnknown):
+			// Only stale/unknown are quiet-eligible while closed: no fresh
+			// update is expected, and the copy claims only what the code
+			// verified — counts come from the last good data, not a fresh
+			// check, so a zero is never asserted as current fact.
+			inLast := fmt.Sprintf("%d held %s flagged in the last good data", len(syms), pluralNoun(len(syms), "symbol"))
+			if len(syms) == 0 {
+				inLast = "no flags in the last good data"
+			}
+			state = briefOK(inLast + "; no fresh update expected while the market is closed (source health " + worst + briefLastChecked(lastChecked) + ")")
 		default:
-			// stale/unknown while closed: no fresh update is expected, and the
-			// copy claims only what the code verified — the health state and
-			// when the source last reported.
-			state = briefOK(flagged + "; no fresh update expected while the market is closed (source health " + worst + briefLastChecked(lastChecked) + ")")
+			// Everything else — degraded, partial, any status outside the
+			// known vocabulary, or any non-ok state during an open session —
+			// keeps its weight: a source that misbehaved is not idle.
+			state = briefDegraded(flagged + "; source health is " + worst + briefLastChecked(lastChecked))
 		}
 		if kind == "earnings" && len(syms) > 0 {
 			if unknown := briefUnknownEarningsRules(rules); len(unknown) > 0 {
