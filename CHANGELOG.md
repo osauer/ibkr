@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and release entries follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) categories (Added / Changed / Deprecated / Removed / Fixed / Security).
 
+## v2.2.1 — 2026-07-19 08:18 CEST
+
+### What's new
+
+- **Releases no longer wait on a human for the registry step.** The MCP Registry entry is published automatically by a GitHub Actions workflow when the release goes out; the release pipeline now verifies that publish happened instead of prompting for a device code. The interactive login remains only as a fallback when the workflow fails.
+
+### Changed
+
+- The release pipeline's registry leg is verify-first: after the GitHub release is created, it polls the public MCP Registry for the exact released version (about four minutes, reporting the Actions `registry-publish` run status while it waits) and succeeds without operator interaction once the workflow-published entry appears. Only on timeout does it fall back to the previous interactive device-code login and direct publish. Standalone `make registry-publish` keeps its direct login+publish behavior as the manual heal, and the release preflight reminder now notes a browser is needed only if the automated publish fails.
+
 ## v2.2.0 — 2026-07-19 07:22 CEST
 
 ### What's new
