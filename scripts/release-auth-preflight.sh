@@ -5,16 +5,14 @@
 # minute 0:
 #   - gh CLI auth (release-publish creates the GitHub Release page); goes
 #     stale between releases and used to surface only at the last legs.
-#   - The registry leg's preconditions. MCP Registry JWTs from the GitHub
-#     device-code flow live only ~5 minutes (observed v2.1.0, 2026-07-18;
-#     originally assumed hours), so a stored token is always dead by the
-#     registry-publish leg and gating on residual validity — or refreshing
-#     here — is meaningless. The real credential mint is the device-code
-#     login that registry-publish-with-login.sh runs AT the publish leg;
-#     this preflight verifies that backstop is armed (publisher binary
-#     present, MCP_REGISTRY_AUTO_LOGIN not disabled) and reminds the
-#     operator to be at a browser near the END of the pipeline (v2.0.0
-#     stranded twice when nobody was).
+#   - The registry leg's local fallback preconditions. The normal release path
+#     waits for the registry-publish Actions workflow to publish via OIDC. If
+#     that workflow does not deliver, registry-publish-with-login.sh is the
+#     backstop. Its GitHub device-code JWTs live only ~5 minutes (observed
+#     v2.1.0, 2026-07-18; originally assumed hours), so refreshing one here is
+#     meaningless. This preflight verifies that fallback is armed (publisher
+#     binary present, MCP_REGISTRY_AUTO_LOGIN not disabled); the operator needs
+#     a browser only if the OIDC workflow fails.
 
 set -euo pipefail
 
@@ -35,7 +33,7 @@ command -v "$publisher" >/dev/null 2>&1 \
     || fail "mcp-publisher not found at '$publisher' — the registry-publish leg would strand"
 
 if [ "$auto_login" != "1" ]; then
-    fail "MCP_REGISTRY_AUTO_LOGIN=0: registry JWTs live only ~5 minutes, so without the publish-leg auto-login every release strands at registry-publish — drop the override"
+    fail "MCP_REGISTRY_AUTO_LOGIN=0 disables the local device-code fallback if Actions OIDC fails — drop the override"
 fi
 
 token_file="${XDG_CONFIG_HOME:-$HOME/.config}/mcp-publisher/token.json"
@@ -59,10 +57,11 @@ PY
 }
 
 # Stored-token state is informational only: with ~5-minute JWTs no stored
-# token survives to the registry leg, so nothing here gates the release.
+# token is expected to survive until an OIDC-failure fallback, so nothing here
+# gates the release.
 if remaining="$(registry_jwt_remaining_minutes 2>/dev/null)"; then
     if [ "$remaining" -gt 0 ]; then
-        note "stored registry JWT has ${remaining}m left — it will still be expired by the registry-publish leg"
+        note "stored registry JWT has ${remaining}m left — it is not used by the normal Actions OIDC path"
     else
         note "stored registry JWT expired $((-remaining))m ago (normal: registry JWTs live ~5 minutes)"
     fi
@@ -70,4 +69,4 @@ else
     note "no readable registry JWT at $token_file (normal between releases)"
 fi
 
-note "REMINDER: registry-publish runs '$(basename "$publisher") login $login_method' near the END of the pipeline — be at a browser then; the device code expires in ~1 minute"
+note "REMINDER: the device code is needed only if the Actions OIDC workflow fails; if fallback starts near the END of the pipeline, be ready to use a browser within ~1 minute"

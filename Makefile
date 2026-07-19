@@ -56,7 +56,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check agent-config-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish registry-publish-verify-first release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check agent-config-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -726,13 +726,24 @@ release-registry-server: ## Generate and validate dist/server.json for MCP Regis
 registry-login: ## Refresh MCP Registry auth token (default: GitHub device flow)
 	$(MCP_PUBLISHER) login $(MCP_REGISTRY_LOGIN_METHOD)
 
-release-auth-preflight: ## Fail-fast gh auth + registry-leg precondition check (registry JWTs live ~5m; device-code login happens at the publish leg)
+release-auth-preflight: ## Fail-fast gh auth + registry fallback preconditions (device code only if Actions OIDC fails)
 	MCP_REGISTRY_AUTO_LOGIN=$(MCP_REGISTRY_AUTO_LOGIN) \
 		./scripts/release-auth-preflight.sh "$(MCP_PUBLISHER)" "$(MCP_REGISTRY_LOGIN_METHOD)"
 
 registry-publish: release-registry-server ## Publish dist/server.json, refreshing expired Registry auth when needed
 	MCP_REGISTRY_AUTO_LOGIN=$(MCP_REGISTRY_AUTO_LOGIN) MCP_REGISTRY_LOGIN_METHOD=$(MCP_REGISTRY_LOGIN_METHOD) \
 		./scripts/registry-publish-with-login.sh "$(MCP_PUBLISHER)" "$(DIST_DIR)/server.json"
+
+registry-publish-verify-first: ## Release-only: wait for Actions OIDC, then fall back to direct login + publish
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "registry-publish-verify-first: RELEASE_VERSION is required, e.g. make registry-publish-verify-first RELEASE_VERSION=v1.2.1" >&2; \
+		exit 1; \
+	fi
+	@./scripts/registry-publish-verify-first.sh "$(RELEASE_VERSION)" \
+		make --no-print-directory registry-publish \
+		RELEASE_VERSION="$(RELEASE_VERSION)" DIST_DIR="$(DIST_DIR)" \
+		MCP_PUBLISHER="$(MCP_PUBLISHER)" MCP_REGISTRY_AUTO_LOGIN="$(MCP_REGISTRY_AUTO_LOGIN)" \
+		MCP_REGISTRY_LOGIN_METHOD="$(MCP_REGISTRY_LOGIN_METHOD)"
 
 # Compose the GitHub Release notes by substituting __VERSION__ and
 # __HIGHLIGHTS__ in the install-header template, then appending the
@@ -858,10 +869,9 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	fi
 	@# Auth preflight before any expensive step: gh auth goes stale
 	@# between releases and used to surface only at the LAST pipeline
-	@# legs (v2.0.0 stranded twice on registry-publish). Registry JWTs
-	@# live only ~5 minutes, so the real device-code login happens AT the
-	@# registry-publish leg via its auto-login; this checks gh plus that
-	@# backstop and warns the operator to be at a browser near the end.
+	@# legs (v2.0.0 stranded twice on registry-publish). Actions OIDC is
+	@# the normal registry path; this checks gh plus the local device-code
+	@# fallback in case the workflow does not deliver the released version.
 	$(MAKE) release-auth-preflight
 	@# Validate the CHANGELOG entry shape before any expensive step. A
 	@# malformed entry (wrong version heading, missing ### What's new, or
@@ -916,7 +926,7 @@ release: ## Tag and push a release: make release RELEASE_VERSION=vX.Y.Z [MESSAGE
 	claude plugin tag . --push --message "$$msg"
 	@msg="$${MESSAGE:-$(RELEASE_VERSION)}"; \
 	$(MAKE) release-publish RELEASE_VERSION=$(RELEASE_VERSION) MESSAGE="$$msg"
-	$(MAKE) registry-publish RELEASE_VERSION=$(RELEASE_VERSION)
+	$(MAKE) registry-publish-verify-first RELEASE_VERSION=$(RELEASE_VERSION)
 	@echo
 	@echo "Released $(RELEASE_VERSION):"
 	@echo "  https://github.com/osauer/ibkr/releases/tag/$(RELEASE_VERSION)"

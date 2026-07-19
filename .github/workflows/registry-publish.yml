@@ -1,8 +1,8 @@
 # Publish the MCP Registry entry for a GitHub release via Actions OIDC —
 # no device code, no human. Runs on every release publication and is
-# idempotent: if the local release pipeline's registry leg already published
-# this version (operator was present), the job no-ops green. If the local
-# leg stranded (operator away), this job is the automatic heal.
+# idempotent: if a manual or fallback local publish already registered this
+# version, the job no-ops green. The local release pipeline normally waits for
+# this workflow and uses device-code publishing only as a delayed fallback.
 #
 # Manual heal for an older tag: Actions → registry-publish → Run workflow.
 name: registry-publish
