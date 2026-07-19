@@ -23,6 +23,7 @@ import (
 	"github.com/osauer/ibkr/v2/internal/app/auth"
 	"github.com/osauer/ibkr/v2/internal/app/daemonclient"
 	"github.com/osauer/ibkr/v2/internal/app/live"
+	"github.com/osauer/ibkr/v2/internal/app/push"
 	"github.com/osauer/ibkr/v2/internal/app/relay"
 	"github.com/osauer/ibkr/v2/internal/app/state"
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -85,6 +86,317 @@ func TestBootstrapRequiresAuth(t *testing.T) {
 	handler.ServeHTTP(res, req)
 	if res.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d, want 401; body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestGovernanceDTOIsAuthenticatedAndTyped(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	client := governanceRouteClient{routeFakeClient: routeFakeClient{}, nudges: readyRouteNudges(now), brief: &rpc.BriefResult{
+		Process: rpc.BriefProcessSection{MonthlyPulse: &rpc.BriefMonthlyPulseRow{Status: rpc.BriefMonthlyPulseDue, Month: "2026-07", DueAt: now}},
+	}}
+	srv, store, _ := newGovernanceTestHandler(t, client)
+	handler := srv.Handler()
+
+	unauth := httptest.NewRecorder()
+	handler.ServeHTTP(unauth, httptest.NewRequest(http.MethodGet, "/api/governance", nil))
+	if unauth.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth status=%d, want 401", unauth.Code)
+	}
+
+	occ, _, err := store.UpsertGovernanceOccurrence(state.GovernanceOccurrence{
+		Fingerprint: "sha256:" + strings.Repeat("a", 64), Kind: rpc.NudgeKindPolicyDrift, State: rpc.NudgeStateOpen,
+		Severity: rpc.NudgeSeverityAct, Title: "Policy pins need review", Body: "Review the policy pin status.",
+		Destination: rpc.NudgeDestinationAlerts, OccurredAt: now,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordGovernanceAttempt(state.GovernanceAttempt{OccurrenceID: occ.DisplayID, TargetRef: state.GovernanceTargetRef("device-private", "subscription-private"), ReceiptKey: "internal-private", At: now, Class: state.GovernanceTransportRejected}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := routeSessionCookie(t, handler)
+	req := httptest.NewRequest(http.MethodGet, "/api/governance", nil)
+	req.AddCookie(cookie)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	raw := append([]byte(nil), res.Body.Bytes()...)
+	var dto GovernanceDTO
+	if err := json.Unmarshal(raw, &dto); err != nil {
+		t.Fatal(err)
+	}
+	if len(dto.Candidates) != 1 || dto.SourceHealth.Aggregate != rpc.NudgeAggregateReady || dto.PollSource.State != live.SourceStateCurrent {
+		t.Fatalf("dto source/candidates=%+v", dto)
+	}
+	if dto.ConfirmedFlowCoverage == nil || !dto.ConfirmedFlowCoverage.CoverageFrom.Equal(now) || dto.AttemptAggregate.Rejected != 1 {
+		t.Fatalf("dto coverage/aggregate=%+v", dto)
+	}
+	if dto.AttemptAggregate.CumulativeAttempts != 1 || !strings.Contains(string(raw), `"cumulative_attempts":1`) || strings.Contains(string(raw), `"total":`) {
+		t.Fatalf("ambiguous attempt aggregate contract: %s", raw)
+	}
+	if strings.Contains(string(raw), "monthly_pulse") || strings.Contains(string(raw), "device-private") || strings.Contains(string(raw), "subscription-private") || strings.Contains(string(raw), "internal-private") {
+		t.Fatalf("governance DTO leaked private identifiers: %s", raw)
+	}
+}
+
+func TestGovernanceDTOStartupIsFailClosedAndDegradedAggregateRoundTrips(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	client := governanceRouteClient{routeFakeClient: routeFakeClient{}, nudges: readyRouteNudges(now)}
+	srv, _, _ := newGovernanceTestHandlerWithoutPoll(t, client)
+	handler := srv.Handler()
+	cookie := routeSessionCookie(t, handler)
+	for _, path := range []string{"/api/governance", "/api/bootstrap"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(cookie)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"state":"not_observed"`) || !strings.Contains(res.Body.String(), `"aggregate":"suppressed"`) || !strings.Contains(res.Body.String(), `"reason":"invalid_health"`) {
+			t.Fatalf("startup %s status=%d body=%s", path, res.Code, res.Body.String())
+		}
+	}
+
+	degraded := readyRouteNudges(now)
+	degraded.SourceHealth.Reconciliation = rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusUnavailable, Reason: rpc.NudgeHealthReasonSourceUnavailable, AsOf: now}
+	client.nudges = degraded
+	srv, _, _ = newGovernanceTestHandler(t, client)
+	handler = srv.Handler()
+	cookie = routeSessionCookie(t, handler)
+	req := httptest.NewRequest(http.MethodGet, "/api/governance", nil)
+	req.AddCookie(cookie)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"aggregate":"degraded"`) || !strings.Contains(res.Body.String(), `"confirmed_flow_coverage":{"coverage_from":"2026-07-18T09:00:00Z","pre_cutover_flows_unreviewed":false}`) {
+		t.Fatalf("degraded coverage response status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestGovernanceCutoverReviewUsesFixedPairedParamsAndDoesNotMutateAppState(t *testing.T) {
+	t.Parallel()
+	reviewedAt := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name            string
+		body            io.Reader
+		alreadyReviewed bool
+	}{
+		{name: "absent body"},
+		{name: "exact empty object idempotent result", body: strings.NewReader(`{}`), alreadyReviewed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &cutoverRouteClient{result: &rpc.NudgesCutoverReviewResult{
+				OK: true, AlreadyReviewed: tc.alreadyReviewed, ReviewedAt: reviewedAt, CoverageFrom: reviewedAt.Add(-time.Hour),
+				Evidence: rpc.NudgeCutoverReviewEvidencePairedDeviceForegroundRender,
+			}}
+			srv, store, _ := newGovernanceTestHandler(t, client)
+			handler := srv.Handler()
+			cookie := routeSessionCookie(t, handler)
+			if err := store.SetAlertMode(state.AlertModeNone); err != nil {
+				t.Fatal(err)
+			}
+			before := governanceAppStateForTest(t, store, reviewedAt)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/governance/cutover-review", tc.body)
+			req.AddCookie(cookie)
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+			}
+			if client.calls != 1 || client.params.Origin != rpc.NudgeCutoverReviewOriginPairedDevice || client.params.Evidence != rpc.NudgeCutoverReviewEvidencePairedDeviceForegroundRender {
+				t.Fatalf("cutover calls=%d params=%+v", client.calls, client.params)
+			}
+			var got rpc.NudgesCutoverReviewResult
+			if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got.AlreadyReviewed != tc.alreadyReviewed || !got.ReviewedAt.Equal(reviewedAt) || got.Evidence != rpc.NudgeCutoverReviewEvidencePairedDeviceForegroundRender {
+				t.Fatalf("result=%+v", got)
+			}
+			after := governanceAppStateForTest(t, store, reviewedAt)
+			if !bytes.Equal(after, before) {
+				t.Fatalf("cutover review mutated app governance state:\nbefore=%s\nafter=%s", before, after)
+			}
+		})
+	}
+}
+
+func TestGovernanceCutoverReviewRequiresAuthentication(t *testing.T) {
+	t.Parallel()
+	client := &cutoverRouteClient{}
+	handler := newTestHandlerWithClient(t, client).Handler()
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/governance/cutover-review", nil))
+	if res.Code != http.StatusUnauthorized || client.calls != 0 {
+		t.Fatalf("status=%d calls=%d body=%s", res.Code, client.calls, res.Body.String())
+	}
+}
+
+func TestGovernanceCutoverReviewRejectsEveryBrowserSuppliedField(t *testing.T) {
+	t.Parallel()
+	client := &cutoverRouteClient{}
+	handler := newTestHandlerWithClient(t, client).Handler()
+	cookie := routeSessionCookie(t, handler)
+	for _, body := range []string{
+		`null`,
+		`[]`,
+		`{"origin":"paired_device"}`,
+		`{"evidence":"paired_device_foreground_render_review"}`,
+		`{"Origin":"paired_device"}`,
+		`{"origin":"paired_device","origin":"agent"}`,
+		`{"report_id":"HOSTILE-REPORT"}`,
+		`{"fingerprint":"sha256:HOSTILE-FINGERPRINT"}`,
+		`{"token":"HOSTILE-TOKEN"}`,
+		`{"url":"https://evil.example/HOSTILE"}`,
+		`{"note":"HOSTILE arbitrary prose"}`,
+		`{} {}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/governance/cutover-review", strings.NewReader(body))
+		req.AddCookie(cookie)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusBadRequest || strings.Contains(res.Body.String(), "HOSTILE") || strings.Contains(res.Body.String(), "evil.example") || strings.Contains(res.Body.String(), "sha256:") {
+			t.Errorf("body=%s status=%d response=%s", body, res.Code, res.Body.String())
+		}
+	}
+	if client.calls != 0 {
+		t.Fatalf("hostile bodies reached daemon %d times", client.calls)
+	}
+}
+
+func TestGovernanceCutoverReviewMapsDaemonErrorsWithoutPrivateText(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{name: "revalidation conflict", err: &rpc.Error{Code: rpc.CodeBadRequest, Message: "HOSTILE report /private/report token"}, status: http.StatusConflict},
+		{name: "daemon unavailable", err: &rpc.Error{Code: rpc.CodeDaemonUnavailable, Message: "HOSTILE socket /private/daemon.sock"}, status: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &cutoverRouteClient{err: tc.err}
+			handler := newTestHandlerWithClient(t, client).Handler()
+			cookie := routeSessionCookie(t, handler)
+			req := httptest.NewRequest(http.MethodPost, "/api/governance/cutover-review", nil)
+			req.AddCookie(cookie)
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != tc.status || client.calls != 1 || strings.Contains(res.Body.String(), "HOSTILE") || strings.Contains(res.Body.String(), "/private") {
+				t.Fatalf("status=%d calls=%d body=%s", res.Code, client.calls, res.Body.String())
+			}
+		})
+	}
+}
+
+func TestGovernanceDTOContextPreservesTypedNullability(t *testing.T) {
+	t.Parallel()
+	zero := 0.0
+	known := 37.5
+	for _, tc := range []struct {
+		name       string
+		kind       string
+		stateValue string
+		context    *rpc.NudgeSnapshotContext
+		wantJSON   string
+		absent     bool
+	}{
+		{name: "shadow count", kind: rpc.NudgeKindShadowWouldBlock, stateValue: rpc.NudgeStateObserved, context: &rpc.NudgeSnapshotContext{Shadow: &rpc.NudgeShadowSummary{Count: 7}}, wantJSON: `"context":{"shadow":{"count":7}}`},
+		{name: "known drawdown", kind: rpc.NudgeKindDrawdownLatched, stateValue: rpc.NudgeStateOpen, context: &rpc.NudgeSnapshotContext{Drawdown: &rpc.NudgeDrawdownSummary{Tier: rpc.NudgeDrawdownTierBlock, ConsumedPct: &known}}, wantJSON: `"context":{"drawdown":{"tier":"block","consumed_pct":37.5}}`},
+		{name: "zero drawdown", kind: rpc.NudgeKindDrawdownLatched, stateValue: rpc.NudgeStateOpen, context: &rpc.NudgeSnapshotContext{Drawdown: &rpc.NudgeDrawdownSummary{Tier: rpc.NudgeDrawdownTierBlock, ConsumedPct: &zero}}, wantJSON: `"consumed_pct":0`},
+		{name: "unknown drawdown", kind: rpc.NudgeKindDrawdownLatched, stateValue: rpc.NudgeStateOpen, context: &rpc.NudgeSnapshotContext{Drawdown: &rpc.NudgeDrawdownSummary{Tier: rpc.NudgeDrawdownTierBlock}}, wantJSON: `"consumed_pct":null`},
+		{name: "absent context", kind: rpc.NudgeKindPolicyDrift, stateValue: rpc.NudgeStateOpen, absent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+			nudges := readyRouteNudges(now)
+			nudges.Candidates = []rpc.NudgeCandidate{{
+				Fingerprint: "sha256:" + strings.Repeat("b", 64), Kind: tc.kind, State: tc.stateValue,
+				OccurredAt: now,
+			}}
+			nudges.Context = tc.context
+			client := governanceRouteClient{routeFakeClient: routeFakeClient{}, nudges: nudges}
+			srv, _, _ := newGovernanceTestHandler(t, client)
+			handler := srv.Handler()
+			cookie := routeSessionCookie(t, handler)
+			req := httptest.NewRequest(http.MethodGet, "/api/governance", nil)
+			req.AddCookie(cookie)
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+			}
+			var dto GovernanceDTO
+			if err := json.Unmarshal(res.Body.Bytes(), &dto); err != nil {
+				t.Fatal(err)
+			}
+			if tc.absent {
+				if dto.Context != nil || strings.Contains(res.Body.String(), `"context"`) {
+					t.Fatalf("absent context serialized: %s", res.Body.String())
+				}
+			} else if dto.Context == nil || !strings.Contains(res.Body.String(), tc.wantJSON) {
+				t.Fatalf("context did not round trip: dto=%+v body=%s", dto.Context, res.Body.String())
+			}
+		})
+	}
+}
+
+func TestSafeDiagnosticUsesAuthenticatedDeviceFixedCopyAndHonorsNone(t *testing.T) {
+	t.Parallel()
+	srv, store, sender := newGovernanceTestHandler(t, routeFakeClient{})
+	handler := srv.Handler()
+	unauth := httptest.NewRecorder()
+	handler.ServeHTTP(unauth, httptest.NewRequest(http.MethodPost, "/api/push/test", nil))
+	if unauth.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth status=%d", unauth.Code)
+	}
+	cookie := routeSessionCookie(t, handler)
+	devices := store.Devices()
+	if len(devices) != 1 {
+		t.Fatalf("devices=%+v", devices)
+	}
+	if err := store.AddPushSubscription(state.PushSubscription{ID: "diagnostic-sub", DeviceID: devices[0].ID, Endpoint: "https://push.example/diagnostic", P256DH: "key", Auth: "auth", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	rejectedReq := httptest.NewRequest(http.MethodPost, "/api/push/test", strings.NewReader(`{"title":"arbitrary","destination":"https://evil.example"}`))
+	rejectedReq.AddCookie(cookie)
+	rejected := httptest.NewRecorder()
+	handler.ServeHTTP(rejected, rejectedReq)
+	if rejected.Code != http.StatusBadRequest || len(sender.payloads) != 0 {
+		t.Fatalf("arbitrary diagnostic status=%d sends=%d", rejected.Code, len(sender.payloads))
+	}
+
+	if err := store.SetAlertMode(state.AlertModeNone); err != nil {
+		t.Fatal(err)
+	}
+	noneReq := httptest.NewRequest(http.MethodPost, "/api/push/test", nil)
+	noneReq.AddCookie(cookie)
+	noneRes := httptest.NewRecorder()
+	handler.ServeHTTP(noneRes, noneReq)
+	if noneRes.Code != http.StatusOK || len(sender.payloads) != 0 || !strings.Contains(noneRes.Body.String(), `"state":"suppressed"`) {
+		t.Fatalf("none diagnostic status=%d sends=%d body=%s", noneRes.Code, len(sender.payloads), noneRes.Body.String())
+	}
+	if err := store.SetAlertMode(state.AlertModeWatchAndAct); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/push/test", nil)
+	req.AddCookie(cookie)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK || len(sender.payloads) != 1 {
+		t.Fatalf("paired diagnostic status=%d sends=%d body=%s", res.Code, len(sender.payloads), res.Body.String())
+	}
+	want := push.SafeDiagnosticPayload()
+	if sender.payloads[0] != want {
+		t.Fatalf("diagnostic payload=%+v, want fixed=%+v", sender.payloads[0], want)
+	}
+	view := store.Governance(time.Now())
+	if len(view.Occurrences) != 0 || len(view.Attempts) != 0 || len(view.Receipts) != 0 || view.Diagnostic.State != state.GovernanceTransportAccepted {
+		t.Fatalf("diagnostic contaminated governance evidence: %+v", view)
 	}
 }
 
@@ -912,6 +1224,104 @@ func newTestHandlerWithClientAndRelay(t *testing.T, fakeClient daemonclient.Clie
 	return srv
 }
 
+type governanceHTTPTestSender struct {
+	payloads []push.Payload
+}
+
+func (s *governanceHTTPTestSender) Send(_ context.Context, sub state.PushSubscription, _ state.VAPIDKeys, payload push.Payload) state.PushAttempt {
+	s.payloads = append(s.payloads, payload)
+	return state.PushAttempt{SubscriptionID: sub.ID, OK: true, Class: state.GovernanceTransportAccepted}
+}
+
+func newGovernanceTestHandler(t *testing.T, fakeClient daemonclient.Client) (*hyperserve.Server, *state.Store, *governanceHTTPTestSender) {
+	return newGovernanceTestHandlerWithPoll(t, fakeClient, true)
+}
+
+func newGovernanceTestHandlerWithoutPoll(t *testing.T, fakeClient daemonclient.Client) (*hyperserve.Server, *state.Store, *governanceHTTPTestSender) {
+	return newGovernanceTestHandlerWithPoll(t, fakeClient, false)
+}
+
+func newGovernanceTestHandlerWithPoll(t *testing.T, fakeClient daemonclient.Client, poll bool) (*hyperserve.Server, *state.Store, *governanceHTTPTestSender) {
+	t.Helper()
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureVAPID(time.Now().UTC(), func() (string, string, error) { return "private", "public", nil }); err != nil {
+		t.Fatal(err)
+	}
+	authMgr := auth.NewManager(store, time.Minute)
+	liveSvc := live.New(fakeClient, time.Minute, time.Minute)
+	if poll {
+		liveSvc.PollOnce(t.Context())
+	}
+	srv, err := hyperserve.NewServer(hyperserve.WithAddr("127.0.0.1:0"), hyperserve.WithSuppressBanner(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &governanceHTTPTestSender{}
+	Register(Dependencies{
+		Server: srv, Store: store, Auth: authMgr, Daemon: fakeClient, Live: liveSvc,
+		Relay: relay.Noop{PublicURL: "https://relay.example"}, PublicURL: "https://relay.example", Version: "test-version",
+		PushSender: sender,
+	})
+	return srv, store, sender
+}
+
+type governanceRouteClient struct {
+	routeFakeClient
+	nudges *rpc.NudgesSnapshotResult
+	brief  *rpc.BriefResult
+}
+
+func (c governanceRouteClient) NudgesSnapshot(context.Context) (*rpc.NudgesSnapshotResult, error) {
+	return c.nudges, nil
+}
+func (c governanceRouteClient) Brief(context.Context) (*rpc.BriefResult, error) { return c.brief, nil }
+
+type cutoverRouteClient struct {
+	routeFakeClient
+	params rpc.NudgesCutoverReviewParams
+	result *rpc.NudgesCutoverReviewResult
+	err    error
+	calls  int
+}
+
+func (c *cutoverRouteClient) NudgesCutoverReview(_ context.Context, params rpc.NudgesCutoverReviewParams) (*rpc.NudgesCutoverReviewResult, error) {
+	c.calls++
+	c.params = params
+	return c.result, c.err
+}
+
+func governanceAppStateForTest(t *testing.T, store *state.Store, at time.Time) []byte {
+	t.Helper()
+	vapid, hasVAPID := store.VAPID()
+	value := struct {
+		AlertSettings state.AlertSettings      `json:"alert_settings"`
+		Subscriptions []state.PushSubscription `json:"subscriptions"`
+		Governance    state.GovernanceView     `json:"governance"`
+		LastPush      *state.PushAttempt       `json:"last_push"`
+		VAPID         state.VAPIDKeys          `json:"vapid"`
+		HasVAPID      bool                     `json:"has_vapid"`
+	}{
+		AlertSettings: store.AlertSettings(), Subscriptions: store.PushSubscriptions(),
+		Governance: store.Governance(at), LastPush: store.LastPush(), VAPID: vapid, HasVAPID: hasVAPID,
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func readyRouteNudges(now time.Time) *rpc.NudgesSnapshotResult {
+	ok := rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusOK, AsOf: now}
+	return &rpc.NudgesSnapshotResult{AsOf: now, Candidates: []rpc.NudgeCandidate{{
+		Fingerprint: "sha256:" + strings.Repeat("a", 64), Kind: rpc.NudgeKindPolicyDrift, State: rpc.NudgeStateOpen,
+		Severity: rpc.NudgeSeverityAct, Title: "Policy pins need review", Body: "Review the policy pin status.", OccurredAt: now, Destination: rpc.NudgeDestinationAlerts,
+	}}, SourceHealth: rpc.NudgeSourceHealth{Policy: ok, Reconciliation: ok, Capital: ok, Pins: ok, Cadence: ok, ConfirmedFlow: ok}, ConfirmedFlowCoverage: &rpc.NudgeConfirmedFlowCoverage{CoverageFrom: now}}
+}
+
 type routeTestRelay struct {
 	route string
 }
@@ -967,6 +1377,14 @@ func routeSessionCookie(t *testing.T, handler http.Handler) *http.Cookie {
 }
 
 type routeFakeClient struct{}
+
+func (routeFakeClient) NudgesSnapshot(context.Context) (*rpc.NudgesSnapshotResult, error) {
+	return nil, nil
+}
+
+func (routeFakeClient) NudgesCutoverReview(context.Context, rpc.NudgesCutoverReviewParams) (*rpc.NudgesCutoverReviewResult, error) {
+	return nil, nil
+}
 
 func (routeFakeClient) Status(context.Context) (*rpc.HealthResult, error) {
 	return &rpc.HealthResult{Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7497}, nil

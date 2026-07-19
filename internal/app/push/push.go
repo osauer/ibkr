@@ -3,13 +3,17 @@ package push
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
 	"github.com/osauer/ibkr/v2/internal/app/state"
+	"github.com/osauer/ibkr/v2/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 type Sender interface {
@@ -17,12 +21,57 @@ type Sender interface {
 }
 
 type Payload struct {
-	Title    string `json:"title"`
-	Body     string `json:"body"`
-	URL      string `json:"url,omitempty"`
-	AlertID  string `json:"alert_id,omitempty"`
-	Action   string `json:"action,omitempty"`
-	Severity string `json:"severity,omitempty"`
+	Title       string `json:"title"`
+	Body        string `json:"body"`
+	Severity    string `json:"severity,omitempty"`
+	Kind        string `json:"kind,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	DisplayID   string `json:"display_id,omitempty"`
+	URL         string `json:"url,omitempty"`
+	AlertID     string `json:"alert_id,omitempty"`
+	Action      string `json:"action,omitempty"`
+}
+
+// GovernancePayload is the only constructor for governance Web Push copy.
+// Canonicalization replaces every caller-supplied display field with the
+// shared enum template, while the returned struct populates only the explicit
+// lock-screen allowlist.
+func GovernancePayload(candidate rpc.NudgeCandidate, displayID string) (Payload, error) {
+	canonical, err := risk.CanonicalizeNudgeCandidate(risk.NudgeCandidate{
+		Fingerprint: candidate.Fingerprint, Kind: candidate.Kind, State: candidate.State,
+		Severity: candidate.Severity, Title: candidate.Title, Body: candidate.Body,
+		OccurredAt: candidate.OccurredAt, DueAt: candidate.DueAt, ExpiresAt: candidate.ExpiresAt,
+		Destination: candidate.Destination,
+	})
+	if err != nil {
+		return Payload{}, err
+	}
+	if !validGovernanceDisplayID(displayID) {
+		return Payload{}, errors.New("invalid governance display id")
+	}
+	return Payload{
+		Title: canonical.Title, Body: canonical.Body, Severity: canonical.Severity,
+		Kind: canonical.Kind, Destination: canonical.Destination, DisplayID: displayID,
+	}, nil
+}
+
+func validGovernanceDisplayID(displayID string) bool {
+	if len(displayID) != len("gov-")+16 || !strings.HasPrefix(displayID, "gov-") {
+		return false
+	}
+	for _, char := range displayID[len("gov-"):] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func SafeDiagnosticPayload() Payload {
+	return Payload{
+		Title: "IBKR notification test", Body: "Safe test notification. No account data is included.",
+		Destination: rpc.NudgeDestinationAlerts, DisplayID: "diagnostic-safe-test",
+	}
 }
 
 type WebPushSender struct {
@@ -38,11 +87,13 @@ func (s WebPushSender) Send(ctx context.Context, sub state.PushSubscription, key
 	attempt := state.PushAttempt{At: time.Now().UTC(), SubscriptionID: sub.ID, AlertID: payload.AlertID}
 	if err := ValidateSubscription(sub); err != nil {
 		attempt.Error = err.Error()
+		attempt.Class = state.GovernanceTransportMissingKeys
 		return attempt
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		attempt.Error = err.Error()
+		attempt.Class = state.GovernanceTransportHTTPRejected
 		return attempt
 	}
 	resp, err := webpush.SendNotificationWithContext(ctx, body, &webpush.Subscription{
@@ -58,15 +109,36 @@ func (s WebPushSender) Send(ctx context.Context, sub state.PushSubscription, key
 	})
 	if err != nil {
 		attempt.Error = err.Error()
+		attempt.Class = classifyTransport(err, 0)
 		return attempt
 	}
 	defer resp.Body.Close()
 	attempt.Status = resp.Status
 	attempt.OK = resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
+	attempt.Class = classifyTransport(nil, resp.StatusCode)
 	if !attempt.OK {
 		attempt.Error = fmt.Sprintf("push service returned %s", resp.Status)
 	}
 	return attempt
+}
+
+func classifyTransport(err error, status int) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return state.GovernanceTransportDeadlineRetry
+	case errors.Is(err, context.Canceled):
+		return state.GovernanceTransportCanceledRetry
+	case err != nil:
+		return state.GovernanceTransportNetworkRetry
+	case status >= http.StatusOK && status < http.StatusMultipleChoices:
+		return state.GovernanceTransportAccepted
+	case status == http.StatusNotFound || status == http.StatusGone:
+		return state.GovernanceTransportDead
+	case status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError:
+		return state.GovernanceTransportHTTPRetry
+	default:
+		return state.GovernanceTransportHTTPRejected
+	}
 }
 
 func ValidateSubscription(sub state.PushSubscription) error {

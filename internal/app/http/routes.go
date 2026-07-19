@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"github.com/osauer/ibkr/v2/internal/app/auth"
 	"github.com/osauer/ibkr/v2/internal/app/daemonclient"
 	"github.com/osauer/ibkr/v2/internal/app/live"
+	"github.com/osauer/ibkr/v2/internal/app/push"
 	"github.com/osauer/ibkr/v2/internal/app/relay"
 	"github.com/osauer/ibkr/v2/internal/app/state"
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -25,14 +27,15 @@ import (
 )
 
 type Dependencies struct {
-	Server    *hyperserve.Server
-	Store     *state.Store
-	Auth      *auth.Manager
-	Daemon    daemonclient.Client
-	Live      *live.Service
-	Relay     relay.Client
-	PublicURL string
-	Version   string
+	Server     *hyperserve.Server
+	Store      *state.Store
+	Auth       *auth.Manager
+	Daemon     daemonclient.Client
+	Live       *live.Service
+	Relay      relay.Client
+	PublicURL  string
+	Version    string
+	PushSender push.Sender
 }
 
 type handler struct {
@@ -114,6 +117,9 @@ func Register(deps Dependencies) {
 	srv.POST("/api/recon/signoff", h.requireAuth(h.handleReconcileSignoff))
 	srv.POST("/api/push/subscribe", h.requireAuth(h.handlePushSubscribe))
 	srv.DELETE("/api/push/{id}", h.requireAuth(h.handlePushDelete))
+	srv.GET("/api/governance", h.requireAuth(h.handleGovernance))
+	srv.POST("/api/governance/cutover-review", h.requireAuth(h.handleGovernanceCutoverReview))
+	srv.POST("/api/push/test", h.requireAuth(h.handleSafePushTest))
 }
 
 func (h *handler) serveIndex(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -336,7 +342,193 @@ func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) 
 		"relay":            h.deps.Relay.Status(),
 		"vapid_public_key": vapid.PublicKey,
 		"auth":             h.authStatus(r),
+		"governance":       h.governanceDTO(),
 	})
+}
+
+type GovernancePollSource struct {
+	State         string    `json:"state"`
+	Reason        string    `json:"reason,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at,omitzero"`
+	LastSuccessAt time.Time `json:"last_success_at,omitzero"`
+}
+
+type GovernanceAttemptAggregate struct {
+	CumulativeAttempts int `json:"cumulative_attempts"`
+	Accepted           int `json:"push_service_accepted"`
+	RetryableFailures  int `json:"retryable_failures"`
+	Rejected           int `json:"rejected"`
+	RetryPending       int `json:"retry_pending"`
+	Dead               int `json:"dead_subscription"`
+	Missed             int `json:"missed"`
+	Suppressed         int `json:"suppressed"`
+	Interrupted        int `json:"interrupted_uncertain"`
+	TargetRetired      int `json:"target_retired"`
+}
+
+type GovernanceHealthAggregate struct {
+	PartialEpisodes int `json:"partial_episodes"`
+	StateFailures   int `json:"state_write_failures"`
+	Recoveries      int `json:"recoveries"`
+	Overflows       int `json:"overflows"`
+}
+
+// GovernanceSourceHealth is a wire value rather than rpc.NudgeSourceHealth so
+// its JSON encoding preserves the result-level aggregate that was normalized
+// with candidate context.
+type GovernanceSourceHealth struct {
+	Aggregate      string               `json:"aggregate"`
+	Policy         rpc.NudgeInputHealth `json:"policy"`
+	Reconciliation rpc.NudgeInputHealth `json:"reconciliation"`
+	Capital        rpc.NudgeInputHealth `json:"capital"`
+	Pins           rpc.NudgeInputHealth `json:"pins"`
+	Cadence        rpc.NudgeInputHealth `json:"cadence"`
+	ConfirmedFlow  rpc.NudgeInputHealth `json:"confirmed_flow"`
+}
+
+// GovernanceDTO is the typed SPA boundary. Current candidates retain the
+// foundation's opaque semantic fingerprint; durable app evidence deliberately
+// excludes that fingerprint, internal receipt keys, raw device/subscription
+// identities, endpoints, keys, and transport error prose.
+type GovernanceDTO struct {
+	Candidates            []rpc.NudgeCandidate             `json:"candidates"`
+	SourceHealth          GovernanceSourceHealth           `json:"source_health"`
+	PollSource            GovernancePollSource             `json:"poll_source"`
+	ConfirmedFlowCoverage *rpc.NudgeConfirmedFlowCoverage  `json:"confirmed_flow_coverage,omitempty"`
+	Context               *rpc.NudgeSnapshotContext        `json:"context,omitempty"`
+	Occurrences           []state.GovernanceOccurrenceView `json:"occurrences"`
+	Attempts              []state.GovernanceAttemptView    `json:"attempts"`
+	AttemptAggregate      GovernanceAttemptAggregate       `json:"attempt_aggregate"`
+	HealthAggregate       GovernanceHealthAggregate        `json:"health_aggregate"`
+	DeliveryHealth        state.GovernanceDeliveryHealth   `json:"delivery_health"`
+	Diagnostic            state.GovernanceDiagnosticStatus `json:"diagnostic"`
+}
+
+func (h *handler) governanceDTO() GovernanceDTO {
+	snapshot := h.deps.Live.Snapshot()
+	view := h.deps.Store.Governance(time.Now().UTC())
+	dto := GovernanceDTO{
+		Candidates: make([]rpc.NudgeCandidate, 0), Occurrences: view.Occurrences, Attempts: view.Attempts,
+		DeliveryHealth: view.DeliveryHealth, Diagnostic: view.Diagnostic,
+		AttemptAggregate: GovernanceAttemptAggregate{
+			CumulativeAttempts: view.AttemptTotals.CumulativeAttempts, Accepted: view.AttemptTotals.Accepted,
+			RetryableFailures: view.AttemptTotals.RetryableFailures, Rejected: view.AttemptTotals.Rejected,
+			RetryPending: view.AttemptTotals.RetryPending, Dead: view.AttemptTotals.Dead, Missed: view.AttemptTotals.Missed,
+			Suppressed: view.AttemptTotals.Suppressed, Interrupted: view.AttemptTotals.Interrupted,
+			TargetRetired: view.AttemptTotals.TargetRetired,
+		},
+		HealthAggregate: GovernanceHealthAggregate{
+			PartialEpisodes: view.HealthTotals.PartialEpisodes, StateFailures: view.HealthTotals.StateFailures,
+			Recoveries: view.HealthTotals.Recoveries, Overflows: view.HealthTotals.Overflows,
+		},
+	}
+	failClosed := rpc.NormalizeNudgeSourceHealth(rpc.NudgeSourceHealth{}, 0)
+	dto.SourceHealth = governanceSourceHealth(failClosed)
+	if snapshot.Nudges != nil {
+		dto.Candidates = append(dto.Candidates, snapshot.Nudges.Candidates...)
+		normalized := rpc.NormalizeNudgeSourceHealth(snapshot.Nudges.SourceHealth, len(snapshot.Nudges.Candidates))
+		dto.SourceHealth = governanceSourceHealth(normalized)
+		if snapshot.Nudges.ConfirmedFlowCoverage != nil {
+			coverage := *snapshot.Nudges.ConfirmedFlowCoverage
+			dto.ConfirmedFlowCoverage = &coverage
+		}
+		dto.Context = cloneNudgeSnapshotContext(snapshot.Nudges.Context)
+	}
+	if source, ok := snapshot.Sources["nudges"]; ok {
+		dto.PollSource = GovernancePollSource{State: source.State, Reason: source.Reason, UpdatedAt: source.UpdatedAt, LastSuccessAt: source.LastSuccessAt}
+	}
+	return dto
+}
+
+func governanceSourceHealth(health rpc.NudgeSourceHealth) GovernanceSourceHealth {
+	return GovernanceSourceHealth{
+		Aggregate: health.Aggregate, Policy: health.Policy, Reconciliation: health.Reconciliation,
+		Capital: health.Capital, Pins: health.Pins, Cadence: health.Cadence, ConfirmedFlow: health.ConfirmedFlow,
+	}
+}
+
+func (h *handler) handleGovernance(w nethttp.ResponseWriter, _ *nethttp.Request) {
+	writeJSON(w, h.governanceDTO())
+}
+
+func (h *handler) handleGovernanceCutoverReview(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if err := decodeEmptyJSONObject(r); err != nil {
+		writeError(w, nethttp.StatusBadRequest, "governance cutover review body must be an empty JSON object")
+		return
+	}
+	if _, ok := h.session(r); !ok {
+		writeError(w, nethttp.StatusUnauthorized, "unauthorized")
+		return
+	}
+	params := rpc.NudgesCutoverReviewParams{
+		Origin:   rpc.NudgeCutoverReviewOriginPairedDevice,
+		Evidence: rpc.NudgeCutoverReviewEvidencePairedDeviceForegroundRender,
+	}
+	result, err := h.deps.Daemon.NudgesCutoverReview(r.Context(), params)
+	if err != nil {
+		writeCutoverReviewError(w, err)
+		return
+	}
+	writeJSON(w, result)
+}
+
+func decodeEmptyJSONObject(r *nethttp.Request) error {
+	if r.Body == nil || r.Body == nethttp.NoBody {
+		return nil
+	}
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	var fixed map[string]json.RawMessage
+	if err := decoder.Decode(&fixed); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	if fixed == nil || len(fixed) != 0 {
+		return errors.New("body must be an empty JSON object")
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("body must contain exactly one empty JSON object")
+	}
+	return nil
+}
+
+func writeCutoverReviewError(w nethttp.ResponseWriter, err error) {
+	var rpcErr *rpc.Error
+	if errors.As(err, &rpcErr) {
+		switch rpcErr.Code {
+		case rpc.CodeBadRequest:
+			writeError(w, nethttp.StatusConflict, "governance cutover review requires fresh revalidation")
+		case rpc.CodeDaemonUnavailable, rpc.CodeGatewayUnavailable, rpc.CodeTimeout:
+			writeError(w, nethttp.StatusServiceUnavailable, "governance cutover review unavailable")
+		default:
+			writeError(w, nethttp.StatusBadGateway, "governance cutover review failed")
+		}
+		return
+	}
+	writeError(w, nethttp.StatusServiceUnavailable, "governance cutover review unavailable")
+}
+
+func cloneNudgeSnapshotContext(in *rpc.NudgeSnapshotContext) *rpc.NudgeSnapshotContext {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Shadow != nil {
+		shadow := *in.Shadow
+		out.Shadow = &shadow
+	}
+	if in.Drawdown != nil {
+		drawdown := *in.Drawdown
+		if in.Drawdown.ConsumedPct != nil {
+			consumed := *in.Drawdown.ConsumedPct
+			drawdown.ConsumedPct = &consumed
+		}
+		out.Drawdown = &drawdown
+	}
+	return &out
 }
 
 func (h *handler) settingsSnapshot(ctx context.Context) *rpc.PlatformSettings {
@@ -502,6 +694,81 @@ func (h *handler) handlePushDelete(w nethttp.ResponseWriter, r *nethttp.Request)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+type SafePushTestResult struct {
+	State               string `json:"state"`
+	PushServiceAccepted bool   `json:"push_service_accepted"`
+}
+
+func (h *handler) handleSafePushTest(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if r.Body != nil && r.ContentLength != 0 {
+		var fixed map[string]json.RawMessage
+		if err := decodeJSON(r, &fixed); err != nil || fixed == nil || len(fixed) != 0 {
+			if err == nil {
+				err = errors.New("safe notification test body must be empty")
+			}
+			writeError(w, nethttp.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	sess, ok := h.session(r)
+	if !ok {
+		writeError(w, nethttp.StatusUnauthorized, "unauthorized")
+		return
+	}
+	now := time.Now().UTC()
+	if h.deps.Store.AlertSettings().Mode == state.AlertModeNone {
+		if err := h.deps.Store.RecordDiagnosticStatus(state.GovernanceDiagnosticStatus{State: state.GovernanceTransportSuppressed, At: now}); err != nil {
+			writeError(w, nethttp.StatusInternalServerError, "diagnostic state write failed")
+			return
+		}
+		writeJSON(w, SafePushTestResult{State: state.GovernanceTransportSuppressed})
+		return
+	}
+	subs := h.deps.Store.ActivePushSubscriptionsForDevice(sess.DeviceID)
+	stateClass := state.GovernanceTransportNoSubscription
+	accepted, failed := 0, 0
+	keys, hasKeys := h.deps.Store.VAPID()
+	for _, sub := range subs {
+		result := state.PushAttempt{Class: state.GovernanceTransportSenderMissing}
+		if !hasKeys {
+			result.Class = state.GovernanceTransportMissingKeys
+		} else if h.deps.PushSender != nil {
+			sendCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			result = h.deps.PushSender.Send(sendCtx, sub, keys, push.SafeDiagnosticPayload())
+			cancel()
+		}
+		class := result.Class
+		if result.OK {
+			class = state.GovernanceTransportAccepted
+		}
+		if class == "" || class == state.GovernanceTransportAccepted && !result.OK {
+			class = state.GovernanceTransportHTTPRejected
+		}
+		if class == state.GovernanceTransportAccepted {
+			accepted++
+		} else {
+			failed++
+			stateClass = class
+		}
+		if class == state.GovernanceTransportDead {
+			_ = h.deps.Store.RemovePushSubscription(sub.ID)
+		}
+	}
+	switch {
+	case accepted > 0 && failed == 0:
+		stateClass = state.GovernanceTransportAccepted
+	case accepted > 0:
+		stateClass = state.GovernanceTransportPartial
+	case len(subs) > 1 && failed > 0:
+		stateClass = state.GovernanceTransportAllFailed
+	}
+	if err := h.deps.Store.RecordDiagnosticStatus(state.GovernanceDiagnosticStatus{State: stateClass, At: now}); err != nil {
+		writeError(w, nethttp.StatusInternalServerError, "diagnostic state write failed")
+		return
+	}
+	writeJSON(w, SafePushTestResult{State: stateClass, PushServiceAccepted: accepted > 0})
 }
 
 func (h *handler) requireAuth(next nethttp.HandlerFunc) nethttp.HandlerFunc {

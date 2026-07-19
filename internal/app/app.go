@@ -25,13 +25,14 @@ import (
 )
 
 type App struct {
-	Options Options
-	Store   *state.Store
-	Auth    *auth.Manager
-	Live    *live.Service
-	Relay   relay.Client
-	Server  *hyperserve.Server
-	lock    *xdgcache.Lock
+	Options          Options
+	Store            *state.Store
+	Auth             *auth.Manager
+	Live             *live.Service
+	Relay            relay.Client
+	Server           *hyperserve.Server
+	governanceWorker *alerts.GovernanceWorker
+	lock             *xdgcache.Lock
 }
 
 func New(opts Options) (*App, error) {
@@ -70,9 +71,10 @@ func New(opts Options) (*App, error) {
 			opts.PublicURL = publicURL
 		}
 	}
+	pushSender := push.WebPushSender{Subscriber: "mailto:ibkr-app@localhost"}
 	monitor := alerts.Monitor{
 		Store:  store,
-		Sender: push.WebPushSender{Subscriber: "mailto:ibkr-app@localhost"},
+		Sender: pushSender,
 		URL:    opts.PublicURL,
 	}
 	monitor.TradingStatus = func() *rpc.TradingStatus {
@@ -81,11 +83,17 @@ func New(opts Options) (*App, error) {
 	liveSvc.OnCanary = func(ctx context.Context, canary rpc.CanaryResult) {
 		monitor.Observe(ctx, canary)
 	}
-	app, err := newWithParts(opts, store, authMgr, daemonClient, liveSvc, relayClient)
+	dispatcher := alerts.GovernanceDispatcher{Store: store, Sender: pushSender}
+	governanceWorker := alerts.NewGovernanceWorker(&dispatcher)
+	liveSvc.OnNudges = func(ctx context.Context, snapshot rpc.NudgesSnapshotResult) {
+		governanceWorker.Submit(snapshot)
+	}
+	app, err := newWithParts(opts, store, authMgr, daemonClient, liveSvc, relayClient, pushSender)
 	if err != nil {
 		return nil, err
 	}
 	app.lock = lock
+	app.governanceWorker = governanceWorker
 	lock = nil
 	return app, nil
 }
@@ -148,7 +156,7 @@ func acquireAppLock(stateDir string) (*xdgcache.Lock, error) {
 	return lock, nil
 }
 
-func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, daemonClient daemonclient.Client, liveSvc *live.Service, relayClient relay.Client) (*App, error) {
+func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, daemonClient daemonclient.Client, liveSvc *live.Service, relayClient relay.Client, pushSender push.Sender) (*App, error) {
 	srv, err := hyperserve.NewServer(
 		hyperserve.WithAddr(opts.Addr),
 		hyperserve.WithTimeouts(30*time.Second, 0, 0),
@@ -167,14 +175,15 @@ func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, daemo
 		Server:  srv,
 	}
 	apphttp.Register(apphttp.Dependencies{
-		Server:    srv,
-		Store:     store,
-		Auth:      authMgr,
-		Daemon:    daemonClient,
-		Live:      liveSvc,
-		Relay:     relayClient,
-		PublicURL: opts.PublicURL,
-		Version:   opts.Version,
+		Server:     srv,
+		Store:      store,
+		Auth:       authMgr,
+		Daemon:     daemonClient,
+		Live:       liveSvc,
+		Relay:      relayClient,
+		PublicURL:  opts.PublicURL,
+		Version:    opts.Version,
+		PushSender: pushSender,
 	})
 	return a, nil
 }
@@ -184,6 +193,9 @@ func (a *App) Run(ctx context.Context) error {
 	liveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go a.Live.Start(liveCtx)
+	if a.governanceWorker != nil {
+		go a.governanceWorker.Run(liveCtx)
+	}
 	go a.Relay.Run(liveCtx)
 	go a.Auth.StartReaper(liveCtx, time.Minute)
 	go func() {

@@ -235,6 +235,27 @@ func TestSnapshotBriefCloneIsIndependent(t *testing.T) {
 	}
 }
 
+func TestSnapshotDeepCopiesNudgeContextAndConsumedPercentage(t *testing.T) {
+	t.Parallel()
+	consumed := 31.25
+	svc := New(&fakeClient{}, time.Minute, time.Minute)
+	svc.snapshot = Snapshot{Nudges: &rpc.NudgesSnapshotResult{Context: &rpc.NudgeSnapshotContext{
+		Shadow: &rpc.NudgeShadowSummary{Count: 7},
+		Drawdown: &rpc.NudgeDrawdownSummary{
+			Tier: rpc.NudgeDrawdownTierBlock, ConsumedPct: &consumed,
+		},
+	}}}
+
+	got := svc.Snapshot()
+	got.Nudges.Context.Shadow.Count = 99
+	got.Nudges.Context.Drawdown.Tier = "HOSTILE"
+	*got.Nudges.Context.Drawdown.ConsumedPct = 0
+	current := svc.Snapshot()
+	if current.Nudges.Context.Shadow.Count != 7 || current.Nudges.Context.Drawdown.Tier != rpc.NudgeDrawdownTierBlock || current.Nudges.Context.Drawdown.ConsumedPct == nil || *current.Nudges.Context.Drawdown.ConsumedPct != 31.25 {
+		t.Fatalf("mutating returned nudge context changed cached authority state: %+v", current.Nudges.Context)
+	}
+}
+
 func TestStartPublishesStatusBeforeFullPollCompletes(t *testing.T) {
 	t.Parallel()
 	canaryBlock := make(chan struct{})
@@ -462,6 +483,107 @@ func TestMarketQuoteErrorIncludesDynamicSymbols(t *testing.T) {
 	}
 }
 
+func TestNudgesPollSeparatesTransportFromDaemonSourceHealth(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	healthAt := now.Add(-time.Minute)
+	client := &fakeClient{nudges: &rpc.NudgesSnapshotResult{
+		AsOf:                  now,
+		ConfirmedFlowCoverage: &rpc.NudgeConfirmedFlowCoverage{CoverageFrom: healthAt},
+		SourceHealth: rpc.NudgeSourceHealth{
+			Policy:         rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusOK, AsOf: healthAt},
+			Reconciliation: rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusUnavailable, Reason: rpc.NudgeHealthReasonSourceUnavailable, AsOf: healthAt},
+			Capital:        rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusOK, AsOf: healthAt},
+			Pins:           rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusOK, AsOf: healthAt},
+			Cadence:        rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusOK, AsOf: healthAt},
+			ConfirmedFlow:  rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusOK, AsOf: healthAt},
+		},
+	}}
+	service := New(client, time.Hour, time.Hour)
+	service.now = func() time.Time { return now }
+	service.PollNudgesOnce(t.Context())
+	snap := service.Snapshot()
+	if snap.Nudges == nil || snap.Nudges.SourceHealth.Aggregate != rpc.NudgeAggregateSuppressed {
+		t.Fatalf("nudges=%+v, want daemon-suppressed snapshot", snap.Nudges)
+	}
+	source := snap.Sources["nudges"]
+	if source.State != SourceStateCurrent || source.Reason != SourceReasonNone || !source.LastSuccessAt.Equal(now) {
+		t.Fatalf("poll source=%+v, want current separate from daemon suppression", source)
+	}
+
+	client.nudgesErr = errors.New("socket path /private/sentinel token")
+	now = now.Add(time.Minute)
+	service.PollNudgesOnce(t.Context())
+	snap = service.Snapshot()
+	if snap.Nudges == nil {
+		t.Fatal("last successful nudge snapshot was discarded")
+	}
+	source = snap.Sources["nudges"]
+	if source.State != SourceStateUnavailable || source.Reason != SourceReasonTransportUnavailable || source.Error != "" || !source.LastSuccessAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("poll source=%+v, want allowlisted unavailable state without raw error", source)
+	}
+}
+
+func TestNudgesPollUsesDedicatedOneMinuteCadence(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	client := &fakeClient{nudges: readyNudges(now)}
+	service := New(client, time.Second, time.Hour)
+	service.now = func() time.Time { return now }
+	service.PollOnce(t.Context())
+	now = now.Add(59 * time.Second)
+	service.PollOnce(t.Context())
+	now = now.Add(time.Second)
+	service.PollOnce(t.Context())
+	client.quoteMu.Lock()
+	calls := client.nudgeCalls
+	client.quoteMu.Unlock()
+	if calls != 2 {
+		t.Fatalf("nudges calls=%d, want initial and one-minute poll", calls)
+	}
+}
+
+func TestNudgesSourceStartsNotObservedAndAgesToStale(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	client := &fakeClient{nudges: readyNudges(now)}
+	service := New(client, time.Hour, time.Hour)
+	service.now = func() time.Time { return now }
+	startup := service.Snapshot().Sources["nudges"]
+	if startup.State != SourceStateNotObserved || startup.Reason != SourceReasonNotObserved || !startup.LastSuccessAt.IsZero() {
+		t.Fatalf("startup source=%+v", startup)
+	}
+	service.PollNudgesOnce(t.Context())
+	now = now.Add(nudgesPollEvery + time.Nanosecond)
+	aged := service.Snapshot().Sources["nudges"]
+	if aged.State != SourceStateStale || aged.Reason != SourceReasonPollStale || aged.LastSuccessAt.IsZero() {
+		t.Fatalf("aged source=%+v", aged)
+	}
+}
+
+func TestNudgesExplicitOutageRemainsUnavailableAfterFreshnessBudget(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC)
+	client := &fakeClient{nudges: readyNudges(now)}
+	service := New(client, time.Hour, time.Hour)
+	service.now = func() time.Time { return now }
+	service.PollNudgesOnce(t.Context())
+	client.nudgesErr = errors.New("transport sentinel")
+	now = now.Add(2 * nudgesPollEvery)
+	service.PollNudgesOnce(t.Context())
+	source := service.Snapshot().Sources["nudges"]
+	if source.State != SourceStateUnavailable || source.Reason != SourceReasonTransportUnavailable {
+		t.Fatalf("explicit outage was aged to stale: %+v", source)
+	}
+}
+
+func readyNudges(at time.Time) *rpc.NudgesSnapshotResult {
+	ok := rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusOK, AsOf: at}
+	return &rpc.NudgesSnapshotResult{AsOf: at, SourceHealth: rpc.NudgeSourceHealth{
+		Policy: ok, Reconciliation: ok, Capital: ok, Pins: ok, Cadence: ok, ConfirmedFlow: ok,
+	}, ConfirmedFlowCoverage: &rpc.NudgeConfirmedFlowCoverage{CoverageFrom: at}}
+}
+
 type fakeClient struct {
 	status       *rpc.HealthResult
 	calendar     *rpc.MarketCalendarResult
@@ -473,6 +595,8 @@ type fakeClient struct {
 	canary       *rpc.CanaryResult
 	brief        *rpc.BriefResult
 	briefErr     error
+	nudges       *rpc.NudgesSnapshotResult
+	nudgesErr    error
 	marketEvents *rpc.MarketEventsResult
 	trading      *rpc.TradingStatus
 
@@ -482,6 +606,7 @@ type fakeClient struct {
 	quoteCalls  []rpc.ContractParams
 	briefCalls  int
 	briefAcks   int
+	nudgeCalls  int
 }
 
 func (c *fakeClient) Status(context.Context) (*rpc.HealthResult, error) {
@@ -555,6 +680,17 @@ func (c *fakeClient) Brief(context.Context) (*rpc.BriefResult, error) {
 	defer c.quoteMu.Unlock()
 	c.briefCalls++
 	return c.brief, c.briefErr
+}
+
+func (c *fakeClient) NudgesSnapshot(context.Context) (*rpc.NudgesSnapshotResult, error) {
+	c.quoteMu.Lock()
+	defer c.quoteMu.Unlock()
+	c.nudgeCalls++
+	return c.nudges, c.nudgesErr
+}
+
+func (c *fakeClient) NudgesCutoverReview(context.Context, rpc.NudgesCutoverReviewParams) (*rpc.NudgesCutoverReviewResult, error) {
+	return nil, nil
 }
 
 func (c *fakeClient) BriefAck(context.Context, rpc.BriefAckParams) (*rpc.BriefAckResult, error) {

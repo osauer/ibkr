@@ -25,6 +25,8 @@ type Client interface {
 	CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error)
 	Rules(context.Context) (*rpc.RulesResult, error)
 	Brief(context.Context) (*rpc.BriefResult, error)
+	NudgesSnapshot(context.Context) (*rpc.NudgesSnapshotResult, error)
+	NudgesCutoverReview(context.Context, rpc.NudgesCutoverReviewParams) (*rpc.NudgesCutoverReviewResult, error)
 	BriefAck(context.Context, rpc.BriefAckParams) (*rpc.BriefAckResult, error)
 	ReconcileSignoff(context.Context, rpc.CapitalEventParams) (*rpc.RiskPolicyWriteResult, error)
 	TradingStatus(context.Context) (*rpc.TradingStatus, error)
@@ -179,6 +181,26 @@ func (c Real) Rules(ctx context.Context) (*rpc.RulesResult, error) {
 func (c Real) Brief(ctx context.Context) (*rpc.BriefResult, error) {
 	var out rpc.BriefResult
 	if err := c.call(ctx, rpc.MethodBriefSnapshot, rpc.BriefSnapshotParams{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) NudgesSnapshot(ctx context.Context) (*rpc.NudgesSnapshotResult, error) {
+	var out rpc.NudgesSnapshotResult
+	if err := c.call(ctx, rpc.MethodNudgesSnapshot, rpc.NudgesSnapshotParams{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) NudgesCutoverReview(ctx context.Context, params rpc.NudgesCutoverReviewParams) (*rpc.NudgesCutoverReviewResult, error) {
+	return nudgesCutoverReview(ctx, params, c.call)
+}
+
+func nudgesCutoverReview(ctx context.Context, params rpc.NudgesCutoverReviewParams, call func(context.Context, string, any, any) error) (*rpc.NudgesCutoverReviewResult, error) {
+	var out rpc.NudgesCutoverReviewResult
+	if err := call(ctx, rpc.MethodNudgesCutoverReview, params, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

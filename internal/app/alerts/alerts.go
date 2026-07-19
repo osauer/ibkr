@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/app/push"
@@ -19,6 +20,260 @@ type Monitor struct {
 	URL           string
 	Now           func() time.Time
 	TradingStatus func() *rpc.TradingStatus
+}
+
+// GovernanceDispatcher transports daemon-authored candidates independently
+// from Canary alert history and fingerprint caps. The daemon remains the sole
+// policy evaluator; this type owns only per-target delivery evidence.
+type GovernanceDispatcher struct {
+	Store       *state.Store
+	Sender      push.Sender
+	Now         func() time.Time
+	SendTimeout time.Duration
+	mu          sync.Mutex
+}
+
+func (d *GovernanceDispatcher) Observe(ctx context.Context, snapshot rpc.NudgesSnapshotResult) (state.GovernanceView, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.Store == nil {
+		return state.GovernanceView{}, nil
+	}
+	now := time.Now().UTC()
+	if d.Now != nil {
+		now = d.Now().UTC()
+	}
+	if err := d.Store.CompactGovernance(now); err != nil {
+		return d.Store.Governance(now), err
+	}
+	records := make([]state.GovernanceOccurrence, 0, len(snapshot.Candidates))
+	for _, candidate := range snapshot.Candidates {
+		// The payload constructor is the app's mandatory canonicalization
+		// boundary. Its temporary display id is replaced by the store's stable
+		// id after the occurrence has been persisted.
+		probe, err := push.GovernancePayload(candidate, governanceProbeDisplayID)
+		if err != nil {
+			_ = d.Store.SetGovernanceDeliveryHealth(state.GovernanceDeliveryHealth{
+				State: state.GovernanceDeliveryUnavailable, Class: state.GovernanceTransportAllFailed, UpdatedAt: now,
+			})
+			return d.Store.Governance(now), fmt.Errorf("invalid governance candidate: %w", err)
+		}
+		records = append(records, state.GovernanceOccurrence{
+			Fingerprint: candidate.Fingerprint, Kind: probe.Kind, State: candidate.State, Severity: probe.Severity,
+			Title: probe.Title, Body: probe.Body, Destination: probe.Destination,
+			OccurredAt: candidate.OccurredAt, DueAt: candidate.DueAt, ExpiresAt: candidate.ExpiresAt,
+		})
+	}
+	normalizedHealth := rpc.NormalizeNudgeSourceHealth(snapshot.SourceHealth, len(snapshot.Candidates))
+	occurrences, err := d.Store.ObserveGovernanceOccurrences(records, normalizedHealth.Aggregate == rpc.NudgeAggregateReady, now)
+	if err != nil {
+		return d.Store.Governance(now), err
+	}
+	if len(occurrences) == 0 {
+		return d.Store.Governance(now), nil
+	}
+
+	if d.Store.AlertSettings().Mode == state.AlertModeNone {
+		for _, occurrence := range occurrences {
+			if err := d.recordMissed(occurrence, "suppressed", state.GovernanceTransportSuppressed, now); err != nil {
+				return d.Store.Governance(now), err
+			}
+		}
+		err := d.Store.SetGovernanceDeliveryHealth(state.GovernanceDeliveryHealth{
+			State: state.GovernanceDeliverySuppressed, Class: state.GovernanceTransportSuppressed, UpdatedAt: now,
+		})
+		return d.Store.Governance(now), err
+	}
+
+	subscriptions := d.Store.ActivePushSubscriptions()
+	if len(subscriptions) == 0 {
+		for _, occurrence := range occurrences {
+			if err := d.recordMissed(occurrence, "no-subscription", state.GovernanceTransportNoSubscription, now); err != nil {
+				return d.Store.Governance(now), err
+			}
+		}
+		err := d.Store.SetGovernanceDeliveryHealth(state.GovernanceDeliveryHealth{
+			State: state.GovernanceDeliveryUnavailable, Class: state.GovernanceTransportNoSubscription, UpdatedAt: now,
+		})
+		return d.Store.Governance(now), err
+	}
+
+	keys, hasKeys := d.Store.VAPID()
+	accepted, failed, retired := 0, 0, 0
+	var acceptedAt time.Time
+	for _, occurrence := range occurrences {
+		candidate := rpc.NudgeCandidate{
+			Fingerprint: occurrence.Fingerprint, Kind: occurrence.Kind, State: occurrence.State,
+			Severity: occurrence.Severity, Title: occurrence.Title, Body: occurrence.Body,
+			OccurredAt: occurrence.OccurredAt, DueAt: occurrence.DueAt, Destination: occurrence.Destination,
+		}
+		payload, err := push.GovernancePayload(candidate, occurrence.DisplayID)
+		if err != nil {
+			return d.Store.Governance(now), err
+		}
+		for _, subscription := range subscriptions {
+			targetRef := state.GovernanceTargetRef(subscription.DeviceID, subscription.ID)
+			receiptKey := state.GovernanceReceiptKey(occurrence.DisplayID, targetRef)
+			if d.Store.HasGovernanceReceipt(receiptKey) {
+				accepted++
+				continue
+			}
+			reservation, send, err := d.Store.ReserveGovernanceAttempt(occurrence.DisplayID, targetRef, now)
+			if err != nil {
+				return d.Store.Governance(now), err
+			}
+			if !send {
+				failed++
+				continue
+			}
+			if !d.Store.BeginGovernanceTransport(reservation.ID) {
+				retired++
+				continue
+			}
+			class := state.GovernanceTransportSenderMissing
+			result := state.PushAttempt{Class: class}
+			if !hasKeys {
+				result.Class = state.GovernanceTransportMissingKeys
+			} else if d.Sender != nil {
+				timeout := d.SendTimeout
+				if timeout <= 0 {
+					timeout = 10 * time.Second
+				}
+				sendCtx, cancel := context.WithTimeout(ctx, timeout)
+				result = d.Sender.Send(sendCtx, subscription, keys, payload)
+				cancel()
+			}
+			class = normalizeGovernanceResult(result)
+			if result.OK {
+				class = state.GovernanceTransportAccepted
+			}
+			acceptedResult := result.OK && class == state.GovernanceTransportAccepted
+			outcome, err := d.Store.CompleteGovernanceAttempt(reservation.ID, class, acceptedResult, now)
+			if err != nil {
+				return d.Store.Governance(now), err
+			}
+			if acceptedResult {
+				acceptedAt = now
+			}
+			if outcome.Disposition == state.GovernanceCompletionRetired {
+				retired++
+			} else if acceptedResult {
+				accepted++
+			} else {
+				failed++
+			}
+			if class == state.GovernanceTransportDead {
+				if err := d.Store.RemovePushSubscriptionAt(subscription.ID, now); err != nil {
+					return d.Store.Governance(now), err
+				}
+			}
+		}
+	}
+	health := state.GovernanceDeliveryHealth{UpdatedAt: now}
+	switch {
+	case accepted > 0 && failed == 0:
+		health.State = state.GovernanceDeliveryHealthy
+		health.Class = state.GovernanceTransportAccepted
+		health.LastAcceptedAt = acceptedAt
+	case accepted > 0:
+		health.State = state.GovernanceDeliveryDegraded
+		health.Class = state.GovernanceTransportPartial
+		health.LastAcceptedAt = acceptedAt
+	case retired > 0 && failed == 0:
+		health.State = state.GovernanceDeliveryUnavailable
+		health.Class = state.GovernanceTransportTargetRetired
+		health.LastAcceptedAt = acceptedAt
+	default:
+		health.State = state.GovernanceDeliveryUnavailable
+		health.Class = state.GovernanceTransportAllFailed
+		health.LastAcceptedAt = acceptedAt
+	}
+	if err := d.Store.SetGovernanceDeliveryHealth(health); err != nil {
+		return d.Store.Governance(now), err
+	}
+	return d.Store.Governance(now), nil
+}
+
+func normalizeGovernanceResult(result state.PushAttempt) string {
+	switch result.Class {
+	case state.GovernanceTransportAccepted, state.GovernanceTransportDeadlineRetry,
+		state.GovernanceTransportCanceledRetry, state.GovernanceTransportNetworkRetry,
+		state.GovernanceTransportHTTPRetry, state.GovernanceTransportHTTPRejected,
+		state.GovernanceTransportMissingKeys, state.GovernanceTransportSenderMissing,
+		state.GovernanceTransportTimeoutRetry, state.GovernanceTransportRejected,
+		state.GovernanceTransportDead:
+		return result.Class
+	default:
+		return state.GovernanceTransportHTTPRejected
+	}
+}
+
+const governanceProbeDisplayID = "gov-0000000000000000"
+
+func (d *GovernanceDispatcher) recordMissed(occurrence state.GovernanceOccurrence, target, class string, now time.Time) error {
+	targetRef := state.GovernanceTargetRef("governance", target)
+	receiptKey := state.GovernanceReceiptKey(occurrence.DisplayID, targetRef)
+	if !d.Store.GovernanceAttemptDue(receiptKey, now) {
+		return nil
+	}
+	return d.Store.RecordGovernanceAttempt(state.GovernanceAttempt{
+		OccurrenceID: occurrence.DisplayID, TargetRef: targetRef, ReceiptKey: receiptKey, At: now, Class: class,
+	}, false)
+}
+
+// GovernanceWorker bounds poll-triggered delivery to one active observation
+// and one coalesced latest snapshot.
+type GovernanceWorker struct {
+	dispatcher *GovernanceDispatcher
+	submitMu   sync.Mutex
+	generation uint64
+	latest     chan governanceWork
+}
+
+type governanceWork struct {
+	generation uint64
+	snapshot   rpc.NudgesSnapshotResult
+}
+
+func NewGovernanceWorker(dispatcher *GovernanceDispatcher) *GovernanceWorker {
+	return &GovernanceWorker{dispatcher: dispatcher, latest: make(chan governanceWork, 1)}
+}
+
+func (w *GovernanceWorker) Submit(snapshot rpc.NudgesSnapshotResult) uint64 {
+	w.submitMu.Lock()
+	defer w.submitMu.Unlock()
+	w.generation++
+	work := governanceWork{generation: w.generation, snapshot: snapshot}
+	select {
+	case w.latest <- work:
+		return work.generation
+	default:
+	}
+	select {
+	case <-w.latest:
+	default:
+	}
+	select {
+	case w.latest <- work:
+	default:
+	}
+	return work.generation
+}
+
+func (w *GovernanceWorker) Pending() int { return len(w.latest) }
+
+func (w *GovernanceWorker) Run(ctx context.Context) {
+	if w == nil || w.dispatcher == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case work := <-w.latest:
+			_, _ = w.dispatcher.Observe(ctx, work.snapshot)
+		}
+	}
 }
 
 func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.AlertRecord, []state.PushAttempt) {

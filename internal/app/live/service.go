@@ -27,8 +27,10 @@ type Service struct {
 	lastEventAt map[string]time.Time
 	subs        map[chan Event]struct{}
 	nextCanary  time.Time
+	nextNudges  time.Time
 
 	OnCanary func(context.Context, rpc.CanaryResult)
+	OnNudges func(context.Context, rpc.NudgesSnapshotResult)
 }
 
 type Snapshot struct {
@@ -44,6 +46,7 @@ type Snapshot struct {
 	Canary        *rpc.CanaryResult          `json:"canary,omitempty"`
 	Rules         *rpc.RulesResult           `json:"rules,omitempty"`
 	Brief         *rpc.BriefResult           `json:"brief,omitempty"`
+	Nudges        *rpc.NudgesSnapshotResult  `json:"nudges,omitempty"`
 	Trading       *rpc.TradingStatus         `json:"trading,omitempty"`
 	AutoTrade     *rpc.AutoTradeStatus       `json:"auto_trade,omitempty"`
 	Opportunities *rpc.OpportunitySnapshot   `json:"opportunities,omitempty"`
@@ -66,9 +69,24 @@ type SourceError struct {
 }
 
 type SourceMeta struct {
-	UpdatedAt time.Time `json:"updated_at,omitzero"`
-	Error     string    `json:"error,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at,omitzero"`
+	LastSuccessAt time.Time `json:"last_success_at,omitzero"`
+	State         string    `json:"state,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	Error         string    `json:"error,omitempty"`
 }
+
+const (
+	SourceStateNotObserved           = "not_observed"
+	SourceStateCurrent               = "current"
+	SourceStateStale                 = "stale"
+	SourceStateUnavailable           = "unavailable"
+	SourceReasonNone                 = ""
+	SourceReasonNotObserved          = "not_observed"
+	SourceReasonPollStale            = "poll_stale"
+	SourceReasonTransportUnavailable = "transport_unavailable"
+	nudgesPollEvery                  = time.Minute
+)
 
 type Event struct {
 	Type string `json:"type"`
@@ -96,6 +114,9 @@ func New(client daemonclient.Client, pollEvery, canaryEvery time.Duration) *Serv
 		hashes:      map[string]string{},
 		lastEventAt: map[string]time.Time{},
 		subs:        map[chan Event]struct{}{},
+		snapshot: Snapshot{Sources: map[string]SourceMeta{
+			"nudges": {State: SourceStateNotObserved, Reason: SourceReasonNotObserved},
+		}},
 	}
 }
 
@@ -190,6 +211,7 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		snap.Sources = map[string]SourceMeta{}
 	}
 	pollCanary := s.nextCanary.IsZero() || !now.Before(s.nextCanary)
+	pollNudges := s.nextNudges.IsZero() || !now.Before(s.nextNudges)
 	s.mu.Unlock()
 
 	var events []Event
@@ -317,6 +339,34 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 			events = append(events, Event{Type: "settings", Data: settings})
 		}
 	}
+	if pollNudges {
+		if nudges, err := s.client.NudgesSnapshot(ctx); err != nil {
+			prior := snap.Sources["nudges"]
+			snap.Sources["nudges"] = SourceMeta{
+				UpdatedAt: now, LastSuccessAt: prior.LastSuccessAt,
+				State: SourceStateUnavailable, Reason: SourceReasonTransportUnavailable,
+			}
+		} else if nudges == nil {
+			prior := snap.Sources["nudges"]
+			snap.Sources["nudges"] = SourceMeta{
+				UpdatedAt: now, LastSuccessAt: prior.LastSuccessAt,
+				State: SourceStateUnavailable, Reason: SourceReasonTransportUnavailable,
+			}
+		} else {
+			nudges.SourceHealth = rpc.NormalizeNudgeSourceHealth(nudges.SourceHealth, len(nudges.Candidates))
+			snap.Nudges = nudges
+			snap.Sources["nudges"] = SourceMeta{UpdatedAt: now, LastSuccessAt: now, State: SourceStateCurrent}
+			if s.changed("nudges", nudges) {
+				events = append(events, Event{Type: "nudges", Data: nudges})
+			}
+			if s.OnNudges != nil {
+				s.OnNudges(ctx, *nudges)
+			}
+		}
+		s.mu.Lock()
+		s.nextNudges = now.Add(nudgesPollEvery)
+		s.mu.Unlock()
+	}
 	if pollCanary {
 		if canary, regime, err := s.client.CanaryWithRegime(ctx); err != nil {
 			errors = append(errors, sourceErr("canary", err, now))
@@ -382,6 +432,49 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 	events = append(events, Event{Type: "snapshot", Data: out})
 	for _, ev := range events {
 		s.publish(ev)
+	}
+	return out
+}
+
+// PollNudgesOnce exercises the dedicated one-minute governance source without
+// polling account or market surfaces. Daemon evaluator health remains inside
+// Nudges; this method owns only app transport freshness.
+func (s *Service) PollNudgesOnce(ctx context.Context) Snapshot {
+	now := s.now().UTC()
+	s.mu.Lock()
+	snap := cloneSnapshot(s.snapshot)
+	if snap.Sources == nil {
+		snap.Sources = map[string]SourceMeta{}
+	}
+	s.mu.Unlock()
+	var events []Event
+	if nudges, err := s.client.NudgesSnapshot(ctx); err != nil {
+		prior := snap.Sources["nudges"]
+		snap.Sources["nudges"] = SourceMeta{UpdatedAt: now, LastSuccessAt: prior.LastSuccessAt, State: SourceStateUnavailable, Reason: SourceReasonTransportUnavailable}
+	} else if nudges == nil {
+		prior := snap.Sources["nudges"]
+		snap.Sources["nudges"] = SourceMeta{UpdatedAt: now, LastSuccessAt: prior.LastSuccessAt, State: SourceStateUnavailable, Reason: SourceReasonTransportUnavailable}
+	} else {
+		nudges.SourceHealth = rpc.NormalizeNudgeSourceHealth(nudges.SourceHealth, len(nudges.Candidates))
+		snap.Nudges = nudges
+		snap.Sources["nudges"] = SourceMeta{UpdatedAt: now, LastSuccessAt: now, State: SourceStateCurrent}
+		if s.changed("nudges", nudges) {
+			events = append(events, Event{Type: "nudges", Data: nudges})
+		}
+		if s.OnNudges != nil {
+			s.OnNudges(ctx, *nudges)
+		}
+	}
+	s.mu.Lock()
+	s.nextNudges = now.Add(nudgesPollEvery)
+	snap.UpdatedAt = now
+	snap.Version++
+	s.snapshot = snap
+	out := cloneSnapshot(s.snapshot)
+	s.mu.Unlock()
+	events = append(events, Event{Type: "snapshot", Data: out})
+	for _, event := range events {
+		s.publish(event)
 	}
 	return out
 }
@@ -848,7 +941,13 @@ func marketQuoteError(errs map[string]string) string {
 func (s *Service) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneSnapshot(s.snapshot)
+	out := cloneSnapshot(s.snapshot)
+	if source, ok := out.Sources["nudges"]; ok && source.State == SourceStateCurrent && !source.LastSuccessAt.IsZero() && s.now().UTC().Sub(source.LastSuccessAt) > nudgesPollEvery {
+		source.State = SourceStateStale
+		source.Reason = SourceReasonPollStale
+		out.Sources["nudges"] = source
+	}
+	return out
 }
 
 func (s *Service) Diagnostics() Diagnostics {
@@ -860,7 +959,7 @@ func (s *Service) Diagnostics() Diagnostics {
 }
 
 func (s *Service) Subscribe() (<-chan Event, func()) {
-	ch := make(chan Event, 16)
+	ch := make(chan Event, 32)
 	s.mu.Lock()
 	s.subs[ch] = struct{}{}
 	s.mu.Unlock()
@@ -936,6 +1035,16 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	out.Regime = cloneRegimeMonitor(in.Regime)
 	out.Brief = cloneBriefResult(in.Brief)
 	out.Settings = clonePlatformSettings(in.Settings)
+	if in.Nudges != nil {
+		nudges := *in.Nudges
+		nudges.Candidates = append([]rpc.NudgeCandidate(nil), in.Nudges.Candidates...)
+		if in.Nudges.ConfirmedFlowCoverage != nil {
+			coverage := *in.Nudges.ConfirmedFlowCoverage
+			nudges.ConfirmedFlowCoverage = &coverage
+		}
+		nudges.Context = cloneNudgeSnapshotContext(in.Nudges.Context)
+		out.Nudges = &nudges
+	}
 	if in.AutoTrade != nil {
 		autoTrade := *in.AutoTrade
 		autoTrade.Blockers = append([]rpc.TradingBlocker(nil), in.AutoTrade.Blockers...)
@@ -954,6 +1063,23 @@ func cloneSnapshot(in Snapshot) Snapshot {
 		out.Proposals = &proposals
 	}
 	return out
+}
+
+func cloneNudgeSnapshotContext(in *rpc.NudgeSnapshotContext) *rpc.NudgeSnapshotContext {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Shadow != nil {
+		shadow := *in.Shadow
+		out.Shadow = &shadow
+	}
+	if in.Drawdown != nil {
+		drawdown := *in.Drawdown
+		drawdown.ConsumedPct = cloneValue(in.Drawdown.ConsumedPct)
+		out.Drawdown = &drawdown
+	}
+	return &out
 }
 
 func cloneBriefResult(in *rpc.BriefResult) *rpc.BriefResult {
