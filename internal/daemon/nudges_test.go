@@ -5,14 +5,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -212,6 +216,42 @@ func TestNudgeSnapshotContextKnownUnknownAndValidatorCorrelation(t *testing.T) {
 	}
 }
 
+func TestCapitalReportAndLatchAreCapturedFromOneGeneration(t *testing.T) {
+	now := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+	s := newV4NudgeTestServer(t, now)
+	primeNudgeBlockEpisode(s, now, true)
+	policy := s.riskPolicies.snapshot().policy
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	s.riskCapital.nudgeCaptureHook = func() {
+		s.riskCapital.nudgeCaptureHook = nil
+		close(entered)
+		<-release
+	}
+	authorityCh := make(chan nudgeAuthorityState, 1)
+	go func() { authorityCh <- s.currentNudgeAuthority(now) }()
+	<-entered
+	resetDone := make(chan error, 1)
+	go func() { resetDone <- s.riskCapital.ResetDrawdown("atomic capture test", policy) }()
+	select {
+	case err := <-resetDone:
+		t.Fatalf("reset crossed locked capture: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(release)
+	authority := <-authorityCh
+	if err := <-resetDone; err != nil {
+		t.Fatal(err)
+	}
+	if !authority.report.Capital.BlockLatched || !authority.capitalNudge.LatchOpen || authority.capitalNudge.Episode == "" || authority.report.Capital.ConsumedPct == nil {
+		t.Fatalf("captured mixed capital/latch generation: capital=%+v latch=%+v", authority.report.Capital, authority.capitalNudge)
+	}
+	after := s.currentNudgeAuthority(now)
+	if after.report.Capital.BlockLatched || after.capitalNudge.LatchOpen || after.capitalNudge.Episode != "" {
+		t.Fatalf("post-reset capture retained old latch: capital=%+v latch=%+v", after.report.Capital, after.capitalNudge)
+	}
+}
+
 func TestNudgeSnapshotAuthoritativeCleanEmptyHasNoContext(t *testing.T) {
 	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
 	s, _ := newCutoverReviewTestServer(t, now)
@@ -226,9 +266,10 @@ func TestNudgeSnapshotAuthoritativeCleanEmptyHasNoContext(t *testing.T) {
 	if _, err := s.handleNudgesCutoverReview(context.Background(), cutoverReviewRequest(t)); err != nil {
 		t.Fatal(err)
 	}
+	rendered, _ := s.composeBrief(context.Background())
 	if _, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
 		Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
-		BriefFingerprint: "sha256:clean-empty", Origin: rpc.OrderOriginPairedDevice,
+		BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice,
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -275,9 +316,12 @@ func TestNudgesSnapshotAssemblesTypedTriggersAndRedactsHostileSources(t *testing
 	}); err != nil {
 		t.Fatal(err)
 	}
+	governanceIdentity := nudgeAuthorityToken(s.currentNudgeAuthority(now))
 	if _, _, err := s.nudges.reviewConfirmedCutover(nudgeCutoverReviewEvidence{
 		ReviewedAt: now, PolicyIdentity: policyIdentity, PolicyVersion: 4,
-		ReportIdentity: opaqueIdentity("report", "cutover"), ConfirmedRows: 0,
+		ReportIdentity: opaqueIdentity("report", "cutover"), ConfirmedRows: 0, ReviewedRows: []string{},
+		GovernanceIdentity: governanceIdentity,
+		AuthorityIdentity:  cutoverAuthorityIdentity(governanceIdentity, opaqueIdentity("report", "cutover"), time.Time{}, nil),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -399,6 +443,202 @@ func TestNudgesMonthlyRequiresMatchingPinsWhileReadableDriftStillTriggers(t *tes
 	}
 }
 
+func TestNudgePinOutagePreservesIndependentCandidates(t *testing.T) {
+	now := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+	s := newV4NudgeTestServer(t, now)
+	primeNudgeBlockEpisode(s, now, true)
+	policyIdentity := nudgePolicyIdentity(s.riskPolicies.snapshot().policy)
+	_, episode, _ := s.riskCapital.NudgeLatch()
+	if err := s.nudges.recordShadow(policyIdentity, episode, true, false, true); err != nil {
+		t.Fatal(err)
+	}
+	s.riskCapital.mu.Lock()
+	s.riskCapital.lastReconciledAt = now.Add(-7 * 24 * time.Hour)
+	s.riskCapital.mu.Unlock()
+	s.protectionPolicies = nil
+	day := now.Format("20060102")
+	writeFlexFixture(t, "pin-outage-exception.xml", now.Format("20060102")+";090000", day, day,
+		cashLine("pin-independent-exception", "Unknown Broker Instruction", 12, day))
+
+	result, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{rpc.NudgeKindDrawdownLatched, rpc.NudgeKindShadowWouldBlock, rpc.NudgeKindReconcileDue, rpc.NudgeKindReconcileException} {
+		if !candidateKindPresent(result.Candidates, kind) {
+			t.Fatalf("pin outage hid independent %s candidate: candidates=%+v health=%+v", kind, result.Candidates, result.SourceHealth)
+		}
+	}
+	if candidateKindPresent(result.Candidates, rpc.NudgeKindPolicyDrift) || candidateKindPresent(result.Candidates, rpc.NudgeKindMonthlyPulse) {
+		t.Fatalf("pin-dependent candidate survived unreadable pin: %+v", result.Candidates)
+	}
+	if result.SourceHealth.Pins.Status != rpc.NudgeInputStatusUnavailable || result.SourceHealth.Aggregate != rpc.NudgeAggregateDegraded || result.IsCleanEmpty() {
+		t.Fatalf("pin outage health=%+v clean=%v", result.SourceHealth, result.IsCleanEmpty())
+	}
+}
+
+func TestConfirmedFlowObservationRequiresCurrentHealthyAuthorityAndReport(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	row := opaqueIdentity("flow", "current")
+	tests := []struct {
+		name        string
+		mutate      func(*Server, *nudgeConfirmedFlowSnapshot)
+		wantObserve bool
+	}{
+		{name: "absent retained v4", mutate: func(s *Server, _ *nudgeConfirmedFlowSnapshot) { s.riskPolicies.status = rpc.RiskPolicyStatusAbsent }},
+		{name: "error retained v4", mutate: func(s *Server, _ *nudgeConfirmedFlowSnapshot) { s.riskPolicies.status = rpc.RiskPolicyStatusError }},
+		{name: "drift retained v4", mutate: func(s *Server, _ *nudgeConfirmedFlowSnapshot) { s.riskPolicies.status = rpc.RiskPolicyStatusDrift }},
+		{name: "unapproved v4", mutate: func(s *Server, _ *nudgeConfirmedFlowSnapshot) { s.riskPolicies.active.Cadence.Monthly.DayOfMonth = nil }},
+		{name: "stale statement", mutate: func(_ *Server, snap *nudgeConfirmedFlowSnapshot) { snap.StatementAsOf = now.Add(-10 * 24 * time.Hour) }},
+		{name: "degraded report", mutate: func(_ *Server, snap *nudgeConfirmedFlowSnapshot) { snap.ReportStatus = rpc.ReconStatusDegraded }},
+		{name: "unhealthy statements", mutate: func(_ *Server, snap *nudgeConfirmedFlowSnapshot) { snap.StatementsHealthy = false }},
+		{name: "current healthy v4", wantObserve: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newV4NudgeTestServer(t, now)
+			snap := nudgeConfirmedFlowSnapshot{
+				PolicyVersion: 4, PolicyIdentity: nudgePolicyIdentity(s.riskPolicies.active),
+				ReportStatus: rpc.ReconStatusActive, ReportIdentity: opaqueIdentity("report", tt.name),
+				StatementAsOf: now, StatementsHealthy: true, ConfirmedRows: []string{row},
+			}
+			s.riskPolicies.mu.Lock()
+			if tt.mutate != nil {
+				tt.mutate(s, &snap)
+			}
+			s.riskPolicies.mu.Unlock()
+			s.riskCapital.IncorporateStatementSnapshot(statementCapitalSnapshot{NudgeConfirmedFlows: snap})
+			coverage, _, ok := s.nudges.confirmedSnapshot([]string{row})
+			if ok != tt.wantObserve || (coverage != nil) != tt.wantObserve {
+				t.Fatalf("coverage=%+v ok=%v want_observe=%v", coverage, ok, tt.wantObserve)
+			}
+		})
+	}
+}
+
+func TestNudgesHandlersHonorCanceledContextBeforePersistence(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	s, _ := newCutoverReviewTestServer(t, now)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.handleNudgesSnapshot(ctx, &rpc.Request{}); err == nil {
+		t.Fatal("canceled snapshot unexpectedly succeeded")
+	}
+	if _, err := s.handleNudgesCutoverReview(ctx, cutoverReviewRequest(t)); err == nil {
+		t.Fatal("canceled cutover review unexpectedly succeeded")
+	}
+	coverage, _, ok := s.nudges.confirmedSnapshot(nil)
+	if !ok || coverage == nil || !coverage.PreCutoverFlowsUnreviewed {
+		t.Fatalf("canceled cutover persisted review: %+v ok=%v", coverage, ok)
+	}
+}
+
+func TestNudgesSnapshotCancelsDuringRetainedStatementScan(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	s, _ := newCutoverReviewTestServer(t, now)
+	ctx, cancel := context.WithCancel(context.Background())
+	s.nudgeScanCheckpoint = func(stage string) {
+		if stage == "retained_statement_file" {
+			cancel()
+		}
+	}
+	if _, err := s.handleNudgesSnapshot(ctx, &rpc.Request{}); err == nil || !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("scan cancellation error=%v", err)
+	}
+}
+
+func TestGovernanceWritesRevalidateAuthorityAtomically(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name   string
+		kind   string
+		mutate func(*Server, string)
+	}{
+		{name: "monthly policy drift", kind: "monthly", mutate: func(s *Server, _ string) {
+			s.riskPolicies.mu.Lock()
+			s.riskPolicies.status = rpc.RiskPolicyStatusDrift
+			s.riskPolicies.mu.Unlock()
+		}},
+		{name: "monthly pin change", kind: "monthly", mutate: func(s *Server, _ string) {
+			s.protectionPolicies.mu.Lock()
+			s.protectionPolicies.status.PolicyVersion++
+			s.protectionPolicies.mu.Unlock()
+		}},
+		{name: "monthly report change", kind: "monthly", mutate: func(_ *Server, fixture string) {
+			day := now.Format("20060102")
+			writeFlexFixture(t, fixture, now.Format("20060102")+";090000", day, day,
+				cashLine("cutover-flow", "Deposits/Withdrawals", 250, day)+"\n"+cashLine("monthly-raced-flow", "Deposits/Withdrawals", 50, day))
+		}},
+		{name: "cutover policy drift", kind: "cutover", mutate: func(s *Server, _ string) {
+			s.riskPolicies.mu.Lock()
+			s.riskPolicies.status = rpc.RiskPolicyStatusDrift
+			s.riskPolicies.mu.Unlock()
+		}},
+		{name: "cutover pin change", kind: "cutover", mutate: func(s *Server, _ string) {
+			s.protectionPolicies.mu.Lock()
+			s.protectionPolicies.status.PolicyVersion++
+			s.protectionPolicies.mu.Unlock()
+		}},
+		{name: "cutover report change", kind: "cutover", mutate: func(_ *Server, fixture string) {
+			day := now.Format("20060102")
+			writeFlexFixture(t, fixture, now.Format("20060102")+";090000", day, day,
+				cashLine("cutover-flow", "Deposits/Withdrawals", 250, day)+"\n"+cashLine("raced-flow", "Deposits/Withdrawals", 50, day))
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, fixture := newCutoverReviewTestServer(t, now)
+			s.nudgeBeforeCommit = func(kind string) {
+				if kind == tt.kind {
+					tt.mutate(s, fixture)
+				}
+			}
+			if tt.kind == "monthly" {
+				rendered, _ := s.composeBrief(context.Background())
+				_, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
+					Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+					BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice,
+				}))
+				if err == nil {
+					t.Fatal("monthly write survived authority race")
+				}
+				if _, ok := s.nudges.monthlyCompletionRecord("2026-08", nudgePolicyIdentity(s.riskPolicies.active)); ok {
+					t.Fatal("monthly evidence persisted after authority race")
+				}
+				return
+			}
+			if _, err := s.handleNudgesCutoverReview(context.Background(), cutoverReviewRequest(t)); err == nil {
+				t.Fatal("cutover write survived authority race")
+			}
+			coverage, _, ok := s.nudges.confirmedSnapshot(nil)
+			if !ok || coverage == nil || !coverage.PreCutoverFlowsUnreviewed {
+				t.Fatalf("cutover evidence persisted after authority race: %+v", coverage)
+			}
+		})
+	}
+}
+
+func TestCutoverCancellationDuringFinalRevalidationWritesNothing(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	s, _ := newCutoverReviewTestServer(t, now)
+	ctx, cancel := context.WithCancel(context.Background())
+	s.nudgeBeforeCommit = func(kind string) {
+		if kind == "cutover" {
+			s.nudgeScanCheckpoint = func(stage string) {
+				if stage == "recon_start" {
+					cancel()
+				}
+			}
+		}
+	}
+	if _, err := s.handleNudgesCutoverReview(ctx, cutoverReviewRequest(t)); err == nil || !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("cutover final-scan cancellation error=%v", err)
+	}
+	coverage, _, ok := s.nudges.confirmedSnapshot(nil)
+	if !ok || coverage == nil || !coverage.PreCutoverFlowsUnreviewed {
+		t.Fatalf("canceled final revalidation persisted evidence: %+v", coverage)
+	}
+}
+
 func candidateKindPresent(candidates []rpc.NudgeCandidate, kind string) bool {
 	for _, candidate := range candidates {
 		if candidate.Kind == kind {
@@ -423,9 +663,17 @@ func TestConfirmedFlowCutoverRevalidationRestatementAndRestart(t *testing.T) {
 	if !ok || coverage == nil || !coverage.PreCutoverFlowsUnreviewed || len(events) != 0 {
 		t.Fatalf("cutover coverage=%+v events=%+v ok=%v", coverage, events, ok)
 	}
+	// Every row incorporated before review belongs to the exact reviewed
+	// baseline, including rows that arrived after coverage was first created.
+	if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{PolicyVersion: 4, ReportIdentity: opaqueIdentity("report", "incremental"), ConfirmedRows: []string{oldID, newID}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, events, _ := st.confirmedSnapshot([]string{oldID, newID}); len(events) != 0 {
+		t.Fatalf("pre-review incremental rows became candidates: %+v", events)
+	}
 	evidence := nudgeCutoverReviewEvidence{
 		ReviewedAt: now.Add(time.Minute), PolicyIdentity: opaqueIdentity("policy", "v4"), PolicyVersion: 4,
-		ReportIdentity: opaqueIdentity("report", "cutover"), ConfirmedRows: 1,
+		ReportIdentity: opaqueIdentity("report", "incremental"), ConfirmedRows: 2, ReviewedRows: []string{oldID, newID},
 	}
 	if _, reviewed, err := st.reviewConfirmedCutover(evidence); err == nil || reviewed {
 		t.Fatalf("future cutover review reviewed=%v err=%v", reviewed, err)
@@ -436,11 +684,12 @@ func TestConfirmedFlowCutoverRevalidationRestatementAndRestart(t *testing.T) {
 		t.Fatalf("already=%v err=%v", already, err)
 	}
 	now = now.Add(2 * time.Minute)
-	if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{PolicyVersion: 4, ReportIdentity: opaqueIdentity("report", "next"), ConfirmedRows: []string{oldID, newID}}); err != nil {
+	postReviewID := opaqueIdentity("flow", "post-review")
+	if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{PolicyVersion: 4, ReportIdentity: opaqueIdentity("report", "next"), ConfirmedRows: []string{oldID, newID, postReviewID}}); err != nil {
 		t.Fatal(err)
 	}
-	coverage, events, _ = st.confirmedSnapshot([]string{oldID, newID})
-	if coverage.PreCutoverFlowsUnreviewed || len(events) != 1 || events[0].ContentIdentity != newID {
+	coverage, events, _ = st.confirmedSnapshot([]string{oldID, newID, postReviewID})
+	if coverage.PreCutoverFlowsUnreviewed || len(events) != 1 || events[0].ContentIdentity != postReviewID {
 		t.Fatalf("post-cutover coverage=%+v events=%+v", coverage, events)
 	}
 	st.mu.Lock()
@@ -468,6 +717,85 @@ func TestConfirmedFlowCutoverRevalidationRestatementAndRestart(t *testing.T) {
 	}
 	if _, got, _ := reloaded.confirmedSnapshot([]string{oldID, restatedID}); len(got) != 1 || got[0].ContentIdentity != restatedID {
 		t.Fatalf("material restatement did not rearm: %+v", got)
+	}
+}
+
+func TestConfirmedFlowEmptyCurrentRowsRemainObservedAcrossReload(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), governanceNudgeStateFile)
+	st := &nudgeStateStore{path: path, now: func() time.Time { return now }}
+	row := opaqueIdentity("flow", "covered")
+	firstReport := opaqueIdentity("report", "nonzero")
+	if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{PolicyVersion: 4, ReportIdentity: firstReport, ConfirmedRows: []string{row}}); err != nil {
+		t.Fatal(err)
+	}
+	governance := opaqueIdentity("governance", "stable")
+	policyID := opaqueIdentity("policy", "stable")
+	firstAuthority := cutoverAuthorityIdentity(governance, firstReport, now, []string{row})
+	if _, _, err := st.reviewConfirmedCutover(nudgeCutoverReviewEvidence{ReviewedAt: now, PolicyIdentity: policyID,
+		PolicyVersion: 4, ReportIdentity: firstReport, ConfirmedRows: 1, ReviewedRows: []string{row}, StatementAsOf: now,
+		AuthorityIdentity: firstAuthority, GovernanceIdentity: governance}); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(time.Minute)
+	emptyReport := opaqueIdentity("report", "empty")
+	if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{PolicyVersion: 4, ReportIdentity: emptyReport, ConfirmedRows: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	emptyAuthority := cutoverAuthorityIdentity(governance, emptyReport, now, nil)
+	emptyEvidence := nudgeCutoverReviewEvidence{ReviewedAt: now, PolicyIdentity: policyID,
+		PolicyVersion: 4, ReportIdentity: emptyReport, ConfirmedRows: 0, ReviewedRows: []string{}, StatementAsOf: now,
+		AuthorityIdentity: emptyAuthority, GovernanceIdentity: governance}
+	if _, already, err := st.reviewConfirmedCutover(emptyEvidence); err != nil || already {
+		t.Fatalf("empty replacement already=%v err=%v", already, err)
+	}
+
+	reloaded := &nudgeStateStore{path: path, now: func() time.Time { return now }}
+	reloaded.mu.Lock()
+	reloaded.loadLocked()
+	coverage := cloneNudgeStateForTest(t, reloaded.state).ConfirmedCoverage
+	reloaded.mu.Unlock()
+	if coverage == nil || coverage.CurrentRowCount != 0 || len(coverage.CurrentRows) != 0 {
+		t.Fatalf("reloaded empty current truth=%+v", coverage)
+	}
+	currentAuthority := confirmedFlowCurrentAuthority{GovernanceIdentity: governance, ReportIdentity: emptyReport, StatementAsOf: now}
+	projected, _, ok, err := reloaded.confirmedSnapshotContext(context.Background(), nil, currentAuthority)
+	if err != nil || !ok || projected == nil || projected.PreCutoverFlowsUnreviewed {
+		t.Fatalf("reloaded empty projection=%+v ok=%v err=%v", projected, ok, err)
+	}
+	if _, already, err := reloaded.reviewConfirmedCutover(emptyEvidence); err != nil || !already {
+		t.Fatalf("reloaded empty retry already=%v err=%v", already, err)
+	}
+}
+
+func TestConfirmedFlowLegacyCoverageMigratesMissingCurrentRowsPresence(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), governanceNudgeStateFile)
+	row := opaqueIdentity("flow", "legacy")
+	report := opaqueIdentity("report", "legacy")
+	legacy := fmt.Sprintf(`{"version":1,"confirmed_coverage":{"coverage_from":%q,"report_identity":%q,"covered_row_count":1,"pre_cutover_unreviewed":true,"known_rows":[%q]}}`,
+		now.Format(time.RFC3339Nano), report, row)
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := &nudgeStateStore{path: path, now: func() time.Time { return now }}
+	st.mu.Lock()
+	st.loadLocked()
+	coverage := cloneNudgeStateForTest(t, st.state).ConfirmedCoverage
+	st.mu.Unlock()
+	if coverage == nil || coverage.CurrentRowCount != 1 || !slices.Equal(coverage.CurrentRows, []string{row}) {
+		t.Fatalf("legacy migration=%+v", coverage)
+	}
+	if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{PolicyVersion: 4, ReportIdentity: report, ConfirmedRows: []string{row}}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"current_rows_observed":true`)) {
+		t.Fatalf("migrated presence marker was not persisted: %s", raw)
 	}
 }
 
@@ -552,6 +880,347 @@ func TestNudgesCutoverReviewProductionAuthorizationRevalidationAndPersistence(t 
 	}
 }
 
+func TestStaleCutoverReviewCanBeReplacedAfterRoutineReportDrift(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	s, fixtureName := newCutoverReviewTestServer(t, now)
+	first, err := s.handleNudgesCutoverReview(context.Background(), cutoverReviewRequest(t))
+	if err != nil || first == nil || !first.OK || first.AlreadyReviewed {
+		t.Fatalf("initial review=%+v err=%v", first, err)
+	}
+
+	// Advance the broker-backed statement/report authority without adding a
+	// confirmed-flow row. The old exact review becomes inert and a fresh paired
+	// action must be able to establish the new baseline.
+	day := now.Format("20060102")
+	writeFlexFixture(t, fixtureName, now.Format("20060102;150405"), day, day,
+		cashLine("cutover-flow", "Deposits/Withdrawals", 250, day)+"\n"+equityRow(day, 250000))
+	report, capitalSnapshot := s.buildReconReportWithSnapshot()
+	if report == nil || capitalSnapshot == nil || report.ReportID == "" {
+		t.Fatalf("drifted report=%+v capital=%+v", report, capitalSnapshot)
+	}
+	s.riskCapital.IncorporateStatementSnapshot(*capitalSnapshot)
+
+	before, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+	if err != nil || before.ConfirmedFlowCoverage == nil || !before.ConfirmedFlowCoverage.PreCutoverFlowsUnreviewed {
+		t.Fatalf("stale review did not reopen: snapshot=%+v err=%v", before, err)
+	}
+	replacement, err := s.handleNudgesCutoverReview(context.Background(), cutoverReviewRequest(t))
+	if err != nil || replacement == nil || !replacement.OK || replacement.AlreadyReviewed {
+		t.Fatalf("replacement review=%+v err=%v", replacement, err)
+	}
+	after, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+	if err != nil || after.ConfirmedFlowCoverage == nil || after.ConfirmedFlowCoverage.PreCutoverFlowsUnreviewed {
+		t.Fatalf("replacement review not current: snapshot=%+v err=%v", after, err)
+	}
+
+	path := s.nudges.path
+	s.nudges = &nudgeStateStore{path: path, now: s.now}
+	s.riskCapital.nudges = s.nudges
+	reloaded, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+	if err != nil || reloaded.ConfirmedFlowCoverage == nil || reloaded.ConfirmedFlowCoverage.PreCutoverFlowsUnreviewed {
+		t.Fatalf("replacement did not survive reload: snapshot=%+v err=%v", reloaded, err)
+	}
+
+	// A genuinely current review remains an immutable idempotency boundary.
+	s.nudges.mu.Lock()
+	current := cloneNudgeStateForTest(t, s.nudges.state)
+	s.nudges.mu.Unlock()
+	coverage := current.ConfirmedCoverage
+	_, _, err = s.nudges.reviewConfirmedCutover(nudgeCutoverReviewEvidence{
+		ReviewedAt: replacement.ReviewedAt, PolicyIdentity: coverage.ReviewPolicyIdentity + "-conflict",
+		PolicyVersion: coverage.ReviewPolicyVersion, ReportIdentity: coverage.ReviewReportIdentity,
+		ConfirmedRows: coverage.ReviewedRowCount, ReviewedRows: coverage.ReviewedRows,
+		StatementAsOf: coverage.ReviewStatementAsOf, AuthorityIdentity: coverage.ReviewAuthority,
+		GovernanceIdentity: coverage.ReviewGovernance,
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflict") {
+		t.Fatalf("current conflicting retry error=%v", err)
+	}
+}
+
+func TestStaleCutoverReplacementRollsBackOnPersistenceFailure(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	s, fixtureName := newCutoverReviewTestServer(t, now)
+	if _, err := s.handleNudgesCutoverReview(context.Background(), cutoverReviewRequest(t)); err != nil {
+		t.Fatal(err)
+	}
+	day := now.Format("20060102")
+	writeFlexFixture(t, fixtureName, now.Format("20060102;150405"), day, day,
+		cashLine("cutover-flow", "Deposits/Withdrawals", 250, day)+"\n"+equityRow(day, 250000))
+	_, capitalSnapshot := s.buildReconReportWithSnapshot()
+	if capitalSnapshot == nil {
+		t.Fatal("routine report drift produced no capital snapshot")
+	}
+	s.riskCapital.IncorporateStatementSnapshot(*capitalSnapshot)
+
+	s.nudges.mu.Lock()
+	before := cloneNudgeStateForTest(t, s.nudges.state)
+	s.nudges.writeState = func(string, []byte) error { return errors.New("injected replacement rename failure") }
+	s.nudges.mu.Unlock()
+	if result, err := s.handleNudgesCutoverReview(context.Background(), cutoverReviewRequest(t)); err == nil || result != nil {
+		t.Fatalf("failed replacement result=%+v err=%v", result, err)
+	}
+	s.nudges.mu.Lock()
+	after := cloneNudgeStateForTest(t, s.nudges.state)
+	s.nudges.writeState = nil
+	s.nudges.fault = false
+	s.nudges.mu.Unlock()
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("failed replacement leaked nested state:\n got=%+v\nwant=%+v", after, before)
+	}
+
+	result, err := s.handleNudgesCutoverReview(context.Background(), cutoverReviewRequest(t))
+	if err != nil || result == nil || !result.OK || result.AlreadyReviewed {
+		t.Fatalf("fresh replacement after rollback=%+v err=%v", result, err)
+	}
+}
+
+func TestMonthlyCompletionSurvivesRoutineAuthorityRefresh(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	s, fixtureName := newCutoverReviewTestServer(t, now)
+	rendered, _ := s.composeBrief(context.Background())
+	params := rpc.BriefAckParams{Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+		BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice}
+	ack, err := s.handleBriefAck(context.Background(), rawParams(t, params))
+	if err != nil || ack == nil || !ack.OK {
+		t.Fatalf("monthly completion=%+v err=%v", ack, err)
+	}
+
+	// Daily report and protection-pin generations are volatile diagnostic
+	// authority after completion, not a second monthly key.
+	day := now.Format("20060102")
+	writeFlexFixture(t, fixtureName, now.Format("20060102;150405"), day, day,
+		cashLine("cutover-flow", "Deposits/Withdrawals", 250, day)+"\n"+equityRow(day, 250000))
+	s.protectionPolicies.mu.Lock()
+	s.protectionPolicies.status.PolicyVersion++
+	s.protectionPolicies.mu.Unlock()
+	authority := s.currentNudgeAuthority(now)
+	evaluation, _ := s.governanceMonthlyPulseForAuthority(authority, authority.policy, s.buildReconReport(), now)
+	if evaluation.Status != risk.MonthlyPulseStatusCompleted {
+		t.Fatalf("routine authority refresh reopened monthly pulse: %+v", evaluation)
+	}
+	retry, err := s.handleBriefAck(context.Background(), rawParams(t, params))
+	if err != nil || retry == nil || !retry.AlreadyStamped || retry.BriefFingerprint != rendered.BriefFingerprint {
+		t.Fatalf("routine authority refresh broke idempotent retry: ack=%+v err=%v", retry, err)
+	}
+
+	path := s.nudges.path
+	s.nudges = &nudgeStateStore{path: path, now: s.now}
+	s.riskCapital.nudges = s.nudges
+	authority = s.currentNudgeAuthority(now)
+	evaluation, _ = s.governanceMonthlyPulseForAuthority(authority, authority.policy, s.buildReconReport(), now)
+	if evaluation.Status != risk.MonthlyPulseStatusCompleted {
+		t.Fatalf("reload reopened monthly pulse after routine refresh: %+v", evaluation)
+	}
+	retry, err = s.handleBriefAck(context.Background(), rawParams(t, params))
+	if err != nil || retry == nil || !retry.AlreadyStamped || retry.BriefFingerprint != rendered.BriefFingerprint {
+		t.Fatalf("reload broke idempotent retry after routine refresh: ack=%+v err=%v", retry, err)
+	}
+
+	s.riskPolicies.mu.Lock()
+	revisedWarning := 3
+	s.riskPolicies.active.Cadence.Nudges.ReconcileWarningDays = &revisedWarning
+	s.riskPolicies.lastFingerprint = s.riskPolicies.active.FingerprintKey()
+	s.riskPolicies.mu.Unlock()
+	authority = s.currentNudgeAuthority(now)
+	evaluation, _ = s.governanceMonthlyPulseForAuthority(authority, authority.policy, s.buildReconReport(), now)
+	if evaluation.Status == risk.MonthlyPulseStatusCompleted {
+		t.Fatalf("policy identity revision did not reopen monthly pulse: %+v", evaluation)
+	}
+}
+
+func TestMonthlyCompletionRecoversFromTransientWriteFailure(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	s := newV4NudgeTestServer(t, now)
+	rendered, _ := s.composeBrief(context.Background())
+	params := rpc.BriefAckParams{Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+		BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice}
+	attempts := 0
+	s.nudges.writeState = func(path string, raw []byte) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("injected transient atomic rename failure")
+		}
+		return writePrivateStateAtomic(path, raw)
+	}
+	if ack, err := s.handleBriefAck(context.Background(), rawParams(t, params)); err == nil || ack != nil {
+		t.Fatalf("first write unexpectedly succeeded: ack=%+v err=%v", ack, err)
+	}
+	if s.nudges.healthOK() {
+		t.Fatal("failed write did not leave reads faulted")
+	}
+	if result := s.composeNudgesSnapshot(); result.SourceHealth.ConfirmedFlow.Status != rpc.NudgeInputStatusError || result.IsCleanEmpty() {
+		t.Fatalf("faulted snapshot health=%+v clean=%v", result.SourceHealth, result.IsCleanEmpty())
+	}
+
+	ack, err := s.handleBriefAck(context.Background(), rawParams(t, params))
+	if err != nil || ack == nil || !ack.OK || ack.AlreadyStamped {
+		t.Fatalf("authorized retry did not recover: ack=%+v err=%v", ack, err)
+	}
+	if attempts != 2 || !s.nudges.healthOK() {
+		t.Fatalf("retry attempts=%d healthy=%v", attempts, s.nudges.healthOK())
+	}
+	path := s.nudges.path
+	s.nudges = &nudgeStateStore{path: path, now: s.now}
+	authority := s.currentNudgeAuthority(now)
+	evaluation, completion := s.governanceMonthlyPulseForAuthority(authority, authority.policy, s.buildReconReport(), now)
+	if evaluation.Status != risk.MonthlyPulseStatusCompleted || completion == nil || !completion.CompletedAt.Equal(ack.At) {
+		t.Fatalf("reloaded completion evaluation=%+v completion=%+v ack=%+v", evaluation, completion, ack)
+	}
+}
+
+func TestNudgeStoreTransientWriteRecoveryIsSharedAndLoadCorruptionIsNot(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	failOnce := func() func(string, []byte) error {
+		attempts := 0
+		return func(path string, raw []byte) error {
+			attempts++
+			if attempts == 1 {
+				return errors.New("injected transient atomic rename failure")
+			}
+			return writePrivateStateAtomic(path, raw)
+		}
+	}
+
+	t.Run("shadow", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), governanceNudgeStateFile)
+		st := &nudgeStateStore{path: path, now: func() time.Time { return now }, writeState: failOnce()}
+		policyID, episode := opaqueIdentity("policy", "recovery"), opaqueIdentity("latch", "recovery")
+		if err := st.recordShadow(policyID, episode, true, false, true); err == nil || st.healthOK() {
+			t.Fatalf("first shadow write err=%v healthy=%v", err, st.healthOK())
+		}
+		if err := st.recordShadow(policyID, episode, true, false, true); err != nil || !st.healthOK() {
+			t.Fatalf("shadow retry err=%v healthy=%v", err, st.healthOK())
+		}
+		reloaded := &nudgeStateStore{path: path, now: func() time.Time { return now }}
+		if candidate := reloaded.shadowCandidate(policyID, episode, true); candidate == nil {
+			t.Fatal("reloaded shadow recovery lost the occurrence")
+		}
+	})
+
+	t.Run("confirmed flow", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), governanceNudgeStateFile)
+		st := &nudgeStateStore{path: path, now: func() time.Time { return now }, writeState: failOnce()}
+		snapshot := nudgeConfirmedFlowSnapshot{PolicyVersion: 4, ReportIdentity: opaqueIdentity("report", "recovery"),
+			ConfirmedRows: []string{opaqueIdentity("flow", "recovery")}}
+		if err := st.observeConfirmedFlows(snapshot); err == nil || st.healthOK() {
+			t.Fatalf("first confirmed write err=%v healthy=%v", err, st.healthOK())
+		}
+		if err := st.observeConfirmedFlows(snapshot); err != nil || !st.healthOK() {
+			t.Fatalf("confirmed retry err=%v healthy=%v", err, st.healthOK())
+		}
+		reloaded := &nudgeStateStore{path: path, now: func() time.Time { return now }}
+		if coverage, _, ok := reloaded.confirmedSnapshot(snapshot.ConfirmedRows); !ok || coverage == nil {
+			t.Fatalf("reloaded confirmed recovery coverage=%+v ok=%v", coverage, ok)
+		}
+	})
+
+	t.Run("cutover", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), governanceNudgeStateFile)
+		st := &nudgeStateStore{path: path, now: func() time.Time { return now }}
+		row := opaqueIdentity("flow", "cutover-recovery")
+		reportID := opaqueIdentity("report", "cutover-recovery")
+		if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{PolicyVersion: 4, ReportIdentity: reportID, ConfirmedRows: []string{row}}); err != nil {
+			t.Fatal(err)
+		}
+		st.writeState = failOnce()
+		evidence := nudgeCutoverReviewEvidence{ReviewedAt: now, PolicyIdentity: opaqueIdentity("policy", "cutover-recovery"),
+			PolicyVersion: 4, ReportIdentity: reportID, ConfirmedRows: 1, ReviewedRows: []string{row}, StatementAsOf: now}
+		if _, _, err := st.reviewConfirmedCutover(evidence); err == nil || st.healthOK() {
+			t.Fatalf("first cutover write err=%v healthy=%v", err, st.healthOK())
+		}
+		if _, already, err := st.reviewConfirmedCutover(evidence); err != nil || already || !st.healthOK() {
+			t.Fatalf("cutover retry already=%v err=%v healthy=%v", already, err, st.healthOK())
+		}
+		reloaded := &nudgeStateStore{path: path, now: func() time.Time { return now }}
+		if coverage, _, ok := reloaded.confirmedSnapshot([]string{row}); !ok || coverage == nil || coverage.PreCutoverFlowsUnreviewed {
+			t.Fatalf("reloaded cutover recovery coverage=%+v ok=%v", coverage, ok)
+		}
+	})
+
+	t.Run("repeated failure stays faulted", func(t *testing.T) {
+		st := &nudgeStateStore{path: filepath.Join(t.TempDir(), governanceNudgeStateFile), now: func() time.Time { return now },
+			writeState: func(string, []byte) error { return errors.New("persistent rename failure") }}
+		for range 2 {
+			if err := st.recordShadow(opaqueIdentity("policy", "persistent"), opaqueIdentity("latch", "persistent"), true, false, true); err == nil {
+				t.Fatal("persistent failure unexpectedly succeeded")
+			}
+		}
+		if st.healthOK() {
+			t.Fatal("repeated persistence failure cleared fault")
+		}
+	})
+
+	t.Run("load corruption is not recoverable", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), governanceNudgeStateFile)
+		if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		st := &nudgeStateStore{path: path, now: func() time.Time { return now }}
+		if st.writeReady() {
+			t.Fatal("corrupt loaded state was treated as transient-write recovery")
+		}
+		if err := st.recordShadow(opaqueIdentity("policy", "corrupt"), opaqueIdentity("latch", "corrupt"), true, false, true); err == nil {
+			t.Fatal("corrupt loaded state accepted a governance write")
+		}
+	})
+}
+
+func TestMonthlyCompletionLookupIsStableAcrossAuthorityABA(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	s, fixtureName := newCutoverReviewTestServer(t, now)
+	rendered, _ := s.composeBrief(context.Background())
+	params := rpc.BriefAckParams{Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+		BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice}
+	first, err := s.handleBriefAck(context.Background(), rawParams(t, params))
+	if err != nil || first == nil || !first.OK {
+		t.Fatalf("A completion=%+v err=%v", first, err)
+	}
+	day := now.Format("20060102")
+	initialProtectionVersion := s.protectionPolicies.status.PolicyVersion
+	writeFlexFixture(t, fixtureName, now.Format("20060102;150405"), day, day,
+		cashLine("cutover-flow", "Deposits/Withdrawals", 250, day)+"\n"+equityRow(day, 250000))
+	s.protectionPolicies.mu.Lock()
+	s.protectionPolicies.status.PolicyVersion++
+	s.protectionPolicies.mu.Unlock()
+	for _, phase := range []string{"B", "A"} {
+		if phase == "A" {
+			writeFlexFixture(t, fixtureName, now.Format("20060102")+";090000", day, day,
+				cashLine("cutover-flow", "Deposits/Withdrawals", 250, day))
+			s.protectionPolicies.mu.Lock()
+			s.protectionPolicies.status.PolicyVersion = initialProtectionVersion
+			s.protectionPolicies.mu.Unlock()
+		}
+		retry, err := s.handleBriefAck(context.Background(), rawParams(t, params))
+		if err != nil || retry == nil || !retry.AlreadyStamped || retry.BriefFingerprint != first.BriefFingerprint || !retry.At.Equal(first.At) {
+			t.Fatalf("%s retry=%+v err=%v, want original durable record %+v", phase, retry, err, first)
+		}
+	}
+	s.nudges.mu.Lock()
+	completionRows := len(s.nudges.state.MonthlyCompletions)
+	path := s.nudges.path
+	s.nudges.mu.Unlock()
+	if completionRows != 1 {
+		t.Fatalf("A-B-A created %d monthly records, want one", completionRows)
+	}
+	s.nudges = &nudgeStateStore{path: path, now: s.now}
+	retry, err := s.handleBriefAck(context.Background(), rawParams(t, params))
+	if err != nil || retry == nil || !retry.AlreadyStamped || !retry.At.Equal(first.At) {
+		t.Fatalf("reloaded A retry=%+v err=%v", retry, err)
+	}
+
+	s.riskPolicies.mu.Lock()
+	revisedWarning := 3
+	s.riskPolicies.active.Cadence.Nudges.ReconcileWarningDays = &revisedWarning
+	s.riskPolicies.lastFingerprint = s.riskPolicies.active.FingerprintKey()
+	s.riskPolicies.mu.Unlock()
+	authority := s.currentNudgeAuthority(now)
+	evaluation, _ := s.governanceMonthlyPulseForAuthority(authority, authority.policy, s.buildReconReport(), now)
+	if evaluation.Status == risk.MonthlyPulseStatusCompleted {
+		t.Fatalf("policy C did not reopen monthly duty: %+v", evaluation)
+	}
+}
+
 func TestNudgesCutoverReviewRejectsStaleCurrentReportAndDispatches(t *testing.T) {
 	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
 	s, _ := newCutoverReviewTestServer(t, now)
@@ -626,6 +1295,229 @@ func TestShadowEpisodeCountRestartResolutionAndRearm(t *testing.T) {
 	if second == nil || second.Fingerprint == first.Fingerprint {
 		t.Fatalf("policy revision did not rearm: first=%+v second=%+v", first, second)
 	}
+}
+
+func TestNudgeMutationRollsBackOnPersistenceFailure(t *testing.T) {
+	now := time.Date(2026, 8, 4, 10, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	goodPath := filepath.Join(root, governanceNudgeStateFile)
+	failWrite := func(string, []byte) error { return errors.New("injected atomic rename failure") }
+	policyID, episode := opaqueIdentity("policy", "rollback"), opaqueIdentity("latch", "rollback")
+
+	t.Run("shadow creation and update", func(t *testing.T) {
+		st := &nudgeStateStore{path: goodPath, now: func() time.Time { return now }, writeState: failWrite}
+		if err := st.recordShadow(policyID, episode, true, false, true); err == nil {
+			t.Fatal("shadow creation unexpectedly persisted")
+		}
+		if got := st.state.Shadow; got != (nudgeShadowEpisodeState{}) {
+			t.Fatalf("failed creation leaked in memory: %+v", got)
+		}
+
+		st.writeState, st.fault = nil, false
+		if err := st.recordShadow(policyID, episode, true, false, true); err != nil {
+			t.Fatal(err)
+		}
+		before := st.state.Shadow
+		st.writeState = failWrite
+		if err := st.recordShadow(policyID, episode, true, false, true); err == nil {
+			t.Fatal("shadow update unexpectedly persisted")
+		}
+		if st.state.Shadow != before {
+			t.Fatalf("failed update leaked in memory: got=%+v want=%+v", st.state.Shadow, before)
+		}
+		st.writeState, st.fault = nil, false
+		if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{
+			PolicyVersion: 4, ReportIdentity: opaqueIdentity("report", "unrelated"),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		reopened := &nudgeStateStore{path: goodPath, now: func() time.Time { return now }}
+		reopened.loadLocked()
+		if reopened.state.Shadow != before {
+			t.Fatalf("later save flushed failed shadow update: got=%+v want=%+v", reopened.state.Shadow, before)
+		}
+	})
+
+	t.Run("confirmed creation and nested update", func(t *testing.T) {
+		path := filepath.Join(root, "confirmed.json")
+		st := &nudgeStateStore{path: path, now: func() time.Time { return now }, writeState: failWrite}
+		oldID, newID := opaqueIdentity("flow", "old"), opaqueIdentity("flow", "new")
+		first := nudgeConfirmedFlowSnapshot{PolicyVersion: 4, ReportIdentity: opaqueIdentity("report", "first"), ConfirmedRows: []string{oldID}}
+		if err := st.observeConfirmedFlows(first); err == nil {
+			t.Fatal("coverage creation unexpectedly persisted")
+		}
+		if st.state.ConfirmedCoverage != nil || len(st.state.ConfirmedEvents) != 0 {
+			t.Fatalf("failed coverage creation leaked state: %+v %+v", st.state.ConfirmedCoverage, st.state.ConfirmedEvents)
+		}
+
+		st.writeState, st.fault = nil, false
+		if err := st.observeConfirmedFlows(first); err != nil {
+			t.Fatal(err)
+		}
+		before := cloneNudgeStateForTest(t, st.state)
+		st.writeState = failWrite
+		if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{
+			PolicyVersion: 4, ReportIdentity: opaqueIdentity("report", "update"), ConfirmedRows: []string{oldID, newID},
+		}); err == nil {
+			t.Fatal("coverage update unexpectedly persisted")
+		}
+		if !reflect.DeepEqual(st.state, before) {
+			t.Fatalf("failed nested update leaked state:\n got=%+v\nwant=%+v", st.state, before)
+		}
+		st.writeState, st.fault = nil, false
+		if _, _, err := st.reviewConfirmedCutover(nudgeCutoverReviewEvidence{
+			ReviewedAt: now, PolicyIdentity: policyID, PolicyVersion: 4,
+			ReportIdentity: first.ReportIdentity, ConfirmedRows: 1, ReviewedRows: []string{oldID},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{
+			PolicyVersion: 4, ReportIdentity: opaqueIdentity("report", "event"), ConfirmedRows: []string{oldID, newID},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		beforeEventMutation := cloneNudgeStateForTest(t, st.state)
+		st.writeState = failWrite
+		if err := st.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{
+			PolicyVersion: 4, ReportIdentity: opaqueIdentity("report", "supersede"), ConfirmedRows: []string{oldID},
+		}); err == nil {
+			t.Fatal("event supersession unexpectedly persisted")
+		}
+		if !reflect.DeepEqual(st.state, beforeEventMutation) {
+			t.Fatalf("failed event/supersession mutation leaked state:\n got=%+v\nwant=%+v", st.state, beforeEventMutation)
+		}
+
+		// A later unrelated successful write must not flush the failed row.
+		st.writeState, st.fault = nil, false
+		if err := st.recordShadow(policyID, episode, true, false, true); err != nil {
+			t.Fatal(err)
+		}
+		reopened := &nudgeStateStore{path: path, now: func() time.Time { return now }}
+		reopened.loadLocked()
+		if !reflect.DeepEqual(reopened.state.ConfirmedCoverage, beforeEventMutation.ConfirmedCoverage) || !reflect.DeepEqual(reopened.state.ConfirmedEvents, beforeEventMutation.ConfirmedEvents) {
+			t.Fatalf("later save flushed failed confirmed state: %+v", reopened.state)
+		}
+	})
+}
+
+func TestPersistedGovernanceEvidenceIsInertAfterAuthorityRaces(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	type mutation struct {
+		name   string
+		mutate func(*Server, string)
+	}
+	mutations := []mutation{
+		{name: "policy revision", mutate: func(s *Server, _ string) {
+			s.riskPolicies.mu.Lock()
+			revised := 3
+			s.riskPolicies.active.Cadence.Nudges.ReconcileWarningDays = &revised
+			s.riskPolicies.lastFingerprint = s.riskPolicies.active.FingerprintKey()
+			s.riskPolicies.mu.Unlock()
+		}},
+		{name: "pin change", mutate: func(s *Server, _ string) {
+			s.protectionPolicies.mu.Lock()
+			s.protectionPolicies.status.PolicyVersion++
+			s.protectionPolicies.mu.Unlock()
+		}},
+		{name: "report row change", mutate: func(_ *Server, fixture string) {
+			day := now.Format("20060102")
+			writeFlexFixture(t, fixture, now.Format("20060102")+";090000", day, day,
+				cashLine("cutover-flow", "Deposits/Withdrawals", 250, day)+"\n"+cashLine("post-validation-flow", "Deposits/Withdrawals", 25, day))
+		}},
+	}
+	for _, phase := range []string{"after_validation", "after_persist"} {
+		for _, mutation := range mutations {
+			t.Run("monthly/"+phase+"/"+mutation.name, func(t *testing.T) {
+				s, fixture := newCutoverReviewTestServer(t, now)
+				rendered, _ := s.composeBrief(context.Background())
+				hook := func(kind string) {
+					if kind == "monthly" {
+						mutation.mutate(s, fixture)
+					}
+				}
+				if phase == "after_validation" {
+					s.nudgeAfterValidation = hook
+				} else {
+					s.nudgeAfterPersist = hook
+				}
+				ack, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
+					Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+					BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice,
+				}))
+				if phase == "after_validation" {
+					if err == nil || ack != nil {
+						t.Fatalf("pre-write authority race persisted monthly evidence: ack=%+v err=%v", ack, err)
+					}
+					s.nudges.mu.Lock()
+					completionCount := len(s.nudges.state.MonthlyCompletions)
+					s.nudges.mu.Unlock()
+					if completionCount != 0 {
+						t.Fatalf("pre-write authority race left %d monthly completion rows", completionCount)
+					}
+					return
+				}
+				if err != nil || ack == nil || !ack.OK {
+					t.Fatalf("raced monthly write ack=%+v err=%v", ack, err)
+				}
+				authority := s.currentNudgeAuthority(now)
+				report := s.buildReconReport()
+				evaluation, _ := s.governanceMonthlyPulseForAuthority(authority, authority.policy, report, now)
+				wantCompleted := mutation.name != "policy revision"
+				if gotCompleted := evaluation.Status == risk.MonthlyPulseStatusCompleted; gotCompleted != wantCompleted {
+					t.Fatalf("monthly completion current=%v want=%v after %s: %+v", gotCompleted, wantCompleted, mutation.name, evaluation)
+				}
+				statePath := s.nudges.path
+				s.nudges = &nudgeStateStore{path: statePath, now: s.now}
+				evaluation, _ = s.governanceMonthlyPulseForAuthority(s.currentNudgeAuthority(now), s.riskPolicies.snapshot().policy, s.buildReconReport(), now)
+				if gotCompleted := evaluation.Status == risk.MonthlyPulseStatusCompleted; gotCompleted != wantCompleted {
+					t.Fatalf("restart monthly completion current=%v want=%v after %s: %+v", gotCompleted, wantCompleted, mutation.name, evaluation)
+				}
+			})
+
+			t.Run("cutover/"+phase+"/"+mutation.name, func(t *testing.T) {
+				s, fixture := newCutoverReviewTestServer(t, now)
+				hook := func(kind string) {
+					if kind == "cutover" {
+						mutation.mutate(s, fixture)
+					}
+				}
+				if phase == "after_validation" {
+					s.nudgeAfterValidation = hook
+				} else {
+					s.nudgeAfterPersist = hook
+				}
+				if result, err := s.handleNudgesCutoverReview(context.Background(), cutoverReviewRequest(t)); err != nil || result == nil || !result.OK {
+					t.Fatalf("raced cutover result=%+v err=%v", result, err)
+				}
+				snapshot, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if snapshot.ConfirmedFlowCoverage == nil || !snapshot.ConfirmedFlowCoverage.PreCutoverFlowsUnreviewed {
+					t.Fatalf("stale cutover evidence reviewed current authority: coverage=%+v health=%+v", snapshot.ConfirmedFlowCoverage, snapshot.SourceHealth)
+				}
+				statePath := s.nudges.path
+				s.nudges = &nudgeStateStore{path: statePath, now: s.now}
+				restarted, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+				if err != nil || restarted.ConfirmedFlowCoverage == nil || !restarted.ConfirmedFlowCoverage.PreCutoverFlowsUnreviewed {
+					t.Fatalf("restart revived stale cutover evidence: snapshot=%+v err=%v", restarted, err)
+				}
+			})
+		}
+	}
+}
+
+func cloneNudgeStateForTest(t *testing.T, state nudgeStateFileV1) nudgeStateFileV1 {
+	t.Helper()
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cloned nudgeStateFileV1
+	if err := json.Unmarshal(raw, &cloned); err != nil {
+		t.Fatal(err)
+	}
+	return cloned
 }
 
 func TestLatchResetRearmsOpaqueEpisodeEvenAtSameTimestamp(t *testing.T) {

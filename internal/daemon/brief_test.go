@@ -3,10 +3,14 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,9 +148,10 @@ func TestMonthlyBriefAckOriginPinsFingerprintIdempotencyAndRollover(t *testing.T
 	s := newV4NudgeTestServer(t, now)
 	policy := s.riskPolicies.snapshot().policy
 	month := "2026-08"
+	rendered, _ := s.composeBrief(context.Background())
 	params := rpc.BriefAckParams{
 		Kind: rpc.BriefKindMonthly, Month: month, Evidence: rpc.BriefAckEvidenceRender,
-		BriefFingerprint: "sha256:rendered-monthly", Origin: rpc.OrderOriginPairedDevice,
+		BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice,
 	}
 	statePath, _ := defaultTradingStatePath(governanceNudgeStateFile)
 	for _, origin := range []string{"", rpc.OrderOriginAgent, rpc.OrderOriginHumanTTY} {
@@ -195,14 +200,34 @@ func TestMonthlyBriefAckOriginPinsFingerprintIdempotencyAndRollover(t *testing.T
 		t.Fatalf("monthly completion silently reviewed pre-cutover coverage: %+v", coverage)
 	}
 	repeat, err := s.handleBriefAck(context.Background(), rawParams(t, params))
-	if err != nil || !repeat.AlreadyStamped || !repeat.At.Equal(ack.At) {
+	if err != nil || !repeat.AlreadyStamped || !repeat.At.Equal(ack.At) || repeat.BriefFingerprint != ack.BriefFingerprint {
 		t.Fatalf("repeat=%+v err=%v", repeat, err)
 	}
-
+	conflict := params
+	conflict.BriefFingerprint = opaqueIdentity("brief", "different-render")
+	if got, err := s.handleBriefAck(context.Background(), rawParams(t, conflict)); err == nil || got != nil || !strings.Contains(err.Error(), "conflict") {
+		t.Fatalf("conflicting render result=%+v err=%v", got, err)
+	}
+	statePath = s.nudges.path
+	s.nudges = &nudgeStateStore{path: statePath, now: s.now}
+	restarted, err := s.handleBriefAck(context.Background(), rawParams(t, params))
+	if err != nil || !restarted.AlreadyStamped || restarted.BriefFingerprint != ack.BriefFingerprint || !restarted.At.Equal(ack.At) {
+		t.Fatalf("restart retry=%+v err=%v", restarted, err)
+	}
 	policyIdentity := nudgePolicyIdentity(policy)
-	evaluation, completion := s.briefMonthlyPulse(policy, &rpc.RiskPolicyResult{Inventory: s.riskPolicyInventory(policy)}, now)
+	evaluation, completion := s.briefMonthlyPulse(policy, &rpc.RiskPolicyResult{Inventory: s.riskPolicyInventory(policy)}, s.buildReconReport(), now)
 	if evaluation.Status != risk.MonthlyPulseStatusCompleted || completion == nil || !completion.CompletedAt.Equal(ack.At) {
 		t.Fatalf("monthly evaluation=%+v completion=%+v", evaluation, completion)
+	}
+	// A current policy revision reopens the month and invalidates the old
+	// rendered identity instead of recording it under the new authority.
+	s.riskPolicies.mu.Lock()
+	revisedWarning := 3
+	s.riskPolicies.active.Cadence.Nudges.ReconcileWarningDays = &revisedWarning
+	s.riskPolicies.lastFingerprint = s.riskPolicies.active.FingerprintKey()
+	s.riskPolicies.mu.Unlock()
+	if got, err := s.handleBriefAck(context.Background(), rawParams(t, params)); err == nil || got != nil {
+		t.Fatalf("stale-policy render result=%+v err=%v", got, err)
 	}
 	// A within-month policy fingerprint change has no matching completion and
 	// therefore reopens the pulse.
@@ -226,10 +251,425 @@ func TestMonthlyBriefAckOriginPinsFingerprintIdempotencyAndRollover(t *testing.T
 	s.riskPolicies.mu.Unlock()
 	next := params
 	next.Month = "2026-09"
-	next.BriefFingerprint = "sha256:rendered-next-month"
+	nextRendered, _ := s.composeBrief(context.Background())
+	next.BriefFingerprint = nextRendered.BriefFingerprint
 	nextAck, err := s.handleBriefAck(context.Background(), rawParams(t, next))
 	if err != nil || nextAck.AlreadyStamped || nextAck.Month != "2026-09" {
 		t.Fatalf("next month ack=%+v err=%v", nextAck, err)
+	}
+}
+
+func TestMonthlyBriefAckUsesIssuedRenderNotVolatileRecomposition(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	s := newV4NudgeTestServer(t, now)
+	rendered, _ := s.composeBrief(context.Background())
+	if rendered.BriefFingerprint == "" {
+		t.Fatal("monthly render has no fingerprint")
+	}
+
+	// Account/capital values are visible brief content but are not monthly
+	// governance authority. A phone receipt remains valid when they move after
+	// the render and before acknowledgement.
+	s.riskCapital.mu.Lock()
+	s.riskCapital.loadLocked()
+	s.riskCapital.state.Seeded = true
+	s.riskCapital.state.AdjustedPeakBase = 260000
+	s.riskCapital.state.LastEquityBase = 245000
+	s.riskCapital.state.LastEquityAsOf = now
+	s.riskCapital.mu.Unlock()
+
+	ack, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
+		Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+		BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice,
+	}))
+	if err != nil || ack == nil || !ack.OK {
+		t.Fatalf("issued render rejected after volatile mutation: ack=%+v err=%v", ack, err)
+	}
+}
+
+func TestMonthlyRenderReceiptsIssueExpireRestartAndBound(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	t.Run("unissued and expired fail closed", func(t *testing.T) {
+		s := newV4NudgeTestServer(t, now)
+		unissued := opaqueIdentity("brief", "never-rendered")
+		if _, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
+			Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+			BriefFingerprint: unissued, Origin: rpc.OrderOriginPairedDevice,
+		})); err == nil || !strings.Contains(err.Error(), "render receipt") {
+			t.Fatalf("unissued fingerprint error=%v", err)
+		}
+		rendered, _ := s.composeBrief(context.Background())
+		now = now.Add(monthlyRenderReceiptTTL + time.Second)
+		s.now = func() time.Time { return now }
+		s.riskCapital.now = s.now
+		s.riskPolicies.mu.Lock()
+		s.riskPolicies.now = s.now
+		s.riskPolicies.lastCheckedAt = now
+		s.riskPolicies.mu.Unlock()
+		if _, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
+			Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+			BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice,
+		})); err == nil || !strings.Contains(err.Error(), "render receipt") {
+			t.Fatalf("expired fingerprint error=%v", err)
+		}
+	})
+
+	t.Run("restart requires rerender", func(t *testing.T) {
+		now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+		s := newV4NudgeTestServer(t, now)
+		rendered, _ := s.composeBrief(context.Background())
+		// Receipts are intentionally memory-only; a daemon restart loses them
+		// and requires the phone to render the current brief again.
+		s.monthlyRenderReceipts = nil
+		params := rpc.BriefAckParams{Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+			BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice}
+		if _, err := s.handleBriefAck(context.Background(), rawParams(t, params)); err == nil {
+			t.Fatal("pre-restart receipt survived memory reset")
+		}
+		rerendered, _ := s.composeBrief(context.Background())
+		params.BriefFingerprint = rerendered.BriefFingerprint
+		if ack, err := s.handleBriefAck(context.Background(), rawParams(t, params)); err != nil || ack == nil || !ack.OK {
+			t.Fatalf("rerendered receipt ack=%+v err=%v", ack, err)
+		}
+	})
+
+	t.Run("bounded pruning", func(t *testing.T) {
+		s := newV4NudgeTestServer(t, now)
+		for i := range monthlyRenderReceiptLimit + 5 {
+			s.issueMonthlyRenderReceipt(opaqueIdentity("brief", fmt.Sprint(i)), "2026-08", opaqueIdentity("authority", "same"), now.Add(time.Duration(i)*time.Second))
+		}
+		if got := len(s.monthlyRenderReceipts); got != monthlyRenderReceiptLimit {
+			t.Fatalf("receipt count=%d want=%d", got, monthlyRenderReceiptLimit)
+		}
+		later := now.Add(monthlyRenderReceiptTTL + time.Hour)
+		s.issueMonthlyRenderReceipt(opaqueIdentity("brief", "fresh"), "2026-08", opaqueIdentity("authority", "same"), later)
+		if got := len(s.monthlyRenderReceipts); got != 1 {
+			t.Fatalf("expired receipt pruning left %d rows", got)
+		}
+	})
+}
+
+func TestMonthlyReceiptSurvivesMutationAtFormerSecondRead(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	s := newV4NudgeTestServer(t, now)
+	rendered, _ := s.composeBrief(context.Background())
+	s.nudgeBeforeCommit = func(kind string) {
+		if kind != "monthly" {
+			return
+		}
+		s.riskCapital.mu.Lock()
+		s.riskCapital.state.LastEquityBase = 230000
+		s.riskCapital.state.LastEquityAsOf = now
+		s.riskCapital.mu.Unlock()
+	}
+	ack, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
+		Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+		BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice,
+	}))
+	if err != nil || ack == nil || !ack.OK {
+		t.Fatalf("stable receipt rejected at former second read: ack=%+v err=%v", ack, err)
+	}
+}
+
+func TestMonthlyRenderReceiptRequiresSameRenderedAuthority(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name   string
+		mutate func(*Server)
+	}{
+		{name: "policy reload", mutate: func(s *Server) {
+			s.riskPolicies.mu.Lock()
+			defer s.riskPolicies.mu.Unlock()
+			revised := 3
+			s.riskPolicies.active.Cadence.Nudges.ReconcileWarningDays = &revised
+			s.riskPolicies.lastFingerprint = s.riskPolicies.active.FingerprintKey()
+		}},
+		{name: "protection pin reload", mutate: func(s *Server) {
+			s.protectionPolicies.mu.Lock()
+			next := s.protectionPolicies.status.PolicyVersion + 1
+			s.protectionPolicies.status.PolicyVersion = next
+			s.protectionPolicies.mu.Unlock()
+			s.riskPolicies.mu.Lock()
+			s.riskPolicies.active.Inventory.Protection.Version = strconv.Itoa(next)
+			s.riskPolicies.lastFingerprint = s.riskPolicies.active.FingerprintKey()
+			s.riskPolicies.mu.Unlock()
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newV4NudgeTestServer(t, now)
+			s.monthlyRenderBeforeIssue = func() {
+				s.monthlyRenderBeforeIssue = nil
+				tt.mutate(s)
+			}
+			rendered, _ := s.composeBrief(context.Background())
+			s.monthlyRenderMu.Lock()
+			receipts := len(s.monthlyRenderReceipts)
+			s.monthlyRenderMu.Unlock()
+			if receipts != 0 {
+				t.Fatalf("authority-raced render issued %d receipt(s)", receipts)
+			}
+			if _, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
+				Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+				BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice,
+			})); err == nil {
+				t.Fatal("authority-raced render was accepted")
+			}
+		})
+	}
+
+	t.Run("stable render remains usable", func(t *testing.T) {
+		s := newV4NudgeTestServer(t, now)
+		rendered, _ := s.composeBrief(context.Background())
+		ack, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
+			Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+			BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice,
+		}))
+		if err != nil || ack == nil || !ack.OK {
+			t.Fatalf("stable render ack=%+v err=%v", ack, err)
+		}
+	})
+}
+
+func TestMonthlyCompletionRecoversWithFreshReceiptAfterExpiry(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	s := newV4NudgeTestServer(t, now)
+	firstRender, _ := s.composeBrief(context.Background())
+	params := rpc.BriefAckParams{Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+		BriefFingerprint: firstRender.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice}
+	attempts := 0
+	s.nudges.writeState = func(path string, raw []byte) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("injected transient atomic rename failure")
+		}
+		return writePrivateStateAtomic(path, raw)
+	}
+	if ack, err := s.handleBriefAck(context.Background(), rawParams(t, params)); err == nil || ack != nil {
+		t.Fatalf("first completion unexpectedly succeeded: ack=%+v err=%v", ack, err)
+	}
+	if s.nudges.healthOK() {
+		t.Fatal("failed completion did not fault snapshot reads")
+	}
+
+	now = now.Add(monthlyRenderReceiptTTL + time.Second)
+	s.now = func() time.Time { return now }
+	s.riskCapital.now = s.now
+	s.nudges.now = s.now
+	s.riskPolicies.mu.Lock()
+	s.riskPolicies.now = s.now
+	s.riskPolicies.loadedAt = now
+	s.riskPolicies.lastCheckedAt = now
+	s.riskPolicies.mu.Unlock()
+	freshRender, _ := s.composeBrief(context.Background())
+	if freshRender.Process.MonthlyPulse == nil || freshRender.Process.MonthlyPulse.Status != rpc.BriefMonthlyPulseDue {
+		t.Fatalf("fault recovery monthly process=%+v, want conservatively due", freshRender.Process.MonthlyPulse)
+	}
+	s.monthlyRenderMu.Lock()
+	freshReceipt, issued := s.monthlyRenderReceipts[freshRender.BriefFingerprint]
+	s.monthlyRenderMu.Unlock()
+	if !issued || !freshReceipt.ExpiresAt.After(now) {
+		t.Fatalf("fault recovery issued=%v receipt=%+v fingerprint=%q", issued, freshReceipt, freshRender.BriefFingerprint)
+	}
+	params.BriefFingerprint = freshRender.BriefFingerprint
+	ack, err := s.handleBriefAck(context.Background(), rawParams(t, params))
+	if err != nil || ack == nil || !ack.OK || ack.AlreadyStamped {
+		t.Fatalf("fresh receipt recovery ack=%+v err=%v", ack, err)
+	}
+	if attempts != 2 || !s.nudges.healthOK() {
+		t.Fatalf("recovery attempts=%d healthy=%v", attempts, s.nudges.healthOK())
+	}
+	path := s.nudges.path
+	s.nudges = &nudgeStateStore{path: path, now: s.now}
+	authority := s.currentNudgeAuthority(now)
+	evaluation, completion := s.governanceMonthlyPulseForAuthority(authority, authority.policy, s.buildReconReport(), now)
+	if evaluation.Status != risk.MonthlyPulseStatusCompleted || completion == nil || !completion.CompletedAt.Equal(ack.At) {
+		t.Fatalf("reloaded recovery evaluation=%+v completion=%+v ack=%+v", evaluation, completion, ack)
+	}
+}
+
+func TestCorruptNudgeStoreCannotIssueMonthlyRecoveryReceipt(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	s := newV4NudgeTestServer(t, now)
+	path := filepath.Join(t.TempDir(), governanceNudgeStateFile)
+	if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.nudges = &nudgeStateStore{path: path, now: s.now}
+	s.riskCapital.nudges = s.nudges
+	rendered, _ := s.composeBrief(context.Background())
+	s.monthlyRenderMu.Lock()
+	_, issued := s.monthlyRenderReceipts[rendered.BriefFingerprint]
+	s.monthlyRenderMu.Unlock()
+	if issued {
+		t.Fatal("corrupt loaded store issued a monthly recovery receipt")
+	}
+}
+
+func TestCanceledBriefCompositionNeverMintsMonthlyReceipt(t *testing.T) {
+	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	activeReceipts := func(s *Server, at time.Time) int {
+		s.monthlyRenderMu.Lock()
+		defer s.monthlyRenderMu.Unlock()
+		count := 0
+		for _, receipt := range s.monthlyRenderReceipts {
+			if receipt.ExpiresAt.After(at) {
+				count++
+			}
+		}
+		return count
+	}
+
+	t.Run("already canceled normal due render", func(t *testing.T) {
+		s := newV4NudgeTestServer(t, now)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		s.composeBrief(ctx)
+		if got := activeReceipts(s, now); got != 0 {
+			t.Fatalf("canceled normal render minted %d active receipt(s)", got)
+		}
+	})
+
+	t.Run("already canceled fault recovery after expiry", func(t *testing.T) {
+		current := now
+		s := newV4NudgeTestServer(t, current)
+		first, _ := s.composeBrief(context.Background())
+		params := rpc.BriefAckParams{Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+			BriefFingerprint: first.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice}
+		s.nudges.writeState = func(string, []byte) error { return errors.New("injected persistent atomic rename failure") }
+		if ack, err := s.handleBriefAck(context.Background(), rawParams(t, params)); err == nil || ack != nil {
+			t.Fatalf("fault setup ack=%+v err=%v", ack, err)
+		}
+		current = current.Add(monthlyRenderReceiptTTL + time.Second)
+		s.now = func() time.Time { return current }
+		s.riskCapital.now = s.now
+		s.nudges.now = s.now
+		s.riskPolicies.mu.Lock()
+		s.riskPolicies.now = s.now
+		s.riskPolicies.loadedAt = current
+		s.riskPolicies.lastCheckedAt = current
+		s.riskPolicies.mu.Unlock()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		s.composeBrief(ctx)
+		if got := activeReceipts(s, current); got != 0 {
+			t.Fatalf("canceled recovery render minted %d active receipt(s)", got)
+		}
+	})
+
+	t.Run("cancellation at before issue seam", func(t *testing.T) {
+		s := newV4NudgeTestServer(t, now)
+		ctx, cancel := context.WithCancel(context.Background())
+		s.monthlyRenderBeforeIssue = cancel
+		s.composeBrief(ctx)
+		if got := activeReceipts(s, now); got != 0 {
+			t.Fatalf("before-issue cancellation minted %d active receipt(s)", got)
+		}
+	})
+
+	t.Run("cancellation immediately before receipt persistence", func(t *testing.T) {
+		s := newV4NudgeTestServer(t, now)
+		ctx, cancel := context.WithCancel(context.Background())
+		s.monthlyRenderBeforePersist = cancel
+		s.composeBrief(ctx)
+		if got := activeReceipts(s, now); got != 0 {
+			t.Fatalf("pre-persist cancellation minted %d active receipt(s)", got)
+		}
+	})
+
+	t.Run("preexisting valid receipt survives later canceled render", func(t *testing.T) {
+		current := now
+		s := newV4NudgeTestServer(t, current)
+		first, _ := s.composeBrief(context.Background())
+		s.monthlyRenderMu.Lock()
+		original, ok := s.monthlyRenderReceipts[first.BriefFingerprint]
+		s.monthlyRenderMu.Unlock()
+		if !ok {
+			t.Fatal("stable initial render issued no receipt")
+		}
+		current = current.Add(time.Minute)
+		s.now = func() time.Time { return current }
+		s.riskCapital.now = s.now
+		s.nudges.now = s.now
+		s.riskPolicies.mu.Lock()
+		s.riskPolicies.now = s.now
+		s.riskPolicies.lastCheckedAt = current
+		s.riskPolicies.mu.Unlock()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		s.composeBrief(ctx)
+		s.monthlyRenderMu.Lock()
+		preserved, stillPresent := s.monthlyRenderReceipts[first.BriefFingerprint]
+		s.monthlyRenderMu.Unlock()
+		if !stillPresent || preserved != original || activeReceipts(s, current) != 1 {
+			t.Fatalf("canceled render changed prior receipt: present=%v got=%+v want=%+v", stillPresent, preserved, original)
+		}
+	})
+
+	t.Run("uncanceled render issues receipt", func(t *testing.T) {
+		s := newV4NudgeTestServer(t, now)
+		rendered, _ := s.composeBrief(context.Background())
+		s.monthlyRenderMu.Lock()
+		receipt, ok := s.monthlyRenderReceipts[rendered.BriefFingerprint]
+		s.monthlyRenderMu.Unlock()
+		if !ok || !receipt.ExpiresAt.After(now) {
+			t.Fatalf("uncanceled render receipt=%+v issued=%v", receipt, ok)
+		}
+	})
+}
+
+func TestConcurrentIdenticalMonthlyAcknowledgementsAreIdempotent(t *testing.T) {
+	for iteration := range 10 {
+		now := time.Date(2026, 8, 1, 10, 0, iteration, 0, time.UTC)
+		s := newV4NudgeTestServer(t, now)
+		rendered, _ := s.composeBrief(context.Background())
+		params := rpc.BriefAckParams{Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
+			BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice}
+		requests := []*rpc.Request{rawParams(t, params), rawParams(t, params)}
+		ready := make(chan struct{}, 2)
+		release := make(chan struct{})
+		s.monthlyAckBeforeWriteLock = func() {
+			ready <- struct{}{}
+			<-release
+		}
+		type outcome struct {
+			ack *rpc.BriefAckResult
+			err error
+		}
+		outcomes := make(chan outcome, 2)
+		var started sync.WaitGroup
+		started.Add(2)
+		for _, request := range requests {
+			go func(req *rpc.Request) {
+				started.Done()
+				ack, err := s.handleBriefAck(context.Background(), req)
+				outcomes <- outcome{ack: ack, err: err}
+			}(request)
+		}
+		started.Wait()
+		<-ready
+		<-ready
+		close(release)
+		newCount, existingCount := 0, 0
+		for range 2 {
+			result := <-outcomes
+			if result.err != nil || result.ack == nil || !result.ack.OK {
+				t.Fatalf("iteration %d concurrent ack=%+v err=%v", iteration, result.ack, result.err)
+			}
+			if result.ack.AlreadyStamped {
+				existingCount++
+			} else {
+				newCount++
+			}
+		}
+		if newCount != 1 || existingCount != 1 {
+			t.Fatalf("iteration %d new=%d existing=%d", iteration, newCount, existingCount)
+		}
+		s.nudges.mu.Lock()
+		rows := len(s.nudges.state.MonthlyCompletions)
+		s.nudges.mu.Unlock()
+		if rows != 1 {
+			t.Fatalf("iteration %d persisted %d monthly rows", iteration, rows)
+		}
 	}
 }
 
@@ -272,9 +712,10 @@ func TestBriefAndNudgeMonthlyParityDueBlockedAndComplete(t *testing.T) {
 	s.riskPolicies.mu.Lock()
 	s.riskPolicies.status = rpc.RiskPolicyStatusActive
 	s.riskPolicies.mu.Unlock()
+	rendered, _ := s.composeBrief(context.Background())
 	ack, err := s.handleBriefAck(context.Background(), rawParams(t, rpc.BriefAckParams{
 		Kind: rpc.BriefKindMonthly, Month: "2026-08", Evidence: rpc.BriefAckEvidenceRender,
-		BriefFingerprint: "sha256:monthly-parity", Origin: rpc.OrderOriginPairedDevice,
+		BriefFingerprint: rendered.BriefFingerprint, Origin: rpc.OrderOriginPairedDevice,
 	}))
 	if err != nil || !ack.OK {
 		t.Fatalf("monthly completion ack=%+v err=%v", ack, err)

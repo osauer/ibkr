@@ -236,3 +236,31 @@ func TestRiskPolicyPreviewWarnings(t *testing.T) {
 		t.Fatalf("absent policy: warnings = %+v, want none", got)
 	}
 }
+
+func TestRiskPolicyPreviewShadowBookkeepingUsesCapturedLatchGeneration(t *testing.T) {
+	now := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+	s := newV4NudgeTestServer(t, now)
+	primeNudgeBlockEpisode(s, now, true)
+	open, capturedEpisode, _ := s.riskCapital.NudgeLatch()
+	if !open || capturedEpisode == "" {
+		t.Fatalf("initial latch open=%v episode=%q", open, capturedEpisode)
+	}
+
+	s.shadowBookkeepingHook = func() {
+		s.riskCapital.mu.Lock()
+		defer s.riskCapital.mu.Unlock()
+		s.riskCapital.state.LatchEpisodeSeq++
+		s.riskCapital.state.LatchedAt = now.Add(time.Minute)
+	}
+	stockBuy := rpc.OrderDraft{Action: "BUY", Contract: rpc.ContractParams{Symbol: "MSFT", SecType: "STK"}}
+	if got := s.riskPolicyPreviewWarnings(stockBuy, rpc.OrderPositionImpact{Effect: "open"}); len(got) != 1 {
+		t.Fatalf("preview warnings=%+v", got)
+	}
+
+	s.nudges.mu.Lock()
+	shadow := s.nudges.state.Shadow
+	s.nudges.mu.Unlock()
+	if shadow.LatchEpisode != capturedEpisode {
+		t.Fatalf("shadow episode=%q, want atomically captured preview episode %q", shadow.LatchEpisode, capturedEpisode)
+	}
+}

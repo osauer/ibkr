@@ -352,6 +352,21 @@ type Server struct {
 	// nudges owns only opaque governance occurrence state. Eligibility remains
 	// a pure projection over risk/recon/capital/pin authorities.
 	nudges *nudgeStateStore
+	// nudgeWriteMu serializes the final compare-and-persist step for advisory
+	// governance evidence. It does not freeze policy, pins, Flex, recon, or
+	// capital; durable authority identities make a raced write inert.
+	nudgeWriteMu          sync.Mutex
+	monthlyRenderMu       sync.Mutex
+	monthlyRenderReceipts map[string]monthlyRenderReceipt
+	// Test-only deterministic seams. Production leaves all nil.
+	nudgeBeforeCommit          func(string)
+	nudgeAfterValidation       func(string)
+	nudgeAfterPersist          func(string)
+	nudgeScanCheckpoint        func(string)
+	shadowBookkeepingHook      func()
+	monthlyRenderBeforeIssue   func()
+	monthlyRenderBeforePersist func()
+	monthlyAckBeforeWriteLock  func()
 	// briefState persists only human render-stamps and their rulebook delta
 	// baselines. brief.snapshot reads it but never writes it.
 	briefState *briefStateStore

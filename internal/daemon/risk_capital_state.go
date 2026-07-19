@@ -98,11 +98,15 @@ type capitalEventReplay struct {
 }
 
 type riskCapitalStore struct {
-	mu     sync.Mutex
-	now    func() time.Time
-	nudges *nudgeStateStore
-	loaded bool
-	state  riskCapitalStateFileV1
+	mu                    sync.Mutex
+	now                   func() time.Time
+	nudges                *nudgeStateStore
+	observeConfirmedFlows func(nudgeConfirmedFlowSnapshot)
+	// nudgeCaptureHook is a test-only barrier invoked while mu is held before
+	// the atomic capital-report/latch capture.
+	nudgeCaptureHook func()
+	loaded           bool
+	state            riskCapitalStateFileV1
 	// Re-derived from capital-events.jsonl on load, maintained incrementally
 	// afterwards; never trusted from the state file.
 	cumFlowsBase           float64
@@ -488,8 +492,8 @@ func (st *riskCapitalStore) IncorporateStatementSnapshot(snap statementCapitalSn
 	// The nudge store has its own lock and persistence boundary. Observe only
 	// after capital state is installed so neither store is held while writing
 	// the other, and never let advisory nudge persistence alter capital truth.
-	if st.nudges != nil {
-		_ = st.nudges.observeConfirmedFlows(snap.NudgeConfirmedFlows)
+	if st.observeConfirmedFlows != nil {
+		st.observeConfirmedFlows(snap.NudgeConfirmedFlows)
 	}
 }
 
@@ -640,6 +644,35 @@ func (st *riskCapitalStore) Report(c *risk.Constitution, obs *risk.CapitalObserv
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.loadLocked()
+	return st.reportLocked(c, obs)
+}
+
+type riskCapitalNudgeSnapshot struct {
+	Report     rpc.CapitalStateReport
+	LatchOpen  bool
+	Episode    string
+	OccurredAt time.Time
+}
+
+// NudgeSnapshot captures the policy-derived capital report and latch episode
+// from one state generation. Snapshot composition cannot pair an old capital
+// magnitude with a reset or rearmed latch.
+func (st *riskCapitalStore) NudgeSnapshot(c *risk.Constitution, obs *risk.CapitalObservation) riskCapitalNudgeSnapshot {
+	if st == nil {
+		return riskCapitalNudgeSnapshot{}
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	if st.nudgeCaptureHook != nil {
+		st.nudgeCaptureHook()
+	}
+	report := st.reportLocked(c, obs)
+	open, episode, occurredAt := st.nudgeLatchLocked()
+	return riskCapitalNudgeSnapshot{Report: report, LatchOpen: open, Episode: episode, OccurredAt: occurredAt}
+}
+
+func (st *riskCapitalStore) reportLocked(c *risk.Constitution, obs *risk.CapitalObservation) rpc.CapitalStateReport {
 	now := st.now()
 
 	if obs == nil && st.state.LastEquityBase > 0 {
@@ -760,6 +793,10 @@ func (st *riskCapitalStore) NudgeLatch() (open bool, episode string, occurredAt 
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.loadLocked()
+	return st.nudgeLatchLocked()
+}
+
+func (st *riskCapitalStore) nudgeLatchLocked() (open bool, episode string, occurredAt time.Time) {
 	if !st.state.BlockLatched || st.state.LatchedAt.IsZero() {
 		return false, "", time.Time{}
 	}

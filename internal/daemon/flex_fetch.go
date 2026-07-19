@@ -283,6 +283,19 @@ func sanitizeFlexTransportError(err error, endpoint string) string {
 // file first. A file that no longer parses is reported, never skipped
 // silently.
 func loadRetainedFlexStatements() ([]flexstmt.Statement, []string, error) {
+	return loadRetainedFlexStatementsContext(context.Background(), nil)
+}
+
+func loadRetainedFlexStatementsContext(ctx context.Context, checkpoint func(string) error) ([]flexstmt.Statement, []string, error) {
+	check := func(stage string) error {
+		if checkpoint != nil {
+			return checkpoint(stage)
+		}
+		return ctx.Err()
+	}
+	if err := check("retained_statements_start"); err != nil {
+		return nil, nil, err
+	}
 	dir, err := flexStatementsDirPath()
 	if err != nil {
 		return nil, nil, err
@@ -296,6 +309,9 @@ func loadRetainedFlexStatements() ([]flexstmt.Statement, []string, error) {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
+		if err := check("retained_statements_entries"); err != nil {
+			return nil, nil, err
+		}
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".xml") {
 			names = append(names, e.Name())
 		}
@@ -304,6 +320,9 @@ func loadRetainedFlexStatements() ([]flexstmt.Statement, []string, error) {
 	var out []flexstmt.Statement
 	var problems []string
 	for _, name := range names {
+		if err := check("retained_statement_file"); err != nil {
+			return nil, nil, err
+		}
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("%s: %v", name, err))
@@ -315,6 +334,9 @@ func loadRetainedFlexStatements() ([]flexstmt.Statement, []string, error) {
 			continue
 		}
 		out = append(out, sts...)
+	}
+	if err := check("retained_statements_complete"); err != nil {
+		return nil, nil, err
 	}
 	return out, problems, nil
 }

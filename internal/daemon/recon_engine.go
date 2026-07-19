@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -45,11 +46,24 @@ type retainedStatementMerge struct {
 // buildReconReport regenerates the report. It is cheap (local files only)
 // and side-effect free apart from reading journals.
 func (s *Server) buildReconReport() *rpc.ReconResult {
-	res, _ := s.buildReconReportWithSnapshot()
+	res, _ := s.buildReconReportContext(context.Background())
 	return res
 }
 
 func (s *Server) buildReconReportWithSnapshot() (*rpc.ReconResult, *statementCapitalSnapshot) {
+	res, snapshot, _ := s.buildReconReportWithSnapshotContext(context.Background())
+	return res, snapshot
+}
+
+func (s *Server) buildReconReportContext(ctx context.Context) (*rpc.ReconResult, error) {
+	res, _, err := s.buildReconReportWithSnapshotContext(ctx)
+	return res, err
+}
+
+func (s *Server) buildReconReportWithSnapshotContext(ctx context.Context) (*rpc.ReconResult, *statementCapitalSnapshot, error) {
+	if err := s.nudgeScanCheck(ctx, "recon_start"); err != nil {
+		return nil, nil, err
+	}
 	now := time.Now()
 	if s.now != nil {
 		now = s.now()
@@ -69,21 +83,24 @@ func (s *Server) buildReconReportWithSnapshot() (*rpc.ReconResult, *statementCap
 		res.Message = "recon.* policy keys are unapproved; write them in the risk policy before reconciliation can classify anything"
 		health = append(health, rpc.SourceHealth{Source: "risk_policy", Status: "unapproved"})
 		res.InputHealth = health
-		return res, nil
+		return res, nil, nil
 	}
 
-	statements, problems, err := loadRetainedFlexStatements()
+	statements, problems, err := loadRetainedFlexStatementsContext(ctx, func(stage string) error { return s.nudgeScanCheck(ctx, stage) })
+	if err != nil && ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
 	switch {
 	case err != nil:
 		res.Status = rpc.ReconStatusUnavailable
 		res.Message = "cannot read retained statements: " + err.Error()
 		res.InputHealth = append(health, rpc.SourceHealth{Source: "statements", Status: "unavailable", Notes: []string{err.Error()}})
-		return res, nil
+		return res, nil, nil
 	case len(statements) == 0:
 		res.Status = rpc.ReconStatusUnavailable
 		res.Message = "no retained Flex statements yet; enable [flex] and wait for the daily fetch, or check fetch.last_error"
 		res.InputHealth = append(health, rpc.SourceHealth{Source: "statements", Status: "unavailable"})
-		return res, nil
+		return res, nil, nil
 	}
 	res.Status = rpc.ReconStatusActive
 	if len(problems) > 0 {
@@ -98,14 +115,17 @@ func (s *Server) buildReconReportWithSnapshot() (*rpc.ReconResult, *statementCap
 	res.CoverageFrom = merged.coverageFrom
 	res.CoverageTo = merged.coverageTo
 
-	ctx := s.riskCapital.ReplayContext()
-	res.GenesisAt = ctx.GenesisAt
-	matchableFlows, baseline := partitionReconBaselineFlows(merged.flows, ctx)
-	events := replayCapitalFlowEvents()
+	replayCtx := s.riskCapital.ReplayContext()
+	res.GenesisAt = replayCtx.GenesisAt
+	matchableFlows, baseline := partitionReconBaselineFlows(merged.flows, replayCtx)
+	events, err := replayCapitalFlowEventsContext(ctx, func(stage string) error { return s.nudgeScanCheck(ctx, stage) })
+	if err != nil {
+		return nil, nil, err
+	}
 	bridgeFlows := 0.0
 	var bridgeEvents []capitalEventV1
 	if pol.PolicyVersion >= 3 {
-		events, bridgeEvents, bridgeFlows = splitV3ReconEvents(events, ctx, res.CoverageTo)
+		events, bridgeEvents, bridgeFlows = splitV3ReconEvents(events, replayCtx, res.CoverageTo)
 	}
 	matchedExceptions, matched := matchReconFlows(matchableFlows, events, rc)
 	var confirmed []rpc.ReconException
@@ -123,7 +143,9 @@ func (s *Server) buildReconReportWithSnapshot() (*rpc.ReconResult, *statementCap
 		matchedExceptions = kept
 	}
 	exceptions := append(merged.exceptions, matchedExceptions...)
-	applyReconDismissals(exceptions)
+	if err := applyReconDismissalsContext(ctx, exceptions, func(stage string) error { return s.nudgeScanCheck(ctx, stage) }); err != nil {
+		return nil, nil, err
+	}
 
 	sort.Slice(exceptions, func(i, j int) bool { return exceptions[i].LineID < exceptions[j].LineID })
 	sort.Slice(baseline, func(i, j int) bool { return baseline[i].LineID < baseline[j].LineID })
@@ -154,8 +176,12 @@ func (s *Server) buildReconReportWithSnapshot() (*rpc.ReconResult, *statementCap
 		CoverageTo: res.CoverageTo,
 		Flows:      matchableFlows,
 		NudgeConfirmedFlows: nudgeConfirmedFlowSnapshot{
-			PolicyVersion:  pol.PolicyVersion,
-			ReportIdentity: opaqueIdentity("recon-report", res.ReportID),
+			PolicyVersion:     pol.PolicyVersion,
+			PolicyIdentity:    nudgePolicyIdentity(pol),
+			ReportStatus:      res.Status,
+			ReportIdentity:    opaqueIdentity("recon-report", res.ReportID),
+			StatementAsOf:     res.StatementAsOf,
+			StatementsHealthy: statementsHealthOK(res.InputHealth),
 		},
 	}
 	for _, row := range confirmed {
@@ -164,7 +190,17 @@ func (s *Server) buildReconReportWithSnapshot() (*rpc.ReconResult, *statementCap
 	for _, flow := range matchableFlows {
 		snapshot.FlowsBase += flow.amountBase
 	}
-	return res, snapshot
+	if err := s.nudgeScanCheck(ctx, "recon_complete"); err != nil {
+		return nil, nil, err
+	}
+	return res, snapshot, nil
+}
+
+func (s *Server) nudgeScanCheck(ctx context.Context, stage string) error {
+	if s != nil && s.nudgeScanCheckpoint != nil {
+		s.nudgeScanCheckpoint(stage)
+	}
+	return ctx.Err()
 }
 
 func splitV3ReconEvents(events []capitalEventV1, ctx capitalReplayContext, coverageTo time.Time) (within, bridges []capitalEventV1, bridgeFlows float64) {
@@ -441,16 +477,31 @@ func businessDaysApart(a, b time.Time) int {
 // replayCapitalFlowEvents returns the declared deposit/withdrawal events
 // (journal order). Reconcile attestations are not flows.
 func replayCapitalFlowEvents() []capitalEventV1 {
+	out, _ := replayCapitalFlowEventsContext(context.Background(), nil)
+	return out
+}
+
+func replayCapitalFlowEventsContext(ctx context.Context, checkpoint func(string) error) ([]capitalEventV1, error) {
+	if checkpoint != nil {
+		if err := checkpoint("capital_events_start"); err != nil {
+			return nil, err
+		}
+	} else if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	path, err := defaultTradingStatePath(capitalEventsJournalFile)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var out []capitalEventV1
 	for line := range strings.SplitSeq(string(data), "\n") {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -463,22 +514,36 @@ func replayCapitalFlowEvents() []capitalEventV1 {
 			out = append(out, ev)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // applyReconDismissals folds journaled human dismissals into the exception
 // list. The journal is the source of truth; nothing else stores them.
 func applyReconDismissals(exceptions []rpc.ReconException) {
+	_ = applyReconDismissalsContext(context.Background(), exceptions, nil)
+}
+
+func applyReconDismissalsContext(ctx context.Context, exceptions []rpc.ReconException, checkpoint func(string) error) error {
+	if checkpoint != nil {
+		if err := checkpoint("recon_dismissals_start"); err != nil {
+			return err
+		}
+	} else if err := ctx.Err(); err != nil {
+		return err
+	}
 	path, err := defaultTradingStatePath(riskPolicyJournalFile)
 	if err != nil {
-		return
+		return nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return nil
 	}
 	reasons := map[string]string{}
 	for line := range strings.SplitSeq(string(data), "\n") {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -493,11 +558,15 @@ func applyReconDismissals(exceptions []rpc.ReconException) {
 		}
 	}
 	for i := range exceptions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if reason, ok := reasons[exceptions[i].LineID]; ok {
 			exceptions[i].Dismissed = true
 			exceptions[i].DismissReason = reason
 		}
 	}
+	return nil
 }
 
 func (s *Server) reconEquityCheck(equityByDay map[string]flexstmt.EquityRow) *rpc.ReconEquityCheck {

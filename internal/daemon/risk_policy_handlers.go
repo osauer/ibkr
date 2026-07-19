@@ -336,15 +336,19 @@ func (s *Server) riskPolicyPreviewWarnings(draft rpc.OrderDraft, position rpc.Or
 	case "close", "reduce":
 		return nil
 	}
-	mgr := s.riskPolicies.snapshot()
-	if mgr.policy == nil {
+	now := time.Now().UTC()
+	if s.now != nil {
+		now = s.now().UTC()
+	}
+	authority := s.currentNudgeAuthority(now)
+	if authority.policy == nil {
 		return nil // unapproved constitution: policy show owns that disclosure, not preview noise
 	}
 	if strings.EqualFold(draft.Action, "BUY") && strings.EqualFold(draft.Contract.SecType, "OPT") &&
 		strings.EqualFold(draft.Contract.Right, "P") && risk.DefaultRulebookPolicy().IsHedgeSymbol(draft.Contract.Symbol) {
 		return nil // hedge entry stays available under a drawdown breach
 	}
-	v := s.riskCapital.PreviewVerdict(mgr.policy)
+	v := authority.capitalNudge.Report
 	var severity, tier string
 	switch v.Tier {
 	case risk.CapitalTierWarn:
@@ -355,14 +359,11 @@ func (s *Server) riskPolicyPreviewWarnings(draft rpc.OrderDraft, position rpc.Or
 		// risk-increasing, non-hedge preview path. Persistence failure cannot
 		// alter the preview warning or any submit-eligibility field.
 		if s.nudges != nil {
-			now := time.Now().UTC()
-			if s.now != nil {
-				now = s.now().UTC()
+			if s.shadowBookkeepingHook != nil {
+				s.shadowBookkeepingHook()
 			}
-			authority := s.currentNudgeAuthority(now)
-			open, episode, _ := s.riskCapital.NudgeLatch()
-			if authority.eligible && authority.policyIdentity == nudgePolicyIdentity(mgr.policy) && open {
-				_ = s.nudges.recordShadow(authority.policyIdentity, episode, true, false, true)
+			if authority.eligible && authority.capitalNudge.LatchOpen {
+				_ = s.nudges.recordShadow(authority.policyIdentity, authority.capitalNudge.Episode, true, false, true)
 			}
 		}
 	default:
@@ -377,7 +378,7 @@ func (s *Server) riskPolicyPreviewWarnings(draft rpc.OrderDraft, position rpc.Or
 		Scope:    "risk_policy",
 		Severity: severity,
 		Message:  fmt.Sprintf("Drawdown %s tier: %s of declared risk capital consumed from the adjusted peak; this order increases risk.", tier, consumed),
-		Impact:   fmt.Sprintf("Advisory constitution cause (enforcement %s); submit eligibility is unaffected.", mgr.policy.EffectiveBlockEnforcement()),
+		Impact:   fmt.Sprintf("Advisory constitution cause (enforcement %s); submit eligibility is unaffected.", authority.policy.EffectiveBlockEnforcement()),
 		Action:   "Run `ibkr policy show --explain` for the capital state and ladder.",
 	}}
 }
