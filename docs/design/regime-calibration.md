@@ -464,6 +464,18 @@ reconstructed from disk today, and the `pending_backtest` thresholds for
 gamma/breadth can never be calibrated from historical data — forward
 collection is the only path (same finding as the skew-R² analysis).
 
+**Update 2026-07-20:** the decisions journal below is now also queryable. The
+daemon maintains a derived SQLite index (`$XDG_STATE_HOME/ibkr/history.db`,
+see `docs/design/history-index.md`) with automatic backfill and tail ingest.
+`ibkr regime history` serves timelines over typed RPC, and offline
+calibration reads use read-only `sqlite3` (including `json_extract` over the
+verbatim journal lines) instead of `jq`. The JSONL journal stays the evidence
+of record. Since the same day's phase-2 build, monthly rotation bounds the
+raw journal (`history.rotation.keep_raw_months`, default 2); older months
+live as immutable gzip archives that, together with the index, preserve the
+full corpus. A sibling canary-decisions journal now collects the portfolio
+side under the same mechanics.
+
 ### Decisions journal (new)
 
 `$XDG_STATE_HOME/ibkr/regime-decisions.jsonl` — one line per

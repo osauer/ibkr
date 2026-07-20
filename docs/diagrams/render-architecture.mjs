@@ -195,7 +195,7 @@ function systemArchitecture() {
   const busX = 884;
 
   const body = `
-  ${header("Runtime architecture", "One daemon owns the broker session; typed adapters serve humans, AI hosts, and the app.")}
+  ${header("Runtime Architecture", "One daemon owns the broker session; typed adapters serve humans, AI hosts, and the app.")}
 
   ${legendItem(1157, 40, "slate", "Local typed flow")}
   ${legendItem(1304, 40, "green", "Broker path")}
@@ -214,13 +214,13 @@ function systemArchitecture() {
   <text x="898" y="184" class="layer">5 · INTEGRATIONS</text>
   <text x="1164" y="184" class="layer">6 · PROVIDERS / DATA</text>
 
-  ${component({ x: 36, y: rows[0], iconName: "user", color: C.slate, title: "Human operator", subtitle: ["shell · local browser"], width: 172 })}
-  ${component({ x: 36, y: rows[1], iconName: "cpu", color: C.slate, title: "AI / MCP host", subtitle: ["Claude · Codex", "other MCP clients"], width: 172 })}
+  ${component({ x: 36, y: rows[0], iconName: "user", color: C.slate, title: "Human Operator", subtitle: ["shell · local browser"], width: 172 })}
+  ${component({ x: 36, y: rows[1], iconName: "cpu", color: C.slate, title: "AI / MCP Host", subtitle: ["Claude · Codex", "other MCP clients"], width: 172 })}
   ${component({ x: 36, y: rows[2], iconName: "mobileCode", color: C.yellow, iconColor: C.ink, title: "Canary PWA", subtitle: ["browser", "iOS Home Screen"], width: 172 })}
 
   ${component({ x: 246, y: rows[0], iconName: "terminal", color: C.slate, title: "CLI / TUI", subtitle: ["argv · stdout"], mono: "internal/cli", width: 180 })}
-  ${component({ x: 246, y: rows[1], iconName: "plugConnected", color: C.slate, title: "MCP adapter", subtitle: ["JSON-RPC 2.0 · stdio"], mono: "internal/mcp", width: 180 })}
-  ${component({ x: 246, y: rows[2], iconName: "mobileCode", color: C.yellow, iconColor: C.ink, title: "Canary app host", subtitle: ["HTTP JSON · SSE"], mono: "internal/app", width: 180 })}
+  ${component({ x: 246, y: rows[1], iconName: "plugConnected", color: C.slate, title: "MCP Adapter", subtitle: ["JSON-RPC 2.0 · stdio"], mono: "internal/mcp", width: 180 })}
+  ${component({ x: 246, y: rows[2], iconName: "mobileCode", color: C.yellow, iconColor: C.ink, title: "Canary App Host", subtitle: ["HTTP JSON · SSE"], mono: "internal/app", width: 180 })}
 
   ${line(`M214 ${arrowY[0]}H240`, "slate")}
   ${line(`M214 ${arrowY[1]}H240`, "slate")}
@@ -245,27 +245,27 @@ function systemArchitecture() {
 
   <rect x="608" y="300" width="242" height="64" rx="10" fill="${C.terminal2}"/>
   ${icon("settings", 620, 315, 26, "#9fb3d9")}
-  <text x="658" y="325" class="module-title">Runtime orchestration</text>
+  <text x="658" y="325" class="module-title">Runtime Orchestration</text>
   <text x="658" y="345" class="module-sub">schedulers · policy execution</text>
 
   <rect x="608" y="376" width="242" height="64" rx="10" fill="${C.terminal2}"/>
   ${icon("shieldCheck", 620, 391, 26, "#6fd3c2")}
-  <text x="658" y="401" class="module-title">Pure risk semantics</text>
+  <text x="658" y="401" class="module-title">Pure Risk Semantics</text>
   <text x="658" y="421" class="module-sub">internal/risk · no I/O</text>
 
   <rect x="608" y="452" width="242" height="64" rx="10" fill="${C.terminal2}"/>
   ${icon("fileText", 620, 467, 26, C.yellow)}
-  <text x="658" y="477" class="module-title">State lifecycle</text>
+  <text x="658" y="477" class="module-title">State Lifecycle</text>
   <text x="658" y="497" class="module-sub">journals · recon · proposals</text>
 
   <rect x="608" y="560" width="242" height="1" fill="${C.terminalLine}"/>
   <text x="608" y="588" class="mono-small" style="fill:${C.textOnDarkDim}">auto-spawned by clients on demand</text>
   <text x="608" y="606" class="mono-small" style="fill:${C.textOnDarkDim}">default idle timeout 15 min</text>
 
-  ${component({ x: 898, y: intRows[0], iconName: "plug", color: C.green, title: "Broker connectors", subtitle: ["primary + breadth clients"], mono: "pkg/ibkr", width: 226 })}
-  ${component({ x: 898, y: intRows[1], iconName: "databaseImport", color: C.blue, title: "Observed-source clients", subtitle: ["Flex · market events · rates"], width: 226 })}
+  ${component({ x: 898, y: intRows[0], iconName: "plug", color: C.green, title: "Broker Connectors", subtitle: ["primary + breadth clients"], mono: "pkg/ibkr", width: 226 })}
+  ${component({ x: 898, y: intRows[1], iconName: "databaseImport", color: C.blue, title: "Observed-Source Clients", subtitle: ["Flex · market events · rates"], width: 226 })}
   ${component({ x: 898, y: intRows[2], iconName: "database", color: C.greenDark, title: "Persistence", subtitle: ["XDG state · cache · data dirs"], width: 226 })}
-  ${component({ x: 898, y: intRows[3], iconName: "calendarCode", color: C.slate, title: "Embedded calendars", subtitle: ["official sessions", "compiled into the binary"], width: 226 })}
+  ${component({ x: 898, y: intRows[3], iconName: "calendarCode", color: C.slate, title: "Embedded Calendars", subtitle: ["official sessions 2026-2028", "compiled into the binary"], width: 226 })}
 
   <path d="M874 420H${busX}M${busX} ${intArrowY[0]}V${intArrowY[3]}" fill="none" stroke="${C.slate}" stroke-width="1.5" stroke-linecap="round"/>
   ${junction(busX, 420)}
@@ -276,8 +276,8 @@ function systemArchitecture() {
 
   ${component({ x: 1164, y: 212, iconName: "server", color: C.green, title: "TWS / IB Gateway", subtitle: ["selected endpoint + account"], width: 240 })}
   ${chipAt(1284, 292, "TWS wire · TCP/TLS · 2 client IDs", C.greenSoft)}
-  ${component({ x: 1164, y: 362, iconName: "worldDownload", color: C.blue, title: "IBKR data services", subtitle: ["Flex statements · borrow data"], width: 240 })}
-  ${component({ x: 1164, y: 512, iconName: "worldDownload", color: C.blue, title: "Public market sources", subtitle: ["Nasdaq · FRED · CBOE · Treasury", "Fed · Wikipedia S&P 500 list"], width: 240 })}
+  ${component({ x: 1164, y: 362, iconName: "worldDownload", color: C.blue, title: "IBKR Data Services", subtitle: ["Flex statements · borrow data"], width: 240 })}
+  ${component({ x: 1164, y: 512, iconName: "worldDownload", color: C.blue, title: "Public Market Sources", subtitle: ["Nasdaq · FRED · CBOE · Treasury", "Fed · Wikipedia S&P 500 list"], width: 240 })}
   ${chipAt(1284, 604, "HTTPS · FTP · JSON/CSV/XML/RSS", C.blueSoft)}
 
   ${line(`M1124 ${intArrowY[0]}H1154`, "green", { both: true })}
@@ -292,7 +292,7 @@ function systemArchitecture() {
   ${stripNode(56, 742, 104, "Canary PWA")}
   ${line("M168 756H222", "amber", { dotted: true, both: true, width: 1.6 })}
   <text x="195" y="748" text-anchor="middle" class="flow-label">HTTPS</text>
-  ${stripNode(230, 742, 240, "Cloudflare relay · Worker + DO", "cloud")}
+  ${stripNode(230, 742, 240, "Cloudflare Relay · Worker + DO", "cloud")}
   ${line("M478 756H568", "amber", { dotted: true, both: true, width: 1.6 })}
   <text x="523" y="748" text-anchor="middle" class="flow-label">outbound WSS</text>
   ${stripNode(576, 742, 84, "ibkr app")}
@@ -300,7 +300,7 @@ function systemArchitecture() {
   ${stripNode(56, 778, 84, "ibkr app")}
   ${line("M148 792H244", "amber", { dotted: true, width: 1.6 })}
   <text x="196" y="788" text-anchor="middle" class="flow-label">VAPID Web Push</text>
-  ${stripNode(252, 778, 190, "browser push service", "bell")}
+  ${stripNode(252, 778, 190, "Browser Push Service", "bell")}
   ${line("M450 792H568", "amber", { dotted: true, width: 1.6 })}
   <text x="509" y="788" text-anchor="middle" class="flow-label">redacted payloads</text>
   ${stripNode(576, 778, 104, "Canary PWA")}
@@ -311,7 +311,7 @@ function systemArchitecture() {
   return svgFrame({
     width: 1440,
     height: 848,
-    title: "ibkr canary runtime architecture",
+    title: "Runtime Architecture (ibkr canary)",
     description: "Six architecture layers show consumers, surface adapters, the typed RPC contract, daemon authority, integration clients, and external providers. Optional remote delivery is isolated from broker and observed-data paths.",
     body,
   });
@@ -336,7 +336,7 @@ function emptyCell(x, y, width, height) {
 function persistenceArchitecture() {
   const colW = 256;
   const xs = [182, 452, 722, 992];
-  const rowTops = [178, 330, 494, 658];   // operator, daemon, canary, relay
+  const rowTops = [178, 330, 584, 748];   // operator, daemon (tall: index tile), canary, relay
   const tileY = (row) => rowTops[row] + 18;
 
   const ownerCell = (row, iconName, color, name, sub, iconColor = "#ffffff") => `
@@ -349,7 +349,7 @@ function persistenceArchitecture() {
     <text x="${xs[index] + colW / 2}" y="167" text-anchor="middle" class="matrix-sub">${esc(sub)}</text>`;
 
   const body = `
-  ${header("State ownership and lifecycle", "Who owns which state, where it lives, and what survives a restart.")}
+  ${header("State Ownership and Lifecycle", "Who owns which state, where it lives, and what survives a restart.")}
 
   ${legendItem(956, 40, "green", "Durable / authoritative")}
   ${legendItem(1144, 40, "blue", "Rebuildable")}
@@ -358,55 +358,57 @@ function persistenceArchitecture() {
   ${icon("lock", 1171, 55, 15, C.amber, 2)}
   <text x="1192" y="68" class="legend">Sensitive</text>
 
-  <rect x="24" y="124" width="1232" height="676" rx="16" fill="${C.panel}" stroke="${C.line}"/>
+  <rect x="24" y="124" width="1232" height="766" rx="16" fill="${C.panel}" stroke="${C.line}"/>
   <path d="M24 178h1232v-38a16 16 0 0 0 -16 -16h-1200a16 16 0 0 0 -16 16z" fill="${C.panelAlt}"/>
   <text x="42" y="156" class="boundary">OWNER</text>
-  ${colHead(0, "Authored authority", "human or policy source of truth")}
-  ${colHead(1, "Durable evidence & state", "survives process restart")}
-  ${colHead(2, "Rebuildable observations", "refreshable or memory-only")}
-  ${colHead(3, "Runtime & route state", "IPC, continuity, delivery")}
+  ${colHead(0, "Authored Authority", "human or policy source of truth")}
+  ${colHead(1, "Durable Evidence & State", "survives process restart")}
+  ${colHead(2, "Rebuildable Observations", "refreshable or memory-only")}
+  ${colHead(3, "Runtime & Route State", "IPC, continuity, delivery")}
 
-  <line x1="174" y1="124" x2="174" y2="800" stroke="${C.line}"/>
+  <line x1="174" y1="124" x2="174" y2="890" stroke="${C.line}"/>
   <line x1="24" y1="330" x2="1256" y2="330" stroke="${C.line}"/>
-  <line x1="24" y1="494" x2="541" y2="494" stroke="${C.line}"/>
-  <line x1="889" y1="494" x2="1256" y2="494" stroke="${C.line}"/>
-  <line x1="24" y1="658" x2="1256" y2="658" stroke="${C.line}"/>
+  <line x1="24" y1="584" x2="541" y2="584" stroke="${C.line}"/>
+  <line x1="889" y1="584" x2="1256" y2="584" stroke="${C.line}"/>
+  <line x1="24" y1="748" x2="1256" y2="748" stroke="${C.line}"/>
 
   ${ownerCell(0, "user", C.slate, "Operator", "writes and approves")}
-  ${matrixTile({ x: xs[0], y: tileY(0), width: colW, height: 118, iconName: "settings", color: C.greenDark, accent: C.greenDark, title: "Config & policies", lines: ["gateway, account, client pins", "risk-policy.toml · flex-token"], format: "$XDG_CONFIG_HOME/ibkr · TOML", sensitive: true })}
-  ${matrixTile({ x: xs[1], y: tileY(0), width: colW, height: 118, iconName: "fileText", color: C.green, accent: C.green, title: "Watchlist / user data", lines: ["watchlist.json", "explicit research exports"], format: "$XDG_DATA_HOME/ibkr · JSON" })}
+  ${matrixTile({ x: xs[0], y: tileY(0), width: colW, height: 118, iconName: "settings", color: C.greenDark, accent: C.greenDark, title: "Config & Policies", lines: ["gateway, account, client pins", "risk-policy.toml · flex-token"], format: "$XDG_CONFIG_HOME/ibkr · TOML", sensitive: true })}
+  ${matrixTile({ x: xs[1], y: tileY(0), width: colW, height: 118, iconName: "fileText", color: C.green, accent: C.green, title: "Watchlist / User Data", lines: ["watchlist.json", "explicit research exports"], format: "$XDG_DATA_HOME/ibkr · JSON" })}
   ${emptyCell(xs[2], tileY(0), colW, 118)}
   ${emptyCell(xs[3], tileY(0), colW, 118)}
 
   ${ownerCell(1, "serverCog", C.terminal, "Daemon", "runtime authority")}
-  ${matrixTile({ x: xs[0], y: tileY(1), width: colW, height: 118, iconName: "shieldCheck", color: C.greenDark, accent: C.greenDark, title: "Loaded policy authority", lines: ["validated fingerprint", "no embedded default policy"], format: "typed runtime state" })}
-  ${matrixTile({ x: xs[1], y: tileY(1), width: colW, height: 118, iconName: "fileText", color: C.green, accent: C.green, title: "Journals & statements", lines: ["orders · risk capital · recon", "proposals · raw Flex XML"], format: "$XDG_STATE_HOME/ibkr · JSONL/XML", sensitive: true })}
-  ${matrixTile({ x: xs[2], y: tileY(1), width: colW, height: 118, iconName: "refresh", color: C.blue, accent: C.blue, title: "Market & contract caches", lines: ["breadth · regime · FX · gamma", "earnings · S&P membership"], format: "$XDG_CACHE_HOME/ibkr · JSON" })}
-  ${matrixTile({ x: xs[3], y: tileY(1), width: colW, height: 118, iconName: "route", color: C.slate, accent: C.slate, title: "Socket, lock & logs", lines: ["one daemon per socket scope", "rotated daemon log"], format: "$XDG_RUNTIME_DIR/ibkr" })}
+  ${matrixTile({ x: xs[0], y: tileY(1), width: colW, height: 118, iconName: "shieldCheck", color: C.greenDark, accent: C.greenDark, title: "Loaded Policy Authority", lines: ["validated fingerprint", "no embedded default policy"], format: "typed runtime state" })}
+  ${matrixTile({ x: xs[1], y: tileY(1), width: colW, height: 104, iconName: "fileText", color: C.green, accent: C.green, title: "Journals & Statements", lines: ["orders · capital · proposals", "decision journals · Flex XML"], format: "$XDG_STATE_HOME/ibkr · JSONL/XML", sensitive: true })}
+  ${matrixTile({ x: xs[1], y: tileY(1) + 114, width: colW, height: 104, iconName: "databaseImport", color: C.green, accent: C.green, title: "Rotated Archives", lines: ["monthly gzip archives", "immutable · kept forever"], format: "$XDG_STATE_HOME/ibkr/rotated", sensitive: true })}
+  ${matrixTile({ x: xs[2], y: tileY(1), width: colW, height: 104, iconName: "refresh", color: C.blue, accent: C.blue, title: "Market & Contract Caches", lines: ["breadth · regime · FX · gamma", "earnings · S&P membership"], format: "$XDG_CACHE_HOME/ibkr · JSON" })}
+  ${matrixTile({ x: xs[2], y: tileY(1) + 114, width: colW, height: 104, iconName: "database", color: C.blue, accent: C.blue, title: "History Index", lines: ["journals + statements index", "delete-safe · rebuilds at start"], format: "$XDG_STATE_HOME/ibkr/history.db", sensitive: true })}
+  ${matrixTile({ x: xs[3], y: tileY(1), width: colW, height: 118, iconName: "route", color: C.slate, accent: C.slate, title: "Socket, Lock & Logs", lines: ["one daemon per socket scope", "rotated daemon log"], format: "$XDG_RUNTIME_DIR/ibkr" })}
 
-  <rect x="551" y="482" width="328" height="24" rx="12" fill="${C.panel}" stroke="${C.line}"/>
-  ${icon("exchange", 566, 487, 14, C.slate, 2)}
-  <text x="588" y="498" class="mono">no direct file coupling · typed RPC only</text>
+  <rect x="551" y="572" width="328" height="24" rx="12" fill="${C.panel}" stroke="${C.line}"/>
+  ${icon("exchange", 566, 577, 14, C.slate, 2)}
+  <text x="588" y="588" class="mono">no direct file coupling · typed RPC only</text>
 
-  ${ownerCell(2, "mobileCode", C.yellow, "Canary / device", "separate app authority", C.ink)}
+  ${ownerCell(2, "mobileCode", C.yellow, "Canary / Device", "separate app authority", C.ink)}
   ${emptyCell(xs[0], tileY(2), colW, 118)}
-  ${matrixTile({ x: xs[1], y: tileY(2), width: colW, height: 118, iconName: "database", color: C.green, accent: C.green, title: "App state & grants", lines: ["device grants · push · alerts", "VAPID · relay credentials"], format: "$XDG_STATE_HOME/ibkr/app · JSON", sensitive: true })}
-  ${matrixTile({ x: xs[2], y: tileY(2), width: colW, height: 118, iconName: "refresh", color: C.blue, accent: C.blue, title: "Live app snapshot", lines: ["periodic polls + quote streams", "memory-only read model"], format: "ephemeral" })}
-  ${matrixTile({ x: xs[3], y: tileY(2), width: colW, height: 118, iconName: "browser", color: C.slate, accent: C.slate, title: "Browser / device state", lines: ["cookies · IndexedDB · P-256 key", "continuity + local recovery"], format: "browser storage", sensitive: true })}
+  ${matrixTile({ x: xs[1], y: tileY(2), width: colW, height: 118, iconName: "database", color: C.green, accent: C.green, title: "App State & Grants", lines: ["device grants · push · alerts", "VAPID · relay credentials"], format: "$XDG_STATE_HOME/ibkr/app · JSON", sensitive: true })}
+  ${matrixTile({ x: xs[2], y: tileY(2), width: colW, height: 118, iconName: "refresh", color: C.blue, accent: C.blue, title: "Live App Snapshot", lines: ["periodic polls + quote streams", "memory-only read model"], format: "ephemeral" })}
+  ${matrixTile({ x: xs[3], y: tileY(2), width: colW, height: 118, iconName: "browser", color: C.slate, accent: C.slate, title: "Browser / Device State", lines: ["cookies · IndexedDB · P-256 key", "continuity + local recovery"], format: "browser storage", sensitive: true })}
 
-  ${ownerCell(3, "cloud", C.amber, "Hosted relay", "transport only")}
+  ${ownerCell(3, "cloud", C.amber, "Hosted Relay", "transport only")}
   ${emptyCell(xs[0], tileY(3), colW, 106)}
   ${emptyCell(xs[1], tileY(3), colW, 106)}
   ${emptyCell(xs[2], tileY(3), colW, 106)}
-  ${matrixTile({ x: xs[3], y: tileY(3), width: colW, height: 106, iconName: "cloud", color: C.amber, accent: C.amber, title: "Hosted relay route", lines: ["connector token + expiry", "no grants · no broker state"], format: "Cloudflare Durable Object", sensitive: true, optional: true })}
+  ${matrixTile({ x: xs[3], y: tileY(3), width: colW, height: 106, iconName: "cloud", color: C.amber, accent: C.amber, title: "Hosted Relay Route", lines: ["connector token + expiry", "no grants · no broker state"], format: "Cloudflare Durable Object", sensitive: true, optional: true })}
 
-  <text x="1244" y="826" text-anchor="end" class="footnote">deterministic SVG · docs/diagrams/render-architecture.mjs · icons: Tabler 3.45 (MIT)</text>
+  <text x="1244" y="916" text-anchor="end" class="footnote">deterministic SVG · docs/diagrams/render-architecture.mjs · icons: Tabler 3.45 (MIT)</text>
   `;
 
   return svgFrame({
     width: 1280,
-    height: 840,
-    title: "ibkr canary state ownership and lifecycle",
+    height: 930,
+    title: "State Ownership and Lifecycle (ibkr canary)",
     description: "A matrix maps operator, daemon, Canary or device, and hosted relay ownership across authored authority, durable state, rebuildable observations, and runtime or route state.",
     body,
   });
