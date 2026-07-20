@@ -202,7 +202,15 @@ const context = await browser.newContext({
 // hazard class as the guarded /api/brief/seen render stamp). Intercept the
 // POST before any page interaction, never forward it, and answer with the
 // shape the SPA expects so its state machine stays coherent.
+// The SPA's service worker claims its clients immediately (skipWaiting +
+// clients.claim), and WebKit never surfaces SW-controlled page fetches to
+// Playwright's network routes — a context.route here silently lets the POST
+// reach the real host. The primary guard therefore diverts the POST inside
+// the page's wrapped fetch (init script below), before any network layer can
+// see it; this route stays only as a second net for engines and windows
+// where routing does observe the request.
 let attentionReadIntercepted = 0;
+let attentionReadRouted = 0;
 await context.route(`${baseURL}/api/attention/read`, async (route) => {
   if (route.request().method() !== "POST") {
     await route.fallback();
@@ -215,13 +223,17 @@ await context.route(`${baseURL}/api/attention/read`, async (route) => {
   } catch {
     // Malformed body still must not reach the real host; answer neutrally.
   }
-  attentionReadIntercepted += 1;
+  attentionReadRouted += 1;
   await route.fulfill({
     status: 200,
     contentType: "application/json",
     body: JSON.stringify({ high_water_seq: throughSeq, read_through_seq: throughSeq, unread_count: 0, unread_refs: [] }),
   });
 });
+async function attentionReadInterceptedCount(page) {
+  const diverted = await page.evaluate(() => globalThis.__ibkrSmoke?.attentionReadDiverted || 0);
+  return diverted + attentionReadRouted;
+}
 if (noNotification) {
   await context.addInitScript(() => {
     try {
@@ -262,11 +274,33 @@ await context.addInitScript(() => {
     eventCounts: {},
     fetches: [],
     openedEvents: 0,
+    attentionReadDiverted: 0,
   };
   const nativeFetch = globalThis.fetch.bind(globalThis);
   globalThis.fetch = async (...fetchArgs) => {
     const request = fetchArgs[0];
     const url = typeof request === "string" ? request : request?.url || "";
+    const method = String((typeof request === "string" ? fetchArgs[1]?.method : request?.method || fetchArgs[1]?.method) || "GET").toUpperCase();
+    if (method === "POST" && url.endsWith("/api/attention/read")) {
+      // The QA page must never mark the operator's real unread as read.
+      // Divert before any network layer (service-worker control hides this
+      // request from Playwright routing in WebKit) and answer with the
+      // receipt shape the SPA expects.
+      let throughSeq = 0;
+      try {
+        const raw = typeof request === "string" ? fetchArgs[1]?.body : await request.clone().text();
+        const parsed = JSON.parse(raw || "{}");
+        if (Number.isFinite(Number(parsed.through_seq))) throughSeq = Number(parsed.through_seq);
+      } catch {
+        // Malformed body still must not reach the real host.
+      }
+      globalThis.__ibkrSmoke.attentionReadDiverted += 1;
+      globalThis.__ibkrSmoke.fetches.push({ url, status: 200, diverted: true, at: Date.now() });
+      return new Response(
+        JSON.stringify({ unread_count: 0, high_water_seq: throughSeq, read_through_seq: throughSeq, unread_refs: [] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
     try {
       const res = await nativeFetch(...fetchArgs);
       globalThis.__ibkrSmoke.fetches.push({ url, status: res.status, at: Date.now() });
@@ -353,8 +387,10 @@ try {
   // attempted the acknowledge POST, and every attempt must have been
   // intercepted rather than reaching the real host.
   const attentionGuardDeadline = Date.now() + 10000;
+  attentionReadIntercepted = await attentionReadInterceptedCount(page);
   while (attentionReadIntercepted === 0 && Date.now() < attentionGuardDeadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
+    attentionReadIntercepted = await attentionReadInterceptedCount(page);
   }
   const attentionReadFetches = await page.evaluate(() => globalThis.__ibkrSmoke.fetches.filter((item) => item.url.endsWith("/api/attention/read")).length);
   if (attentionReadIntercepted === 0) throw new Error("attention read guard never fired: alerts tab exercised without an intercepted /api/attention/read POST");
@@ -1545,7 +1581,9 @@ async function exerciseGovernanceFixtures(page) {
     current: document.getElementById("governanceCurrentList")?.textContent || "",
     source: document.getElementById("governanceSourceHealth")?.textContent || "",
   }));
-  if (notObserved.state !== "not_observed" || notObserved.current.includes("Unobserved retained candidate") || !notObserved.source.includes("not_observed · not_observed")) {
+  // The redesigned chip renders "waiting" for a not-yet-observed poll; the
+  // raw enum only appears inside the source-health evidence line.
+  if (notObserved.state !== "waiting" || notObserved.current.includes("Unobserved retained candidate") || !notObserved.source.includes("not_observed · not_observed")) {
     throw new Error(`governance not-observed fixture is incomplete: ${JSON.stringify(notObserved)}`);
   }
 
@@ -1570,10 +1608,10 @@ async function exerciseGovernanceFixtures(page) {
   const fetchesAfter = await page.evaluate((paths) => globalThis.__ibkrSmoke.fetches.filter((item) => paths.some((path) => item.url.endsWith(path))).length, mutationPaths);
   if (fetchesAfter !== fetchesBefore) throw new Error(`governance fixture QA called a mutation endpoint: before=${fetchesBefore} after=${fetchesAfter}`);
   // Hold the Alerts tab until the SPA's dwell-gated acknowledge has fired
-  // (and been intercepted); leaving earlier would cancel the dwell and the
+  // (and been diverted); leaving earlier would cancel the dwell and the
   // guard assertion downstream would see zero intercepts.
   const dwellDeadline = Date.now() + 10000;
-  while (attentionReadIntercepted === 0 && Date.now() < dwellDeadline) {
+  while ((await attentionReadInterceptedCount(page)) === 0 && Date.now() < dwellDeadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   await page.locator("#tabMonitor").click();
