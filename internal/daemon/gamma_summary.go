@@ -14,12 +14,93 @@ func hydrateGammaComputed(c *rpc.GammaZeroComputed) *rpc.GammaZeroComputed {
 	if c == nil {
 		return nil
 	}
+	// Both cached payloads and child results are data-boundary input. Reduce
+	// every warning surface to typed codes and rebuild the structured prose;
+	// never preserve producer-supplied detail text across hydration.
+	legacyCodes := make([]string, 0, len(c.WarningDetails))
+	for _, detail := range c.WarningDetails {
+		legacyCodes = append(legacyCodes, detail.Code)
+	}
+	c.Warnings = canonicalGammaWarningUnion(c.Warnings, legacyCodes)
+	c.WarningDetails = nil
 	for _, sub := range c.PerIndex {
 		hydrateGammaComputed(sub)
 	}
-	c.WarningDetails = buildGammaWarningDetails(c)
+	if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
+		c.WarningDetails = buildCombinedGammaWarningDetails(c)
+	} else {
+		c.WarningDetails = buildGammaWarningDetails(c)
+	}
 	c.Summary = buildGammaSummary(c)
 	return c
+}
+
+// buildCombinedGammaWarningDetails projects the per-index warning surfaces to
+// the combined envelope without pretending a SPY or SPX condition applies to
+// both indices. The (scope, code) pair is the identity: duplicate copies from
+// repeated hydration collapse, while the same code on SPY and SPX remains two
+// distinct diagnostics.
+func buildCombinedGammaWarningDetails(c *rpc.GammaZeroComputed) []rpc.GammaWarningDetail {
+	if c == nil {
+		return nil
+	}
+
+	type warningKey struct {
+		scope string
+		code  string
+	}
+	seen := make(map[warningKey]struct{})
+	childCodes := make(map[string]struct{})
+	out := make([]rpc.GammaWarningDetail, 0, len(c.WarningDetails)+len(c.Warnings))
+	appendDetail := func(d rpc.GammaWarningDetail) {
+		if d.Code == "" {
+			return
+		}
+		key := warningKey{scope: d.Scope, code: d.Code}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, d)
+	}
+
+	for _, label := range []string{"SPY", "SPX"} {
+		sub := c.PerIndex[label]
+		if sub == nil {
+			continue
+		}
+		for _, code := range sub.Warnings {
+			if code != "" {
+				childCodes[code] = struct{}{}
+			}
+		}
+		for _, d := range sub.WarningDetails {
+			if d.Code != "" {
+				childCodes[d.Code] = struct{}{}
+			}
+			appendDetail(d)
+		}
+	}
+
+	// Preserve any combined-local structured warning that was attached by a
+	// cache/fallback path. Child-derived copies lose to the freshly hydrated
+	// child details above, which keeps repeated hydration deterministic.
+	for _, d := range c.WarningDetails {
+		appendDetail(d)
+	}
+	// Warnings is deliberately the code-only union for daemon-internal
+	// compatibility. Only codes absent from both children are combined-local;
+	// child codes already have their correctly scoped details above.
+	for _, code := range c.Warnings {
+		if code == "" {
+			continue
+		}
+		if _, inherited := childCodes[code]; inherited {
+			continue
+		}
+		appendDetail(gammaWarningDetail(c, code))
+	}
+	return out
 }
 
 func buildGammaSummary(c *rpc.GammaZeroComputed) *rpc.GammaZeroSummary {
@@ -212,14 +293,46 @@ func gammaResultConfidence(c *rpc.GammaZeroComputed) string {
 	return "estimate"
 }
 
+// gammaWarningCodes returns warnings that apply to this quality node. A
+// combined envelope also projects its children's warnings for wire consumers;
+// those inherited details are excluded here because each child already gates
+// its own quality and SPY context must not re-gate the SPX-canonical result.
 func gammaWarningCodes(c *rpc.GammaZeroComputed) []string {
 	if c == nil {
 		return nil
+	}
+	type warningKey struct {
+		scope string
+		code  string
+	}
+	childCodes := map[string]struct{}{}
+	childDetails := map[warningKey]struct{}{}
+	if c.Scope == rpc.GammaZeroScopeCombined && len(c.PerIndex) > 0 {
+		for _, sub := range c.PerIndex {
+			if sub == nil {
+				continue
+			}
+			for _, code := range sub.Warnings {
+				if code != "" {
+					childCodes[code] = struct{}{}
+				}
+			}
+			for _, d := range sub.WarningDetails {
+				if d.Code == "" {
+					continue
+				}
+				childCodes[d.Code] = struct{}{}
+				childDetails[warningKey{scope: d.Scope, code: d.Code}] = struct{}{}
+			}
+		}
 	}
 	seen := map[string]struct{}{}
 	var out []string
 	for _, code := range c.Warnings {
 		if code == "" {
+			continue
+		}
+		if _, inherited := childCodes[code]; inherited {
 			continue
 		}
 		if _, ok := seen[code]; ok {
@@ -230,6 +343,9 @@ func gammaWarningCodes(c *rpc.GammaZeroComputed) []string {
 	}
 	for _, d := range c.WarningDetails {
 		if d.Code == "" {
+			continue
+		}
+		if _, inherited := childDetails[warningKey{scope: d.Scope, code: d.Code}]; inherited {
 			continue
 		}
 		if _, ok := seen[d.Code]; ok {
@@ -356,6 +472,11 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		d.Severity = "data_quality"
 		d.Message = "The cached gamma result is older than 24 hours and markets are closed."
 		d.Impact = "The daemon served the last persisted snapshot rather than recomputing against a closed market."
+	case code == "unclassified_data_warning":
+		d.Severity = "data_quality"
+		d.Message = "An unclassified gamma data warning was received."
+		d.Impact = "The affected gamma slice is not trusted for ranking until a typed warning is available."
+		d.Action = "Inspect local daemon diagnostics and retry after the data source recovers."
 	case strings.HasPrefix(code, "refresh_failed:"):
 		d.Severity = "data_quality"
 		summary := strings.TrimPrefix(code, "refresh_failed:")
@@ -383,7 +504,13 @@ func gammaWarningDetail(c *rpc.GammaZeroComputed, code string) rpc.GammaWarningD
 		d.Message = "Skew fit fell back to sticky-IV for expiry " + expiry + "."
 		d.Impact = "That expiry used the simpler IV assumption during the sweep."
 	default:
-		d.Message = code
+		// Warning codes are typed before reaching this renderer. Keep the
+		// fallback generic so a corrupt cache or future producer cannot turn
+		// arbitrary text into browser-visible copy.
+		d.Code = "unclassified_data_warning"
+		d.Severity = "data_quality"
+		d.Message = "An unclassified gamma data warning was received."
+		d.Impact = "The affected gamma slice is not trusted for ranking until a typed warning is available."
 	}
 	return d
 }

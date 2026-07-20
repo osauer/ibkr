@@ -1,0 +1,651 @@
+package risk
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+)
+
+const (
+	// AlertCandidateSnapshotVersion identifies the first source-neutral alert
+	// candidate wire contract. It does not approve any routing or pageability
+	// policy.
+	AlertCandidateSnapshotVersion  = "alert-candidate-snapshot-v1"
+	alertEpisodeKeyPrefix          = "alert-episode-v1:"
+	alertOccurrenceKeyPrefix       = "alert-occurrence-v1:"
+	alertEvidenceFingerprintPrefix = "sha256:"
+)
+
+// AlertSource names the daemon authority that produced a candidate. These are
+// product subsystem names, never broker, account, symbol, order, or device
+// identifiers.
+type AlertSource string
+
+const (
+	AlertSourceCanary         AlertSource = "canary"
+	AlertSourceRegime         AlertSource = "regime"
+	AlertSourceRulebook       AlertSource = "rulebook"
+	AlertSourceRiskPolicy     AlertSource = "risk_policy"
+	AlertSourceProtection     AlertSource = "protection"
+	AlertSourceOrderIntegrity AlertSource = "order_integrity"
+	AlertSourceReconciliation AlertSource = "reconciliation"
+	AlertSourceGovernance     AlertSource = "governance"
+	AlertSourceDataHealth     AlertSource = "data_health"
+	AlertSourceDelivery       AlertSource = "delivery"
+)
+
+// AlertKind is the redacted semantic class of an operator condition. Source
+// and kind remain independent so adapters do not recreate producer policy.
+type AlertKind string
+
+const (
+	AlertKindMarketState             AlertKind = "market_state"
+	AlertKindPortfolioRisk           AlertKind = "portfolio_risk"
+	AlertKindMarginSafety            AlertKind = "margin_safety"
+	AlertKindDrawdown                AlertKind = "drawdown"
+	AlertKindProtectionGap           AlertKind = "protection_gap"
+	AlertKindOrderIntegrity          AlertKind = "order_integrity"
+	AlertKindReconciliationException AlertKind = "reconciliation_exception"
+	AlertKindGovernance              AlertKind = "governance"
+	AlertKindPolicyDrift             AlertKind = "policy_drift"
+	AlertKindDataHealth              AlertKind = "data_health"
+	AlertKindDeliveryHealth          AlertKind = "delivery_health"
+)
+
+// AlertEpisodeState is the daemon producer's lifecycle state. The daemon owns
+// dwell, escalation, recovery, and re-arm; the app only persists delivery and
+// receipt state for the producer-authored occurrence. A new opening/reopen or
+// daemon-qualified page-worthy escalation starts a new occurrence; evidence-
+// only revisions and recovery do not.
+type AlertEpisodeState string
+
+const (
+	AlertEpisodeOpen      AlertEpisodeState = "open"
+	AlertEpisodeEscalated AlertEpisodeState = "escalated"
+	AlertEpisodeRecovered AlertEpisodeState = "recovered"
+)
+
+type AlertSeverity string
+
+const (
+	AlertSeverityObserve AlertSeverity = "observe"
+	AlertSeverityWatch   AlertSeverity = "watch"
+	AlertSeverityAct     AlertSeverity = "act"
+	AlertSeverityUrgent  AlertSeverity = "urgent"
+)
+
+// AlertDeliveryPreference is advisory input to a future app-owned delivery
+// policy. The zero value is invalid. Unapproved is an explicit, non-pageable
+// state; Page is representable for a future approved policy but no constructor
+// or evaluator in this contract selects it.
+type AlertDeliveryPreference string
+
+const (
+	AlertDeliveryUnapproved AlertDeliveryPreference = "unapproved"
+	AlertDeliveryRecordOnly AlertDeliveryPreference = "record_only"
+	AlertDeliveryInbox      AlertDeliveryPreference = "inbox"
+	AlertDeliveryDigest     AlertDeliveryPreference = "digest"
+	AlertDeliveryPage       AlertDeliveryPreference = "page"
+)
+
+type AlertEvidenceHealth string
+
+const (
+	AlertEvidenceCurrent     AlertEvidenceHealth = "current"
+	AlertEvidencePartial     AlertEvidenceHealth = "partial"
+	AlertEvidenceStale       AlertEvidenceHealth = "stale"
+	AlertEvidenceUnavailable AlertEvidenceHealth = "unavailable"
+	AlertEvidenceError       AlertEvidenceHealth = "error"
+)
+
+// AlertDestination names a redacted product surface, not a device or target.
+// Per-target delivery identity belongs to the app delivery ledger.
+type AlertDestination string
+
+const (
+	AlertDestinationMonitor AlertDestination = "monitor"
+	AlertDestinationAlerts  AlertDestination = "alerts"
+	AlertDestinationBrief   AlertDestination = "brief"
+)
+
+type AlertCoverageState string
+
+const (
+	AlertCoverageComplete    AlertCoverageState = "complete"
+	AlertCoveragePartial     AlertCoverageState = "partial"
+	AlertCoverageUnavailable AlertCoverageState = "unavailable"
+)
+
+type AlertCoverageFreshness string
+
+const (
+	AlertCoverageCurrent AlertCoverageFreshness = "current"
+	AlertCoverageStale   AlertCoverageFreshness = "stale"
+	AlertCoverageUnknown AlertCoverageFreshness = "unknown"
+)
+
+type AlertSnapshotState string
+
+const (
+	AlertSnapshotClear   AlertSnapshotState = "clear"
+	AlertSnapshotActive  AlertSnapshotState = "active"
+	AlertSnapshotUnknown AlertSnapshotState = "unknown"
+)
+
+// AlertCandidate contains classified, redacted semantics only. It deliberately
+// has no display copy, source subject, account, symbol, order, route, display
+// ID, target ID, device ID, or delivery-attempt ID.
+//
+// EpisodeKey is stable for the same root problem. EvidenceFingerprint changes
+// when classified supporting evidence changes. OccurrenceKey changes when the
+// daemon opens/reopens the root problem or classifies an escalation as a new
+// page-worthy occurrence; it stays stable for evidence-only revisions and the
+// occurrence's recovery. App delivery records bind this private occurrence key
+// and create their own per-target attempt IDs; they never infer re-arm,
+// page-worthy escalation, or use a display ID as authority. StateChangedAt is
+// the daemon's semantic transition time.
+type AlertCandidate struct {
+	EpisodeKey          string                  `json:"episode_key"`
+	OccurrenceKey       string                  `json:"occurrence_key"`
+	EvidenceFingerprint string                  `json:"evidence_fingerprint"`
+	Source              AlertSource             `json:"source"`
+	Kind                AlertKind               `json:"kind"`
+	State               AlertEpisodeState       `json:"state"`
+	Severity            AlertSeverity           `json:"severity"`
+	DeliveryPreference  AlertDeliveryPreference `json:"delivery_preference"`
+	EvidenceHealth      AlertEvidenceHealth     `json:"evidence_health"`
+	Destination         AlertDestination        `json:"destination"`
+	EvidenceAsOf        time.Time               `json:"evidence_as_of"`
+	StateChangedAt      time.Time               `json:"state_changed_at"`
+	ObservedAt          time.Time               `json:"observed_at"`
+}
+
+// AlertCoverage makes the universe behind an empty candidate list explicit.
+// CoveredSources must be a subset of ExpectedSources. Complete means the two
+// sets are equal; unavailable means CoveredSources is empty.
+type AlertCoverage struct {
+	State           AlertCoverageState     `json:"state"`
+	Freshness       AlertCoverageFreshness `json:"freshness"`
+	AsOf            time.Time              `json:"as_of"`
+	ExpectedSources []AlertSource          `json:"expected_sources"`
+	CoveredSources  []AlertSource          `json:"covered_sources"`
+}
+
+// AlertCandidateSnapshot is the versioned daemon-side measurement contract.
+// CurrentState is validated from candidates and coverage: an empty result is
+// Clear only with complete, current coverage; otherwise it is Unknown.
+type AlertCandidateSnapshot struct {
+	SchemaVersion string             `json:"schema_version"`
+	AsOf          time.Time          `json:"as_of"`
+	CurrentState  AlertSnapshotState `json:"current_state"`
+	Coverage      AlertCoverage      `json:"coverage"`
+	Candidates    []AlertCandidate   `json:"candidates"`
+}
+
+// BuildAlertEpisodeKey hashes a producer-approved semantic identity into an
+// opaque stable key. identityParts may contain sensitive source identities;
+// callers must not persist or log them. Only the returned key belongs on the
+// alert contract. Part order is significant.
+func BuildAlertEpisodeKey(source AlertSource, kind AlertKind, identityParts ...string) (string, error) {
+	if !validAlertSource(source) {
+		return "", errors.New("invalid alert episode source")
+	}
+	if !validAlertKind(kind) {
+		return "", errors.New("invalid alert episode kind")
+	}
+	if len(identityParts) == 0 || len(identityParts) > 16 {
+		return "", errors.New("alert episode identity requires between 1 and 16 parts")
+	}
+	parts := make([]string, len(identityParts))
+	for i, part := range identityParts {
+		part = strings.TrimSpace(part)
+		if part == "" || len(part) > 1024 {
+			return "", fmt.Errorf("invalid alert episode identity part %d", i)
+		}
+		parts[i] = part
+	}
+	raw, err := json.Marshal(struct {
+		Version string      `json:"version"`
+		Source  AlertSource `json:"source"`
+		Kind    AlertKind   `json:"kind"`
+		Parts   []string    `json:"parts"`
+	}{
+		Version: AlertCandidateSnapshotVersion,
+		Source:  source,
+		Kind:    kind,
+		Parts:   parts,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode alert episode identity: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return alertEpisodeKeyPrefix + hex.EncodeToString(sum[:]), nil
+}
+
+// BuildAlertOccurrenceKey hashes a daemon-authored occurrence identity for one
+// EpisodeKey. The daemon decides when opening, re-arm, or a page-worthy
+// escalation starts a new occurrence; this helper only makes that decision
+// opaque and stable across transport. The identity parts must not be persisted
+// or logged outside the owning runtime. Because both keys are opaque digests,
+// candidate validation cannot reconstruct this relationship; producers must
+// use this helper and persist the result.
+func BuildAlertOccurrenceKey(episodeKey string, identityParts ...string) (string, error) {
+	if !validOpaqueSHA256(episodeKey, alertEpisodeKeyPrefix) {
+		return "", errors.New("invalid alert occurrence episode_key")
+	}
+	if len(identityParts) == 0 || len(identityParts) > 16 {
+		return "", errors.New("alert occurrence identity requires between 1 and 16 parts")
+	}
+	parts := make([]string, len(identityParts))
+	for i, part := range identityParts {
+		part = strings.TrimSpace(part)
+		if part == "" || len(part) > 1024 {
+			return "", fmt.Errorf("invalid alert occurrence identity part %d", i)
+		}
+		parts[i] = part
+	}
+	raw, err := json.Marshal(struct {
+		Version    string   `json:"version"`
+		EpisodeKey string   `json:"episode_key"`
+		Parts      []string `json:"parts"`
+	}{
+		Version:    AlertCandidateSnapshotVersion,
+		EpisodeKey: episodeKey,
+		Parts:      parts,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode alert occurrence identity: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return alertOccurrenceKeyPrefix + hex.EncodeToString(sum[:]), nil
+}
+
+func (candidate AlertCandidate) Validate() error {
+	if !validOpaqueSHA256(candidate.EpisodeKey, alertEpisodeKeyPrefix) {
+		return errors.New("invalid alert candidate episode_key")
+	}
+	if !validOpaqueSHA256(candidate.OccurrenceKey, alertOccurrenceKeyPrefix) {
+		return errors.New("invalid alert candidate occurrence_key")
+	}
+	if !validOpaqueSHA256(candidate.EvidenceFingerprint, alertEvidenceFingerprintPrefix) {
+		return errors.New("invalid alert candidate evidence_fingerprint")
+	}
+	if !validAlertSource(candidate.Source) {
+		return errors.New("invalid alert candidate source")
+	}
+	if !validAlertKind(candidate.Kind) {
+		return errors.New("invalid alert candidate kind")
+	}
+	if !validAlertEpisodeState(candidate.State) {
+		return errors.New("invalid alert candidate state")
+	}
+	if !validAlertSeverity(candidate.Severity) {
+		return errors.New("invalid alert candidate severity")
+	}
+	if !validAlertDeliveryPreference(candidate.DeliveryPreference) {
+		return errors.New("invalid alert candidate delivery_preference")
+	}
+	if !validAlertEvidenceHealth(candidate.EvidenceHealth) {
+		return errors.New("invalid alert candidate evidence_health")
+	}
+	if !validAlertDestination(candidate.Destination) {
+		return errors.New("invalid alert candidate destination")
+	}
+	if candidate.EvidenceAsOf.IsZero() || candidate.StateChangedAt.IsZero() || candidate.ObservedAt.IsZero() {
+		return errors.New("alert candidate timestamps must be present")
+	}
+	if candidate.EvidenceAsOf.After(candidate.ObservedAt) {
+		return errors.New("alert candidate evidence_as_of is after observed_at")
+	}
+	if candidate.StateChangedAt.After(candidate.ObservedAt) {
+		return errors.New("alert candidate state_changed_at is after observed_at")
+	}
+	if candidate.State == AlertEpisodeRecovered && candidate.EvidenceHealth != AlertEvidenceCurrent {
+		return errors.New("recovered alert candidate requires current evidence")
+	}
+	return nil
+}
+
+func (coverage AlertCoverage) Validate() error {
+	if !validAlertCoverageState(coverage.State) {
+		return errors.New("invalid alert coverage state")
+	}
+	if !validAlertCoverageFreshness(coverage.Freshness) {
+		return errors.New("invalid alert coverage freshness")
+	}
+	if coverage.AsOf.IsZero() {
+		return errors.New("alert coverage is missing as_of")
+	}
+	if len(coverage.ExpectedSources) == 0 {
+		return errors.New("alert coverage requires expected_sources")
+	}
+	if coverage.CoveredSources == nil {
+		return errors.New("alert coverage requires covered_sources")
+	}
+	expected, err := alertSourceSet("expected_sources", coverage.ExpectedSources)
+	if err != nil {
+		return err
+	}
+	covered, err := alertSourceSet("covered_sources", coverage.CoveredSources)
+	if err != nil {
+		return err
+	}
+	for source := range covered {
+		if _, ok := expected[source]; !ok {
+			return errors.New("alert coverage covered_sources is not a subset of expected_sources")
+		}
+	}
+
+	switch coverage.State {
+	case AlertCoverageComplete:
+		if len(covered) != len(expected) {
+			return errors.New("complete alert coverage does not cover every expected source")
+		}
+		if coverage.Freshness == AlertCoverageUnknown {
+			return errors.New("complete alert coverage cannot have unknown freshness")
+		}
+	case AlertCoveragePartial:
+		if len(covered) == 0 || len(covered) == len(expected) {
+			return errors.New("partial alert coverage requires a non-empty proper subset")
+		}
+		if coverage.Freshness == AlertCoverageUnknown {
+			return errors.New("partial alert coverage cannot have unknown freshness")
+		}
+	case AlertCoverageUnavailable:
+		if len(covered) != 0 {
+			return errors.New("unavailable alert coverage cannot cover a source")
+		}
+		if coverage.Freshness != AlertCoverageUnknown {
+			return errors.New("unavailable alert coverage requires unknown freshness")
+		}
+	}
+	return nil
+}
+
+func (snapshot AlertCandidateSnapshot) Validate() error {
+	if snapshot.SchemaVersion != AlertCandidateSnapshotVersion {
+		return errors.New("invalid alert candidate snapshot schema_version")
+	}
+	if snapshot.AsOf.IsZero() {
+		return errors.New("alert candidate snapshot is missing as_of")
+	}
+	if snapshot.Candidates == nil {
+		return errors.New("alert candidate snapshot requires candidates")
+	}
+	if err := snapshot.Coverage.Validate(); err != nil {
+		return fmt.Errorf("invalid alert candidate snapshot coverage: %w", err)
+	}
+	if snapshot.Coverage.AsOf.After(snapshot.AsOf) {
+		return errors.New("alert candidate snapshot coverage is after as_of")
+	}
+	if snapshot.Coverage.Freshness == AlertCoverageCurrent && !snapshot.Coverage.AsOf.Equal(snapshot.AsOf) {
+		return errors.New("current alert candidate coverage must match snapshot as_of")
+	}
+
+	expected, _ := alertSourceSet("expected_sources", snapshot.Coverage.ExpectedSources)
+	covered, _ := alertSourceSet("covered_sources", snapshot.Coverage.CoveredSources)
+	seenEpisodes := make(map[string]struct{}, len(snapshot.Candidates))
+	seenOccurrences := make(map[string]struct{}, len(snapshot.Candidates))
+	hasActive := false
+	for i, candidate := range snapshot.Candidates {
+		if err := candidate.Validate(); err != nil {
+			return fmt.Errorf("invalid alert candidate at index %d: %w", i, err)
+		}
+		if candidate.ObservedAt.After(snapshot.AsOf) {
+			return fmt.Errorf("invalid alert candidate at index %d: observed_at is after snapshot as_of", i)
+		}
+		if _, ok := expected[candidate.Source]; !ok {
+			return fmt.Errorf("invalid alert candidate at index %d: source is outside snapshot coverage", i)
+		}
+		if candidate.EvidenceHealth == AlertEvidenceCurrent {
+			if _, ok := covered[candidate.Source]; !ok {
+				return fmt.Errorf("invalid alert candidate at index %d: current evidence source is not covered", i)
+			}
+		}
+		if _, duplicate := seenEpisodes[candidate.EpisodeKey]; duplicate {
+			return fmt.Errorf("invalid alert candidate at index %d: duplicate episode_key", i)
+		}
+		seenEpisodes[candidate.EpisodeKey] = struct{}{}
+		if _, duplicate := seenOccurrences[candidate.OccurrenceKey]; duplicate {
+			return fmt.Errorf("invalid alert candidate at index %d: duplicate occurrence_key", i)
+		}
+		seenOccurrences[candidate.OccurrenceKey] = struct{}{}
+		if candidate.State == AlertEpisodeOpen || candidate.State == AlertEpisodeEscalated {
+			hasActive = true
+		}
+	}
+
+	derived := AlertSnapshotUnknown
+	if hasActive {
+		derived = AlertSnapshotActive
+	} else if snapshot.Coverage.State == AlertCoverageComplete && snapshot.Coverage.Freshness == AlertCoverageCurrent {
+		derived = AlertSnapshotClear
+	}
+	if snapshot.CurrentState != derived {
+		return fmt.Errorf("alert candidate snapshot current_state %q does not match derived state %q", snapshot.CurrentState, derived)
+	}
+	return nil
+}
+
+// IsClear reports a trustworthy clear only for a fully valid snapshot. It is
+// intentionally false for empty snapshots with incomplete or stale coverage.
+func (snapshot AlertCandidateSnapshot) IsClear() bool {
+	return snapshot.CurrentState == AlertSnapshotClear && snapshot.Validate() == nil
+}
+
+func (candidate AlertCandidate) MarshalJSON() ([]byte, error) {
+	if err := candidate.Validate(); err != nil {
+		return nil, err
+	}
+	type wire AlertCandidate
+	return json.Marshal(wire(candidate))
+}
+
+func (candidate *AlertCandidate) UnmarshalJSON(data []byte) error {
+	type wire AlertCandidate
+	var decoded wire
+	if err := decodeExactAlertJSONObject(data, []string{
+		"episode_key", "occurrence_key", "evidence_fingerprint", "source", "kind", "state", "severity",
+		"delivery_preference", "evidence_health", "destination", "evidence_as_of",
+		"state_changed_at", "observed_at",
+	}, &decoded); err != nil {
+		return err
+	}
+	value := AlertCandidate(decoded)
+	if err := value.Validate(); err != nil {
+		return err
+	}
+	*candidate = value
+	return nil
+}
+
+func (coverage AlertCoverage) MarshalJSON() ([]byte, error) {
+	if err := coverage.Validate(); err != nil {
+		return nil, err
+	}
+	type wire AlertCoverage
+	return json.Marshal(wire(coverage))
+}
+
+func (coverage *AlertCoverage) UnmarshalJSON(data []byte) error {
+	type wire AlertCoverage
+	var decoded wire
+	if err := decodeExactAlertJSONObject(data, []string{
+		"state", "freshness", "as_of", "expected_sources", "covered_sources",
+	}, &decoded); err != nil {
+		return err
+	}
+	value := AlertCoverage(decoded)
+	if err := value.Validate(); err != nil {
+		return err
+	}
+	*coverage = value
+	return nil
+}
+
+func (snapshot AlertCandidateSnapshot) MarshalJSON() ([]byte, error) {
+	if err := snapshot.Validate(); err != nil {
+		return nil, err
+	}
+	type wire AlertCandidateSnapshot
+	return json.Marshal(wire(snapshot))
+}
+
+func (snapshot *AlertCandidateSnapshot) UnmarshalJSON(data []byte) error {
+	type wire AlertCandidateSnapshot
+	var decoded wire
+	if err := decodeExactAlertJSONObject(data, []string{
+		"schema_version", "as_of", "current_state", "coverage", "candidates",
+	}, &decoded); err != nil {
+		return err
+	}
+	value := AlertCandidateSnapshot(decoded)
+	if err := value.Validate(); err != nil {
+		return err
+	}
+	*snapshot = value
+	return nil
+}
+
+func alertSourceSet(field string, sources []AlertSource) (map[AlertSource]struct{}, error) {
+	set := make(map[AlertSource]struct{}, len(sources))
+	for _, source := range sources {
+		if !validAlertSource(source) {
+			return nil, fmt.Errorf("alert coverage %s contains invalid source", field)
+		}
+		if _, duplicate := set[source]; duplicate {
+			return nil, fmt.Errorf("alert coverage %s contains duplicate source", field)
+		}
+		set[source] = struct{}{}
+	}
+	return set, nil
+}
+
+func validOpaqueSHA256(value, prefix string) bool {
+	if len(value) != len(prefix)+sha256.Size*2 || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	for i := len(prefix); i < len(value); i++ {
+		if (value[i] < '0' || value[i] > '9') && (value[i] < 'a' || value[i] > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validAlertSource(value AlertSource) bool {
+	switch value {
+	case AlertSourceCanary, AlertSourceRegime, AlertSourceRulebook, AlertSourceRiskPolicy,
+		AlertSourceProtection, AlertSourceOrderIntegrity, AlertSourceReconciliation,
+		AlertSourceGovernance, AlertSourceDataHealth, AlertSourceDelivery:
+		return true
+	default:
+		return false
+	}
+}
+
+func validAlertKind(value AlertKind) bool {
+	switch value {
+	case AlertKindMarketState, AlertKindPortfolioRisk, AlertKindMarginSafety, AlertKindDrawdown,
+		AlertKindProtectionGap, AlertKindOrderIntegrity, AlertKindReconciliationException,
+		AlertKindGovernance, AlertKindPolicyDrift, AlertKindDataHealth, AlertKindDeliveryHealth:
+		return true
+	default:
+		return false
+	}
+}
+
+func validAlertEpisodeState(value AlertEpisodeState) bool {
+	return value == AlertEpisodeOpen || value == AlertEpisodeEscalated || value == AlertEpisodeRecovered
+}
+
+func validAlertSeverity(value AlertSeverity) bool {
+	return value == AlertSeverityObserve || value == AlertSeverityWatch || value == AlertSeverityAct || value == AlertSeverityUrgent
+}
+
+func validAlertDeliveryPreference(value AlertDeliveryPreference) bool {
+	return value == AlertDeliveryUnapproved || value == AlertDeliveryRecordOnly || value == AlertDeliveryInbox ||
+		value == AlertDeliveryDigest || value == AlertDeliveryPage
+}
+
+func validAlertEvidenceHealth(value AlertEvidenceHealth) bool {
+	return value == AlertEvidenceCurrent || value == AlertEvidencePartial || value == AlertEvidenceStale ||
+		value == AlertEvidenceUnavailable || value == AlertEvidenceError
+}
+
+func validAlertDestination(value AlertDestination) bool {
+	return value == AlertDestinationMonitor || value == AlertDestinationAlerts || value == AlertDestinationBrief
+}
+
+func validAlertCoverageState(value AlertCoverageState) bool {
+	return value == AlertCoverageComplete || value == AlertCoveragePartial || value == AlertCoverageUnavailable
+}
+
+func validAlertCoverageFreshness(value AlertCoverageFreshness) bool {
+	return value == AlertCoverageCurrent || value == AlertCoverageStale || value == AlertCoverageUnknown
+}
+
+func decodeExactAlertJSONObject(data []byte, requiredKeys []string, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := opening.(json.Delim); !ok || delimiter != '{' {
+		return errors.New("alert JSON value must be an object")
+	}
+	required := make(map[string]struct{}, len(requiredKeys))
+	for _, key := range requiredKeys {
+		required[key] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(requiredKeys))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return errors.New("alert JSON object contains a non-string key")
+		}
+		if _, ok := required[key]; !ok {
+			return fmt.Errorf("alert JSON object contains unknown key %q", key)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("alert JSON object contains duplicate key %q", key)
+		}
+		seen[key] = struct{}{}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return err
+		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("alert JSON object key %q must not be null", key)
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := closing.(json.Delim); !ok || delimiter != '}' {
+		return errors.New("alert JSON object is not closed")
+	}
+	for _, key := range requiredKeys {
+		if _, ok := seen[key]; !ok {
+			return fmt.Errorf("alert JSON object is missing key %q", key)
+		}
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("unexpected trailing alert JSON value")
+		}
+		return err
+	}
+	return json.Unmarshal(data, destination)
+}

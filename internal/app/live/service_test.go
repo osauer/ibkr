@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -158,17 +159,256 @@ func TestBriefPollErrorKeepsLastGoodSnapshotAndSetsSourceMeta(t *testing.T) {
 	if got.Status == nil || !got.Status.Connected {
 		t.Fatalf("rest of snapshot was not retained: %#v", got.Status)
 	}
-	if got.Sources["brief"].Error != "brief composition unavailable" {
+	briefSource := got.Sources["brief"]
+	if briefSource.State != SourceStateUnavailable || briefSource.Reason != SourceReasonTransportUnavailable || briefSource.Error != "" || !briefSource.LastSuccessAt.Equal(now.Add(-time.Minute)) {
 		t.Fatalf("brief source meta=%#v", got.Sources["brief"])
 	}
 	found := false
 	for _, sourceErr := range got.Errors {
-		if sourceErr.Source == "brief" && sourceErr.Message == "brief composition unavailable" {
+		if sourceErr.Source == "brief" && sourceErr.Message == "Source temporarily unavailable." {
 			found = true
 		}
 	}
 	if !found {
 		t.Fatalf("brief source error missing: %#v", got.Errors)
+	}
+}
+
+func TestCadenceSourcesStartNotObserved(t *testing.T) {
+	t.Parallel()
+	svc := New(&fakeClient{}, 5*time.Second, time.Minute)
+	for _, name := range []string{"canary", "regime", "rules", "brief"} {
+		source, ok := svc.Snapshot().Sources[name]
+		if !ok {
+			t.Fatalf("source %q missing at startup", name)
+		}
+		if source.State != SourceStateNotObserved || source.Reason != SourceReasonNotObserved || !source.UpdatedAt.IsZero() || !source.LastSuccessAt.IsZero() || source.Error != "" {
+			t.Fatalf("startup source %q=%+v, want allowlisted not_observed", name, source)
+		}
+	}
+}
+
+func TestCanaryRegimePollIsAtomicOnFailure(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 20, 19, 0, 0, 0, time.UTC)
+	client := &fakeClient{
+		canary: &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "canary-last-good"}},
+		regime: &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime-last-good"}},
+		brief:  &rpc.BriefResult{BriefFingerprint: "brief-ready"},
+	}
+	svc := New(client, 5*time.Second, time.Minute)
+	svc.now = func() time.Time { return now }
+	canarySeen := make(chan rpc.CanaryResult, 2)
+	svc.OnCanary = func(_ context.Context, canary rpc.CanaryResult) { canarySeen <- canary }
+
+	first := svc.PollOnce(t.Context())
+	select {
+	case <-canarySeen:
+	case <-time.After(time.Second):
+		t.Fatal("initial successful Canary result did not reach OnCanary")
+	}
+	for _, name := range []string{"canary", "regime"} {
+		source := first.Sources[name]
+		if source.State != SourceStateCurrent || source.Reason != SourceReasonNone || !source.LastSuccessAt.Equal(now) || source.Error != "" {
+			t.Fatalf("initial source %q=%+v, want current", name, source)
+		}
+	}
+
+	client.canary = &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "must-not-publish"}}
+	client.regime = &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "must-not-publish"}}
+	client.canaryErr = errors.New("regime: private transport sentinel")
+	now = now.Add(time.Minute)
+	got := svc.PollOnce(t.Context())
+	if got.Canary == nil || got.Canary.Fingerprint.Key != "canary-last-good" || got.Regime == nil || got.Regime.Fingerprint.Key != "regime-last-good" {
+		t.Fatalf("atomic failure replaced last-good pair: canary=%#v regime=%#v", got.Canary, got.Regime)
+	}
+	for _, name := range []string{"canary", "regime"} {
+		source := got.Sources[name]
+		if source.State != SourceStateUnavailable || source.Reason != SourceReasonTransportUnavailable || !source.LastSuccessAt.Equal(now.Add(-time.Minute)) || source.Error != "" {
+			t.Fatalf("failed source %q=%+v, want allowlisted unavailable with retained success", name, source)
+		}
+	}
+	seenErrors := map[string]bool{}
+	for _, sourceErr := range got.Errors {
+		if sourceErr.Message == "Source temporarily unavailable." {
+			seenErrors[sourceErr.Source] = true
+		}
+		if strings.Contains(sourceErr.Message, "private transport sentinel") {
+			t.Fatalf("raw transport error leaked through SourceError: %#v", sourceErr)
+		}
+	}
+	if !seenErrors["canary"] || !seenErrors["regime"] {
+		t.Fatalf("legacy Canary/Regime SourceError attribution was not retained: %#v", got.Errors)
+	}
+	select {
+	case unexpected := <-canarySeen:
+		t.Fatalf("failed atomic poll fired OnCanary: %#v", unexpected)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+func TestCanaryRegimeNilSuccessIsUnavailableAndNeverPublishes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		canary        *rpc.CanaryResult
+		regime        *rpc.RegimeMonitorResult
+		missingSource []string
+	}{
+		{name: "nil canary", regime: &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime"}}, missingSource: []string{"canary"}},
+		{name: "nil regime", canary: &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "canary"}}, missingSource: []string{"regime"}},
+		{name: "nil pair", missingSource: []string{"canary", "regime"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, 7, 20, 19, 30, 0, 0, time.UTC)
+			client := &fakeClient{canary: tt.canary, regime: tt.regime, brief: &rpc.BriefResult{BriefFingerprint: "brief-ready"}}
+			svc := New(client, 5*time.Second, time.Minute)
+			svc.now = func() time.Time { return now }
+			canarySeen := make(chan rpc.CanaryResult, 1)
+			svc.OnCanary = func(_ context.Context, canary rpc.CanaryResult) { canarySeen <- canary }
+
+			got := svc.PollOnce(t.Context())
+			if got.Canary != nil || got.Regime != nil {
+				t.Fatalf("partial pair was published: canary=%#v regime=%#v", got.Canary, got.Regime)
+			}
+			for _, name := range []string{"canary", "regime"} {
+				source := got.Sources[name]
+				if source.State != SourceStateUnavailable || source.Reason != SourceReasonTransportUnavailable || !source.LastSuccessAt.IsZero() || source.Error != "" {
+					t.Fatalf("source %q=%+v, want cold unavailable", name, source)
+				}
+			}
+			seen := map[string]bool{}
+			for _, sourceErr := range got.Errors {
+				seen[sourceErr.Source] = true
+			}
+			for _, name := range tt.missingSource {
+				if !seen[name] {
+					t.Fatalf("missing nil-result SourceError attribution for %q: %#v", name, got.Errors)
+				}
+			}
+			select {
+			case unexpected := <-canarySeen:
+				t.Fatalf("partial nil poll fired OnCanary: %#v", unexpected)
+			case <-time.After(25 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestRulesAndBriefFailuresRetainLastGoodAndRecover(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 20, 20, 0, 0, 0, time.UTC)
+	client := &fakeClient{
+		canary: &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "canary"}},
+		regime: &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime"}},
+		rules:  &rpc.RulesResult{Enabled: true, Status: "first"},
+		brief:  &rpc.BriefResult{BriefFingerprint: "brief-first"},
+	}
+	svc := New(client, 5*time.Second, time.Minute)
+	svc.now = func() time.Time { return now }
+	svc.PollOnce(t.Context())
+
+	client.rules = &rpc.RulesResult{Enabled: true, Status: "must-not-publish"}
+	client.rulesErr = errors.New("private rules transport sentinel")
+	client.brief = &rpc.BriefResult{BriefFingerprint: "must-not-publish"}
+	client.briefErr = errors.New("private brief transport sentinel")
+	now = now.Add(time.Minute)
+	failed := svc.PollOnce(t.Context())
+	if failed.Rules == nil || failed.Rules.Status != "first" || failed.Brief == nil || failed.Brief.BriefFingerprint != "brief-first" {
+		t.Fatalf("error discarded last-good payloads: rules=%#v brief=%#v", failed.Rules, failed.Brief)
+	}
+	for _, name := range []string{"rules", "brief"} {
+		source := failed.Sources[name]
+		if source.State != SourceStateUnavailable || source.Reason != SourceReasonTransportUnavailable || !source.LastSuccessAt.Equal(now.Add(-time.Minute)) || source.Error != "" {
+			t.Fatalf("failed source %q=%+v", name, source)
+		}
+	}
+
+	client.rulesErr = nil
+	client.rules = &rpc.RulesResult{Enabled: true, Status: "recovered"}
+	client.briefErr = nil
+	client.brief = &rpc.BriefResult{BriefFingerprint: "brief-recovered"}
+	now = now.Add(time.Minute)
+	recovered := svc.PollOnce(t.Context())
+	if recovered.Rules == nil || recovered.Rules.Status != "recovered" || recovered.Brief == nil || recovered.Brief.BriefFingerprint != "brief-recovered" {
+		t.Fatalf("recovery payloads missing: rules=%#v brief=%#v", recovered.Rules, recovered.Brief)
+	}
+	for _, name := range []string{"rules", "brief"} {
+		source := recovered.Sources[name]
+		if source.State != SourceStateCurrent || source.Reason != SourceReasonNone || !source.LastSuccessAt.Equal(now) || source.Error != "" {
+			t.Fatalf("recovered source %q=%+v", name, source)
+		}
+	}
+
+	client.rulesNil = true
+	client.brief = nil
+	now = now.Add(time.Minute)
+	nilResult := svc.PollOnce(t.Context())
+	if nilResult.Rules == nil || nilResult.Rules.Status != "recovered" || nilResult.Brief == nil || nilResult.Brief.BriefFingerprint != "brief-recovered" {
+		t.Fatalf("nil success discarded last-good payloads: rules=%#v brief=%#v", nilResult.Rules, nilResult.Brief)
+	}
+	for _, name := range []string{"rules", "brief"} {
+		source := nilResult.Sources[name]
+		if source.State != SourceStateUnavailable || source.Reason != SourceReasonTransportUnavailable || !source.LastSuccessAt.Equal(now.Add(-time.Minute)) || source.Error != "" {
+			t.Fatalf("nil source %q=%+v", name, source)
+		}
+	}
+	seen := map[string]string{}
+	for _, sourceErr := range nilResult.Errors {
+		seen[sourceErr.Source] = sourceErr.Message
+	}
+	if seen["rules"] != "Source temporarily unavailable." || seen["brief"] != "Source temporarily unavailable." {
+		t.Fatalf("nil-result SourceErrors=%#v", nilResult.Errors)
+	}
+}
+
+func TestCadenceSourceFreshnessAgesCurrentButNotUnavailable(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 20, 20, 30, 0, 0, time.UTC)
+	client := &fakeClient{
+		canary: &rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "canary"}},
+		regime: &rpc.RegimeMonitorResult{Fingerprint: rpc.Fingerprint{Key: "regime"}},
+		rules:  &rpc.RulesResult{Enabled: true, Status: "ok"},
+		brief:  &rpc.BriefResult{BriefFingerprint: "brief"},
+	}
+	svc := New(client, 5*time.Second, time.Minute)
+	svc.now = func() time.Time { return now }
+	svc.PollOnce(t.Context())
+	lastSuccess := now
+
+	now = now.Add(time.Minute + time.Nanosecond)
+	aged := svc.Snapshot()
+	for _, name := range []string{"canary", "regime", "rules", "brief"} {
+		source := aged.Sources[name]
+		if source.State != SourceStateStale || source.Reason != SourceReasonPollStale || !source.LastSuccessAt.Equal(lastSuccess) {
+			t.Fatalf("aged source %q=%+v", name, source)
+		}
+	}
+
+	client.canaryErr = errors.New("transport down")
+	client.rulesErr = errors.New("transport down")
+	client.briefErr = errors.New("transport down")
+	svc.PollOnce(t.Context())
+	now = now.Add(2 * time.Minute)
+	unavailable := svc.Snapshot()
+	for _, name := range []string{"canary", "regime", "rules", "brief"} {
+		source := unavailable.Sources[name]
+		if source.State != SourceStateUnavailable || source.Reason != SourceReasonTransportUnavailable || !source.LastSuccessAt.Equal(lastSuccess) {
+			t.Fatalf("explicit outage source %q was reclassified by aging: %+v", name, source)
+		}
+	}
+
+	client.canaryErr = nil
+	client.rulesErr = nil
+	client.briefErr = nil
+	svc.PollOnce(t.Context())
+	recovered := svc.Snapshot()
+	for _, name := range []string{"canary", "regime", "rules", "brief"} {
+		source := recovered.Sources[name]
+		if source.State != SourceStateCurrent || source.Reason != SourceReasonNone || !source.LastSuccessAt.Equal(now) {
+			t.Fatalf("recovered source %q=%+v", name, source)
+		}
 	}
 }
 
@@ -698,6 +938,10 @@ type fakeClient struct {
 	quoteErrs    map[string]error
 	regime       *rpc.RegimeMonitorResult
 	canary       *rpc.CanaryResult
+	canaryErr    error
+	rules        *rpc.RulesResult
+	rulesErr     error
+	rulesNil     bool
 	brief        *rpc.BriefResult
 	briefErr     error
 	nudges       *rpc.NudgesSnapshotResult
@@ -819,10 +1063,16 @@ func (c *fakeClient) CanaryWithRegime(context.Context) (*rpc.CanaryResult, *rpc.
 	if c.canaryBlock != nil {
 		<-c.canaryBlock
 	}
-	return c.canary, c.regime, nil
+	return c.canary, c.regime, c.canaryErr
 }
 
 func (c *fakeClient) Rules(context.Context) (*rpc.RulesResult, error) {
+	if c.rulesErr != nil || c.rulesNil {
+		return nil, c.rulesErr
+	}
+	if c.rules != nil {
+		return c.rules, nil
+	}
 	return &rpc.RulesResult{Enabled: true, Status: "ok"}, nil
 }
 

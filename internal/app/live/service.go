@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -93,6 +92,13 @@ const (
 	nudgesPollEvery                  = time.Minute
 )
 
+var (
+	errCanaryResultUnavailable = errors.New("canary result unavailable")
+	errRegimeResultUnavailable = errors.New("regime result unavailable")
+	errRulesResultUnavailable  = errors.New("rules result unavailable")
+	errBriefResultUnavailable  = errors.New("brief result unavailable")
+)
+
 type Event struct {
 	Type string `json:"type"`
 	Data any    `json:"data"`
@@ -121,7 +127,24 @@ func New(client daemonclient.Client, pollEvery, canaryEvery time.Duration) *Serv
 		subs:        map[chan Event]struct{}{},
 		snapshot: Snapshot{Sources: map[string]SourceMeta{
 			"nudges": {State: SourceStateNotObserved, Reason: SourceReasonNotObserved},
+			"canary": {State: SourceStateNotObserved, Reason: SourceReasonNotObserved},
+			"regime": {State: SourceStateNotObserved, Reason: SourceReasonNotObserved},
+			"rules":  {State: SourceStateNotObserved, Reason: SourceReasonNotObserved},
+			"brief":  {State: SourceStateNotObserved, Reason: SourceReasonNotObserved},
 		}},
+	}
+}
+
+func sourceCurrent(now time.Time) SourceMeta {
+	return SourceMeta{UpdatedAt: now, LastSuccessAt: now, State: SourceStateCurrent}
+}
+
+func sourceUnavailable(prior SourceMeta, now time.Time) SourceMeta {
+	return SourceMeta{
+		UpdatedAt:     now,
+		LastSuccessAt: prior.LastSuccessAt,
+		State:         SourceStateUnavailable,
+		Reason:        SourceReasonTransportUnavailable,
 	}
 }
 
@@ -350,21 +373,13 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 	}
 	if pollNudges {
 		if nudges, err := s.client.NudgesSnapshot(ctx); err != nil {
-			prior := snap.Sources["nudges"]
-			snap.Sources["nudges"] = SourceMeta{
-				UpdatedAt: now, LastSuccessAt: prior.LastSuccessAt,
-				State: SourceStateUnavailable, Reason: SourceReasonTransportUnavailable,
-			}
+			snap.Sources["nudges"] = sourceUnavailable(snap.Sources["nudges"], now)
 		} else if nudges == nil {
-			prior := snap.Sources["nudges"]
-			snap.Sources["nudges"] = SourceMeta{
-				UpdatedAt: now, LastSuccessAt: prior.LastSuccessAt,
-				State: SourceStateUnavailable, Reason: SourceReasonTransportUnavailable,
-			}
+			snap.Sources["nudges"] = sourceUnavailable(snap.Sources["nudges"], now)
 		} else {
 			nudges.SourceHealth = rpc.NormalizeNudgeSourceHealth(nudges.SourceHealth, len(nudges.Candidates))
 			snap.Nudges = nudges
-			snap.Sources["nudges"] = SourceMeta{UpdatedAt: now, LastSuccessAt: now, State: SourceStateCurrent}
+			snap.Sources["nudges"] = sourceCurrent(now)
 			if s.changed("nudges", nudges) {
 				events = append(events, Event{Type: "nudges", Data: nudges})
 			}
@@ -377,23 +392,32 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		s.mu.Unlock()
 	}
 	if pollCanary {
-		if canary, regime, err := s.client.CanaryWithRegime(ctx); err != nil {
-			errors = append(errors, sourceErr("canary", err, now))
-			snap.Sources["canary"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
-			if strings.HasPrefix(err.Error(), "regime:") {
-				errors = append(errors, sourceErr("regime", err, now))
-				snap.Sources["regime"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
-			}
-		} else {
-			if regime != nil {
-				snap.Regime = regime
-				snap.Sources["regime"] = SourceMeta{UpdatedAt: now}
-				if s.changed("regime", regime) {
-					events = append(events, Event{Type: "regime", Data: regime})
+		canary, regime, err := s.client.CanaryWithRegime(ctx)
+		if err != nil || canary == nil || regime == nil {
+			snap.Sources["canary"] = sourceUnavailable(snap.Sources["canary"], now)
+			snap.Sources["regime"] = sourceUnavailable(snap.Sources["regime"], now)
+			switch {
+			case err != nil:
+				errors = append(errors, sourceErr("canary", err, now))
+				if strings.HasPrefix(err.Error(), "regime:") {
+					errors = append(errors, sourceErr("regime", err, now))
+				}
+			default:
+				if canary == nil {
+					errors = append(errors, sourceErr("canary", errCanaryResultUnavailable, now))
+				}
+				if regime == nil {
+					errors = append(errors, sourceErr("regime", errRegimeResultUnavailable, now))
 				}
 			}
+		} else {
+			snap.Regime = regime
+			snap.Sources["regime"] = sourceCurrent(now)
+			if s.changed("regime", regime) {
+				events = append(events, Event{Type: "regime", Data: regime})
+			}
 			snap.Canary = canary
-			snap.Sources["canary"] = SourceMeta{UpdatedAt: now}
+			snap.Sources["canary"] = sourceCurrent(now)
 			if s.changed("canary", canary) {
 				events = append(events, Event{Type: "canary", Data: canary})
 				if s.OnCanary != nil {
@@ -405,10 +429,13 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		// same daily-discipline freshness needs, no extra poll knob.
 		if rules, err := s.client.Rules(ctx); err != nil {
 			errors = append(errors, sourceErr("rules", err, now))
-			snap.Sources["rules"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+			snap.Sources["rules"] = sourceUnavailable(snap.Sources["rules"], now)
+		} else if rules == nil {
+			errors = append(errors, sourceErr("rules", errRulesResultUnavailable, now))
+			snap.Sources["rules"] = sourceUnavailable(snap.Sources["rules"], now)
 		} else {
 			snap.Rules = rules
-			snap.Sources["rules"] = SourceMeta{UpdatedAt: now}
+			snap.Sources["rules"] = sourceCurrent(now)
 			if s.changed("rules", rules) {
 				events = append(events, Event{Type: "rules", Data: rules})
 			}
@@ -425,10 +452,13 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 		// shares this one-minute cadence instead of the five-second app poll.
 		if brief, err := s.client.Brief(ctx); err != nil {
 			errors = append(errors, sourceErr("brief", err, now))
-			snap.Sources["brief"] = SourceMeta{Error: err.Error(), UpdatedAt: now}
+			snap.Sources["brief"] = sourceUnavailable(snap.Sources["brief"], now)
+		} else if brief == nil {
+			errors = append(errors, sourceErr("brief", errBriefResultUnavailable, now))
+			snap.Sources["brief"] = sourceUnavailable(snap.Sources["brief"], now)
 		} else {
 			snap.Brief = brief
-			snap.Sources["brief"] = SourceMeta{UpdatedAt: now}
+			snap.Sources["brief"] = sourceCurrent(now)
 			if s.changed("brief", brief) {
 				events = append(events, Event{Type: "brief", Data: brief})
 			}
@@ -468,15 +498,13 @@ func (s *Service) PollNudgesOnce(ctx context.Context) Snapshot {
 	s.mu.Unlock()
 	var events []Event
 	if nudges, err := s.client.NudgesSnapshot(ctx); err != nil {
-		prior := snap.Sources["nudges"]
-		snap.Sources["nudges"] = SourceMeta{UpdatedAt: now, LastSuccessAt: prior.LastSuccessAt, State: SourceStateUnavailable, Reason: SourceReasonTransportUnavailable}
+		snap.Sources["nudges"] = sourceUnavailable(snap.Sources["nudges"], now)
 	} else if nudges == nil {
-		prior := snap.Sources["nudges"]
-		snap.Sources["nudges"] = SourceMeta{UpdatedAt: now, LastSuccessAt: prior.LastSuccessAt, State: SourceStateUnavailable, Reason: SourceReasonTransportUnavailable}
+		snap.Sources["nudges"] = sourceUnavailable(snap.Sources["nudges"], now)
 	} else {
 		nudges.SourceHealth = rpc.NormalizeNudgeSourceHealth(nudges.SourceHealth, len(nudges.Candidates))
 		snap.Nudges = nudges
-		snap.Sources["nudges"] = SourceMeta{UpdatedAt: now, LastSuccessAt: now, State: SourceStateCurrent}
+		snap.Sources["nudges"] = sourceCurrent(now)
 		if s.changed("nudges", nudges) {
 			events = append(events, Event{Type: "nudges", Data: nudges})
 		}
@@ -961,10 +989,19 @@ func (s *Service) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := cloneSnapshot(s.snapshot)
-	if source, ok := out.Sources["nudges"]; ok && source.State == SourceStateCurrent && !source.LastSuccessAt.IsZero() && s.now().UTC().Sub(source.LastSuccessAt) > nudgesPollEvery {
+	now := s.now().UTC()
+	ageSource := func(name string, maxAge time.Duration) {
+		source, ok := out.Sources[name]
+		if !ok || source.State != SourceStateCurrent || source.LastSuccessAt.IsZero() || now.Sub(source.LastSuccessAt) <= maxAge {
+			return
+		}
 		source.State = SourceStateStale
 		source.Reason = SourceReasonPollStale
-		out.Sources["nudges"] = source
+		out.Sources[name] = source
+	}
+	ageSource("nudges", nudgesPollEvery)
+	for _, name := range []string{"canary", "regime", "rules", "brief"} {
+		ageSource(name, s.canaryEvery)
 	}
 	return out
 }
@@ -1029,8 +1066,12 @@ func (s *Service) changed(key string, value any) bool {
 	return true
 }
 
-func sourceErr(source string, err error, at time.Time) SourceError {
-	return SourceError{Source: source, Message: fmt.Sprint(err), At: at}
+func sourceErr(source string, _ error, at time.Time) SourceError {
+	// Errors originate at broker, transport, and daemon boundaries and are
+	// therefore untrusted browser input. Preserve the source and observation
+	// time for operator diagnostics, but expose only a stable allowlisted
+	// message on the app snapshot. Raw causes belong in local logs.
+	return SourceError{Source: source, Message: "Source temporarily unavailable.", At: at}
 }
 
 func cloneSnapshot(in Snapshot) Snapshot {

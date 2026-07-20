@@ -346,6 +346,8 @@ function renderAlerts() {
   const visibleHistory = historyItems.filter((item) => !firstSeen.ids.has(item.id));
   const previousItems = previousContextAlertItems();
   const hasCanary = Boolean(state.snapshot?.canary?.as_of);
+  const canaryCoverage = canaryCoverageState();
+  const canClaimClear = hasCanary && canaryCoverage === "current";
   // History conditions still current (e.g. a protective-stop mismatch) count as
   // attention when no live preview already covers the same condition. One title
   // is one condition regardless of how many records it produced, and before the
@@ -366,14 +368,18 @@ function renderAlerts() {
   const acts = conditions.filter((item) => alertTone(item) === "risk").length;
   const dataIssues = conditions.filter(isDataQualityItem).length;
   const watches = conditions.filter((item) => alertTone(item) === "warn").length - dataIssues;
+  const coverageLabel = canaryCoverage === "stale" ? "Coverage stale"
+    : canaryCoverage === "unavailable" ? "Coverage unavailable" : "";
 
   const count = $("alertCount");
   count.textContent = acts > 0 || watches > 0 || dataIssues > 0
-    ? [acts > 0 ? `${acts} act` : "", watches > 0 ? `${watches} watch` : "", dataIssues > 0 ? `${dataIssues} data` : ""].filter(Boolean).join(" · ")
-    : hasCanary ? "All clear" : "--";
-  count.classList.toggle("is-zero", acts === 0 && watches === 0 && dataIssues === 0);
+    ? [acts > 0 ? `${acts} act` : "", watches > 0 ? `${watches} watch` : "", dataIssues > 0 ? `${dataIssues} data` : "", coverageLabel].filter(Boolean).join(" · ")
+    : canClaimClear ? "All clear"
+      : canaryCoverage === "stale" ? "Coverage stale"
+        : canaryCoverage === "unavailable" ? "Coverage unavailable" : "--";
+  count.classList.toggle("is-zero", canClaimClear && acts === 0 && watches === 0 && dataIssues === 0);
   count.classList.toggle("has-risk", acts > 0);
-  count.classList.toggle("has-warn", acts === 0 && (watches > 0 || dataIssues > 0));
+  count.classList.toggle("has-warn", acts === 0 && (watches > 0 || dataIssues > 0 || canaryCoverage === "stale" || canaryCoverage === "unavailable"));
 
   renderAlertsStatusLine(firstSeen.at);
   // The section number counts decisions (act + watch); data caveats render in
@@ -386,10 +392,15 @@ function renderAlerts() {
   const decisionRows = listed.filter((item) => !isDataQualityItem(item))
     .sort((a, b) => (toneRank[alertTone(a)] ?? 2) - (toneRank[alertTone(b)] ?? 2));
   const dataRows = listed.filter(isDataQualityItem);
+  const coverageNotice = canaryCoverage === "unavailable" ? "No current Canary evaluation — required source coverage is unavailable. Retained rows below are last-successful context."
+    : canaryCoverage === "stale" ? "No current Canary evaluation — the last successful coverage is stale. Retained rows below are context, not a current verdict."
+      : "";
   renderAttentionList(decisionRows, dataRows,
-    !hasCanary ? "Waiting for the first canary snapshot."
+    canaryCoverage === "unavailable" ? "No current Canary evaluation — required source coverage is unavailable."
+      : canaryCoverage === "stale" ? "No current Canary evaluation — the last successful coverage is stale."
+        : !hasCanary ? "Waiting for the first canary snapshot."
       : suppressed && conditions.length > 0 ? "Watch and data rows are hidden until the signal changes."
-        : "Nothing needs your attention right now.");
+        : "Nothing needs your attention right now.", coverageNotice);
   renderPassedChecks(suppressed ? [] : passedItems);
 
   const historyCount = visibleHistory.length + previousItems.length;
@@ -413,7 +424,21 @@ function renderAlerts() {
   renderDeliveryBanner();
 }
 
-function renderAttentionList(decisionRows, dataRows, emptyText) {
+// A retained Canary snapshot is useful context after a poll failure, but it is
+// not evidence that the current evaluation completed. Typed source state is
+// required for every all-clear claim; version skew fails closed.
+function canaryCoverageState() {
+  const hasCanary = Boolean(state.snapshot?.canary?.as_of);
+  const sourceState = String(state.snapshot?.sources?.canary?.state || "");
+  if (!sourceState) return hasCanary ? "unavailable" : "not_observed";
+  if (sourceState === "current") return hasCanary ? "current" : "unavailable";
+  if (sourceState === "stale") return hasCanary ? "stale" : "unavailable";
+  if (sourceState === "unavailable") return "unavailable";
+  if (sourceState === "not_observed") return hasCanary ? "unavailable" : "not_observed";
+  return "unavailable";
+}
+
+function renderAttentionList(decisionRows, dataRows, emptyText, coverageNotice = "") {
   const list = $("currentSignalList");
   const children = decisionRows.map(alertRowElement);
   if (dataRows.length > 0) {
@@ -429,16 +454,20 @@ function renderAttentionList(decisionRows, dataRows, emptyText) {
     list.replaceChildren(empty);
     return;
   }
+  if (coverageNotice) {
+    const notice = document.createElement("div");
+    notice.className = "alert-section__subhead alert-section__subhead--coverage";
+    notice.textContent = coverageNotice;
+    children.unshift(notice);
+  }
   list.replaceChildren(...children);
 }
 
-// The calendar's not-open umbrella covers phases with different price
-// stories: pre-open on a trading date shows live indicative pre-market prints
-// anchored to the last close, after-close shows that session's closing
-// prints, and weekend/holiday closures show older last-session prints.
-// Classify with the same open/close bounds the header ticker uses so this
-// page never calls live pre-market prints "last-session". An absent calendar
-// or no-coverage state is "unknown": claim nothing about the session.
+// The calendar classifies only the market phase. It is not quote provenance:
+// pre-open data may be live, delayed, frozen, stale, or absent independently
+// of the calendar. Classify the phase here, but leave price-quality claims to
+// a future typed episode/quote contract. An absent calendar or no-coverage
+// state is "unknown": claim nothing about the session.
 function marketSessionPhase() {
   const session = state.snapshot?.market_calendar?.session;
   if (!session || session.state === "unknown") return "unknown";
@@ -462,7 +491,7 @@ function marketSessionPhase() {
 function renderDeliveryBanner() {
   const banner = $("alertsDeliveryBanner");
   const health = state.governance?.delivery_health || {};
-  const failing = ["degraded", "unavailable"].includes(health.state);
+  const failing = ["degraded", "unavailable", "overflow"].includes(health.state);
   const phase = marketSessionPhase();
   const attentive = phase === "open" || phase === "pre-open" || phase === "unknown";
   if (!failing || !attentive) {
@@ -474,8 +503,10 @@ function renderDeliveryBanner() {
     : phase === "open" ? " while the market is open"
       : "";
   banner.textContent = health.state === "degraded"
-    ? `Alerts may not be reaching your phone — push delivery is degraded${when}. Rely on this page until delivery recovers.`
-    : `Alerts are not reaching your phone — push delivery is down${when}. Rely on this page and check notification settings.`;
+    ? `Governance notifications may not be reaching your phone — delivery is degraded${when}. This status does not cover Canary delivery; rely on this page until delivery recovers.`
+    : health.state === "overflow"
+      ? `Governance notification evidence is full${when}. New delivery cannot be trusted; this status does not cover Canary delivery. Rely on this page.`
+      : `Governance notifications are not reaching your phone${when}. This status does not cover Canary delivery; rely on this page and check notification settings.`;
   banner.hidden = false;
 }
 
@@ -500,23 +531,22 @@ function renderAlertsStatusLine(firstSeenAt) {
   status.classList.toggle("alerts-status--warn", tone === "warn");
 }
 
-// The stamp tells the price story for the session phase: a closed market must
-// not launder frozen prints as fresh, and pre-market must not call live
-// indicative prints "last-session" — pre-open, prints are live and only the
-// daily-change anchors come from the last close. An unknown phase claims
-// nothing about the session.
+// This stamp reports evaluation time and market phase only. Calendar state
+// cannot establish whether quotes are live, delayed, frozen, stale, or absent;
+// the Alerts surface must stay neutral until typed quote provenance is part of
+// the episode contract. An unknown phase claims nothing about the session.
 function sessionPriceStamp(asOf) {
   switch (marketSessionPhase()) {
     case "pre-open":
-      return `Snapshot ${asOf} · pre-market — live indicative prints; daily changes anchor to the last close.`;
+      return `Snapshot ${asOf} · pre-market evaluation — quote provenance is not available on this alert summary.`;
     case "after-close":
-      return `Snapshot ${asOf} · after close — prices are last-session prints.`;
+      return `Snapshot ${asOf} · after-close evaluation — quote provenance is not available on this alert summary.`;
     case "weekend":
-      return `Snapshot ${asOf} · weekend — prices are last-session prints.`;
+      return `Snapshot ${asOf} · weekend evaluation — quote provenance is not available on this alert summary.`;
     case "holiday":
-      return `Snapshot ${asOf} · market holiday — prices are last-session prints.`;
+      return `Snapshot ${asOf} · market-holiday evaluation — quote provenance is not available on this alert summary.`;
     case "closed":
-      return `Snapshot ${asOf} · market closed — prices are last-session prints.`;
+      return `Snapshot ${asOf} · closed-market evaluation — quote provenance is not available on this alert summary.`;
     default:
       return `Data as of ${asOf}.`;
   }
@@ -1139,8 +1169,14 @@ function alertRowElement(alert) {
 
 function alertSourceLabel(alert) {
   // Preview alerts already sit under the "Needs attention" header; a per-row
-  // chip would restate it.
-  if (alert.preview) return "";
+  // chip would restate it while current. Retained last-good rows must disclose
+  // their source posture locally so they cannot look like a fresh evaluation.
+  if (alert.preview) {
+    const coverage = canaryCoverageState();
+    if (coverage === "stale") return "retained · coverage stale";
+    if (coverage === "unavailable") return "retained · current evaluation unavailable";
+    return "";
+  }
   if (alertIsStale(alert)) return staleAlertReason(alert);
   return alert.created_at ? `recorded ${alertDayTime(alert.created_at)}` : "recorded";
 }
@@ -1152,11 +1188,16 @@ function renderSelectedAlert() {
   if (!alert) return;
   $("selectedAlertTitle").textContent = alert.title || "Canary alert";
   const stale = alertIsStale(alert);
+  const coverage = alert.preview ? canaryCoverageState() : "current";
+  const retained = !stale && alert.preview && (coverage === "stale" || coverage === "unavailable");
   $("selectedAlertBody").textContent = stale
     ? `From ${staleAlertReason(alert).startsWith("different") ? "a" : "an"} ${staleAlertReason(alert)} — no longer applies. ${alert.body || ""}`.trim()
+    : retained
+      ? `${coverage === "stale" ? "Retained from the last successful Canary evaluation; current coverage is stale." : "Retained from the last successful Canary evaluation; the current evaluation is unavailable."} ${alert.body || ""}`.trim()
     : alert.body || "Open detail for the current canary context.";
   $("selectedAlertTime").textContent = stale
     ? "no longer applies to the current context"
+    : retained ? "last successful Canary snapshot · not a current verdict"
     : alert.preview ? "current canary snapshot"
     : alert.created_at ? `recorded ${alertDayTime(alert.created_at)}` : "recorded --";
 }
@@ -1393,4 +1434,4 @@ function canUseWebPush() {
   return hasNotifications() && "PushManager" in globalThis && !!navigator.serviceWorker;
 }
 
-export { acknowledgeAttention, acknowledgeAttentionNow, alertIsStale, alertRowElement, alertSourceLabel, alertTone, allAlertItems, applyAttention, applyGovernanceCutoverOverlay, applyGovernanceCutoverReceipt, attentionViewReady, canUseWebPush, canaryHasPortfolioAlert, canaryPreviewRows, clearAlerts, currentAlertPreviewItems, currentCanaryFingerprint, currentCanaryHasPortfolioAlert, currentHistoryAlertItems, dismissCurrentSignals, enablePush, fetchAttentionHistories, firstSeenForCurrentSignal, governanceAttemptRows, governanceOccurrenceLifecycle, handleAttentionContextChange, hasNotifications, liveAlertPreviewsSuppressed, notificationStateLabel, previousContextAlertItems, refreshAlerts, refreshAttention, refreshGovernance, refreshPushState, renderAlertList, renderAlertMode, renderAlerts, renderAttention, renderDeliveryBanner, renderGovernance, renderSelectedAlert, scheduleGovernanceRefresh, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility, staleAlertReason, unreadRefsAppear, validateAlertSettings, validateAttention, validateGovernanceResponse, warningMessages };
+export { acknowledgeAttention, acknowledgeAttentionNow, alertIsStale, alertRowElement, alertSourceLabel, alertTone, allAlertItems, applyAttention, applyGovernanceCutoverOverlay, applyGovernanceCutoverReceipt, attentionViewReady, canUseWebPush, canaryCoverageState, canaryHasPortfolioAlert, canaryPreviewRows, clearAlerts, currentAlertPreviewItems, currentCanaryFingerprint, currentCanaryHasPortfolioAlert, currentHistoryAlertItems, dismissCurrentSignals, enablePush, fetchAttentionHistories, firstSeenForCurrentSignal, governanceAttemptRows, governanceOccurrenceLifecycle, handleAttentionContextChange, hasNotifications, liveAlertPreviewsSuppressed, notificationStateLabel, previousContextAlertItems, refreshAlerts, refreshAttention, refreshGovernance, refreshPushState, renderAlertList, renderAlertMode, renderAlerts, renderAttention, renderDeliveryBanner, renderGovernance, renderSelectedAlert, scheduleGovernanceRefresh, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility, staleAlertReason, unreadRefsAppear, validateAlertSettings, validateAttention, validateGovernanceResponse, warningMessages };

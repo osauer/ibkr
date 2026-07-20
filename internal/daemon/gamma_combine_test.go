@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -342,27 +344,78 @@ func TestCombineGammaResultsProfileGridMismatch(t *testing.T) {
 	}
 }
 
-// TestCombineGammaResultsKeepsWarningsPerIndex proves per-index warning
-// codes stay on the SPY/SPX children instead of being promoted to a
-// combined SPY+SPX scope that would lose the affected index.
-func TestCombineGammaResultsKeepsWarningsPerIndex(t *testing.T) {
-	spy := &rpc.GammaZeroComputed{
-		Warnings: []string{"all_iv_derived", "no_crossing_in_window"},
-	}
-	spx := &rpc.GammaZeroComputed{
-		Warnings: []string{"throttled", "no_crossing_in_window"}, // last entry dupes SPY
-	}
-	combined := combineGammaResults(spy, spx)
+// TestCombineGammaResultsUnionsScopedWarnings proves the combined wire
+// envelope carries the warning union without collapsing the affected index.
+// The code-only daemon surface dedupes by code; structured wire details dedupe
+// by (scope, code), so the same condition on both books remains explicit.
+func TestCombineGammaResultsUnionsScopedWarnings(t *testing.T) {
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	spy := rankableGammaFixture(rpc.GammaZeroScopeSPY, now.Add(-5*time.Minute))
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now.Add(-5*time.Minute))
+	spy.Warnings = []string{"oi_missing", "strike_budget_capped", "oi_missing"}
+	spx.Warnings = []string{"strike_budget_capped", "oi_missing", "strike_budget_capped"}
+
+	combined := hydrateGammaComputed(combineGammaResults(spy, spx))
 	if combined == nil {
 		t.Fatal("combined is nil")
 	}
-	if len(combined.Warnings) != 0 {
-		t.Fatalf("combined top-level warnings should stay empty, got %v", combined.Warnings)
+	if got, want := combined.Warnings, []string{"oi_missing", "strike_budget_capped"}; !equalStringSlices(got, want) {
+		t.Fatalf("combined warning codes = %v, want %v", got, want)
 	}
-	if len(combined.PerIndex["SPY"].Warnings) != 2 || len(combined.PerIndex["SPX"].Warnings) != 2 {
+	if len(combined.PerIndex["SPY"].WarningDetails) != 2 || len(combined.PerIndex["SPX"].WarningDetails) != 2 {
 		t.Fatalf("per-index warnings were not preserved: spy=%v spx=%v",
-			combined.PerIndex["SPY"].Warnings, combined.PerIndex["SPX"].Warnings)
+			combined.PerIndex["SPY"].WarningDetails, combined.PerIndex["SPX"].WarningDetails)
 	}
+
+	wantDetails := map[string]bool{
+		"SPY/oi_missing":           false,
+		"SPY/strike_budget_capped": false,
+		"SPX/oi_missing":           false,
+		"SPX/strike_budget_capped": false,
+	}
+	for _, d := range combined.WarningDetails {
+		key := d.Scope + "/" + d.Code
+		seen, ok := wantDetails[key]
+		if !ok {
+			t.Fatalf("unexpected combined warning detail %+v", d)
+		}
+		if seen {
+			t.Fatalf("duplicate combined warning detail for %s: %+v", key, combined.WarningDetails)
+		}
+		wantDetails[key] = true
+	}
+	if len(combined.WarningDetails) != len(wantDetails) {
+		t.Fatalf("combined warning details = %+v, want one detail per scoped code", combined.WarningDetails)
+	}
+	for key, seen := range wantDetails {
+		if !seen {
+			t.Errorf("combined warning details missing %s: %+v", key, combined.WarningDetails)
+		}
+	}
+
+	// Hydration happens on cache loads as well as fresh computes. Repeating it
+	// must not duplicate the projected warning details.
+	hydrateGammaComputed(combined)
+	if len(combined.WarningDetails) != len(wantDetails) {
+		t.Fatalf("repeated hydration duplicated warning details: %+v", combined.WarningDetails)
+	}
+
+	annotateGammaQuality(combined, now)
+	if got := combined.Quality.Rankability; got != rpc.GammaRankabilityRankable {
+		t.Fatalf("combined rankability = %q, want rankable SPX-canonical result after warning projection: %+v", got, combined.Quality)
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestGammaOneSidedFallbackUsableForCombinedRejectsBlockedQuality(t *testing.T) {
@@ -392,6 +445,60 @@ func TestSummarizeGammaPhaseFailureLowUsableLegCount(t *testing.T) {
 	err := errors.New("zero-gamma: low usable leg count: 1 priced legs/1 OI-weighted GEX legs; need at least 100/25")
 	if got := summarizeGammaPhaseFailure(err); got != "low_coverage" {
 		t.Fatalf("summarizeGammaPhaseFailure = %q, want low_coverage", got)
+	}
+}
+
+func TestGammaFailureAndUnionNeverExposeUntrustedText(t *testing.T) {
+	const secret = "private://broker-token-sentinel"
+	if got := summarizeGammaPhaseFailure(errors.New(secret)); got != "unavailable" {
+		t.Fatalf("unknown failure summary = %q, want stable unavailable", got)
+	}
+
+	now := time.Date(2026, 6, 8, 15, 0, 0, 0, time.UTC)
+	spy := rankableGammaFixture(rpc.GammaZeroScopeSPY, now)
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now)
+	spy.Warnings = []string{"oi_missing", secret}
+	spy.WarningDetails = []rpc.GammaWarningDetail{{
+		Code: secret, Scope: secret, Severity: secret, Message: secret, Impact: secret, Action: secret,
+	}}
+	combined := hydrateGammaComputed(combineGammaResults(spy, spx))
+	if combined == nil {
+		t.Fatal("combined is nil")
+	}
+	if got, want := combined.Warnings, []string{"oi_missing", "unclassified_data_warning"}; !equalStringSlices(got, want) {
+		t.Fatalf("combined warnings = %v, want %v", got, want)
+	}
+	for _, detail := range combined.WarningDetails {
+		if strings.Contains(detail.Code+detail.Message+detail.Impact+detail.Action, secret) {
+			t.Fatalf("untrusted warning leaked through structured detail: %+v", detail)
+		}
+	}
+	raw, err := json.Marshal(combined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Fatalf("untrusted warning leaked anywhere in recursive wire JSON: %s", raw)
+	}
+}
+
+func TestCanonicalGammaWarningUnionKeepsPreviousSuccessFallbackTyped(t *testing.T) {
+	got := canonicalGammaWarningUnion([]string{"spx_cache_fallback:previous_success"})
+	want := []string{"spx_cache_fallback:previous_success"}
+	if !equalStringSlices(got, want) {
+		t.Fatalf("canonical warnings = %v, want %v", got, want)
+	}
+
+	now := time.Date(2026, 6, 8, 15, 0, 0, 0, time.UTC)
+	spx := rankableGammaFixture(rpc.GammaZeroScopeSPX, now)
+	spx.Warnings = got
+	hydrateGammaComputed(spx)
+	if !equalStringSlices(spx.Warnings, want) {
+		t.Fatalf("hydrated warnings = %v, want %v", spx.Warnings, want)
+	}
+	annotateGammaQuality(spx, now)
+	if spx.Quality == nil || spx.Quality.Rankability != rpc.GammaRankabilityRankable {
+		t.Fatalf("fresh previous-success fallback lost rankability: %+v", spx.Quality)
 	}
 }
 

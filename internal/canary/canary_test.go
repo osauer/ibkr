@@ -618,7 +618,8 @@ func TestComputeCanaryHeldLiquidityDegradedIsDataQualityOnly(t *testing.T) {
 				}},
 			},
 		},
-		Regime: healthyCanaryRegime(),
+		Regime:       healthyCanaryRegime(),
+		MarketEvents: healthyCanaryMarketEvents(canaryTestNow, "XYZ"),
 	})
 	if res.Direction != "" || res.Action != canaryActionStandDown {
 		t.Fatalf("decision = %s/%s, want stand_down for held-liquidity-only evidence", res.Direction, res.Action)
@@ -1550,6 +1551,213 @@ func TestComputeCanaryRegimeSourceHealthKeepsStaleAndDegradedNotes(t *testing.T)
 	}
 }
 
+func TestComputeCanaryCriticalMarketEventHealthBlocksCleanInput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		source string
+		status string
+	}{
+		{name: "halt_and_luld_degraded", source: "trading_halts", status: rpc.SourceStatusDegraded},
+		{name: "halt_and_luld_unknown", source: "trading_halts", status: rpc.SourceStatusUnknown},
+		{name: "reg_sho_stale", source: "reg_sho_threshold", status: rpc.SourceStatusStale},
+		{name: "reg_sho_partial", source: "reg_sho_threshold", status: rpc.SourceStatusPartial},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			positions := rpc.PositionsResult{
+				AsOf: canaryTestNow,
+				Stocks: []rpc.PositionView{{
+					Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: 100,
+				}},
+			}
+			events := healthyCanaryMarketEvents(canaryTestNow, "XYZ")
+			for i := range events.SourceHealth {
+				if events.SourceHealth[i].Source == test.source {
+					events.SourceHealth[i].Status = test.status
+				}
+			}
+
+			res := ComputeCanary(CanaryInput{
+				Account:      baseCanaryAccount(),
+				Positions:    positions,
+				Regime:       healthyCanaryRegime(),
+				MarketEvents: events,
+				Now:          canaryTestNow,
+			})
+
+			if res.InputHealth != canaryInputDegraded || res.Action != canaryActionConfirmInputs {
+				t.Fatalf("decision = input %q action %q, want degraded/confirm_inputs", res.InputHealth, res.Action)
+			}
+			health := findSourceHealth(res.SourceHealth, "market_events")
+			if health == nil || health.Status != test.status {
+				t.Fatalf("market-events health = %+v, want status %q", health, test.status)
+			}
+			warning := "market-event source " + test.source + ": " + test.status
+			if !strings.Contains(strings.Join(res.Warnings, "\n"), warning) {
+				t.Fatalf("warnings = %+v, want %q", res.Warnings, warning)
+			}
+			if strings.Contains(strings.Join(res.Warnings, "\n"), "borrow_") {
+				t.Fatalf("all-long book must not surface borrow health warnings: %+v", res.Warnings)
+			}
+		})
+	}
+}
+
+func TestComputeCanaryMarketEventHealthRequiresCurrentTimestamps(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name       string
+		mutate     func(*rpc.MarketEventsResult)
+		wantStatus string
+	}{
+		{
+			name: "aggregate_timestamp_missing",
+			mutate: func(events *rpc.MarketEventsResult) {
+				events.AsOf = time.Time{}
+			},
+			wantStatus: rpc.SourceStatusUnknown,
+		},
+		{
+			name: "aggregate_timestamp_stale",
+			mutate: func(events *rpc.MarketEventsResult) {
+				events.AsOf = canaryTestNow.Add(-11 * time.Minute)
+			},
+			wantStatus: rpc.SourceStatusStale,
+		},
+		{
+			name: "required_child_timestamp_missing",
+			mutate: func(events *rpc.MarketEventsResult) {
+				events.SourceHealth[0].AsOf = time.Time{}
+			},
+			wantStatus: rpc.SourceStatusUnknown,
+		},
+		{
+			name: "required_child_timestamp_stale",
+			mutate: func(events *rpc.MarketEventsResult) {
+				events.SourceHealth[0].AsOf = canaryTestNow.Add(-11 * time.Minute)
+			},
+			wantStatus: rpc.SourceStatusStale,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			events := healthyCanaryMarketEvents(canaryTestNow, "XYZ")
+			test.mutate(&events)
+			account := baseCanaryAccount()
+			account.AsOf = canaryTestNow
+			res := ComputeCanary(CanaryInput{
+				Account: account,
+				Positions: rpc.PositionsResult{
+					AsOf:   canaryTestNow,
+					Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: 100}},
+				},
+				Regime:       healthyCanaryRegime(),
+				MarketEvents: events,
+				Now:          canaryTestNow,
+			})
+			if res.InputHealth != canaryInputDegraded || res.Action != canaryActionConfirmInputs {
+				t.Fatalf("decision = input %q action %q, want degraded/confirm_inputs", res.InputHealth, res.Action)
+			}
+			health := findSourceHealth(res.SourceHealth, "market_events")
+			if health == nil || health.Status != test.wantStatus {
+				t.Fatalf("market-events health = %+v, want status %q", health, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestComputeCanaryRealAccountRequiresSnapshotTimestamp(t *testing.T) {
+	t.Parallel()
+	account := baseCanaryAccount()
+	account.AsOf = time.Time{}
+	res := ComputeCanary(CanaryInput{
+		Account:   account,
+		Positions: freshCanaryPositions(),
+		Regime:    healthyCanaryRegime(),
+		Now:       canaryTestNow,
+	})
+	if res.InputHealth != canaryInputDegraded || res.Action != canaryActionConfirmInputs {
+		t.Fatalf("decision = input %q action %q, want degraded/confirm_inputs", res.InputHealth, res.Action)
+	}
+	health := findSourceHealth(res.SourceHealth, "account")
+	if health == nil || health.Status == rpc.SourceStatusOK {
+		t.Fatalf("account health = %+v, want non-ok missing-timestamp state", health)
+	}
+}
+
+func TestComputeCanaryMissingCriticalMarketEventContextIsUnknown(t *testing.T) {
+	t.Parallel()
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{
+			AsOf:   canaryTestNow,
+			Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: 100}},
+		},
+		Regime: healthyCanaryRegime(),
+		Now:    canaryTestNow,
+	})
+	if res.InputHealth != canaryInputDegraded || res.Action != canaryActionConfirmInputs {
+		t.Fatalf("decision = input %q action %q, want degraded/confirm_inputs", res.InputHealth, res.Action)
+	}
+	health := findSourceHealth(res.SourceHealth, "market_events")
+	if health == nil || health.Status != rpc.SourceStatusUnknown {
+		t.Fatalf("market-events health = %+v, want unknown", health)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "\n"), "market-event source market_events: unknown") {
+		t.Fatalf("warnings = %+v, want explicit missing market-event context", res.Warnings)
+	}
+}
+
+func TestComputeCanaryBorrowHealthRequiresShortStockExposure(t *testing.T) {
+	t.Parallel()
+	events := healthyCanaryMarketEvents(canaryTestNow, "XYZ")
+	for i := range events.SourceHealth {
+		switch events.SourceHealth[i].Source {
+		case "borrow_inventory":
+			events.SourceHealth[i].Status = rpc.SourceStatusStale
+		case "borrow_fee":
+			events.SourceHealth[i].Status = rpc.SourceStatusUnknown
+		}
+	}
+	for _, test := range []struct {
+		name       string
+		quantity   float64
+		wantInput  string
+		wantStatus string
+		wantBorrow bool
+	}{
+		{name: "long_stock_ignores_borrow_health", quantity: 100, wantInput: canaryInputOK, wantStatus: rpc.SourceStatusOK},
+		{name: "short_stock_requires_borrow_health", quantity: -100, wantInput: canaryInputDegraded, wantStatus: rpc.SourceStatusUnknown, wantBorrow: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			res := ComputeCanary(CanaryInput{
+				Account: baseCanaryAccount(),
+				Positions: rpc.PositionsResult{
+					AsOf:   canaryTestNow,
+					Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: test.quantity}},
+				},
+				Regime:       healthyCanaryRegime(),
+				MarketEvents: events,
+				Now:          canaryTestNow,
+			})
+			if res.InputHealth != test.wantInput {
+				t.Fatalf("input_health = %q, want %q", res.InputHealth, test.wantInput)
+			}
+			health := findSourceHealth(res.SourceHealth, "market_events")
+			if health == nil || health.Status != test.wantStatus {
+				t.Fatalf("market-events health = %+v, want status %q", health, test.wantStatus)
+			}
+			hasBorrowWarning := strings.Contains(strings.Join(res.Warnings, "\n"), "borrow_")
+			if hasBorrowWarning != test.wantBorrow {
+				t.Fatalf("borrow warning present = %v, want %v; warnings: %+v", hasBorrowWarning, test.wantBorrow, res.Warnings)
+			}
+		})
+	}
+}
+
 func TestComputeCanarySeparatesPartialFromAmbiguousClusters(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
@@ -1668,6 +1876,21 @@ func freshCanaryPositions() rpc.PositionsResult {
 	return rpc.PositionsResult{AsOf: canaryTestNow}
 }
 
+func healthyCanaryMarketEvents(now time.Time, symbols ...string) rpc.MarketEventsResult {
+	return rpc.MarketEventsResult{
+		Kind:          rpc.MarketEventsKind,
+		SchemaVersion: rpc.MarketEventsSchemaVersion,
+		AsOf:          now,
+		Symbols:       slices.Clone(symbols),
+		SourceHealth: []rpc.SourceHealth{
+			{Source: "reg_sho_threshold", Status: rpc.SourceStatusOK, AsOf: now, Confidence: "high"},
+			{Source: "trading_halts", Status: rpc.SourceStatusOK, AsOf: now, Confidence: "high"},
+			{Source: "borrow_inventory", Status: rpc.SourceStatusOK, AsOf: now, Confidence: "medium"},
+			{Source: "borrow_fee", Status: rpc.SourceStatusOK, AsOf: now, Confidence: "medium"},
+		},
+	}
+}
+
 func healthyCanaryRegime() rpc.RegimeSnapshotResult {
 	return rpc.RegimeSnapshotResult{
 		Composite: rpc.RegimeComposite{ClusterGreenCount: 6, ClusterRankedCount: 6},
@@ -1768,6 +1991,15 @@ func findSignal(signals []risk.Signal, id risk.SignalID) (risk.Signal, bool) {
 
 func containsString(values []string, want string) bool {
 	return slices.Contains(values, want)
+}
+
+func findSourceHealth(items []rpc.SourceHealth, source string) *rpc.SourceHealth {
+	for i := range items {
+		if items[i].Source == source {
+			return &items[i]
+		}
+	}
+	return nil
 }
 
 func findCanaryIndicator(indicators []CanaryMarketIndicator, name string) (CanaryMarketIndicator, bool) {

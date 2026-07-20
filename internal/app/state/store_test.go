@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func attentionMatches(got, want Attention) bool {
@@ -1713,6 +1715,7 @@ func TestGovernanceEndpointReassignmentRetiresOldTargetBeforeMove(t *testing.T) 
 		t.Fatal(err)
 	}
 	sub.DeviceID = "new-device"
+	sub.ID = "sub-new"
 	sub.LastSeenAt = now.Add(time.Minute)
 	if err := store.AddPushSubscription(sub); err != nil {
 		t.Fatal(err)
@@ -1722,10 +1725,10 @@ func TestGovernanceEndpointReassignmentRetiresOldTargetBeforeMove(t *testing.T) 
 		t.Fatalf("old target remained binding: %+v", view)
 	}
 	active := store.ActivePushSubscriptionsForDevice("new-device")
-	if len(active) != 1 || active[0].ID != "sub" {
+	if len(active) != 1 || active[0].ID != "sub-new" {
 		t.Fatalf("subscription was not reassigned after retirement: %+v", active)
 	}
-	if _, send, err := store.ReserveGovernanceAttempt(occ.DisplayID, GovernanceTargetRef("new-device", "sub"), now.Add(time.Minute)); err != nil || !send {
+	if _, send, err := store.ReserveGovernanceAttempt(occ.DisplayID, GovernanceTargetRef("new-device", "sub-new"), now.Add(time.Minute)); err != nil || !send {
 		t.Fatalf("new target reserve send=%v err=%v", send, err)
 	}
 }
@@ -2011,6 +2014,245 @@ func TestAddPushSubscriptionRollsBackNewTargetOnPersistenceFailure(t *testing.T)
 				t.Fatalf("later governance save persisted failed target: got=%+v want=%+v", got, before)
 			}
 		})
+	}
+}
+
+func TestPushTargetRetirementIsAtomicAcrossEveryTopologyMutation(t *testing.T) {
+	mutations := []string{"remove subscription", "prune device", "revoke device", "transfer endpoint"}
+	for _, mutation := range mutations {
+		for _, stage := range []string{"write", "rename"} {
+			t.Run(mutation+"_"+stage, func(t *testing.T) {
+				store, err := Open(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				base := time.Date(2026, 7, 20, 18, 0, 0, 0, time.UTC)
+				oldDevice := DeviceGrant{ID: "old-device", CreatedAt: base.Add(-24 * time.Hour)}
+				if err := store.AddDevice(oldDevice); err != nil {
+					t.Fatal(err)
+				}
+				if mutation == "transfer endpoint" {
+					if err := store.AddDevice(DeviceGrant{ID: "new-device", CreatedAt: base}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				subscription := PushSubscription{ID: "subscription", DeviceID: oldDevice.ID, Endpoint: "https://push.example/atomic", P256DH: "key", Auth: "auth", CreatedAt: base}
+				if err := store.AddPushSubscription(subscription); err != nil {
+					t.Fatal(err)
+				}
+
+				store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+				candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", strings.ReplaceAll(mutation, " ", "-"), base)
+				candidate.DeliveryPreference = rpc.AlertDeliveryPage
+				if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
+					t.Fatal(err)
+				}
+				alertTarget := AlertDeliveryTargetRef(oldDevice.ID, subscription.ID)
+				alertReservation, send, err := store.BeginAlertDelivery(candidate.OccurrenceKey, alertTarget, base.Add(time.Second))
+				if err != nil || !send {
+					t.Fatalf("alert reservation send=%v err=%v", send, err)
+				}
+				governanceOccurrence, _, err := store.UpsertGovernanceOccurrence(GovernanceOccurrence{Fingerprint: "atomic-" + mutation, Kind: "policy_drift", OccurredAt: base}, base)
+				if err != nil {
+					t.Fatal(err)
+				}
+				governanceReservation, send, err := store.ReserveGovernanceAttempt(governanceOccurrence.DisplayID, GovernanceTargetRef(oldDevice.ID, subscription.ID), base)
+				if err != nil || !send {
+					t.Fatalf("governance reservation send=%v err=%v", send, err)
+				}
+				if _, err := store.CompleteGovernanceAttempt(governanceReservation.ID, GovernanceTransportNetworkRetry, false, base); err != nil {
+					t.Fatal(err)
+				}
+
+				mutate := func() error {
+					switch mutation {
+					case "remove subscription":
+						return store.RemovePushSubscriptionAt(subscription.ID, base.Add(2*time.Second))
+					case "prune device":
+						_, err := store.PruneDevices(base.Add(-time.Hour))
+						return err
+					case "revoke device":
+						revoked := oldDevice
+						revoked.RevokedAt = base.Add(2 * time.Second)
+						return store.AddDevice(revoked)
+					case "transfer endpoint":
+						transferred := subscription
+						transferred.ID = "transferred-subscription"
+						transferred.DeviceID = "new-device"
+						transferred.LastSeenAt = base.Add(2 * time.Second)
+						return store.AddPushSubscription(transferred)
+					default:
+						return errors.New("unknown test mutation")
+					}
+				}
+				store.saveHook = func(got string) error {
+					if got == stage {
+						return errors.New("injected atomic " + stage + " failure")
+					}
+					return nil
+				}
+				if err := mutate(); err == nil {
+					t.Fatal("injected topology save failure was ignored")
+				}
+				if len(store.ActivePushSubscriptionsForDevice(oldDevice.ID)) != 1 {
+					t.Fatalf("failed mutation changed active topology: %+v", store.PushSubscriptions())
+				}
+				if !store.data.AlertDelivery.RetiredTargets[alertTarget].IsZero() || store.data.AlertDelivery.Attempts[0].Class != AlertDeliveryAttemptReserved || !store.alertDeliveryInFlight[alertReservation.AttemptID] {
+					t.Fatalf("failed mutation partially retired alert target: %+v", store.data.AlertDelivery)
+				}
+				governanceAfterFailure := store.Governance(base)
+				if len(governanceAfterFailure.Attempts) != 1 || !governanceAfterFailure.Attempts[0].RetiredAt.IsZero() || governanceAfterFailure.AttemptTotals.RetryPending != 1 {
+					t.Fatalf("failed mutation partially retired governance target: %+v", governanceAfterFailure)
+				}
+
+				store.saveHook = nil
+				if err := mutate(); err != nil {
+					t.Fatal(err)
+				}
+				if store.data.AlertDelivery.RetiredTargets[alertTarget].IsZero() || store.data.AlertDelivery.Attempts[0].Class != AlertDeliveryAttemptRetired || store.alertDeliveryInFlight[alertReservation.AttemptID] {
+					t.Fatalf("successful mutation did not retire alert target: %+v", store.data.AlertDelivery)
+				}
+				governanceAfterSuccess := store.Governance(base)
+				if len(governanceAfterSuccess.Attempts) != 1 || governanceAfterSuccess.Attempts[0].RetiredAt.IsZero() || governanceAfterSuccess.AttemptTotals.RetryPending != 0 {
+					t.Fatalf("successful mutation did not retire governance target: %+v", governanceAfterSuccess)
+				}
+				switch mutation {
+				case "transfer endpoint":
+					if len(store.ActivePushSubscriptionsForDevice(oldDevice.ID)) != 0 || len(store.ActivePushSubscriptionsForDevice("new-device")) != 1 {
+						t.Fatalf("endpoint transfer topology=%+v", store.PushSubscriptions())
+					}
+				default:
+					if len(store.ActivePushSubscriptionsForDevice(oldDevice.ID)) != 0 {
+						t.Fatalf("retired topology remained active: %+v", store.PushSubscriptions())
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRevokedDeviceIdentityCannotBeReactivated(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 20, 18, 30, 0, 0, time.UTC)
+	revoked := DeviceGrant{ID: "revoked-device", CreatedAt: base, RevokedAt: base.Add(time.Minute)}
+	if err := store.AddDevice(revoked); err != nil {
+		t.Fatal(err)
+	}
+	activeReuse := revoked
+	activeReuse.RevokedAt = time.Time{}
+	if err := store.AddDevice(activeReuse); err == nil {
+		t.Fatal("revoked device identity was reactivated")
+	}
+	if _, ok := store.Device(revoked.ID); ok {
+		t.Fatal("failed reactivation changed persisted revocation")
+	}
+	if err := store.AddDevice(DeviceGrant{ID: "fresh-device", CreatedAt: base.Add(2 * time.Minute)}); err != nil {
+		t.Fatalf("fresh pairing identity was rejected: %v", err)
+	}
+}
+
+func TestCrossDeviceEndpointTransferRotatesIdentityAndRejectsTransferBackReplay(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 20, 18, 45, 0, 0, time.UTC)
+	for _, deviceID := range []string{"device-a", "device-b"} {
+		if err := store.AddDevice(DeviceGrant{ID: deviceID, CreatedAt: base}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	endpoint := "https://push.example/rotating"
+	if err := store.AddPushSubscription(PushSubscription{ID: "sub-a", DeviceID: "device-a", Endpoint: endpoint, P256DH: "key-a", Auth: "auth-a", CreatedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "transfer-back", base)
+	candidate.DeliveryPreference = rpc.AlertDeliveryPage
+	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddPushSubscription(PushSubscription{ID: "sub-b", DeviceID: "device-b", Endpoint: endpoint, P256DH: "key-b", Auth: "auth-b", CreatedAt: base.Add(time.Second), LastSeenAt: base.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	activeB := store.ActivePushSubscriptionsForDevice("device-b")
+	if len(activeB) != 1 || activeB[0].ID != "sub-b" {
+		t.Fatalf("cross-device transfer reused prior identity: %+v", activeB)
+	}
+	if store.data.AlertDelivery.RetiredTargets[AlertDeliveryTargetRef("device-a", "sub-a")].IsZero() {
+		t.Fatal("old target was not retired")
+	}
+	replay := PushSubscription{ID: "sub-a", DeviceID: "device-a", Endpoint: endpoint, P256DH: "key-a2", Auth: "auth-a2", CreatedAt: base.Add(2 * time.Second), LastSeenAt: base.Add(2 * time.Second)}
+	if err := store.AddPushSubscription(replay); err == nil {
+		t.Fatal("transfer-back reused a retired target identity")
+	}
+	if active := store.ActivePushSubscriptionsForDevice("device-b"); len(active) != 1 || active[0].ID != "sub-b" {
+		t.Fatalf("rejected transfer-back changed topology: %+v", store.PushSubscriptions())
+	}
+	fresh := replay
+	fresh.ID = "sub-a-fresh"
+	if err := store.AddPushSubscription(fresh); err != nil {
+		t.Fatal(err)
+	}
+	if _, send, err := store.BeginAlertDelivery(candidate.OccurrenceKey, AlertDeliveryTargetRef("device-a", fresh.ID), base.Add(3*time.Second)); err != nil || !send {
+		t.Fatalf("fresh transfer-back target send=%v err=%v", send, err)
+	}
+	refresh := fresh
+	refresh.ID = "ignored-refresh-id"
+	refresh.LastSeenAt = base.Add(4 * time.Second)
+	if err := store.AddPushSubscription(refresh); err != nil {
+		t.Fatal(err)
+	}
+	activeA := store.ActivePushSubscriptionsForDevice("device-a")
+	if len(activeA) != 1 || activeA[0].ID != fresh.ID {
+		t.Fatalf("same-device refresh rotated stable identity: %+v", activeA)
+	}
+}
+
+func TestPushSubscriptionRejectsDuplicateAndRetiredTargetIdentity(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 20, 18, 50, 0, 0, time.UTC)
+	if err := store.AddDevice(DeviceGrant{ID: "device", CreatedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "target-identity", base)
+	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
+		t.Fatal(err)
+	}
+	first := PushSubscription{ID: "subscription", DeviceID: "device", Endpoint: "https://push.example/first", P256DH: "key", Auth: "auth", CreatedAt: base}
+	if err := store.AddPushSubscription(first); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := first
+	duplicate.Endpoint = "https://push.example/duplicate"
+	if err := store.AddPushSubscription(duplicate); err == nil {
+		t.Fatal("second endpoint reused an active target identity")
+	}
+	if err := store.RemovePushSubscriptionAt(first.ID, base.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	reused := first
+	reused.Endpoint = "https://push.example/reused"
+	if err := store.AddPushSubscription(reused); err == nil {
+		t.Fatal("new endpoint reused a retired target identity")
+	}
+	if err := store.AddPushSubscription(PushSubscription{DeviceID: "device", Endpoint: "https://push.example/empty", P256DH: "key", Auth: "auth"}); err == nil {
+		t.Fatal("empty subscription identity was accepted")
+	}
+	fresh := reused
+	fresh.ID = "fresh-subscription"
+	if err := store.AddPushSubscription(fresh); err != nil {
+		t.Fatalf("fresh target identity rejected: %v", err)
+	}
+	if active := store.ActivePushSubscriptionsForDevice("device"); len(active) != 1 || active[0].ID != fresh.ID {
+		t.Fatalf("active subscriptions=%+v", active)
 	}
 }
 

@@ -81,12 +81,15 @@ func TestFetchCanarySnapshotPreservesCallOrderAndFallbacks(t *testing.T) {
 	}
 	foundFallback := false
 	for _, health := range result.SourceHealth {
-		if health.Source == "market_events" && health.Status == rpc.SourceStatusDegraded {
+		if health.Source == "market_events" && health.Status == rpc.SourceStatusUnknown {
 			foundFallback = true
 		}
 	}
 	if !foundFallback {
 		t.Fatalf("market-events fallback health missing: %+v", result.SourceHealth)
+	}
+	if result.InputHealth != InputDegraded || !strings.Contains(strings.Join(result.Warnings, "\n"), "market-event source market_events: unknown") {
+		t.Fatalf("fallback decision = input %q warnings %+v, want degraded with explicit unknown market-event source", result.InputHealth, result.Warnings)
 	}
 }
 

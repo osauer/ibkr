@@ -87,15 +87,23 @@ const (
 )
 
 type Store struct {
-	path                  string
-	mu                    sync.Mutex
-	data                  Data
-	governanceMaxItems    int
-	governanceMaxAttempts int
-	volatileHealth        *GovernanceDeliveryHealth
-	governanceInFlight    map[string]bool
-	saveHook              func(string) error
-	saveObserver          func()
+	path                            string
+	mu                              sync.Mutex
+	data                            Data
+	governanceMaxItems              int
+	governanceMaxAttempts           int
+	volatileHealth                  *GovernanceDeliveryHealth
+	governanceInFlight              map[string]bool
+	saveHook                        func(string) error
+	saveObserver                    func()
+	alertDeliveryMaxItems           int
+	alertDeliveryInFlight           map[string]bool
+	alertDeliveryEligible           alertDeliveryEligibilityFunc
+	alertDeliveryVolatile           *AlertDeliveryHealth
+	alertDeliveryVolatileGeneration uint64
+	alertDeliveryQuarantine         *alertDeliveryQuarantine
+	loadedAlertDeliveryRaw          json.RawMessage
+	loadedAlertDeliveryDecodeErr    error
 }
 
 type Data struct {
@@ -116,6 +124,7 @@ type Data struct {
 	DiagnosticStatus        GovernanceDiagnosticStatus  `json:"diagnostic_status"`
 	AttentionHighWaterSeq   uint64                      `json:"attention_high_water_seq"`
 	AttentionReadThroughSeq uint64                      `json:"attention_read_through_seq"`
+	AlertDelivery           *alertDeliveryData          `json:"alert_delivery,omitempty"`
 }
 
 type DeviceGrant struct {
@@ -367,6 +376,7 @@ func Open(dir string) (*Store, error) {
 		return nil, errors.New("state dir required")
 	}
 	s := &Store{path: filepath.Join(dir, "state.json"), governanceMaxItems: defaultGovernanceMaxItems, governanceMaxAttempts: defaultGovernanceMaxItems}
+	s.initAlertDeliveryRuntime()
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -388,6 +398,30 @@ func Open(dir string) (*Store, error) {
 	if err := s.validateAttentionState(); err != nil {
 		return nil, err
 	}
+	if s.loadedAlertDeliveryDecodeErr != nil {
+		if err := s.quarantineLoadedAlertDelivery(s.loadedAlertDeliveryDecodeErr); err != nil {
+			return nil, err
+		}
+	} else if err := s.validateAlertDeliveryState(); err != nil {
+		if quarantineErr := s.quarantineLoadedAlertDelivery(err); quarantineErr != nil {
+			return nil, quarantineErr
+		}
+	}
+	if s.alertDeliveryQuarantinedLocked() {
+		return s, nil
+	}
+	if err := s.RecoverAlertDeliveries(time.Now().UTC()); err != nil {
+		if s.alertDeliveryStateWriteFailure() {
+			return s, nil
+		}
+		return nil, err
+	}
+	if err := s.enforceAlertDeliveryRuntimePolicy(time.Now().UTC()); err != nil {
+		if s.alertDeliveryStateWriteFailure() {
+			return s, nil
+		}
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -399,8 +433,35 @@ func (s *Store) load() error {
 		}
 		return fmt.Errorf("read app state: %w", err)
 	}
-	if err := json.Unmarshal(data, &s.data); err != nil {
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(data, &topLevel); err != nil {
 		return fmt.Errorf("decode app state: %w", err)
+	}
+	if topLevel == nil {
+		return errors.New("decode app state: top-level JSON object required")
+	}
+
+	// Decode the top-level object a second time without alert_delivery. This
+	// keeps a failure in the optional typed ledger from making the legacy
+	// Canary authority unavailable, while every legacy field still uses its
+	// normal typed decoder and remains fatal on corruption.
+	rawAlertDelivery := append(json.RawMessage(nil), topLevel["alert_delivery"]...)
+	delete(topLevel, "alert_delivery")
+	legacyData, err := json.Marshal(topLevel)
+	if err != nil {
+		return fmt.Errorf("decode app state envelope: %w", err)
+	}
+	if err := json.Unmarshal(legacyData, &s.data); err != nil {
+		return fmt.Errorf("decode app state: %w", err)
+	}
+	s.loadedAlertDeliveryRaw = rawAlertDelivery
+	if len(rawAlertDelivery) > 0 && string(rawAlertDelivery) != "null" {
+		var typed alertDeliveryData
+		if err := json.Unmarshal(rawAlertDelivery, &typed); err != nil {
+			s.loadedAlertDeliveryDecodeErr = fmt.Errorf("decode alert delivery state: %w", err)
+		} else {
+			s.data.AlertDelivery = &typed
+		}
 	}
 	s.migrateGovernanceTotals()
 	return nil
@@ -594,12 +655,59 @@ func (s *Store) AddDevice(d DeviceGrant) error {
 	defer s.mu.Unlock()
 	for i := range s.data.Devices {
 		if s.data.Devices[i].ID == d.ID {
+			priorDevice := s.data.Devices[i]
+			if !priorDevice.RevokedAt.IsZero() && d.RevokedAt.IsZero() {
+				return errors.New("revoked device identity cannot be reactivated; pair a new device")
+			}
+			priorAttempts := append([]GovernanceAttempt(nil), s.data.GovernanceAttempts...)
+			priorReceipts := append([]GovernanceReceipt(nil), s.data.GovernanceReceipts...)
+			priorTotals := s.data.GovernanceTotals
+			priorAlertDelivery := s.data.AlertDelivery
+			var alertRelease []string
+			alertChanged := false
+			if priorDevice.RevokedAt.IsZero() && !d.RevokedAt.IsZero() {
+				governanceTargets := map[string]bool{}
+				alertTargets := map[string]bool{}
+				for _, subscription := range s.data.PushSubscriptions {
+					if subscription.DeviceID != d.ID {
+						continue
+					}
+					governanceTargets[GovernanceTargetRef(subscription.DeviceID, subscription.ID)] = true
+					alertTargets[AlertDeliveryTargetRef(subscription.DeviceID, subscription.ID)] = true
+				}
+				var err error
+				alertRelease, alertChanged, err = s.retireAlertDeliveryTargetsLocked(alertTargets, d.RevokedAt.UTC())
+				if errors.Is(err, ErrAlertDeliveryOverflow) {
+					return s.setAlertDeliveryOverflowLocked(priorAlertDelivery, d.RevokedAt.UTC())
+				}
+				if err != nil {
+					return err
+				}
+				s.retireGovernanceTargetsLocked(governanceTargets, d.RevokedAt.UTC())
+			}
 			s.data.Devices[i] = d
-			return s.save()
+			if err := s.save(); err != nil {
+				s.data.Devices[i] = priorDevice
+				s.data.GovernanceAttempts = priorAttempts
+				s.data.GovernanceReceipts = priorReceipts
+				s.data.GovernanceTotals = priorTotals
+				s.data.AlertDelivery = priorAlertDelivery
+				if alertChanged {
+					s.noteAlertDeliverySaveFailureLocked(d.RevokedAt.UTC())
+				}
+				return err
+			}
+			s.finishAlertDeliveryRetirementLocked(alertRelease, alertChanged)
+			return nil
 		}
 	}
+	priorDevices := append([]DeviceGrant(nil), s.data.Devices...)
 	s.data.Devices = append(s.data.Devices, d)
-	return s.save()
+	if err := s.save(); err != nil {
+		s.data.Devices = priorDevices
+		return err
+	}
+	return nil
 }
 
 func (s *Store) Device(id string) (DeviceGrant, bool) {
@@ -674,25 +782,41 @@ func (s *Store) PruneDevices(cutoff time.Time) (int, error) {
 	priorAttempts := append([]GovernanceAttempt(nil), s.data.GovernanceAttempts...)
 	priorReceipts := append([]GovernanceReceipt(nil), s.data.GovernanceReceipts...)
 	priorTotals := s.data.GovernanceTotals
-	targets := map[string]bool{}
+	priorAlertDelivery := s.data.AlertDelivery
+	governanceTargets := map[string]bool{}
+	alertTargets := map[string]bool{}
 	for _, sub := range s.data.PushSubscriptions {
 		if removed[sub.DeviceID] {
-			targets[GovernanceTargetRef(sub.DeviceID, sub.ID)] = true
+			governanceTargets[GovernanceTargetRef(sub.DeviceID, sub.ID)] = true
+			alertTargets[AlertDeliveryTargetRef(sub.DeviceID, sub.ID)] = true
 		}
+	}
+	retiredAt := time.Now().UTC()
+	alertRelease, alertChanged, err := s.retireAlertDeliveryTargetsLocked(alertTargets, retiredAt)
+	if errors.Is(err, ErrAlertDeliveryOverflow) {
+		return 0, s.setAlertDeliveryOverflowLocked(priorAlertDelivery, retiredAt)
+	}
+	if err != nil {
+		return 0, err
 	}
 	s.data.Devices = kept
 	s.data.PushSubscriptions = slices.DeleteFunc(s.data.PushSubscriptions, func(sub PushSubscription) bool {
 		return removed[sub.DeviceID]
 	})
-	s.retireGovernanceTargetsLocked(targets, time.Now().UTC())
+	s.retireGovernanceTargetsLocked(governanceTargets, retiredAt)
 	if err := s.save(); err != nil {
 		s.data.Devices = priorDevices
 		s.data.PushSubscriptions = priorSubscriptions
 		s.data.GovernanceAttempts = priorAttempts
 		s.data.GovernanceReceipts = priorReceipts
 		s.data.GovernanceTotals = priorTotals
+		s.data.AlertDelivery = priorAlertDelivery
+		if alertChanged {
+			s.noteAlertDeliverySaveFailureLocked(retiredAt)
+		}
 		return 0, err
 	}
+	s.finishAlertDeliveryRetirementLocked(alertRelease, alertChanged)
 	return len(removed), nil
 }
 
@@ -714,15 +838,39 @@ func (s *Store) AddPushSubscription(sub PushSubscription) error {
 	for i := range s.data.PushSubscriptions {
 		if s.data.PushSubscriptions[i].Endpoint == sub.Endpoint {
 			priorSub := s.data.PushSubscriptions[i]
+			transferring := priorSub.DeviceID != sub.DeviceID
+			if transferring {
+				if strings.TrimSpace(sub.DeviceID) == "" || strings.TrimSpace(sub.ID) == "" || sub.ID == priorSub.ID {
+					return errors.New("cross-device endpoint transfer requires a fresh subscription identity")
+				}
+				if s.pushTargetIdentityInUseLocked(sub.DeviceID, sub.ID, i) {
+					return errors.New("subscription target identity is already active")
+				}
+				if s.pushTargetIdentityRetiredLocked(sub.DeviceID, sub.ID) {
+					return errors.New("subscription target identity was retired; create a fresh subscription")
+				}
+			} else {
+				sub.ID = priorSub.ID
+				sub.CreatedAt = priorSub.CreatedAt
+			}
 			priorAttempts := append([]GovernanceAttempt(nil), s.data.GovernanceAttempts...)
 			priorReceipts := append([]GovernanceReceipt(nil), s.data.GovernanceReceipts...)
 			priorTotals := s.data.GovernanceTotals
-			sub.ID = priorSub.ID
-			sub.CreatedAt = priorSub.CreatedAt
-			if priorSub.DeviceID != sub.DeviceID {
-				retiredAt := sub.LastSeenAt.UTC()
-				if retiredAt.IsZero() {
-					retiredAt = time.Now().UTC()
+			priorAlertDelivery := s.data.AlertDelivery
+			var alertRelease []string
+			alertChanged := false
+			retiredAt := sub.LastSeenAt.UTC()
+			if retiredAt.IsZero() {
+				retiredAt = time.Now().UTC()
+			}
+			if transferring {
+				var err error
+				alertRelease, alertChanged, err = s.retireAlertDeliveryTargetsLocked(map[string]bool{AlertDeliveryTargetRef(priorSub.DeviceID, priorSub.ID): true}, retiredAt)
+				if errors.Is(err, ErrAlertDeliveryOverflow) {
+					return s.setAlertDeliveryOverflowLocked(priorAlertDelivery, retiredAt)
+				}
+				if err != nil {
+					return err
 				}
 				s.retireGovernanceTargetsLocked(map[string]bool{GovernanceTargetRef(priorSub.DeviceID, priorSub.ID): true}, retiredAt)
 			}
@@ -732,10 +880,24 @@ func (s *Store) AddPushSubscription(sub PushSubscription) error {
 				s.data.GovernanceAttempts = priorAttempts
 				s.data.GovernanceReceipts = priorReceipts
 				s.data.GovernanceTotals = priorTotals
+				s.data.AlertDelivery = priorAlertDelivery
+				if alertChanged {
+					s.noteAlertDeliverySaveFailureLocked(retiredAt)
+				}
 				return err
 			}
+			s.finishAlertDeliveryRetirementLocked(alertRelease, alertChanged)
 			return nil
 		}
+	}
+	if strings.TrimSpace(sub.DeviceID) == "" || strings.TrimSpace(sub.ID) == "" {
+		return errors.New("push subscription device and identity required")
+	}
+	if s.pushTargetIdentityInUseLocked(sub.DeviceID, sub.ID, -1) {
+		return errors.New("subscription target identity is already active")
+	}
+	if s.pushTargetIdentityRetiredLocked(sub.DeviceID, sub.ID) {
+		return errors.New("subscription target identity was retired; create a fresh subscription")
 	}
 	priorSubscriptions := append([]PushSubscription(nil), s.data.PushSubscriptions...)
 	s.data.PushSubscriptions = append(s.data.PushSubscriptions, sub)
@@ -744,6 +906,33 @@ func (s *Store) AddPushSubscription(sub PushSubscription) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Store) pushTargetIdentityInUseLocked(deviceID, subscriptionID string, except int) bool {
+	for i, subscription := range s.data.PushSubscriptions {
+		if i != except && subscription.DeviceID == deviceID && subscription.ID == subscriptionID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) pushTargetIdentityRetiredLocked(deviceID, subscriptionID string) bool {
+	if data := s.data.AlertDelivery; data != nil && !data.RetiredTargets[AlertDeliveryTargetRef(deviceID, subscriptionID)].IsZero() {
+		return true
+	}
+	target := GovernanceTargetRef(deviceID, subscriptionID)
+	for _, attempt := range s.data.GovernanceAttempts {
+		if attempt.TargetRef == target && !attempt.RetiredAt.IsZero() {
+			return true
+		}
+	}
+	for _, receipt := range s.data.GovernanceReceipts {
+		if receipt.TargetRef == target && !receipt.RetiredAt.IsZero() {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) PushSubscriptions() []PushSubscription {
@@ -808,26 +997,45 @@ func (s *Store) RemovePushSubscriptionAt(id string, retiredAt time.Time) error {
 	priorAttempts := append([]GovernanceAttempt(nil), s.data.GovernanceAttempts...)
 	priorReceipts := append([]GovernanceReceipt(nil), s.data.GovernanceReceipts...)
 	priorTotals := s.data.GovernanceTotals
-	targets := map[string]bool{}
+	priorAlertDelivery := s.data.AlertDelivery
+	governanceTargets := map[string]bool{}
+	alertTargets := map[string]bool{}
 	for _, sub := range s.data.PushSubscriptions {
 		if sub.ID == id || sub.Endpoint == id {
-			targets[GovernanceTargetRef(sub.DeviceID, sub.ID)] = true
+			governanceTargets[GovernanceTargetRef(sub.DeviceID, sub.ID)] = true
+			alertTargets[AlertDeliveryTargetRef(sub.DeviceID, sub.ID)] = true
 		}
+	}
+	if len(governanceTargets) == 0 {
+		return nil
+	}
+	retiredAt = retiredAt.UTC()
+	if retiredAt.IsZero() {
+		retiredAt = time.Now().UTC()
+	}
+	alertRelease, alertChanged, err := s.retireAlertDeliveryTargetsLocked(alertTargets, retiredAt)
+	if errors.Is(err, ErrAlertDeliveryOverflow) {
+		return s.setAlertDeliveryOverflowLocked(priorAlertDelivery, retiredAt)
+	}
+	if err != nil {
+		return err
 	}
 	s.data.PushSubscriptions = slices.DeleteFunc(s.data.PushSubscriptions, func(sub PushSubscription) bool {
 		return sub.ID == id || sub.Endpoint == id
 	})
-	if len(targets) == 0 {
-		return nil
-	}
-	s.retireGovernanceTargetsLocked(targets, retiredAt.UTC())
+	s.retireGovernanceTargetsLocked(governanceTargets, retiredAt)
 	if err := s.save(); err != nil {
 		s.data.PushSubscriptions = priorSubscriptions
 		s.data.GovernanceAttempts = priorAttempts
 		s.data.GovernanceReceipts = priorReceipts
 		s.data.GovernanceTotals = priorTotals
+		s.data.AlertDelivery = priorAlertDelivery
+		if alertChanged {
+			s.noteAlertDeliverySaveFailureLocked(retiredAt)
+		}
 		return err
 	}
+	s.finishAlertDeliveryRetirementLocked(alertRelease, alertChanged)
 	return nil
 }
 
@@ -1927,7 +2135,7 @@ func (s *Store) save() error {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(s.data, "", "  ")
+	b, err := s.marshalStateForSave()
 	if err != nil {
 		return err
 	}

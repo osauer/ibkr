@@ -642,6 +642,7 @@ test("act day dominates: act rows sort first, dismiss never hides them, counter 
       { title: "Portfolio P&L shock", severity: "observe", guidance: "No daily P&L shock signal.", evidence: "daily P&L -0.2% NLV" },
     ],
   };
+  harness.state.snapshot.sources.canary = { state: "current", updated_at: "2026-07-19T19:00:00Z" };
   harness.exports.renderAlerts();
   assert.equal(harness.elements.get("alertCount").textContent, "1 act · 1 watch · 1 data");
   assert.equal(harness.elements.get("alertCount").textContent.includes("All clear"), false,
@@ -667,6 +668,133 @@ test("act day dominates: act rows sort first, dismiss never hides them, counter 
   assert.equal(harness.elements.get("dismissCurrentButton").hidden, true, "dismiss control disappears once used");
 });
 
+test("retained Canary context cannot claim all clear when current coverage failed", () => {
+  const harness = loadAlerts();
+  harness.state.snapshot.canary = {
+    as_of: "2026-07-20T14:30:00Z",
+    fingerprint: { key: "canary-last-good" },
+    portfolio_fit: "low",
+    portfolio_alert_relevant: false,
+    severity: "observe",
+    summary: "No canary conditions.",
+    portfolio: {},
+    rows: [],
+  };
+  harness.state.snapshot.sources.canary = {
+    state: "unavailable",
+    reason: "transport_unavailable",
+    updated_at: "2026-07-20T14:31:00Z",
+    last_success_at: "2026-07-20T14:30:00Z",
+  };
+
+  harness.exports.renderAlerts();
+  assert.equal(harness.exports.canaryCoverageState(), "unavailable");
+  assert.equal(harness.elements.get("alertCount").textContent, "Coverage unavailable");
+  assert.equal(harness.elements.get("alertCount").textContent.includes("All clear"), false);
+  assert.match(visibleText(harness.elements.get("currentSignalList")), /required source coverage is unavailable/i);
+  assert.equal(harness.elements.get("alertCount").classList.contains("is-zero"), false);
+  assert.equal(harness.elements.get("alertCount").classList.contains("has-warn"), true);
+
+  harness.state.snapshot.sources.canary.state = "stale";
+  harness.exports.renderAlerts();
+  assert.equal(harness.elements.get("alertCount").textContent, "Coverage stale");
+  assert.match(visibleText(harness.elements.get("currentSignalList")), /last successful coverage is stale/i);
+});
+
+test("retained Canary watch rows disclose unavailable and stale coverage everywhere", () => {
+  const harness = loadAlerts();
+  harness.state.snapshot.canary = {
+    as_of: "2026-07-20T14:30:00Z",
+    fingerprint: { key: "canary-last-good-watch" },
+    portfolio_fit: "high",
+    portfolio_alert_relevant: true,
+    severity: "watch",
+    summary: "Last successful context still had a watch condition.",
+    portfolio: {},
+    rows: [
+      { title: "Portfolio canary", severity: "watch", guidance: "overall summary", evidence: "" },
+      { title: "Index tape watch", severity: "watch", direction: "defensive", guidance: "Review the retained condition.", evidence: "last-good evidence" },
+    ],
+  };
+  harness.state.snapshot.sources.canary = {
+    state: "unavailable",
+    reason: "transport_unavailable",
+    updated_at: "2026-07-20T14:31:00Z",
+    last_success_at: "2026-07-20T14:30:00Z",
+  };
+
+  harness.exports.renderAlerts();
+  assert.equal(harness.elements.get("alertCount").textContent, "1 watch · Coverage unavailable");
+  assert.match(visibleText(harness.elements.get("currentSignalList")), /no current Canary evaluation/i);
+  assert.match(visibleText(harness.elements.get("currentSignalList")), /retained.*current evaluation unavailable/i);
+  harness.state.selectedAlertID = "preview-0";
+  harness.exports.renderSelectedAlert();
+  assert.match(harness.elements.get("selectedAlertBody").textContent, /retained from the last successful Canary evaluation/i);
+  assert.doesNotMatch(harness.elements.get("selectedAlertTime").textContent, /current canary snapshot/i);
+  assert.match(harness.elements.get("selectedAlertTime").textContent, /not a current verdict/i);
+
+  harness.state.snapshot.sources.canary.state = "stale";
+  harness.exports.renderAlerts();
+  assert.equal(harness.elements.get("alertCount").textContent, "1 watch · Coverage stale");
+  assert.match(visibleText(harness.elements.get("currentSignalList")), /retained.*coverage stale/i);
+  harness.exports.renderSelectedAlert();
+  assert.match(harness.elements.get("selectedAlertBody").textContent, /current coverage is stale/i);
+  assert.doesNotMatch(harness.elements.get("selectedAlertTime").textContent, /current canary snapshot/i);
+});
+
+test("unknown Canary source states fail closed as unavailable", () => {
+  const harness = loadAlerts();
+  harness.state.snapshot.canary = {
+    as_of: "2026-07-20T14:30:00Z",
+    fingerprint: { key: "canary-last-good" },
+    portfolio_fit: "low",
+    portfolio_alert_relevant: false,
+    severity: "observe",
+    summary: "Retained context.",
+    portfolio: {},
+    rows: [],
+  };
+  harness.state.snapshot.sources.canary = { state: "future_enum", updated_at: "2026-07-20T14:31:00Z" };
+  harness.exports.renderAlerts();
+  assert.equal(harness.exports.canaryCoverageState(), "unavailable");
+  assert.equal(harness.elements.get("alertCount").textContent, "Coverage unavailable");
+
+  delete harness.state.snapshot.canary.as_of;
+  harness.exports.renderAlerts();
+  assert.equal(harness.exports.canaryCoverageState(), "unavailable");
+  assert.equal(harness.elements.get("alertCount").textContent, "Coverage unavailable");
+});
+
+test("all clear requires a timestamped Canary snapshot with current typed coverage", () => {
+  const harness = loadAlerts();
+  harness.state.snapshot.canary = {
+    as_of: "2026-07-20T14:31:00Z",
+    fingerprint: { key: "canary-current" },
+    portfolio_fit: "low",
+    portfolio_alert_relevant: false,
+    severity: "observe",
+    summary: "No canary conditions.",
+    portfolio: {},
+    rows: [],
+  };
+  harness.state.snapshot.sources.canary = { state: "current", updated_at: "2026-07-20T14:31:00Z" };
+  harness.exports.renderAlerts();
+  assert.equal(harness.exports.canaryCoverageState(), "current");
+  assert.equal(harness.elements.get("alertCount").textContent, "All clear");
+
+  delete harness.state.snapshot.sources.canary;
+  harness.exports.renderAlerts();
+  assert.equal(harness.exports.canaryCoverageState(), "unavailable");
+  assert.equal(harness.elements.get("alertCount").textContent, "Coverage unavailable");
+
+  harness.state.snapshot.sources.canary = { state: "current", updated_at: "2026-07-20T14:31:00Z" };
+
+  delete harness.state.snapshot.canary.as_of;
+  harness.exports.renderAlerts();
+  assert.equal(harness.exports.canaryCoverageState(), "unavailable");
+  assert.equal(harness.elements.get("alertCount").textContent, "Coverage unavailable");
+});
+
 test("delivery-down banner is prominent during open and pre-open sessions and quiet otherwise", () => {
   const harness = loadAlerts();
   const hour = 3600 * 1000;
@@ -682,7 +810,13 @@ test("delivery-down banner is prominent during open and pre-open sessions and qu
   harness.state.governance = governanceDTO({ delivery_health: { state: "unavailable", updated_at: "2026-07-20T14:31:00Z" } });
   harness.exports.renderGovernance();
   assert.equal(banner.hidden, false);
-  assert.match(banner.textContent, /not reaching your phone/i);
+  assert.match(banner.textContent, /governance notifications are not reaching your phone/i);
+  assert.match(banner.textContent, /does not cover Canary delivery/i);
+  // Overflow is a failing delivery state, not a quiet history detail.
+  harness.state.governance = governanceDTO({ delivery_health: { state: "overflow", updated_at: "2026-07-20T14:31:30Z" } });
+  harness.exports.renderGovernance();
+  assert.equal(banner.hidden, false);
+  assert.match(banner.textContent, /evidence is full/i);
   // Pre-open on a trading date is attention-on: pre-market alerts are exactly
   // the ones a phone must deliver before the bell, and the copy must not
   // claim the market is already open.
@@ -735,21 +869,22 @@ test("status line price stamp is honest per session phase", () => {
   };
   // Open session: plain freshness stamp.
   assert.match(render({ state: "regular", is_open: true }), /Data as of /);
-  // Pre-open on a trading date: prints are live indicative quotes; only the
-  // daily-change anchors are frozen at the last close. The stamp must not
-  // launder live prints as last-session, the bug observed live 2026-07-20
-  // pre-open while the header ticker counted down to the bell.
+  // Pre-open on a trading date: the calendar identifies phase only. It cannot
+  // prove whether quotes are live, delayed, frozen, stale, or absent, so the
+  // Alerts summary must stay neutral until typed quote provenance is served.
   const preOpen = render({ state: "regular", is_open: false, open: new Date(Date.now() + hour).toISOString(), close: new Date(Date.now() + 7.5 * hour).toISOString() });
-  assert.match(preOpen, /pre-market — live indicative prints; daily changes anchor to the last close/);
+  assert.match(preOpen, /pre-market evaluation — quote provenance is not available on this alert summary/);
+  assert.equal(preOpen.includes("live indicative"), false, "calendar phase must not claim live quotes");
   assert.equal(preOpen.includes("market closed"), false, "pre-open must not claim the market is closed");
-  assert.equal(preOpen.includes("last-session prints"), false, "pre-open prints are live, not last-session");
-  // After the close on a trading date the prints really are last-session.
-  assert.match(render({ state: "regular", is_open: false, open: new Date(Date.now() - 8 * hour).toISOString(), close: new Date(Date.now() - hour).toISOString() }), /after close — prices are last-session prints/);
-  // Weekend and holiday closures name themselves.
-  assert.match(render({ state: "closed", is_open: false, reason: "weekend" }), /weekend — prices are last-session prints/);
-  assert.match(render({ state: "holiday", is_open: false }), /market holiday — prices are last-session prints/);
+  assert.equal(preOpen.includes("last-session prints"), false, "pre-open phase alone cannot claim last-session quotes");
+  // Closed phases can be named, but the calendar still cannot establish
+  // whether prices are last-session, delayed, frozen, stale, or absent.
+  assert.match(render({ state: "regular", is_open: false, open: new Date(Date.now() - 8 * hour).toISOString(), close: new Date(Date.now() - hour).toISOString() }), /after-close evaluation — quote provenance is not available/);
+  // Weekend and holiday closures name themselves without claiming prices.
+  assert.match(render({ state: "closed", is_open: false, reason: "weekend" }), /weekend evaluation — quote provenance is not available/);
+  assert.match(render({ state: "holiday", is_open: false }), /market-holiday evaluation — quote provenance is not available/);
   // A non-trading closure with no better detail keeps the generic stamp.
-  assert.match(render({ state: "closed", is_open: false }), /market closed — prices are last-session prints/);
+  assert.match(render({ state: "closed", is_open: false }), /closed-market evaluation — quote provenance is not available/);
   // No calendar coverage means no session claim, in either direction.
   assert.match(render({ state: "unknown", is_open: false }), /Data as of /);
   assert.match(render(undefined), /Data as of /);

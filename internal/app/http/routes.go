@@ -93,6 +93,9 @@ func Register(deps Dependencies) {
 	srv.DELETE("/api/alerts", h.requireAuth(h.handleClearAlerts))
 	srv.GET("/api/attention", h.requireAuth(h.handleAttention))
 	srv.POST("/api/attention/read", h.requireAuth(h.handleAttentionRead))
+	srv.GET("/api/alert-inbox-v2", h.requireAuth(h.handleAlertInboxV2))
+	srv.GET("/api/alert-inbox-v2/attention", h.requireAuth(h.handleAlertInboxV2Attention))
+	srv.POST("/api/alert-inbox-v2/attention/read", h.requireAuth(h.handleAlertInboxV2AttentionRead))
 	srv.GET("/api/orders/open", h.requireAuth(h.handleOrdersOpen))
 	srv.GET("/api/orders/{id}", h.requireAuth(h.handleOrderStatus))
 	srv.POST("/api/orders/{id}/cancel", h.requireAuth(h.handleOrderCancel))
@@ -342,6 +345,7 @@ func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) 
 		"alert_settings":   h.deps.Store.AlertSettings(),
 		"alerts":           alertHistoryDTOs(h.deps.Store.AlertHistory(20)),
 		"attention":        h.deps.Store.Attention(),
+		"alert_inbox_v2":   h.alertInboxV2DTO(),
 		"last_push":        h.deps.Store.LastPush(),
 		"relay":            h.deps.Relay.Status(),
 		"vapid_public_key": vapid.PublicKey,
@@ -662,15 +666,31 @@ func (h *handler) handleEvents(w nethttp.ResponseWriter, r *nethttp.Request) {
 	defer release()
 	msg := hyperserve.SSEMessage{Event: "snapshot", Data: h.deps.Live.Snapshot()}
 	fmt.Fprint(w, msg.String())
+	alertInbox := h.alertInboxV2DTO()
+	alertInboxCursor := newAlertInboxV2StreamCursor(alertInbox)
+	msg = hyperserve.SSEMessage{Event: "alert_inbox_v2", Data: alertInbox}
+	fmt.Fprint(w, msg.String())
 	flusher.Flush()
 	heartbeat := time.NewTicker(20 * time.Second)
 	defer heartbeat.Stop()
+	alertInboxPoll := time.NewTicker(alertInboxV2PollInterval)
+	defer alertInboxPoll.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-heartbeat.C:
 			msg := hyperserve.SSEMessage{Event: "heartbeat", Data: map[string]any{"at": time.Now().UTC()}}
+			fmt.Fprint(w, msg.String())
+			flusher.Flush()
+		case <-alertInboxPoll.C:
+			next := h.alertInboxV2DTO()
+			nextCursor := newAlertInboxV2StreamCursor(next)
+			if nextCursor == alertInboxCursor {
+				continue
+			}
+			alertInboxCursor = nextCursor
+			msg := hyperserve.SSEMessage{Event: "alert_inbox_v2", Data: next}
 			fmt.Fprint(w, msg.String())
 			flusher.Flush()
 		case ev, ok := <-ch:

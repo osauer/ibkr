@@ -1062,12 +1062,9 @@ func (c *gammaZeroCache) refreshFailureWarning(scope string, result *rpc.GammaZe
 	if result != nil && !result.AsOf.IsZero() && !slot.lastErrAt.After(result.AsOf) {
 		return ""
 	}
-	summary := slot.lastErrSummary
+	summary := summarizeGammaPhaseFailure(slot.lastErr)
 	if summary == "" {
-		summary = summarizeGammaErr(slot.lastErr)
-	}
-	if summary == "" {
-		summary = "unknown"
+		summary = "unavailable"
 	}
 	return "refresh_failed:" + strings.ReplaceAll(summary, " ", "_")
 }
@@ -1412,28 +1409,14 @@ func spxFallbackReason(c *rpc.GammaZeroComputed) string {
 	return "previous_success"
 }
 
-// summarizeGammaErr compresses a compute error to a single-line summary
-// suitable for rendering inline with "computing · retry of <summary>".
-// Strips the long-tail context ("not persisting; gammaErrorRetryTTL ...")
-// that's useful in logs but not in the dashboard. Returns the original
-// string when it's already short enough.
+// summarizeGammaErr returns browser-safe, allowlisted failure copy. Compute
+// errors can contain broker and transport free text; raw causes remain in the
+// daemon log and never become retry or warning payloads.
 func summarizeGammaErr(err error) string {
 	if err == nil {
 		return ""
 	}
-	msg := err.Error()
-	if i := strings.Index(msg, " — "); i > 0 {
-		msg = msg[:i]
-	}
-	if i := strings.Index(msg, ". "); i > 0 {
-		msg = msg[:i]
-	}
-	// "zero-gamma: " prefix is daemon-internal jargon; trim it.
-	msg = strings.TrimPrefix(msg, "zero-gamma: ")
-	if len(msg) > 80 {
-		msg = msg[:77] + "..."
-	}
-	return msg
+	return strings.ReplaceAll(summarizeGammaPhaseFailure(err), "_", " ")
 }
 
 // remainingEta returns a refined ETA in seconds. Once enough work has

@@ -304,7 +304,7 @@ func TestGammaQualityFailedRefreshBlocksServedCache(t *testing.T) {
 	if got := env.Result.Quality.Rankability; got != rpc.GammaRankabilityBlocked {
 		t.Fatalf("rankability = %q, want blocked after failed refresh: %+v", got, env.Result.Quality)
 	}
-	if !hasGammaWarning(env.Result.WarningDetails, "refresh_failed:farm_timeout") {
+	if !hasGammaWarning(env.Result.WarningDetails, "refresh_failed:timeout") {
 		t.Fatalf("warning_details missing refresh failure: %+v", env.Result.WarningDetails)
 	}
 }

@@ -1,4 +1,5 @@
 import { applyAttention, applyGovernanceCutoverOverlay, handleAttentionContextChange, refreshAlerts, refreshGovernance, refreshPushState, scheduleGovernanceRefresh } from "./alerts.js";
+import { ingestAlertInboxV2, ingestAlertInboxV2Event } from "./alert-inbox-v2.js";
 import { renderAll } from "./app.js";
 import { tryDeviceLogin } from "./auth.js";
 import { refreshOpenOrders } from "./orders.js";
@@ -74,6 +75,7 @@ function applyBootstrap(data) {
   state.alerts = data.alerts || [];
   state.attentionEpoch = (state.attentionEpoch || 0) + 1;
   applyAttention(data.attention);
+  ingestAlertInboxV2(data.alert_inbox_v2);
   state.vapidPublicKey = data.vapid_public_key || "";
   $("pairingPanel").hidden = true;
   $("accountPanel").hidden = false;
@@ -106,8 +108,14 @@ function connectEvents() {
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules", "brief", "nudges"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules", "brief", "nudges", "alert_inbox_v2"]) {
     es.addEventListener(type, (event) => {
+      if (type === "alert_inbox_v2") {
+        ingestAlertInboxV2Event(event.data);
+        state.lastEventAt = Date.now();
+        setConnection("Connected", true);
+        return;
+      }
       const data = JSON.parse(event.data);
       if (type === "snapshot") state.snapshot = applyGovernanceCutoverOverlay(data);
       if (type !== "snapshot") state.snapshot = { ...(state.snapshot || {}), [type]: data };

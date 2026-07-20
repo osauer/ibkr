@@ -105,6 +105,7 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 		AsOf:                    asOf,
 		DurationMS:              spy.DurationMS + spx.DurationMS,
 		RegimeAgreement:         classifyRegimeAgreement(spy, spx),
+		Warnings:                canonicalGammaWarningUnion(spy.Warnings, spx.Warnings),
 		PerIndex: map[string]*rpc.GammaZeroComputed{
 			"SPY": spy,
 			"SPX": spx,
@@ -118,7 +119,7 @@ func combineGammaResults(spy, spx *rpc.GammaZeroComputed) *rpc.GammaZeroComputed
 	if len(spy.Profile) > 0 && len(spx.Profile) > 0 && sameProfileGrid(spy.Profile, spx.Profile) {
 		var combinedWarnings []string
 		out.Profile, combinedWarnings = combineProfileBuckets(spy.Profile, spx.Profile, "", nil)
-		out.Warnings = dedupeStrings(append(out.Warnings, combinedWarnings...))
+		out.Warnings = canonicalGammaWarningUnion(out.Warnings, combinedWarnings)
 	}
 	return out
 }
@@ -364,7 +365,7 @@ func gammaOneSidedFallbackUsableForCombined(result *rpc.GammaZeroComputed, now t
 //	fetch_canceled → compute context was cancelled before SPX landed
 //	timeout        → deadline / timeout before SPX landed
 //	zero_magnitude → legs landed but all gamma magnitude was zero
-//	<other>   → truncated error message, ≤ 60 chars
+//	unavailable → every unclassified failure; raw causes remain local-log only
 func summarizeSPXFailure(err error) string {
 	return summarizeGammaPhaseFailure(err)
 }
@@ -394,13 +395,86 @@ func summarizeGammaPhaseFailure(err error) string {
 	case strings.Contains(msg, "no usable GEX legs"), strings.Contains(msg, "zero gamma_total_abs/profile/top_strikes"):
 		return "zero_magnitude"
 	}
-	// Trim leading "zero-gamma: " jargon and cap length.
-	msg = strings.TrimPrefix(msg, "zero-gamma: ")
-	if len(msg) > 60 {
-		msg = msg[:57] + "..."
+	return "unavailable"
+}
+
+// canonicalGammaWarningUnion protects the wire warning surface from raw or
+// persisted free text. Known warning codes retain their decision semantics;
+// every unrecognised value collapses to one fail-visible stable token.
+func canonicalGammaWarningUnion(groups ...[]string) []string {
+	var out []string
+	unclassified := false
+	for _, group := range groups {
+		for _, raw := range group {
+			code, ok := canonicalGammaWarningCode(raw)
+			if !ok {
+				if strings.TrimSpace(raw) != "" {
+					unclassified = true
+				}
+				continue
+			}
+			out = append(out, code)
+		}
 	}
-	msg = strings.ReplaceAll(msg, ":", "·")
-	return msg
+	if unclassified {
+		out = append(out, "unclassified_data_warning")
+	}
+	return dedupeStrings(out)
+}
+
+func canonicalGammaWarningCode(raw string) (string, bool) {
+	code := strings.ToLower(strings.TrimSpace(raw))
+	switch code {
+	case "no_crossing_in_window", "0dte_no_legs", "1to7_no_legs", "term_no_legs",
+		"throttled", "oi_missing", "strike_budget_capped", "all_iv_derived",
+		"cache_stale_off_hours", "closed_session_cache", "session_closed_no_cache",
+		"persisted_cache_rejected", "unclassified_data_warning":
+		return code, true
+	}
+	if suffix, ok := strings.CutPrefix(code, "expiries_stale:"); ok && gammaDigitsWithSuffix(suffix, 'd', 1, 4) {
+		return code, true
+	}
+	if suffix, ok := strings.CutPrefix(code, "skew_fallback:"); ok && gammaDigits(suffix, 8) {
+		return code, true
+	}
+	for _, prefix := range []string{"refresh_failed:", "spy_unavailable:", "spx_unavailable:", "spx_cache_fallback:"} {
+		if suffix, ok := strings.CutPrefix(code, prefix); ok && canonicalGammaFailureToken(suffix) {
+			return code, true
+		}
+	}
+	if code == "spx_cache_fallback" {
+		return code, true
+	}
+	return "", false
+}
+
+func canonicalGammaFailureToken(token string) bool {
+	switch token {
+	case "354", "200", "fetch_canceled", "timeout", "no_data", "throttled",
+		"low_coverage", "zero_magnitude", "unavailable", "previous_success":
+		return true
+	default:
+		return false
+	}
+}
+
+func gammaDigits(value string, exact int) bool {
+	if len(value) != exact {
+		return false
+	}
+	for i := range value {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func gammaDigitsWithSuffix(value string, suffix byte, minDigits, maxDigits int) bool {
+	if len(value) < minDigits+1 || len(value) > maxDigits+1 || value[len(value)-1] != suffix {
+		return false
+	}
+	return gammaDigits(value[:len(value)-1], len(value)-1)
 }
 
 // runUnderlyingPhase wraps one (Hold underlying → computeGammaZeroFor →

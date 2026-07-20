@@ -89,6 +89,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	overall := canaryOverallRow(res.Direction, res.Severity, res.Summary, res.Market, res.Portfolio)
 	res.Rows = append([]CanaryRow{overall}, rows...)
 	res.Warnings = canaryWarnings(res.Market, in.Regime, now)
+	res.Warnings = append(res.Warnings, canaryMarketEventWarnings(sourceIssues)...)
 	res.SourceHealth = canarySourceHealth(in, now, accountFingerprint, positionsFingerprint, regimeFingerprint, marketEventsFingerprint, res.InputHealth, res.Market)
 	res.Fingerprint = rpc.BuildCanaryFingerprint(&res)
 	return res
@@ -1879,7 +1880,10 @@ type canarySourceIssue struct {
 
 func canarySourceIssues(in CanaryInput, now time.Time) []canarySourceIssue {
 	issues := []canarySourceIssue{}
-	if canarySourceStale(in.Account.AsOf, now) {
+	switch {
+	case in.Account.AsOf.IsZero() && in.Account.NetLiquidation > 0:
+		issues = append(issues, canarySourceIssue{Source: "account", Status: rpc.RegimeStatusUnavailable, Reason: "account snapshot timestamp missing"})
+	case canarySourceStale(in.Account.AsOf, now):
 		issues = append(issues, canarySourceIssue{Source: "account", Status: rpc.RegimeStatusStale, Reason: "account snapshot stale"})
 	}
 	switch {
@@ -1892,7 +1896,199 @@ func canarySourceIssues(in CanaryInput, now time.Time) []canarySourceIssue {
 	case canarySourceStale(in.Positions.AsOf, now):
 		issues = append(issues, canarySourceIssue{Source: "positions", Status: rpc.RegimeStatusStale, Reason: "positions snapshot stale"})
 	}
+	issues = append(issues, canaryMarketEventSourceIssues(in.Positions, in.MarketEvents, now)...)
 	return issues
+}
+
+func canaryMarketEventSourceIssues(pos rpc.PositionsResult, events rpc.MarketEventsResult, now time.Time) []canarySourceIssue {
+	// The daemon requests market-event context only for held underlyings. A
+	// clean empty book therefore needs no market-event source, but a held book
+	// must never turn a missing snapshot into an implicit "no flags" answer.
+	if len(canaryMarketEventSymbols(pos)) == 0 {
+		return nil
+	}
+	if !canaryHasMarketEventsInput(events) {
+		return []canarySourceIssue{{
+			Source: "market_events",
+			Status: rpc.SourceStatusUnknown,
+			Reason: "market-event snapshot missing for held underlyings",
+		}}
+	}
+
+	shortStock := canaryHasShortStockExposure(pos)
+	issues := []canarySourceIssue{}
+	issueBySource := map[string]int{}
+	seen := map[string]bool{}
+	umbrellaSeen := false
+	addIssue := func(source, status, reason string) {
+		source = canaryMarketEventSourceName(source)
+		if source == "" {
+			source = "market_events"
+		}
+		if canaryMarketEventBorrowSource(source) && !shortStock {
+			return
+		}
+		status = canaryMarketEventHealthStatus(status)
+		if existing, ok := issueBySource[source]; ok {
+			if canaryMarketEventHealthRank(status) > canaryMarketEventHealthRank(issues[existing].Status) {
+				issues[existing].Status = status
+				issues[existing].Reason = reason
+			}
+			return
+		}
+		issueBySource[source] = len(issues)
+		issues = append(issues, canarySourceIssue{Source: source, Status: status, Reason: reason})
+	}
+	// The result timestamp is part of the decision contract. Child rows that
+	// say OK cannot make a never-dated or stale aggregate current.
+	switch {
+	case events.AsOf.IsZero():
+		addIssue("market_events", rpc.SourceStatusUnknown, "market-event snapshot timestamp missing")
+	case canarySourceStale(events.AsOf, now):
+		addIssue("market_events", rpc.SourceStatusStale, "market-event snapshot stale")
+	}
+
+	for _, health := range events.SourceHealth {
+		source := canaryMarketEventSourceName(health.Source)
+		if source == "" {
+			source = strings.ToLower(strings.TrimSpace(health.Source))
+		}
+		if source == "" {
+			source = "market_events"
+		}
+		if canaryMarketEventBorrowSource(source) && !shortStock {
+			continue
+		}
+		seen[source] = true
+		if source == "market_events" {
+			umbrellaSeen = true
+		}
+		status := canaryMarketEventHealthStatus(health.Status)
+		if status == rpc.SourceStatusOK {
+			switch {
+			case health.AsOf.IsZero():
+				status = rpc.SourceStatusUnknown
+			case canarySourceStale(health.AsOf, now):
+				status = rpc.SourceStatusStale
+			}
+		}
+		if status != rpc.SourceStatusOK {
+			addIssue(source, status, source+" source "+status)
+		}
+	}
+
+	// Structured warnings are part of the source contract too. Do not trust an
+	// apparently OK health row when the same result says that source failed.
+	for _, warning := range events.WarningDetails {
+		source := canaryMarketEventSourceName(warning.Scope + " " + warning.Code)
+		if source == "" {
+			source = "market_events"
+		}
+		if canaryMarketEventBorrowSource(source) && !shortStock {
+			continue
+		}
+		status := rpc.SourceStatusDegraded
+		if strings.Contains(strings.ToLower(warning.Code), "unavailable") {
+			status = rpc.SourceStatusUnknown
+		}
+		addIssue(source, status, source+" source "+status)
+	}
+
+	// A detailed market-event result is expected to cover both official
+	// sources. Borrow data becomes required only when short stock makes cover
+	// friction relevant. An umbrella failure already represents all of them.
+	if !umbrellaSeen {
+		required := []string{"reg_sho_threshold", "trading_halts"}
+		if shortStock {
+			required = append(required, "borrow_inventory", "borrow_fee")
+		}
+		for _, source := range required {
+			if !seen[source] {
+				addIssue(source, rpc.SourceStatusUnknown, source+" source missing")
+			}
+		}
+	}
+
+	slices.SortStableFunc(issues, func(a, b canarySourceIssue) int {
+		return strings.Compare(a.Source, b.Source)
+	})
+	return issues
+}
+
+func canaryHasShortStockExposure(pos rpc.PositionsResult) bool {
+	for _, stock := range pos.Stocks {
+		if stock.Quantity < 0 {
+			return true
+		}
+	}
+	for _, group := range pos.ByUnderlying {
+		if group.Stock != nil && group.Stock.Quantity < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func canaryMarketEventBorrowSource(source string) bool {
+	source = strings.ToLower(strings.TrimSpace(source))
+	return strings.Contains(source, "borrow_inventory") || strings.Contains(source, "borrow_fee")
+}
+
+func canaryMarketEventSourceName(source string) string {
+	source = strings.ToLower(strings.TrimSpace(source))
+	switch {
+	case strings.Contains(source, "borrow_inventory"):
+		return "borrow_inventory"
+	case strings.Contains(source, "borrow_fee"):
+		return "borrow_fee"
+	case strings.Contains(source, "reg_sho"):
+		return "reg_sho_threshold"
+	case strings.Contains(source, "halt"), strings.Contains(source, "luld"):
+		return "trading_halts"
+	case strings.Contains(source, "market_events"):
+		return "market_events"
+	default:
+		return ""
+	}
+}
+
+func canaryMarketEventHealthStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case rpc.SourceStatusOK,
+		rpc.SourceStatusPartial,
+		rpc.SourceStatusStale,
+		rpc.SourceStatusUnknown,
+		rpc.SourceStatusDegraded,
+		rpc.RegimeStatusError,
+		rpc.RegimeStatusUnavailable:
+		return status
+	case "":
+		return rpc.SourceStatusUnknown
+	default:
+		return rpc.SourceStatusDegraded
+	}
+}
+
+func canaryMarketEventHealthRank(status string) int {
+	switch canaryMarketEventHealthStatus(status) {
+	case rpc.RegimeStatusError:
+		return 7
+	case rpc.RegimeStatusUnavailable:
+		return 6
+	case rpc.SourceStatusUnknown:
+		return 5
+	case rpc.SourceStatusDegraded:
+		return 4
+	case rpc.SourceStatusPartial:
+		return 3
+	case rpc.SourceStatusStale:
+		return 2
+	case rpc.SourceStatusOK:
+		return 0
+	default:
+		return 1
+	}
 }
 
 func canarySourceStale(asOf, now time.Time) bool {
@@ -1986,11 +2182,11 @@ func canarySourceDataQualitySignals(issues []canarySourceIssue) []risk.Signal {
 		ID:               risk.SignalRiskDataDegraded,
 		Direction:        risk.DirectionDataQuality,
 		Severity:         risk.SeverityWatch,
-		Metric:           "stale_sources",
+		Metric:           "degraded_sources",
 		Observed:         &observed,
-		Evidence:         "stale sources: " + strings.Join(blockedBy, ","),
+		Evidence:         "degraded sources: " + strings.Join(blockedBy, ","),
 		Confidence:       "medium-low",
-		ConfidenceImpact: "requires fresh account/position source before acting on dependent signals",
+		ConfidenceImpact: "requires healthy decision sources before acting on dependent signals",
 		BlockedBy:        blockedBy,
 	}}
 }
@@ -2071,6 +2267,17 @@ func canaryWarnings(m CanaryMarketSummary, r rpc.RegimeSnapshotResult, now time.
 	return warnings
 }
 
+func canaryMarketEventWarnings(issues []canarySourceIssue) []string {
+	warnings := []string{}
+	for _, issue := range issues {
+		if issue.Source == "account" || issue.Source == "positions" {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf("market-event source %s: %s", issue.Source, issue.Status))
+	}
+	return warnings
+}
+
 func canaryRegimeWarningDetails(details []rpc.RegimeWarning, now time.Time) ([]string, map[string]bool) {
 	lines := []string{}
 	clusters := map[string]bool{}
@@ -2143,8 +2350,8 @@ func canarySourceHealth(in CanaryInput, now time.Time, accountFP, positionsFP, r
 		canaryTimedSourceHealth("positions", in.Positions.AsOf, now, positionsFP, canaryPositionsSourceStatus(in.Positions, now), canaryPositionsSourceConfidence(in.Positions)),
 		canaryRegimeSourceHealth(in.Regime.AsOf, now, regimeFP, canaryInputHealthConfidence(inputHealth), m),
 	}
-	if canaryHasMarketEventsInput(in.MarketEvents) {
-		out = append(out, canaryMarketEventsSourceHealth(in.MarketEvents, now, marketEventsFP))
+	if canaryHasMarketEventsInput(in.MarketEvents) || len(canaryMarketEventSymbols(in.Positions)) > 0 {
+		out = append(out, canaryMarketEventsSourceHealth(in.Positions, in.MarketEvents, now, marketEventsFP))
 	}
 	return out
 }
@@ -2158,26 +2365,22 @@ func canaryHasMarketEventsInput(events rpc.MarketEventsResult) bool {
 		len(events.WarningDetails) > 0
 }
 
-func canaryMarketEventsSourceHealth(events rpc.MarketEventsResult, now time.Time, fp rpc.Fingerprint) rpc.SourceHealth {
-	status := rpc.RegimeStatusOK
+func canaryMarketEventsSourceHealth(pos rpc.PositionsResult, events rpc.MarketEventsResult, now time.Time, fp rpc.Fingerprint) rpc.SourceHealth {
+	status := rpc.SourceStatusOK
 	confidence := "medium"
 	notes := []string{}
 	if len(events.Flags) > 0 {
 		notes = append(notes, fmt.Sprintf("%d active/recent market-event flags", len(events.Flags)))
 	}
-	if len(events.WarningDetails) > 0 {
-		status = "degraded"
-		confidence = "medium-low"
-		notes = append(notes, "one or more market-event sources are unavailable")
-	}
-	for _, health := range events.SourceHealth {
-		switch health.Status {
-		case rpc.MarketEventStatusUnknown, rpc.MarketEventStatusStale, rpc.MarketEventStatusDegraded, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
-			if status == rpc.RegimeStatusOK {
-				status = "degraded"
-				confidence = "medium-low"
-			}
+	issues := canaryMarketEventSourceIssues(pos, events, now)
+	for _, issue := range issues {
+		if canaryMarketEventHealthRank(issue.Status) > canaryMarketEventHealthRank(status) {
+			status = issue.Status
 		}
+		notes = append(notes, issue.Source+" "+issue.Status)
+	}
+	if len(issues) > 0 {
+		confidence = "medium-low"
 	}
 	health := canaryTimedSourceHealth("market_events", events.AsOf, now, fp, status, confidence)
 	health.Notes = notes

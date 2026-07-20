@@ -339,6 +339,8 @@ func gammaQualityWarningGates(q *rpc.GammaSignalQuality, c *rpc.GammaZeroCompute
 			gammaQualityAddGate(q, "strike_budget", rpc.GammaQualityGatePass, "strike fan-out cap disclosed")
 		case code == "cache_stale_off_hours":
 			gammaQualityAddGate(q, "cache_state", rpc.GammaQualityGateBlock, "stale off-hours cache")
+		case code == "unclassified_data_warning":
+			gammaQualityAddGate(q, "warning_contract", rpc.GammaQualityGateBlock, "unclassified data warning")
 		case code == "throttled":
 			gammaQualityAddGate(q, "gateway_pacing", rpc.GammaQualityGateBlock, "gateway throttled option fan-out")
 		case code == "all_iv_derived":
