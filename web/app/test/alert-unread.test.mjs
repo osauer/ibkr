@@ -667,8 +667,9 @@ test("act day dominates: act rows sort first, dismiss never hides them, counter 
   assert.equal(harness.elements.get("dismissCurrentButton").hidden, true, "dismiss control disappears once used");
 });
 
-test("delivery-down banner is prominent during an open session and quiet otherwise", () => {
+test("delivery-down banner is prominent during open and pre-open sessions and quiet otherwise", () => {
   const harness = loadAlerts();
+  const hour = 3600 * 1000;
   // Degraded web-push delivery while the session is open: prominent banner.
   harness.state.governance = governanceDTO({ delivery_health: { state: "degraded", updated_at: "2026-07-20T14:31:00Z" } });
   harness.state.snapshot.market_calendar = { session: { is_open: true } };
@@ -676,11 +677,24 @@ test("delivery-down banner is prominent during an open session and quiet otherwi
   const banner = harness.elements.get("alertsDeliveryBanner");
   assert.equal(banner.hidden, false, "degraded delivery during an open session must banner");
   assert.match(banner.textContent, /may not be reaching your phone/i);
+  assert.match(banner.textContent, /while the market is open/);
   // Unavailable delivery escalates the copy.
   harness.state.governance = governanceDTO({ delivery_health: { state: "unavailable", updated_at: "2026-07-20T14:31:00Z" } });
   harness.exports.renderGovernance();
   assert.equal(banner.hidden, false);
   assert.match(banner.textContent, /not reaching your phone/i);
+  // Pre-open on a trading date is attention-on: pre-market alerts are exactly
+  // the ones a phone must deliver before the bell, and the copy must not
+  // claim the market is already open.
+  harness.state.snapshot.market_calendar = { session: { state: "regular", is_open: false, open: new Date(Date.now() + hour).toISOString(), close: new Date(Date.now() + 7.5 * hour).toISOString() } };
+  harness.exports.renderGovernance();
+  assert.equal(banner.hidden, false, "failing delivery pre-open on a trading date must banner");
+  assert.match(banner.textContent, /ahead of the open/);
+  assert.equal(banner.textContent.includes("while the market is open"), false, "pre-open copy must not claim an open market");
+  // After the close on a trading date the quiet presentation returns.
+  harness.state.snapshot.market_calendar = { session: { state: "regular", is_open: false, open: new Date(Date.now() - 8 * hour).toISOString(), close: new Date(Date.now() - hour).toISOString() } };
+  harness.exports.renderGovernance();
+  assert.equal(banner.hidden, true, "after-close must not banner");
   // A known-closed session keeps the quiet disclosure-only presentation.
   harness.state.snapshot.market_calendar = { session: { is_open: false } };
   harness.exports.renderAlerts();
@@ -698,6 +712,47 @@ test("delivery-down banner is prominent during an open session and quiet otherwi
     harness.exports.renderGovernance();
     assert.equal(banner.hidden, true, `${state} delivery must not banner`);
   }
+});
+
+test("status line price stamp is honest per session phase", () => {
+  const harness = loadAlerts();
+  const hour = 3600 * 1000;
+  harness.state.snapshot.canary = {
+    as_of: "2026-07-20T06:18:00Z",
+    fingerprint: { key: "canary-current" },
+    portfolio_fit: "low",
+    portfolio_alert_relevant: true,
+    severity: "observe",
+    summary: "No canary conditions.",
+    portfolio: {},
+    rows: [],
+  };
+  const render = (session) => {
+    if (session === undefined) delete harness.state.snapshot.market_calendar;
+    else harness.state.snapshot.market_calendar = { session };
+    harness.exports.renderAlerts();
+    return harness.elements.get("alertsStatusLine").textContent;
+  };
+  // Open session: plain freshness stamp.
+  assert.match(render({ state: "regular", is_open: true }), /Data as of /);
+  // Pre-open on a trading date: prints are live indicative quotes; only the
+  // daily-change anchors are frozen at the last close. The stamp must not
+  // launder live prints as last-session, the bug observed live 2026-07-20
+  // pre-open while the header ticker counted down to the bell.
+  const preOpen = render({ state: "regular", is_open: false, open: new Date(Date.now() + hour).toISOString(), close: new Date(Date.now() + 7.5 * hour).toISOString() });
+  assert.match(preOpen, /pre-market — live indicative prints; daily changes anchor to the last close/);
+  assert.equal(preOpen.includes("market closed"), false, "pre-open must not claim the market is closed");
+  assert.equal(preOpen.includes("last-session prints"), false, "pre-open prints are live, not last-session");
+  // After the close on a trading date the prints really are last-session.
+  assert.match(render({ state: "regular", is_open: false, open: new Date(Date.now() - 8 * hour).toISOString(), close: new Date(Date.now() - hour).toISOString() }), /after close — prices are last-session prints/);
+  // Weekend and holiday closures name themselves.
+  assert.match(render({ state: "closed", is_open: false, reason: "weekend" }), /weekend — prices are last-session prints/);
+  assert.match(render({ state: "holiday", is_open: false }), /market holiday — prices are last-session prints/);
+  // A non-trading closure with no better detail keeps the generic stamp.
+  assert.match(render({ state: "closed", is_open: false }), /market closed — prices are last-session prints/);
+  // No calendar coverage means no session claim, in either direction.
+  assert.match(render({ state: "unknown", is_open: false }), /Data as of /);
+  assert.match(render(undefined), /Data as of /);
 });
 
 test("preview relevance reads the daemon-stamped flag and fails open when unstamped", () => {

@@ -432,29 +432,50 @@ function renderAttentionList(decisionRows, dataRows, emptyText) {
   list.replaceChildren(...children);
 }
 
-function marketSessionClosed() {
+// The calendar's not-open umbrella covers phases with different price
+// stories: pre-open on a trading date shows live indicative pre-market prints
+// anchored to the last close, after-close shows that session's closing
+// prints, and weekend/holiday closures show older last-session prints.
+// Classify with the same open/close bounds the header ticker uses so this
+// page never calls live pre-market prints "last-session". An absent calendar
+// or no-coverage state is "unknown": claim nothing about the session.
+function marketSessionPhase() {
   const session = state.snapshot?.market_calendar?.session;
-  return Boolean(session) && session.is_open !== true;
+  if (!session || session.state === "unknown") return "unknown";
+  if (session.is_open === true) return "open";
+  const now = Date.now();
+  const open = Date.parse(session.open ?? "");
+  const close = Date.parse(session.close ?? "");
+  if (Number.isFinite(open) && now < open) return "pre-open";
+  if (Number.isFinite(close) && now >= close) return "after-close";
+  if (session.state === "holiday") return "holiday";
+  return session.reason === "weekend" ? "weekend" : "closed";
 }
 
-// Push delivery failing during an open session means the operator may be
-// trading unalerted — that fact belongs at the top of the page in plain
-// English, not inside the governance evidence disclosure. Known-closed
-// sessions keep the quiet disclosure-only presentation; an unknown session
-// state fails visible. Suppressed delivery (operator chose Off) is not a
-// failure and never banners.
+// Push delivery failing while the operator may be trading unalerted belongs
+// at the top of the page in plain English, not inside the governance evidence
+// disclosure. That window is the open session plus pre-open on a trading
+// date — pre-market alerts are exactly the ones a phone must deliver before
+// the bell. Known non-trading phases (after close, weekend, holiday) keep the
+// quiet disclosure-only presentation; an unknown session state fails visible.
+// Suppressed delivery (operator chose Off) is not a failure and never banners.
 function renderDeliveryBanner() {
   const banner = $("alertsDeliveryBanner");
   const health = state.governance?.delivery_health || {};
   const failing = ["degraded", "unavailable"].includes(health.state);
-  if (!failing || marketSessionClosed()) {
+  const phase = marketSessionPhase();
+  const attentive = phase === "open" || phase === "pre-open" || phase === "unknown";
+  if (!failing || !attentive) {
     banner.hidden = true;
     banner.textContent = "";
     return;
   }
+  const when = phase === "pre-open" ? " ahead of the open"
+    : phase === "open" ? " while the market is open"
+      : "";
   banner.textContent = health.state === "degraded"
-    ? "Alerts may not be reaching your phone — push delivery is degraded while the market is open. Rely on this page until delivery recovers."
-    : "Alerts are not reaching your phone — push delivery is down while the market is open. Rely on this page and check notification settings.";
+    ? `Alerts may not be reaching your phone — push delivery is degraded${when}. Rely on this page until delivery recovers.`
+    : `Alerts are not reaching your phone — push delivery is down${when}. Rely on this page and check notification settings.`;
   banner.hidden = false;
 }
 
@@ -471,18 +492,34 @@ function renderAlertsStatusLine(firstSeenAt) {
   const firstSeen = firstSeenAt ? alertDayTime(firstSeenAt) : "";
   const asOf = canary.as_of ? alertDayTime(canary.as_of) : "";
   if (firstSeen && firstSeen !== asOf) parts.push(`First seen ${firstSeen}.`);
-  // A closed market means every price fact on this page is a last-session
-  // print; the stamp must not launder frozen data as fresh.
-  if (asOf) {
-    parts.push(marketSessionClosed()
-      ? `Snapshot ${asOf} · market closed — prices are last-session prints.`
-      : `Data as of ${asOf}.`);
-  }
+  if (asOf) parts.push(sessionPriceStamp(asOf));
   status.textContent = parts.join(" ");
   status.hidden = false;
   const tone = alertTone({ severity: canary.severity, action: canary.action });
   status.classList.toggle("alerts-status--risk", tone === "risk");
   status.classList.toggle("alerts-status--warn", tone === "warn");
+}
+
+// The stamp tells the price story for the session phase: a closed market must
+// not launder frozen prints as fresh, and pre-market must not call live
+// indicative prints "last-session" — pre-open, prints are live and only the
+// daily-change anchors come from the last close. An unknown phase claims
+// nothing about the session.
+function sessionPriceStamp(asOf) {
+  switch (marketSessionPhase()) {
+    case "pre-open":
+      return `Snapshot ${asOf} · pre-market — live indicative prints; daily changes anchor to the last close.`;
+    case "after-close":
+      return `Snapshot ${asOf} · after close — prices are last-session prints.`;
+    case "weekend":
+      return `Snapshot ${asOf} · weekend — prices are last-session prints.`;
+    case "holiday":
+      return `Snapshot ${asOf} · market holiday — prices are last-session prints.`;
+    case "closed":
+      return `Snapshot ${asOf} · market closed — prices are last-session prints.`;
+    default:
+      return `Data as of ${asOf}.`;
+  }
 }
 
 function renderPassedChecks(passedItems) {
