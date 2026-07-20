@@ -599,8 +599,8 @@ red rows. Then `make docs-regen`; `make check` enforces no drift.
   depth/streak/freshness columns; promotion criteria section.
 - `docs/specs/regime-backtest-plan.md`: decisions journal becomes the
   forward-collection corpus; promotion criteria cross-referenced.
-- Both specs have `.html` twins under the docs-html sync gate → hand-convert
-  and `make docs-html-stamp`.
+- Both specs have generated `.html` derivatives → run
+  `make docs-html-regen` after editing their Markdown sources.
 - Indicator notes constants in `regime.go`: each gains one sentence naming
   its eligibility gates (the notes are consumer-visible documentation).
 

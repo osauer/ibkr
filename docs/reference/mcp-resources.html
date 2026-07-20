@@ -1,158 +1,25 @@
 <!doctype html>
-<!-- md-source: mcp-resources.md sha256:18563a06baae2d056a8eb1ec33399acc90bcf81d154072f0b3a59ea349ba6895 -->
+<!-- Generated from Markdown by scripts/docgen/docs-html. DO NOT EDIT. -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MCP resources reference | ibkr</title>
-  <meta name="description" content="These are the non-tool resources ibkr mcp exposes to MCP clients. Tools are documented separately in MCP tools reference.">
+  <meta name="description" content="Reference for the non-tool resources exposed by ibkr mcp, including live quote subscriptions.">
   <link rel="canonical" href="https://osauer.dev/ibkr/reference/mcp-resources.html">
-  <script type="application/ld+json">
-{
-    "@context": "https://schema.org",
-    "@type": "TechArticle",
-    "author": {
-      "@type": "Person",
-      "name": "Oliver Sauer",
-      "url": "https://github.com/osauer"
-    },
-    "dateModified": "2026-06-11T08:17:00+02:00",
-    "description": "These are the non-tool resources ibkr mcp exposes to MCP clients. Tools are documented separately in MCP tools reference.",
-    "headline": "MCP resources reference",
-    "isPartOf": {
-      "@type": "SoftwareApplication",
-      "name": "ibkr",
-      "url": "https://osauer.dev/ibkr/"
-    },
-    "url": "https://osauer.dev/ibkr/reference/mcp-resources.html"
-  }
-  </script>
-  <style>
+  <link rel="icon" type="image/png" href="../social/canary-icon.png">
 
-    :root {
-      --paper: #f7f5ef;
-      --paper-strong: #fffdf7;
-      --ink: #101827;
-      --muted: #42526a;
-      --line: #d8d2c4;
-      --green: #087f6b;
-      --green-dark: #055f52;
-      --terminal: #0e1626;
-    }
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-    body {
-      margin: 0;
-      background: var(--paper);
-      color: var(--ink);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.58;
-    }
-    a { color: var(--green-dark); text-underline-offset: 0.18em; }
-    .topline { height: 12px; background: var(--green); }
-    .wrap { width: min(1040px, calc(100% - 40px)); margin: 0 auto; }
-    .nav {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 24px;
-      padding: 22px 0 14px;
-    }
-    .brand {
-      color: var(--ink);
-      font-size: 28px;
-      font-weight: 800;
-      letter-spacing: 0;
-      text-decoration: none;
-    }
-    .nav-links { display: flex; align-items: center; gap: 22px; color: var(--muted); font-size: 15px; font-weight: 650; }
-    .nav-links a { color: var(--muted); text-decoration: none; }
-    .doc {
-      padding: 28px 0 70px;
-    }
-    .doc h1 {
-      max-width: 820px;
-      margin: 0 0 18px;
-      font-size: clamp(36px, 5vw, 56px);
-      line-height: 1.05;
-      letter-spacing: 0;
-    }
-    .doc h2 {
-      margin: 44px 0 14px;
-      padding-top: 18px;
-      border-top: 1px solid var(--line);
-      font-size: clamp(26px, 3vw, 34px);
-      line-height: 1.15;
-    }
-    .doc h3 { margin: 30px 0 10px; font-size: 22px; line-height: 1.22; }
-    .doc h4 { margin: 24px 0 8px; font-size: 18px; }
-    .doc p, .doc li { color: #26364d; font-size: 17px; }
-    .doc ul, .doc ol { padding-left: 26px; }
-    .doc li { margin: 6px 0; }
-    .doc code {
-      border: 1px solid #d5cdbc;
-      border-radius: 5px;
-      background: var(--paper-strong);
-      padding: 0.08em 0.28em;
-      color: #172033;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 0.92em;
-    }
-    .doc pre {
-      overflow-x: auto;
-      border-radius: 8px;
-      background: var(--terminal);
-      padding: 18px;
-      border: 1px solid #26364c;
-    }
-    .doc pre code {
-      border: 0;
-      background: transparent;
-      padding: 0;
-      color: #eef3ff;
-      font-size: 14px;
-    }
-    .doc blockquote {
-      margin: 20px 0;
-      padding: 10px 18px;
-      border-left: 4px solid var(--green);
-      background: var(--paper-strong);
-    }
-    .doc table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 18px 0 26px;
-      background: var(--paper-strong);
-      font-size: 15px;
-    }
-    .doc th, .doc td {
-      border: 1px solid var(--line);
-      padding: 10px 12px;
-      vertical-align: top;
-      text-align: left;
-    }
-    .doc th { color: var(--ink); background: #ece7db; }
-    footer {
-      border-top: 1px solid var(--line);
-      background: var(--paper-strong);
-      padding: 28px 0;
-    }
-    footer .wrap { display: flex; flex-wrap: wrap; gap: 18px; }
-    @media (max-width: 760px) {
-      .nav { align-items: flex-start; flex-direction: column; }
-      .nav-links { flex-wrap: wrap; gap: 12px; }
-      .wrap { width: min(100% - 28px, 1040px); }
-    }
-  </style>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","author":{"@type":"Person","name":"Oliver Sauer","url":"https://github.com/osauer"},"description":"Reference for the non-tool resources exposed by ibkr mcp, including live quote subscriptions.","headline":"MCP resources reference","isPartOf":{"@type":"SoftwareApplication","name":"ibkr","url":"https://osauer.dev/ibkr/"},"url":"https://osauer.dev/ibkr/reference/mcp-resources.html"}</script>
+  <link rel="stylesheet" href="../shared.css">
 </head>
-<body>
+<body class="layout-standard">
   <div class="topline"></div>
   <header class="wrap nav" aria-label="Primary">
-    <a class="brand" href="../index.html">ibkr</a>
+    <a class="brand" href="../index.html" aria-label="ibkr canary home"><img src="../social/canary-icon.png" width="192" height="192" alt="">ibkr canary</a>
     <nav class="nav-links" aria-label="Site">
       <a href="../index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
-      <a href="mcp-tools.html">MCP tools</a>
+      <a href="../reference/mcp-tools.html">MCP tools</a>
       <a href="../guides/agentic-use.html">Agent guide</a>
     </nav>
   </header>
@@ -164,11 +31,15 @@
 <p>Live stock / ETF quote resource.</p>
 <p>Use this when an MCP client wants to keep watching one equity or ETF quote without repeatedly calling <code>ibkr_quote</code>. The template is discovered through <code>resources/templates/list</code>.</p>
 <p>Example URI:</p>
-<pre><code>ibkr://quote/AAPL</code></pre>
+<pre><code class="language-text">ibkr://quote/AAPL
+</code></pre>
 <p><code>resources/read</code> returns a one-off quote snapshot with the same JSON shape as <code>ibkr quote AAPL --json</code>, including the enriched headline <code>price</code>, <code>price_source</code>, previous close, change, ranges, volume/average volume, 20-day average volume/dollar volume, <code>price_as_of</code>, stale flags, and optional <code>session_context</code>.</p>
 <p><code>resources/subscribe</code> returns <code>{}</code> and then streams coalesced tick frames through <code>notifications/resources/updated</code> until the client calls <code>resources/unsubscribe</code> or closes the MCP session. Notification payloads embed a JSON frame in <code>params.contents[].text</code>; the frame shape matches <code>ibkr quote AAPL --watch --json</code>.</p>
 <p>Only stock and ETF symbols are supported. Option contract streaming is not exposed as an MCP resource today; use <code>ibkr_chain</code> or CLI option quotes for option snapshots.</p>
   </main>
-  <footer><div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div><div class="wrap" style="margin-top:10px;font-size:13px;opacity:.8">Not financial advice — ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div></footer>
+  <footer>
+    <div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div>
+    <div class="wrap fineprint">Not financial advice. ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div>
+  </footer>
 </body>
 </html>

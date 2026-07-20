@@ -56,7 +56,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-service-worker-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish registry-publish-verify-first release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-stamp account-data-check hook-behavior-check agent-config-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-service-worker-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish registry-publish-verify-first release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-regen account-data-check hook-behavior-check agent-config-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -420,9 +420,10 @@ modernize: ## Apply go fix + modernize rewrites in place
 # this after editing internal/config/config.go, internal/mcp/tools.go,
 # or adding/changing a // docgen:env comment, and commit the diff
 # alongside the source change. `make docs-check` enforces no drift.
-docs-regen: ## Regenerate docs/reference/*.md from generators
+docs-regen: ## Regenerate docs/reference/*.md and their public HTML derivatives
 	go run ./scripts/docgen/config-ref
 	go run ./scripts/docgen/mcp-tools
+	go run ./scripts/docgen/docs-html
 
 # docs-check is the CI gate: regenerate to a tempfile, diff against the
 # checked-in copy, fail if they differ. Catches the "I changed a struct
@@ -447,17 +448,17 @@ docs-check: ## Verify checked-in docs/reference/*.md match what the generators e
 	done; \
 	exit $$fail
 
-# The docs/ md↔html twins (concepts, guides, reference, design, specs)
-# are hand-converted; nothing regenerates the html when the md moves.
-# Each twin html carries an `<!-- md-source: ... sha256:... -->` marker
-# recording the md hash it was last synced against; docs-html-check
-# fails when the md has changed since. Workflow: edit md → check fails →
-# update the html content to match → `make docs-html-stamp`.
-docs-html-check: ## Verify docs/ html twins were synced after their md last changed
-	@./scripts/check-docs-html-sync.sh
+# Markdown is the only prose authority for the 12 public documentation pages
+# declared by scripts/docgen/docs-html. GitHub Pages currently publishes docs/
+# verbatim, so deterministic HTML derivatives stay checked in. The check
+# re-renders every declared page and compares exact bytes; it never trusts a
+# marker stored in the derivative.
+docs-html-check: ## Verify generated docs/ HTML exactly matches Markdown sources
+	@go test ./scripts/docgen/docs-html
+	@go run ./scripts/docgen/docs-html -check
 
-docs-html-stamp: ## Re-stamp md-source markers in docs/ html twins (after syncing content)
-	@./scripts/check-docs-html-sync.sh --stamp
+docs-html-regen: ## Regenerate public docs/ HTML from Markdown sources
+	@go run ./scripts/docgen/docs-html
 
 # Pull the current S&P-500 membership list from Wikipedia and rewrite
 # internal/breadth/spx/members_data.go. Invoked by `make release` so a

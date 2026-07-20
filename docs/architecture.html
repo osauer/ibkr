@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: architecture.md sha256:e66f274750a0d19fbf6bfe16915884d22124663fc64252e106e4b5bf7bd7cebf -->
+<!-- Generated from Markdown by scripts/docgen/docs-html. DO NOT EDIT. -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -8,126 +8,15 @@
   <meta name="description" content="System architecture, protocols, external data flows, process boundaries, and local persistence for ibkr Canary.">
   <link rel="canonical" href="https://osauer.dev/ibkr/architecture.html">
   <link rel="icon" type="image/png" href="social/canary-icon.png">
-
-  <meta property="og:type" content="article">
-  <meta property="og:url" content="https://osauer.dev/ibkr/architecture.html">
+<meta property="og:type" content="article">
   <meta property="og:title" content="Architecture | ibkr">
-  <meta property="og:description" content="How ibkr Canary is put together: one daemon that owns the broker session, typed adapters for humans and AI hosts, and clear state ownership.">
+  <meta property="og:description" content="System architecture, protocols, external data flows, process boundaries, and local persistence for ibkr Canary.">
   <meta property="og:image" content="https://osauer.dev/ibkr/diagrams/system-architecture.png">
-  <meta property="og:image:width" content="2880">
-  <meta property="og:image:height" content="1696">
-  <meta property="og:image:alt" content="ibkr canary runtime architecture diagram">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Architecture | ibkr">
-  <meta name="twitter:description" content="One daemon owns the broker session; typed adapters serve humans, AI hosts, and the Canary app.">
-  <meta name="twitter:image" content="https://osauer.dev/ibkr/diagrams/system-architecture.png">
-
-  <script type="application/ld+json">
-  {
-    "@context": "https://schema.org",
-    "@graph": [
-      {
-        "@type": "TechArticle",
-        "headline": "ibkr Canary architecture",
-        "name": "Architecture",
-        "url": "https://osauer.dev/ibkr/architecture.html",
-        "description": "System architecture, protocols, external data flows, process boundaries, and local persistence for ibkr Canary.",
-        "image": "https://osauer.dev/ibkr/diagrams/system-architecture.png",
-        "author": { "@type": "Person", "name": "Oliver Sauer", "url": "https://github.com/osauer" },
-        "datePublished": "2026-07-20",
-        "dateModified": "2026-07-20T15:10:00+02:00",
-        "isPartOf": { "@type": "WebSite", "name": "ibkr canary", "url": "https://osauer.dev/ibkr/" },
-        "about": { "@type": "SoftwareApplication", "name": "ibkr canary", "url": "https://osauer.dev/ibkr/" }
-      },
-      {
-        "@type": "BreadcrumbList",
-        "itemListElement": [
-          { "@type": "ListItem", "position": 1, "name": "ibkr canary", "item": "https://osauer.dev/ibkr/" },
-          { "@type": "ListItem", "position": 2, "name": "Architecture", "item": "https://osauer.dev/ibkr/architecture.html" }
-        ]
-      }
-    ]
-  }
-  </script>
-
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","author":{"@type":"Person","name":"Oliver Sauer","url":"https://github.com/osauer"},"description":"System architecture, protocols, external data flows, process boundaries, and local persistence for ibkr Canary.","headline":"Architecture","isPartOf":{"@type":"SoftwareApplication","name":"ibkr","url":"https://osauer.dev/ibkr/"},"url":"https://osauer.dev/ibkr/architecture.html"}</script>
   <link rel="stylesheet" href="shared.css">
-  <style>
-    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
-
-    .doc .lede { max-width: 780px; font-size: 19px; line-height: 1.55; }
-    .doc .principle {
-      max-width: 780px;
-      margin: 26px 0;
-      padding: 18px 22px;
-      border-left: 4px solid var(--green);
-      border-radius: 0 10px 10px 0;
-      background: var(--paper-strong);
-    }
-    .doc .principle p { margin: 0; font-size: 18px; line-height: 1.55; color: var(--ink); }
-
-    .toc { margin: 30px 0 6px; }
-    .toc ul { display: grid; grid-template-columns: repeat(auto-fill, minmax(185px, 1fr)); gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
-    .toc li { margin: 0; }
-    .toc a {
-      display: flex;
-      align-items: center;
-      gap: 9px;
-      padding: 9px 12px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: var(--paper-strong);
-      color: var(--muted);
-      font-size: 13.5px;
-      font-weight: 650;
-      text-decoration: none;
-    }
-    .toc a .n { color: var(--green); font-size: 11.5px; font-weight: 800; letter-spacing: .05em; }
-    .toc a:hover { border-color: var(--green); color: var(--green-dark); }
-    .toc .toc-label { font-size: 13px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
-    @media (max-width: 760px) { .toc ul { grid-template-columns: repeat(2, 1fr); } }
-
-    .secno { margin-right: 12px; color: var(--green); font-size: .62em; font-weight: 800; letter-spacing: .08em; vertical-align: .18em; }
-
-    .diagram { margin: 26px 0 34px; }
-    .diagram-frame {
-      overflow-x: auto;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: var(--paper);
-    }
-    .diagram img { display: block; width: 100%; min-width: 960px; height: auto; }
-    .diagram figcaption { margin-top: 10px; color: var(--muted); font-size: 14px; }
-
-    .cardgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin: 20px 0 26px; }
-    .card {
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: var(--paper-strong);
-      padding: 16px 18px 18px;
-    }
-    .card h3 { margin: 0; font-size: 17px; line-height: 1.3; }
-    .card .life {
-      display: inline-block;
-      margin-top: 8px;
-      padding: 3px 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: var(--paper);
-      color: var(--muted);
-      font-size: 12.5px;
-      font-weight: 650;
-    }
-    .doc .card p { margin: 10px 0 0; font-size: 15px; line-height: 1.55; }
-    .card.owns h3 { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 15px; }
-
-    .tblwrap { overflow-x: auto; margin: 18px 0 26px; }
-    .tblwrap table { margin: 0; min-width: 720px; }
-
-    .brand { display: inline-flex; align-items: center; gap: 10px; }
-    .brand img { width: 34px; height: 34px; border-radius: 8px; box-shadow: 0 8px 18px rgba(16, 24, 39, 0.12); }
-  </style>
 </head>
-<body>
+<body class="layout-architecture">
   <div class="topline"></div>
   <header class="wrap nav" aria-label="Primary">
     <a class="brand" href="index.html" aria-label="ibkr canary home"><img src="social/canary-icon.png" width="192" height="192" alt="">ibkr canary</a>
@@ -139,209 +28,396 @@
     </nav>
   </header>
   <main class="wrap doc">
-    <h1 id="architecture">Architecture</h1>
-    <p class="lede"><code>ibkr</code> runs on your machine and connects to one Interactive Brokers TWS or IB Gateway session. It adapts that session for humans, AI hosts, and the Canary app, and it adds a risk harness. One ownership rule shapes the design:</p>
-    <blockquote class="principle">
-      <p>The daemon owns all broker-connected and runtime-state capability: the connection, observed state, schedulers, journals, and policy execution. Every other process adapts typed contracts for its audience, and none of them owns broker state.</p>
-    </blockquote>
-    <p>A few local workflows are deliberate exceptions: watchlist edits, setup, updates, process management, and offline research or backtests all run without daemon RPC.</p>
-
-    <nav class="toc" aria-label="On this page">
-      <span class="toc-label">On this page</span>
-      <ul>
-        <li><a href="#system-overview"><span class="n">01</span>System Overview</a></li>
-        <li><a href="#runtime-processes"><span class="n">02</span>Runtime Processes</a></li>
-        <li><a href="#code-ownership-layers"><span class="n">03</span>Code Ownership</a></li>
-        <li><a href="#data-flows-and-protocols"><span class="n">04</span>Flows &amp; Protocols</a></li>
-        <li><a href="#broker-and-external-data-sources"><span class="n">05</span>Data Sources</a></li>
-        <li><a href="#data-and-persistence"><span class="n">06</span>Data &amp; Persistence</a></li>
-        <li><a href="#deployment-scopes-and-multiple-instances"><span class="n">07</span>Deployment Scopes</a></li>
-        <li><a href="#http-app-and-remote-access"><span class="n">08</span>HTTP App &amp; Remote</a></li>
-        <li><a href="#observability"><span class="n">09</span>Observability</a></li>
-        <li><a href="#change-flow"><span class="n">10</span>Change Flow</a></li>
-      </ul>
-    </nav>
-
-    <h2 id="system-overview"><span class="secno" aria-hidden="true">01</span>System Overview</h2>
-    <figure class="diagram">
-      <div class="diagram-frame">
-        <a href="diagrams/system-architecture.svg"><img src="diagrams/system-architecture.svg" width="1440" height="848" alt="Runtime architecture diagram: numbered layers for consumers, surface adapters, the typed RPC contract, daemon authority and domain, integration clients, and external providers, with an optional remote delivery strip below." loading="eager" decoding="async"></a>
-      </div>
-      <figcaption>Scroll sideways on small screens, or open the full-size <a href="diagrams/system-architecture.svg">SVG</a> · <a href="diagrams/system-architecture.png">PNG</a>. The diagram is generated from <a href="diagrams/render-architecture.mjs">render-architecture.mjs</a> (<a href="diagrams/ICON-LICENSE.txt">icon license</a>).</figcaption>
-    </figure>
-    <p>The numbered columns are layers of one system, not six separate services: consumers, surface adapters, the shared typed contract, daemon authority and domain logic, integration clients, and external providers or data.</p>
-    <p>The default deployment has one shared daemon. <code>ibkr mcp</code> is an adapter process owned by each MCP host, not a second daemon, and <code>ibkr app</code> is a separate HTTP/PWA process. Inside the daemon, a primary broker connection serves interactive, account, and gamma work, while a second client connection carries the S&amp;P 500 breadth history fan-out.</p>
-
-    <h2 id="runtime-processes"><span class="secno" aria-hidden="true">02</span>Runtime Processes</h2>
-    <p>All local modes ship in the same <code>ibkr</code> binary, but they differ in lifetime and authority.</p>
-    <div class="cardgrid">
-      <div class="card">
-        <h3>CLI / TUI</h3>
-        <span class="life">One command</span>
-        <p>Validates input, calls the daemon for broker and runtime work, and renders human or JSON output. A few local-only workflows run without the daemon.</p>
-      </div>
-      <div class="card">
-        <h3><code>ibkr daemon</code></h3>
-        <span class="life">Demand-driven background process or foreground service</span>
-        <p>Owns the broker connections and all runtime state: caches, schedulers, journals, source ingestion, risk-policy execution, proposals, opportunities, and reconciliation.</p>
-      </div>
-      <div class="card">
-        <h3><code>ibkr mcp</code></h3>
-        <span class="life">Long-lived child of each MCP host</span>
-        <p>Speaks MCP JSON-RPC 2.0 over stdio and translates tools and resources into short daemon calls. The surface serves read, research, and preview work; it exposes no broker-write tools.</p>
-      </div>
-      <div class="card">
-        <h3><code>ibkr app</code></h3>
-        <span class="life">Independently run or supervised HTTP process</span>
-        <p>Serves the embedded Canary PWA and owns pairing, auth, and app state. Maintains the live snapshot and quote streams, emits SSE, and can connect to the remote relay and Web Push.</p>
-      </div>
-      <div class="card">
-        <h3>Canary Paired PWA</h3>
-        <span class="life">Browser or iOS Home Screen app</span>
-        <p>Renders authenticated snapshots, receives SSE and push notifications, and keeps device-side credentials and recovery state. It is a plain PWA, not an Android Trusted Web Activity.</p>
-      </div>
-      <div class="card">
-        <h3>TWS / IB Gateway</h3>
-        <span class="life">Interactive Brokers process outside this repo</span>
-        <p>Terminates the local TWS API socket and maintains the broker-managed session.</p>
-      </div>
-    </div>
-    <p>Clients auto-spawn the daemon when the socket is absent, and it exits after 15 idle minutes unless foreground mode disables the timeout. Durable caches and journals survive the process.</p>
-
-    <h2 id="code-ownership-layers"><span class="secno" aria-hidden="true">03</span>Code Ownership Layers</h2>
-    <div class="cardgrid">
-      <div class="card owns">
-        <h3>pkg/ibkr</h3>
-        <p>The clean-room TWS wire client. Protocol framing, sockets and TLS, request IDs, broker callbacks, contract resolution, and order-wire details live here.</p>
-      </div>
-      <div class="card owns">
-        <h3>internal/daemon</h3>
-        <p>The long-running authority. It owns both broker connectors, the external-source clients, caches, schedulers, journals, XDG state, risk-capital runtime state, daily Flex ingestion, and post-trade reconciliation.</p>
-      </div>
-      <div class="card owns">
-        <h3>internal/risk</h3>
-        <p>The pure evaluation library behind advisory verdicts: thresholds and fingerprints, canary signal types, option math, the daily trading rulebook, and risk-constitution evaluation. It does no I/O and owns no broker state.</p>
-      </div>
-      <div class="card owns">
-        <h3>internal/rpc</h3>
-        <p>Defines the typed method names and request/response structs that daemon, CLI, app, and MCP adapters share. Add fields here first; teach surfaces to render them second.</p>
-      </div>
-      <div class="card owns">
-        <h3>internal/cli</h3>
-        <p>Adapts commands to daemon methods or to one of the local-only workflows. Broker policy and state do not belong in the renderer.</p>
-      </div>
-      <div class="card owns">
-        <h3>internal/mcp</h3>
-        <p>Adapts MCP tools and resources to daemon contracts. Tool descriptions are product surface and must match the real authority and data quality.</p>
-      </div>
-      <div class="card owns">
-        <h3>internal/app</h3>
-        <p>Owns the HTTP host, device auth, app-local persistence, live polling and streaming, SSE fanout, Web Push, and the optional outbound relay. The live cache is the normal read path. Settings, reviews, and order, proposal, or opportunity actions make direct typed daemon calls instead.</p>
-      </div>
-      <div class="card owns">
-        <h3>cloudflare/remote-relay</h3>
-        <p>A Worker plus a Durable Object, used as transport. It forwards framed HTTP and SSE traffic over the app's outbound connector. It owns no device grants, pairing sessions, browser sessions, daemon access, or broker credentials.</p>
-      </div>
-      <div class="card owns">
-        <h3>web/app</h3>
-        <p>The embedded no-build Canary SPA and its service worker. Global account, market, and sync state stays outside individual tab content.</p>
-      </div>
-    </div>
-
-    <h2 id="data-flows-and-protocols"><span class="secno" aria-hidden="true">04</span>Data Flows and Protocols</h2>
-    <p>The daemon protocol and the MCP protocol are different on purpose; only the MCP side is JSON-RPC 2.0.</p>
-    <div class="tblwrap">
-      <table>
-        <thead>
-          <tr><th>Flow</th><th>Protocol and Payload</th><th>Notes</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>Human → CLI</td><td><code>argv</code> / stdin; human text or JSON on stdout</td><td>One-shot local process.</td></tr>
-          <tr><td>AI host → <code>ibkr mcp</code></td><td>MCP JSON-RPC 2.0, newline-delimited over stdio</td><td>The host owns the process lifetime.</td></tr>
-          <tr><td>CLI / MCP / app → daemon</td><td>Custom typed newline-delimited JSON request/response frames over a Unix domain socket</td><td>The envelope uses project fields such as <code>ok</code>, <code>frame</code>, <code>stream</code>, and <code>end</code>. It is not JSON-RPC 2.0.</td></tr>
-          <tr><td>App live service → daemon</td><td>Periodic typed calls plus long-lived quote streams</td><td>Feeds one app snapshot/cache and its change fanout.</td></tr>
-          <tr><td>App request routes → daemon</td><td>Request-driven typed calls over the same Unix socket</td><td>Used where a route needs a fresh action, review, or settings response instead of the cached snapshot.</td></tr>
-          <tr><td>Daemon → TWS / Gateway</td><td>Clean-room TWS wire protocol over TCP, optionally TLS</td><td>A primary interactive connection, plus a breadth connection with its own client ID and rate budget.</td></tr>
-          <tr><td>Browser / PWA ↔ app</td><td>Public static assets and pairing/auth endpoints, then authenticated HTTP(S) JSON and <code>/api/events</code> Server-Sent Events</td><td>Local and LAN access reaches the app directly. Pairing-session creation is loopback-only.</td></tr>
-          <tr><td>PWA ↔ remote relay</td><td>Public HTTPS carrying allowed HTTP/SSE traffic</td><td>Optional remote path.</td></tr>
-          <tr><td>App ↔ remote relay</td><td>HTTPS registration, then authenticated outbound WSS</td><td>Requests and streaming responses travel as frames over the WebSocket. The local connector enforces the forwarded-path allowlist.</td></tr>
-          <tr><td>App → browser push service → PWA</td><td>VAPID-authenticated Web Push over HTTPS</td><td>Push payloads are redacted, and the relay is not in the delivery path.</td></tr>
-          <tr><td>Daemon → external observed-data sources</td><td>Scheduled or on-demand HTTPS/FTP; JSON, CSV, XML, RSS, and text</td><td>Source health and stale or unknown states stay explicit in typed results.</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <h2 id="broker-and-external-data-sources"><span class="secno" aria-hidden="true">05</span>Broker and External Data Sources</h2>
-    <p>Not all market context arrives through TWS or Gateway.</p>
-    <div class="tblwrap">
-      <table>
-        <thead>
-          <tr><th>Source</th><th>Runtime Path</th><th>Data</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>TWS / IB Gateway API socket</td><td>TWS wire protocol over TCP/TLS</td><td>Account, positions, quotes, option chains/Greeks/OI, historical bars, scanners, order lifecycle, shortable-share observations, and broker WhatIf/eligibility.</td></tr>
-          <tr><td>IBKR Flex Web Service</td><td>HTTPS POST and polling</td><td>Daily raw Flex XML statements used as broker statement truth for reconciliation.</td></tr>
-          <tr><td>IBKR short-stock availability</td><td>FTP</td><td>Borrow availability and fee-rate evidence.</td></tr>
-          <tr><td>Nasdaq</td><td>HTTPS JSON, pipe-delimited text, and RSS/XML</td><td>Earnings dates, Reg SHO threshold securities, LULD/trade-halt context.</td></tr>
-          <tr><td>FRED, CBOE, Federal Reserve, US Treasury</td><td>HTTPS CSV/XML</td><td>Public regime and rates series.</td></tr>
-          <tr><td>Wikipedia S&amp;P 500 list</td><td>Scheduled HTTPS refresh</td><td>Breadth constituent membership, with a validated cache and embedded fallback.</td></tr>
-          <tr><td>Official exchange calendars</td><td>Embedded Go data</td><td>Handwritten build-time tables for US equities, US options, and Xetra, covering 2026 through 2028; a date outside coverage reports an explicit unknown state. There is no runtime calendar network call.</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p>The market-event source cache is memory-only today; the other source families have the disk caches described below.</p>
-
-    <h2 id="data-and-persistence"><span class="secno" aria-hidden="true">06</span>Data and Persistence</h2>
-    <figure class="diagram">
-      <div class="diagram-frame">
-        <a href="diagrams/data-and-persistence.svg"><img src="diagrams/data-and-persistence.svg" width="1280" height="840" alt="State ownership matrix: operator, daemon, Canary device, and hosted relay rows against authored authority, durable state, rebuildable observations, and runtime or route state columns." loading="lazy" decoding="async"></a>
-      </div>
-      <figcaption>Scroll sideways on small screens, or open the full-size <a href="diagrams/data-and-persistence.svg">SVG</a> · <a href="diagrams/data-and-persistence.png">PNG</a>. The diagram is generated from <a href="diagrams/render-architecture.mjs">render-architecture.mjs</a> (<a href="diagrams/ICON-LICENSE.txt">icon license</a>).</figcaption>
-    </figure>
-    <p>Configuration is operator-owned, and daemon state and app state are separate authorities. Caches are rebuildable observations; journals and broker statements are durable evidence and can contain sensitive account or trading data. The journals and raw statements are the evidence of record; the history index below is only a derived view of them.</p>
-    <div class="tblwrap">
-      <table>
-        <thead>
-          <tr><th>Class</th><th>Default Location</th><th>Owner and Representative Contents</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>Operator configuration</td><td><code>$XDG_CONFIG_HOME/ibkr/config.toml</code>, falling back to <code>~/.config/ibkr/config.toml</code>; policy defaults under <code>~/.config/ibkr/policies/</code></td><td>Gateway/account/client pins, daemon/trading settings, protection/opportunity policy, the operator-authored <code>risk-policy.toml</code>, and the separate <code>flex-token</code> secret. The risk policy has no embedded default: missing approval stays unapproved.</td></tr>
-          <tr><td>Daemon durable state</td><td><code>$XDG_STATE_HOME/ibkr</code>, falling back to <code>~/.local/state/ibkr</code></td><td><code>platform-settings.json</code>, order preview/readiness material, <code>order-journal.jsonl</code>, purge ledger, proposal/opportunity snapshots and journals, risk-capital state and event journals, governance/brief/rule/regime/canary journals, and <code>statements/flex-*.xml</code>.</td></tr>
-          <tr><td>Rotated evidence archives</td><td><code>$XDG_STATE_HOME/ibkr/rotated/</code></td><td>Monthly gzip archives of the regime, rules, and canary decision journals, written only after the bytes are fully absorbed into the history index. Immutable evidence, kept forever: rotation compresses and relocates, it never deletes. The raw keep window is <code>history.rotation.keep_raw_months</code> (default 2).</td></tr>
-          <tr><td>Derived history index</td><td><code>$XDG_STATE_HOME/ibkr/history.db</code> (SQLite, WAL)</td><td>The daemon is the only product writer and runtime opener. This rebuildable query index over the evidence journals and retained statements stays current through automatic backfill and tail ingest. Deleting the file is safe; it rebuilds from archives, journals, and statements at daemon start. Humans and offline analysis scripts may also open it directly in read-only mode.</td></tr>
-          <tr><td>App durable state</td><td><code>$XDG_STATE_HOME/ibkr/app</code>, falling back to <code>~/.local/state/ibkr/app</code></td><td>Private <code>state.json</code> with device grants, push subscriptions, VAPID material, alerts, governance evidence, and relay credentials; <code>app.lock</code> enforces one app process per state directory.</td></tr>
-          <tr><td>Rebuildable cache</td><td><code>$XDG_CACHE_HOME/ibkr</code>, falling back to <code>~/.cache/ibkr</code></td><td>Contract cache, FX and earnings caches, breadth state and S&amp;P membership, regime series/history/streaks, gamma results/OI/expiry grids, and updater scratch space.</td></tr>
-          <tr><td>User data</td><td><code>$XDG_DATA_HOME/ibkr</code>, falling back to <code>~/.local/share/ibkr</code></td><td><code>watchlist.json</code>; explicit research exports are separate operator-created files.</td></tr>
-          <tr><td>Runtime IPC and logs</td><td><code>$XDG_RUNTIME_DIR/ibkr/ibkr.sock</code>, falling back to <code>~/.cache/ibkr/ibkr.sock</code>; daemon log defaults to <code>~/.local/state/ibkr/ibkr-daemon.log</code></td><td>Unix socket, sibling lock/PID file, rotated daemon text log, and optional macOS LaunchAgent/app logs under <code>~/Library</code>.</td></tr>
-          <tr><td>Browser / PWA state</td><td>Browser cookie jar, IndexedDB, and <code>localStorage</code></td><td>Short-lived session, durable HttpOnly device continuity, P-256 device key, local recovery material, preferences, and a non-authorizing relay route identifier.</td></tr>
-          <tr><td>Hosted relay state</td><td>Cloudflare Durable Object</td><td>Connector token and expiry for the optional route. It stores no device grants or broker state.</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p>During normal product operation, the daemon is the history index's only writer and only opener. The four history commands — <code>ibkr regime history</code>, <code>ibkr rules history</code>, <code>ibkr canary history</code>, and <code>ibkr recon equity</code> — reach it through typed daemon RPC; MCP and the app currently expose no history surface. Humans and offline analysis scripts may open the file directly in read-only mode. Archives plus the live journal always reconstruct the original byte stream, so nothing is ever lost to rotation. Order reads serve from the index only while it provably matches the journal; anything else falls back to the journal scan automatically, and the journal stays authoritative.</p>
-    <p>Never persist broker market-data entitlements. Expose observed data type, quality, freshness, and warnings on typed read surfaces instead.</p>
-
-    <h2 id="deployment-scopes-and-multiple-instances"><span class="secno" aria-hidden="true">07</span>Deployment Scopes and Multiple Instances</h2>
-    <p>The default topology is one daemon shared by the CLI, all local MCP adapter processes, and the app, through the canonical Unix socket. A flock-backed lock enforces one daemon per socket directory.</p>
-    <p>You can run more daemon, gateway, or account scopes, but nothing multiplexes them for you. An isolated stack needs its own config, socket, log, account and client pins, and its own XDG state, cache, and data roots. Most durable paths are XDG-global rather than derived from the socket, so changing only <code>IBKR_SOCKET</code> does not isolate persistence.</p>
-
-    <h2 id="http-app-and-remote-access"><span class="secno" aria-hidden="true">08</span>HTTP App and Remote Access</h2>
-    <p>The app is the only HTTP process; it serves through HyperServe (<code>github.com/osauer/hyperserve</code>), the project's companion <code>net/http</code>-shaped server, with method-aware routes, hardened defaults, and SSE formatting. The daemon and the MCP adapter do not serve HTTP at all: the daemon listens on the Unix socket, and MCP speaks stdio.</p>
-    <p>Routes register in <code>internal/app/http/routes.go</code> in four families: static PWA assets, pairing and auth, the authenticated app API, and the <code>/api/events</code> SSE stream. Handlers read app stores, the live snapshot, or typed daemon calls; they do not invent policy. There is no separate health route; <code>/api/bootstrap</code> and <code>/api/snapshot</code> carry relay and liveness state.</p>
-    <p>Remote access keeps pairing, auth, session validation, forwarding allowlists, and daemon access on the local machine. The Worker and the Durable Object carry route transport state only. Browser HTTP and SSE requests travel as frames over the app's authenticated outbound WebSocket and stream back through the Worker.</p>
-
-    <h2 id="observability"><span class="secno" aria-hidden="true">09</span>Observability</h2>
-    <p>The observability layer is thin on purpose: text logs, one health surface, and evidence journals. There are no metrics and no tracing.</p>
-    <ul>
-      <li>The daemon writes structured text logs through <code>log/slog</code>. The <code>log_level</code> config key sets the level; the default is <code>info</code>. The log lives at <code>~/.local/state/ibkr/ibkr-daemon.log</code> and rotates at boot once it passes 64 MiB, keeping one older generation. The app logs to <code>ibkr-app.log</code>.</li>
-      <li><code>ibkr status</code> renders the daemon's <code>status.health</code> report: gateway, session, and TLS state, uptime, background tasks, subsystem health, data quality, data-farm notices, and trading state. It ends in one verdict: ready, attention, offline, or starting.</li>
-      <li>Typed read surfaces carry their own source health. Regime clusters, gamma, the market calendar, and governance report stale, partial, degraded, or unknown instead of guessing.</li>
-      <li>Append-only JSONL journals are the evidence trail for orders, regime, rule, and canary decisions, proposal outcomes, risk-capital events, and risk-policy governance. The purge ledger is different: it is mutable JSON rewritten atomically as purge and restore authority changes. <code>ibkr brief</code> composes current typed daemon authority rather than aggregating journals. The CLI history commands — <code>ibkr regime history</code>, <code>ibkr rules history</code>, <code>ibkr canary history</code>, and <code>ibkr recon equity</code> — query journal and statement evidence through the derived index.</li>
-    </ul>
-
-    <h2 id="change-flow"><span class="secno" aria-hidden="true">10</span>Change Flow</h2>
-    <p>Start every new capability with an ownership decision: operator config, daemon runtime state, app-local state, observed snapshot, cache, derived history index, or build flag. Then work outward in order: typed contract, owning behavior, tests, adapters, rendered surfaces, and generated references. Adapters never refetch daemon-owned sources and never recreate risk or trading verdicts.</p>
-    <p>Market-event flags are daemon-owned observed context. Adapters render or filter the typed <code>market_events.snapshot</code>; they do not refetch Reg SHO, halt, borrow-inventory, borrow-fee, or earnings sources, and they do not duplicate proposal-blocking policy.</p>
+<h1 id="architecture">Architecture</h1>
+<p><code>ibkr</code> runs on your machine and connects to one Interactive Brokers TWS or IB
+Gateway session. It adapts that session for humans, AI hosts, and the Canary
+app, and it adds a risk harness. One ownership rule shapes the design:</p>
+<blockquote>
+<p>The daemon owns all broker-connected and runtime-state capability: the
+connection, observed state, schedulers, journals, and policy execution.
+Every other process adapts typed contracts for its audience, and none of
+them owns broker state.</p>
+</blockquote>
+<p>A few local workflows are deliberate exceptions: watchlist edits, setup,
+updates, process management, and offline research or backtests all run
+without daemon RPC.</p>
+<nav class="toc" aria-label="On this page">
+<span class="toc-label">On this page</span>
+<ul>
+<li><a href="#system-overview"><span class="n">01</span>System Overview</a></li>
+<li><a href="#runtime-processes"><span class="n">02</span>Runtime Processes</a></li>
+<li><a href="#code-ownership-layers"><span class="n">03</span>Code Ownership Layers</a></li>
+<li><a href="#data-flows-and-protocols"><span class="n">04</span>Data Flows and Protocols</a></li>
+<li><a href="#broker-and-external-data-sources"><span class="n">05</span>Broker and External Data Sources</a></li>
+<li><a href="#data-and-persistence"><span class="n">06</span>Data and Persistence</a></li>
+<li><a href="#deployment-scopes-and-multiple-instances"><span class="n">07</span>Deployment Scopes and Multiple Instances</a></li>
+<li><a href="#http-app-and-remote-access"><span class="n">08</span>HTTP App and Remote Access</a></li>
+<li><a href="#observability"><span class="n">09</span>Observability</a></li>
+<li><a href="#change-flow"><span class="n">10</span>Change Flow</a></li>
+</ul>
+</nav>
+<h2 id="system-overview"><span class="secno" aria-hidden="true">01</span>System Overview</h2>
+<p><a href="diagrams/system-architecture.svg"><img src="diagrams/system-architecture.svg" alt="ibkr canary runtime architecture"></a></p>
+<p><a href="diagrams/system-architecture.png">PNG fallback</a> ·
+<a href="diagrams/render-architecture.mjs">SVG source generator</a> ·
+<a href="diagrams/ICON-LICENSE.txt">Tabler Icons license</a></p>
+<p>The numbered columns are layers of one system, not six separate services:
+consumers, surface adapters, the shared typed contract, daemon authority and
+domain logic, integration clients, and external providers or data.</p>
+<p>The default deployment has one shared daemon. <code>ibkr mcp</code> is an adapter process
+owned by each MCP host, not a second daemon, and <code>ibkr app</code> is a separate
+HTTP/PWA process. Inside the daemon, a primary broker connection serves
+interactive, account, and gamma work, while a second client connection carries
+the S&amp;P 500 breadth history fan-out.</p>
+<h2 id="runtime-processes"><span class="secno" aria-hidden="true">02</span>Runtime Processes</h2>
+<p>All local modes ship in the same <code>ibkr</code> binary, but they differ in lifetime
+and authority.</p>
+<div class="tblwrap">
+<table>
+<thead>
+<tr>
+<th>Process or Surface</th>
+<th>Lifetime</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CLI / TUI</td>
+<td>One command</td>
+<td>Validates input, calls the daemon for broker and runtime work, and renders human or JSON output. A few local-only workflows run without the daemon.</td>
+</tr>
+<tr>
+<td><code>ibkr daemon</code></td>
+<td>Demand-driven background process or foreground service</td>
+<td>Owns the broker connections and all runtime state: caches, schedulers, journals, source ingestion, risk-policy execution, proposals, opportunities, and reconciliation.</td>
+</tr>
+<tr>
+<td><code>ibkr mcp</code></td>
+<td>Long-lived child of each MCP host</td>
+<td>Speaks MCP JSON-RPC 2.0 over stdio and translates tools and resources into short daemon calls. The surface serves read, research, and preview work; it exposes no broker-write tools.</td>
+</tr>
+<tr>
+<td><code>ibkr app</code></td>
+<td>Independently run or supervised HTTP process</td>
+<td>Serves the embedded Canary PWA and owns pairing, auth, and app state. Maintains the live snapshot and quote streams, emits SSE, and can connect to the remote relay and Web Push.</td>
+</tr>
+<tr>
+<td>Canary Paired PWA</td>
+<td>Browser or iOS Home Screen app</td>
+<td>Renders authenticated snapshots, receives SSE and push notifications, and keeps device-side credentials and recovery state. It is a plain PWA, not an Android Trusted Web Activity.</td>
+</tr>
+<tr>
+<td>TWS / IB Gateway</td>
+<td>Interactive Brokers process outside this repo</td>
+<td>Terminates the local TWS API socket and maintains the broker-managed session.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Clients auto-spawn the daemon when the socket is absent, and it exits after
+15 idle minutes unless foreground mode disables the timeout. Durable caches
+and journals survive the process.</p>
+<h2 id="code-ownership-layers"><span class="secno" aria-hidden="true">03</span>Code Ownership Layers</h2>
+<ul>
+<li><code>pkg/ibkr</code> is the clean-room TWS wire client. Protocol framing, sockets and
+TLS, request IDs, broker callbacks, contract resolution, and order-wire
+details live here.</li>
+<li><code>internal/daemon</code> is the long-running authority. It owns both broker
+connectors, the external-source clients, caches, schedulers, journals, XDG
+state, risk-capital runtime state, daily Flex ingestion, and post-trade
+reconciliation.</li>
+<li><code>internal/risk</code> is the pure evaluation library behind advisory verdicts:
+thresholds and fingerprints, canary signal types, option math, the daily
+trading rulebook, and risk-constitution evaluation. It does no I/O and owns
+no broker state.</li>
+<li><code>internal/rpc</code> defines the typed method names and request/response structs
+that daemon, CLI, app, and MCP adapters share. Add fields here first; teach
+surfaces to render them second.</li>
+<li><code>internal/cli</code> adapts commands to daemon methods or to one of the local-only
+workflows. Broker policy and state do not belong in the renderer.</li>
+<li><code>internal/mcp</code> adapts MCP tools and resources to daemon contracts. Tool
+descriptions are product surface and must match the real authority and data
+quality.</li>
+<li><code>internal/app</code> owns the HTTP host, device auth, app-local persistence, live
+polling and streaming, SSE fanout, Web Push, and the optional outbound
+relay. The live cache is the normal read path. Settings, reviews, and
+order, proposal, or opportunity actions make direct typed daemon calls
+instead.</li>
+<li><code>cloudflare/remote-relay</code> is a Worker plus a Durable Object, used as
+transport. It forwards framed HTTP and SSE traffic over the app's outbound
+connector. It owns no device grants, pairing sessions, browser sessions,
+daemon access, or broker credentials.</li>
+<li><code>web/app</code> is the embedded no-build Canary SPA and its service worker.
+Global account, market, and sync state stays outside individual tab
+content.</li>
+</ul>
+<h2 id="data-flows-and-protocols"><span class="secno" aria-hidden="true">04</span>Data Flows and Protocols</h2>
+<p>The daemon protocol and the MCP protocol are different on purpose; only the
+MCP side is JSON-RPC 2.0.</p>
+<div class="tblwrap">
+<table>
+<thead>
+<tr>
+<th>Flow</th>
+<th>Protocol and Payload</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Human → CLI</td>
+<td><code>argv</code> / stdin; human text or JSON on stdout</td>
+<td>One-shot local process.</td>
+</tr>
+<tr>
+<td>AI host → <code>ibkr mcp</code></td>
+<td>MCP JSON-RPC 2.0, newline-delimited over stdio</td>
+<td>The host owns the process lifetime.</td>
+</tr>
+<tr>
+<td>CLI / MCP / app → daemon</td>
+<td>Custom typed newline-delimited JSON request/response frames over a Unix domain socket</td>
+<td>The envelope uses project fields such as <code>ok</code>, <code>frame</code>, <code>stream</code>, and <code>end</code>. It is not JSON-RPC 2.0.</td>
+</tr>
+<tr>
+<td>App live service → daemon</td>
+<td>Periodic typed calls plus long-lived quote streams</td>
+<td>Feeds one app snapshot/cache and its change fanout.</td>
+</tr>
+<tr>
+<td>App request routes → daemon</td>
+<td>Request-driven typed calls over the same Unix socket</td>
+<td>Used where a route needs a fresh action, review, or settings response instead of the cached snapshot.</td>
+</tr>
+<tr>
+<td>Daemon → TWS / Gateway</td>
+<td>Clean-room TWS wire protocol over TCP, optionally TLS</td>
+<td>A primary interactive connection, plus a breadth connection with its own client ID and rate budget.</td>
+</tr>
+<tr>
+<td>Browser / PWA ↔ app</td>
+<td>Public static assets and pairing/auth endpoints, then authenticated HTTP(S) JSON and <code>/api/events</code> Server-Sent Events</td>
+<td>Local and LAN access reaches the app directly. Pairing-session creation is loopback-only.</td>
+</tr>
+<tr>
+<td>PWA ↔ remote relay</td>
+<td>Public HTTPS carrying allowed HTTP/SSE traffic</td>
+<td>Optional remote path.</td>
+</tr>
+<tr>
+<td>App ↔ remote relay</td>
+<td>HTTPS registration, then authenticated outbound WSS</td>
+<td>Requests and streaming responses travel as frames over the WebSocket. The local connector enforces the forwarded-path allowlist.</td>
+</tr>
+<tr>
+<td>App → browser push service → PWA</td>
+<td>VAPID-authenticated Web Push over HTTPS</td>
+<td>Push payloads are redacted, and the relay is not in the delivery path.</td>
+</tr>
+<tr>
+<td>Daemon → external observed-data sources</td>
+<td>Scheduled or on-demand HTTPS/FTP; JSON, CSV, XML, RSS, and text</td>
+<td>Source health and stale or unknown states stay explicit in typed results.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="broker-and-external-data-sources"><span class="secno" aria-hidden="true">05</span>Broker and External Data Sources</h2>
+<p>Not all market context arrives through TWS or Gateway.</p>
+<div class="tblwrap">
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Runtime Path</th>
+<th>Data</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TWS / IB Gateway API socket</td>
+<td>TWS wire protocol over TCP/TLS</td>
+<td>Account, positions, quotes, option chains/Greeks/OI, historical bars, scanners, order lifecycle, shortable-share observations, and broker WhatIf/eligibility.</td>
+</tr>
+<tr>
+<td>IBKR Flex Web Service</td>
+<td>HTTPS POST and polling</td>
+<td>Daily raw Flex XML statements used as broker statement truth for reconciliation.</td>
+</tr>
+<tr>
+<td>IBKR short-stock availability</td>
+<td>FTP</td>
+<td>Borrow availability and fee-rate evidence.</td>
+</tr>
+<tr>
+<td>Nasdaq</td>
+<td>HTTPS JSON, pipe-delimited text, and RSS/XML</td>
+<td>Earnings dates, Reg SHO threshold securities, LULD/trade-halt context.</td>
+</tr>
+<tr>
+<td>FRED, CBOE, Federal Reserve, US Treasury</td>
+<td>HTTPS CSV/XML</td>
+<td>Public regime and rates series.</td>
+</tr>
+<tr>
+<td>Wikipedia S&amp;P 500 list</td>
+<td>Scheduled HTTPS refresh</td>
+<td>Breadth constituent membership, with a validated cache and embedded fallback.</td>
+</tr>
+<tr>
+<td>Official exchange calendars</td>
+<td>Embedded Go data</td>
+<td>Handwritten build-time tables for US equities, US options, and Xetra, covering 2026 through 2028; a date outside coverage reports an explicit unknown state. There is no runtime calendar network call.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The market-event source cache is memory-only today; the other source families
+have the disk caches described below.</p>
+<h2 id="data-and-persistence"><span class="secno" aria-hidden="true">06</span>Data and Persistence</h2>
+<p><a href="diagrams/data-and-persistence.svg"><img src="diagrams/data-and-persistence.svg" alt="ibkr canary state ownership and lifecycle"></a></p>
+<p><a href="diagrams/data-and-persistence.png">PNG fallback</a> ·
+<a href="diagrams/render-architecture.mjs">SVG source generator</a> ·
+<a href="diagrams/ICON-LICENSE.txt">Tabler Icons license</a></p>
+<p>Configuration is operator-owned, and daemon state and app state are separate
+authorities. Caches are rebuildable observations; journals and broker
+statements are durable evidence and can contain sensitive account or trading
+data. The journals and raw statements are the evidence of record; the history
+index below is only a derived view of them.</p>
+<div class="tblwrap">
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>Default Location</th>
+<th>Owner and Representative Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Operator configuration</td>
+<td><code>$XDG_CONFIG_HOME/ibkr/config.toml</code>, falling back to <code>~/.config/ibkr/config.toml</code>; policy defaults under <code>~/.config/ibkr/policies/</code></td>
+<td>Gateway/account/client pins, daemon/trading settings, protection/opportunity policy, the operator-authored <code>risk-policy.toml</code>, and the separate <code>flex-token</code> secret. The risk policy has no embedded default: missing approval stays unapproved.</td>
+</tr>
+<tr>
+<td>Daemon durable state</td>
+<td><code>$XDG_STATE_HOME/ibkr</code>, falling back to <code>~/.local/state/ibkr</code></td>
+<td><code>platform-settings.json</code>, order preview/readiness material, <code>order-journal.jsonl</code>, purge ledger, proposal/opportunity snapshots and journals, risk-capital state and event journals, governance/brief/rule/regime/canary journals, and <code>statements/flex-*.xml</code>.</td>
+</tr>
+<tr>
+<td>Rotated evidence archives</td>
+<td><code>$XDG_STATE_HOME/ibkr/rotated/</code></td>
+<td>Monthly gzip archives of the regime, rules, and canary decision journals, written only after the bytes are fully absorbed into the history index. Immutable evidence, kept forever: rotation compresses and relocates, it never deletes. The raw keep window is <code>history.rotation.keep_raw_months</code> (default 2).</td>
+</tr>
+<tr>
+<td>Derived history index</td>
+<td><code>$XDG_STATE_HOME/ibkr/history.db</code> (SQLite, WAL)</td>
+<td>The daemon is the only product writer and runtime opener. This rebuildable query index over the evidence journals and retained statements stays current through automatic backfill and tail ingest. Deleting the file is safe; it rebuilds from archives, journals, and statements at daemon start. Humans and offline analysis scripts may also open it directly in read-only mode.</td>
+</tr>
+<tr>
+<td>App durable state</td>
+<td><code>$XDG_STATE_HOME/ibkr/app</code>, falling back to <code>~/.local/state/ibkr/app</code></td>
+<td>Private <code>state.json</code> with device grants, push subscriptions, VAPID material, alerts, governance evidence, and relay credentials; <code>app.lock</code> enforces one app process per state directory.</td>
+</tr>
+<tr>
+<td>Rebuildable cache</td>
+<td><code>$XDG_CACHE_HOME/ibkr</code>, falling back to <code>~/.cache/ibkr</code></td>
+<td>Contract cache, FX and earnings caches, breadth state and S&amp;P membership, regime series/history/streaks, gamma results/OI/expiry grids, and updater scratch space.</td>
+</tr>
+<tr>
+<td>User data</td>
+<td><code>$XDG_DATA_HOME/ibkr</code>, falling back to <code>~/.local/share/ibkr</code></td>
+<td><code>watchlist.json</code>; explicit research exports are separate operator-created files.</td>
+</tr>
+<tr>
+<td>Runtime IPC and logs</td>
+<td><code>$XDG_RUNTIME_DIR/ibkr/ibkr.sock</code>, falling back to <code>~/.cache/ibkr/ibkr.sock</code>; daemon log defaults to <code>~/.local/state/ibkr/ibkr-daemon.log</code></td>
+<td>Unix socket, sibling lock/PID file, rotated daemon text log, and optional macOS LaunchAgent/app logs under <code>~/Library</code>.</td>
+</tr>
+<tr>
+<td>Browser / PWA state</td>
+<td>Browser cookie jar, IndexedDB, and <code>localStorage</code></td>
+<td>Short-lived session, durable HttpOnly device continuity, P-256 device key, local recovery material, preferences, and a non-authorizing relay route identifier.</td>
+</tr>
+<tr>
+<td>Hosted relay state</td>
+<td>Cloudflare Durable Object</td>
+<td>Connector token and expiry for the optional route. It stores no device grants or broker state.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>During normal product operation, the daemon is the history index's only
+writer and only opener. The four history commands — <code>ibkr regime history</code>,
+<code>ibkr rules history</code>, <code>ibkr canary history</code>, and <code>ibkr recon equity</code> — reach
+it through typed daemon RPC; MCP and the app currently expose no history
+surface. Humans and offline analysis scripts may open the file directly in
+read-only mode. Archives plus the live journal always reconstruct the original
+byte stream, so nothing is ever lost to rotation. Order reads serve from the
+index only while it provably matches the journal; anything else falls back to
+the journal scan automatically, and the journal stays authoritative.</p>
+<p>Never persist broker market-data entitlements. Expose observed data type,
+quality, freshness, and warnings on typed read surfaces instead.</p>
+<h2 id="deployment-scopes-and-multiple-instances"><span class="secno" aria-hidden="true">07</span>Deployment Scopes and Multiple Instances</h2>
+<p>The default topology is one daemon shared by the CLI, all local MCP adapter
+processes, and the app, through the canonical Unix socket. A flock-backed
+lock enforces one daemon per socket directory.</p>
+<p>You can run more daemon, gateway, or account scopes, but nothing multiplexes
+them for you. An isolated stack needs its own config, socket, log, account
+and client pins, and its own XDG state, cache, and data roots. Most durable
+paths are XDG-global rather than derived from the socket, so changing only
+<code>IBKR_SOCKET</code> does not isolate persistence.</p>
+<h2 id="http-app-and-remote-access"><span class="secno" aria-hidden="true">08</span>HTTP App and Remote Access</h2>
+<p>The app is the only HTTP process; it serves through HyperServe
+(<code>github.com/osauer/hyperserve</code>), the project's companion <code>net/http</code>-shaped
+server, with method-aware routes, hardened defaults, and SSE formatting. The
+daemon and the MCP adapter do not serve HTTP at all: the daemon listens on
+the Unix socket, and MCP speaks stdio.</p>
+<p>Routes register in <code>internal/app/http/routes.go</code> in four families: static
+PWA assets, pairing and auth, the authenticated app API, and the
+<code>/api/events</code> SSE stream. Handlers read app stores, the live snapshot, or
+typed daemon calls; they do not invent policy. There is no separate health
+route; <code>/api/bootstrap</code> and <code>/api/snapshot</code> carry relay and liveness state.</p>
+<p>Remote access keeps pairing, auth, session validation, forwarding allowlists,
+and daemon access on the local machine. The Worker and the Durable Object
+carry route transport state only. Browser HTTP and SSE requests travel as
+frames over the app's authenticated outbound WebSocket and stream back
+through the Worker.</p>
+<h2 id="observability"><span class="secno" aria-hidden="true">09</span>Observability</h2>
+<p>The observability layer is thin on purpose: text logs, one health surface,
+and evidence journals. There are no metrics and no tracing.</p>
+<ul>
+<li>The daemon writes structured text logs through <code>log/slog</code>. The <code>log_level</code>
+config key sets the level; the default is <code>info</code>. The log lives at
+<code>~/.local/state/ibkr/ibkr-daemon.log</code> and rotates at boot once it passes
+64 MiB, keeping one older generation. The app logs to <code>ibkr-app.log</code>.</li>
+<li><code>ibkr status</code> renders the daemon's <code>status.health</code> report: gateway,
+session, and TLS state, uptime, background tasks, subsystem health, data
+quality, data-farm notices, and trading state. It ends in one verdict:
+ready, attention, offline, or starting.</li>
+<li>Typed read surfaces carry their own source health. Regime clusters, gamma,
+the market calendar, and governance report stale, partial, degraded, or
+unknown instead of guessing.</li>
+<li>Append-only JSONL journals are the evidence trail for orders, regime, rule,
+and canary decisions, proposal outcomes, risk-capital events, and risk-policy
+governance. The purge ledger is different: it is mutable JSON rewritten
+atomically as purge and restore authority changes. <code>ibkr brief</code> composes
+current typed daemon authority rather than aggregating journals. The CLI
+history commands — <code>ibkr regime history</code>, <code>ibkr rules history</code>,
+<code>ibkr canary history</code>, and <code>ibkr recon equity</code> — query journal and statement
+evidence through the derived index.</li>
+</ul>
+<h2 id="change-flow"><span class="secno" aria-hidden="true">10</span>Change Flow</h2>
+<p>Start every new capability with an ownership decision: operator config,
+daemon runtime state, app-local state, observed snapshot, cache, derived
+history index, or build flag. Then work outward in order: typed contract, owning behavior, tests,
+adapters, rendered surfaces, and generated references. Adapters never refetch
+daemon-owned sources and never recreate risk or trading verdicts.</p>
+<p>Market-event flags are daemon-owned observed context. Adapters render or
+filter the typed <code>market_events.snapshot</code>; they do not refetch Reg SHO, halt,
+borrow-inventory, borrow-fee, or earnings sources, and they do not duplicate
+proposal-blocking policy.</p>
   </main>
   <footer>
     <div class="wrap"><a href="index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div>
