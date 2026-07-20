@@ -1844,7 +1844,14 @@ func canarySourceIssues(in CanaryInput, now time.Time) []canarySourceIssue {
 	if canarySourceStale(in.Account.AsOf, now) {
 		issues = append(issues, canarySourceIssue{Source: "account", Status: rpc.RegimeStatusStale, Reason: "account snapshot stale"})
 	}
-	if !in.Positions.AsOf.IsZero() && canarySourceStale(in.Positions.AsOf, now) {
+	switch {
+	case in.Positions.AsOf.IsZero() && in.Account.NetLiquidation > 0:
+		// A never-fetched positions snapshot against a real account is a
+		// positions source problem, not a clean empty book: exposure built
+		// from it is blind, so dependent signals must block and portfolio
+		// fit must derive unknown instead of defaulting to low.
+		issues = append(issues, canarySourceIssue{Source: "positions", Status: rpc.RegimeStatusUnavailable, Reason: "positions snapshot never fetched"})
+	case canarySourceStale(in.Positions.AsOf, now):
 		issues = append(issues, canarySourceIssue{Source: "positions", Status: rpc.RegimeStatusStale, Reason: "positions snapshot stale"})
 	}
 	return issues

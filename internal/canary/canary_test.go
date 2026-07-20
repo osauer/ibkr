@@ -101,8 +101,9 @@ func TestComputeCanaryZeroExcessLiquidityLiquidatesWhenMarginContextPresent(t *t
 	acct.ExcessLiquidity = 0
 	acct.MaintenanceMargin = 80_000
 	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
-		Account: acct,
-		Regime:  healthyCanaryRegime(),
+		Account:   acct,
+		Positions: freshCanaryPositions(),
+		Regime:    healthyCanaryRegime(),
 	})
 	if res.Direction != "" || res.Severity != risk.SeverityObserve {
 		t.Fatalf("state = %s/%s, want observe because account-only margin danger is outside canary scope", res.Direction, res.Severity)
@@ -120,8 +121,9 @@ func TestComputeCanaryLookAheadMarginDangerLiquidates(t *testing.T) {
 	acct := baseCanaryAccount()
 	acct.LookAheadExcess = 8_000
 	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
-		Account: acct,
-		Regime:  healthyCanaryRegime(),
+		Account:   acct,
+		Positions: freshCanaryPositions(),
+		Regime:    healthyCanaryRegime(),
 	})
 	if res.Direction != "" || res.Severity != risk.SeverityObserve {
 		t.Fatalf("state = %s/%s, want observe because look-ahead margin alone is outside canary scope", res.Direction, res.Severity)
@@ -232,9 +234,10 @@ func TestComputeCanaryContextOnlyGammaDoesNotConfirmStress(t *testing.T) {
 	}
 
 	res := ComputeCanary(CanaryInput{
-		Account: baseCanaryAccount(),
-		Regime:  r,
-		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
+		Account:   baseCanaryAccount(),
+		Positions: freshCanaryPositions(),
+		Regime:    r,
+		Now:       time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 
 	if slices.Contains(res.Market.RedClusterNames, "gamma") {
@@ -456,7 +459,7 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 	t.Parallel()
 	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
 		Account: baseCanaryAccount(),
-		Positions: rpc.PositionsResult{Portfolio: &rpc.PositionsPortfolio{
+		Positions: rpc.PositionsResult{AsOf: canaryTestNow, Portfolio: &rpc.PositionsPortfolio{
 			ExposureBase: []rpc.UnderlyingExposure{
 				{Underlying: "AAPL", DollarDeltaBase: new(45_000.0)},
 			},
@@ -628,7 +631,7 @@ func TestComputeCanarySignalsExposureAndDecisionShape(t *testing.T) {
 	delta := 140_000.0
 	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
 		Account: baseCanaryAccount(),
-		Positions: rpc.PositionsResult{Portfolio: &rpc.PositionsPortfolio{
+		Positions: rpc.PositionsResult{AsOf: canaryTestNow, Portfolio: &rpc.PositionsPortfolio{
 			DollarDeltaBase: &delta,
 			ExposureBase: []rpc.UnderlyingExposure{{
 				Underlying: "LMN", MarketValueBase: 40_000, MarketValuePctNLV: new(40.0), DollarDeltaBase: new(140_000.0),
@@ -695,9 +698,10 @@ func TestComputeCanaryConstructiveTapeShowsOpportunityPosture(t *testing.T) {
 	r.HYGSPYDivergence.SPYChangePct = new(3.0)
 	r.VIXTermStructure.VIXChangePct = new(-25.0)
 	res := ComputeCanary(CanaryInput{
-		Account: baseCanaryAccount(),
-		Regime:  r,
-		Now:     time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
+		Account:   baseCanaryAccount(),
+		Positions: freshCanaryPositions(),
+		Regime:    r,
+		Now:       time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC),
 	})
 	if res.Direction != risk.DirectionConstructive || res.Severity != risk.SeverityWatch {
 		t.Fatalf("state = %s/%s, want constructive/watch", res.Direction, res.Severity)
@@ -717,8 +721,9 @@ func TestComputeCanaryPositivePnLShockProtectsGains(t *testing.T) {
 	daily := 12_000.0
 	acct.DailyPnL = &daily
 	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
-		Account: acct,
-		Regime:  healthyCanaryRegime(),
+		Account:   acct,
+		Positions: freshCanaryPositions(),
+		Regime:    healthyCanaryRegime(),
 	})
 	sig, ok := findSignal(res.Signals, risk.SignalPortfolioPnLShock)
 	if !ok {
@@ -877,9 +882,10 @@ func TestComputeCanaryOffHoursVolStaleIsContext(t *testing.T) {
 		Message: "volatility term structure stale",
 	}}
 	res := ComputeCanary(CanaryInput{
-		Account: baseCanaryAccount(),
-		Regime:  r,
-		Now:     time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC),
+		Account:   baseCanaryAccount(),
+		Positions: freshCanaryPositions(),
+		Regime:    r,
+		Now:       time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC),
 	})
 	if got := strings.Join(res.Market.StaleClusters, ","); got != "" {
 		t.Fatalf("stale clusters = %q, want none for expected off-hours vol context", got)
@@ -957,8 +963,9 @@ func TestComputeCanaryJSONCarriesMonitorFields(t *testing.T) {
 	acct := baseCanaryAccount()
 	acct.Cushion = 0.30
 	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
-		Account: acct,
-		Regime:  regime,
+		Account:   acct,
+		Positions: freshCanaryPositions(),
+		Regime:    regime,
 	})
 	b, err := json.Marshal(res)
 	if err != nil {
@@ -1273,8 +1280,9 @@ func TestComputeCanaryMarginPressureDoesNotActWithoutMarketConfirmation(t *testi
 	}
 
 	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
-		Account: acct,
-		Regime:  r,
+		Account:   acct,
+		Positions: freshCanaryPositions(),
+		Regime:    r,
 	})
 
 	if res.Direction != "" || res.Severity != risk.SeverityObserve {
@@ -1305,8 +1313,9 @@ func TestComputeCanaryDailyLossDoesNotActWithoutMarketConfirmation(t *testing.T)
 	}
 
 	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
-		Account: acct,
-		Regime:  r,
+		Account:   acct,
+		Positions: freshCanaryPositions(),
+		Regime:    r,
 	})
 
 	if res.Direction != "" || res.Severity != risk.SeverityObserve {
@@ -1624,6 +1633,13 @@ func baseCanaryAccount() rpc.AccountResult {
 		DailyPnL:           &dailyPnL,
 		AsOf:               time.Now(),
 	}
+}
+
+// freshCanaryPositions is a fetched-and-current empty book. Tests that model
+// an account-only decision still need it: a zero positions AsOf against a
+// real NetLiquidation is a positions source issue, not a clean empty book.
+func freshCanaryPositions() rpc.PositionsResult {
+	return rpc.PositionsResult{AsOf: canaryTestNow}
 }
 
 func healthyCanaryRegime() rpc.RegimeSnapshotResult {

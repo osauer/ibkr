@@ -1,10 +1,12 @@
 package canary
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/osauer/ibkr/v2/internal/risk"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 // A portfolio fit of "low" must be a measurement, never a default reached
@@ -39,5 +41,45 @@ func TestCanaryUnknownFitNeverClaimsLowExposure(t *testing.T) {
 	}
 	if dir, sev := canaryDecisionState(canaryMarketPartial, canaryPortfolioFitUnknown, canaryInputDegraded, CanaryMarketSummary{}, nil); dir != risk.DirectionDefensive || sev != risk.SeverityWatch {
 		t.Fatalf("partial market with unknown fit must stay defensive watch, got %v/%v", dir, sev)
+	}
+}
+
+// A never-fetched positions snapshot (zero AsOf) against a real account must
+// be a positions source issue, not a silent pass through the staleness gate:
+// with GrossPositionValue missing and a real stock-only book, fit must derive
+// unknown via the data-blocked path, never fall through to low.
+func TestComputeCanaryNeverFetchedPositionsIsSourceIssueNotLowFit(t *testing.T) {
+	t.Parallel()
+	acct := baseCanaryAccount()
+	acct.GrossPositionValue = 0
+	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
+		Account: acct,
+		Positions: rpc.PositionsResult{ // real stock-only book, AsOf never stamped
+			Stocks: []rpc.PositionView{{Symbol: "AAPL", SecType: "STK", Quantity: 200}},
+			Portfolio: &rpc.PositionsPortfolio{
+				ExposureBase: []rpc.UnderlyingExposure{{
+					Underlying: "AAPL", MarketValueBase: 40_000, MarketValuePctNLV: new(40.0),
+				}},
+			},
+		},
+		Regime: healthyCanaryRegime(),
+	})
+	if res.PortfolioFit != canaryPortfolioFitUnknown {
+		t.Fatalf("portfolio_fit = %q, want unknown when the positions snapshot was never fetched", res.PortfolioFit)
+	}
+	if res.InputHealth != canaryInputDegraded {
+		t.Fatalf("input_health = %q, want degraded for never-fetched positions", res.InputHealth)
+	}
+	if res.Action != canaryActionConfirmInputs {
+		t.Fatalf("action = %q, want confirm_inputs instead of trusting an untimestamped book", res.Action)
+	}
+	blocked := false
+	for _, sig := range res.Signals {
+		if sig.ID == risk.SignalSingleNameExposureHigh && slices.Contains(sig.BlockedBy, "positions") {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Fatalf("expected the single-name exposure signal blocked by positions, signals: %+v", res.Signals)
 	}
 }
