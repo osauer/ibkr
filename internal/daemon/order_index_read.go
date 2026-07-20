@@ -10,9 +10,10 @@ import (
 //
 // The uniform safety rule: an indexed order read is served only when the
 // history index is provably complete for the order journal at that
-// instant — on-disk size equals the committed ingest watermark and no
-// parse-marker rows exist; otherwise the byte-identical legacy journal
-// scan runs. SQL only prunes; the existing Go predicates and folds decide.
+// instant — on-disk size equals the committed ingest watermark, the
+// validated file generation and genesis still match, and no parse-marker
+// rows exist; otherwise the byte-identical legacy journal scan runs. SQL
+// only prunes; the existing Go predicates and folds decide.
 // The journal scan remains the semantics-defining reference
 // implementation, the fallback is automatic and disclosed, and nothing
 // here touches broker-write behavior, submit eligibility, freeze, or

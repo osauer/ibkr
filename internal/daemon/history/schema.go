@@ -7,11 +7,11 @@ import (
 )
 
 // schemaVersion is the PRAGMA user_version this build writes and accepts.
-// 0 means "fresh file, apply DDL"; 1 is the phase-1 layout and migrates in
-// place via a delta (no row rewrites); anything above schemaVersion means
+// 0 means "fresh file, apply DDL"; versions 1 and 2 migrate in place via
+// deltas (no evidence-row rewrites); anything above schemaVersion means
 // the file was written by a newer build and is deleted and recreated (the
 // index is derived, so downgrade recovery is rebuild).
-const schemaVersion = 2
+const schemaVersion = 3
 
 // baseDDL creates the bookkeeping tables. None of them are evidence: their
 // rows are updated in place (ingested-byte offsets, rotation state,
@@ -65,6 +65,7 @@ func bookkeepingV2DDL() []string {
 		`CREATE TABLE statement_files (
   name        TEXT PRIMARY KEY,
   size        INTEGER NOT NULL,
+  sha256      TEXT NOT NULL DEFAULT '',
   ingested_at TEXT NOT NULL,
   equity_days INTEGER NOT NULL
 )`,
@@ -298,11 +299,10 @@ func openAndMigrate(path string) (*sql.DB, error) {
 }
 
 // migrate brings the file to schemaVersion. user_version 0 applies the
-// full v2 DDL; user_version 1 applies the phase-2 delta in one transaction
-// (ALTER ingest_sources ADD base, create the new tables) with zero row
-// rewrites — existing phase-1 rows are already correct because base = 0
-// makes logical and physical offsets identical. Anything else is returned
-// for the caller's delete-and-recreate recovery of last resort.
+// current DDL; user_version 1 applies the phase-2 delta in one transaction
+// (ALTER ingest_sources ADD base, create the new tables), and user_version 2
+// adds statement file fingerprints. Existing evidence rows are untouched.
+// Anything else is returned for delete-and-recreate recovery of last resort.
 func migrate(db *sql.DB) error {
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
@@ -324,6 +324,8 @@ func migrate(db *sql.DB) error {
 		delta = append(delta, `ALTER TABLE ingest_sources ADD COLUMN base INTEGER NOT NULL DEFAULT 0`)
 		delta = append(delta, bookkeepingV2DDL()...)
 		delta = append(delta, evidenceV2DDL()...)
+	case version == 2:
+		delta = append(delta, `ALTER TABLE statement_files ADD COLUMN sha256 TEXT NOT NULL DEFAULT ''`)
 	default:
 		return fmt.Errorf("unexpected user_version %d", version)
 	}

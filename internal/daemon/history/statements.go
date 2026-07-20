@@ -2,121 +2,216 @@ package history
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/osauer/ibkr/v2/internal/flexstmt"
 )
 
-// ingestStatements is the file-set ingest for retained Flex statements:
-// every *.xml in StatementsDir missing from statement_files (or whose size
-// changed) is parsed and its equity rows upserted into
-// statement_equity_days with newest-whenGenerated-wins semantics — exactly
-// the restatement rule of the recon engine's mergeRetainedStatements. A
-// file that fails to parse is warned and skipped without a statement_files
-// row, so it retries on the next pass. Statements are never modified or
-// pruned by this package. Callers hold ingestMu.
+type retainedStatementFile struct {
+	name       string
+	size       int64
+	sha256     string
+	data       []byte
+	statements []flexstmt.Statement
+	equityDays int
+}
+
+type recordedStatementFile struct {
+	size   int64
+	sha256 string
+}
+
+type statementEquityWinner struct {
+	accountID     string
+	day           string
+	equityBase    float64
+	sourceStmt    string
+	whenGenerated time.Time
+}
+
+// ingestStatements reconciles the derived statement tables against the
+// complete retained *.xml file set. Content hashes, rather than file size,
+// detect in-place corrections. Whenever the set changes, every current file
+// is parsed before one transaction replaces both bookkeeping and equity rows;
+// a read or parse failure therefore preserves the last complete snapshot and
+// retries on the next pass. Statements themselves are never modified.
+// Callers hold ingestMu.
 func (s *Store) ingestStatements(ctx context.Context) error {
+	recorded, err := s.recordedStatementFiles()
+	if err != nil {
+		return err
+	}
+	files, err := s.readRetainedStatementFiles(ctx)
+	if err != nil {
+		return err
+	}
+	if statementFileSetMatches(recorded, files) {
+		return nil
+	}
+	if err := parseRetainedStatementFiles(files); err != nil {
+		return err
+	}
+	return s.replaceStatementDerivation(ctx, files)
+}
+
+func (s *Store) recordedStatementFiles() (map[string]recordedStatementFile, error) {
+	rows, err := s.db.Query(`SELECT name, size, sha256 FROM statement_files`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	recorded := make(map[string]recordedStatementFile)
+	for rows.Next() {
+		var name string
+		var file recordedStatementFile
+		if err := rows.Scan(&name, &file.size, &file.sha256); err != nil {
+			return nil, err
+		}
+		recorded[name] = file
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return recorded, nil
+}
+
+// readRetainedStatementFiles fingerprints files in descending filename order,
+// matching the recon engine's deterministic newest-file-first tie break when
+// two statements carry the same generation timestamp. Parsing is deferred
+// until a changed fingerprint is found, avoiding repeated XML work on kicks
+// caused by unrelated journal appends.
+func (s *Store) readRetainedStatementFiles(ctx context.Context) ([]retainedStatementFile, error) {
 	entries, err := os.ReadDir(s.opts.StatementsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
-	type onDisk struct {
-		name string
-		size int64
-	}
-	var files []onDisk
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".xml") {
-			continue
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".xml") {
+			names = append(names, entry.Name())
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		files = append(files, onDisk{name: e.Name(), size: info.Size()})
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 
-	recorded := map[string]int64{}
-	rows, err := s.db.Query(`SELECT name, size FROM statement_files`)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var name string
-		var size int64
-		if err := rows.Scan(&name, &size); err != nil {
-			rows.Close()
-			return err
-		}
-		recorded[name] = size
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	for _, f := range files {
+	files := make([]retainedStatementFile, 0, len(names))
+	for _, name := range names {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
-		if size, ok := recorded[f.name]; ok && size == f.size {
-			continue
+		data, err := os.ReadFile(filepath.Join(s.opts.StatementsDir, name))
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
-		if err := s.ingestStatementFile(f.name, f.size); err != nil {
-			s.warnf("history: statement %s not ingested (will retry): %v", f.name, err)
+		digest := sha256.Sum256(data)
+		files = append(files, retainedStatementFile{
+			name:   name,
+			size:   int64(len(data)),
+			sha256: hex.EncodeToString(digest[:]),
+			data:   data,
+		})
+	}
+	return files, nil
+}
+
+func parseRetainedStatementFiles(files []retainedStatementFile) error {
+	for i := range files {
+		statements, err := flexstmt.Parse(files[i].data)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", files[i].name, err)
+		}
+		files[i].data = nil
+		files[i].statements = statements
+		for _, statement := range statements {
+			files[i].equityDays += len(statement.Equity)
 		}
 	}
 	return nil
 }
 
-// ingestStatementFile parses one retained statement and upserts its equity
-// days in a single transaction with the statement_files record, so a crash
-// leaves either the whole file ingested or none of it.
-func (s *Store) ingestStatementFile(name string, size int64) error {
-	data, err := os.ReadFile(filepath.Join(s.opts.StatementsDir, name))
-	if err != nil {
-		return err
+func statementFileSetMatches(recorded map[string]recordedStatementFile, files []retainedStatementFile) bool {
+	if len(recorded) != len(files) {
+		return false
 	}
-	statements, err := flexstmt.Parse(data)
-	if err != nil {
-		return fmt.Errorf("parse: %w", err)
+	for _, file := range files {
+		got, ok := recorded[file.name]
+		if !ok || got.size != file.size || got.sha256 != file.sha256 {
+			return false
+		}
 	}
+	return true
+}
+
+// replaceStatementDerivation rebuilds the per-day winners from the current
+// retained set. The newest whenGenerated value wins. Equal generations keep
+// the first row in descending filename/XML order, the same deterministic tie
+// break used by mergeRetainedStatements.
+func (s *Store) replaceStatementDerivation(ctx context.Context, files []retainedStatementFile) error {
+	winners := make(map[string]statementEquityWinner)
+	for _, file := range files {
+		for _, statement := range file.statements {
+			when := statement.WhenGenerated.UTC()
+			for _, row := range statement.Equity {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				day := row.ReportDate.UTC().Format("2006-01-02")
+				key := statement.AccountID + "\x00" + day
+				current, ok := winners[key]
+				if ok && !when.After(current.whenGenerated) {
+					continue
+				}
+				winners[key] = statementEquityWinner{
+					accountID:     statement.AccountID,
+					day:           day,
+					equityBase:    row.TotalBase,
+					sourceStmt:    file.name,
+					whenGenerated: when,
+				}
+			}
+		}
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	equityDays := 0
-	for _, st := range statements {
-		when := st.WhenGenerated.UTC().Format("2006-01-02T15:04:05Z07:00")
-		for _, row := range st.Equity {
-			if _, err := tx.Exec(`INSERT INTO statement_equity_days (account_id, day, equity_base, source_stmt, when_generated)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(account_id, day) DO UPDATE SET
-  equity_base = excluded.equity_base,
-  source_stmt = excluded.source_stmt,
-  when_generated = excluded.when_generated
-WHERE excluded.when_generated > statement_equity_days.when_generated`,
-				st.AccountID, row.ReportDate.UTC().Format("2006-01-02"), row.TotalBase, name, when); err != nil {
-				return err
-			}
-			equityDays++
+	if _, err := tx.Exec(`DELETE FROM statement_equity_days`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM statement_files`); err != nil {
+		return err
+	}
+	ingestedAt := nowUTC()
+	for _, file := range files {
+		if _, err := tx.Exec(`INSERT INTO statement_files (name, size, sha256, ingested_at, equity_days)
+VALUES (?, ?, ?, ?, ?)`, file.name, file.size, file.sha256, ingestedAt, file.equityDays); err != nil {
+			return err
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO statement_files (name, size, ingested_at, equity_days)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(name) DO UPDATE SET size = excluded.size, ingested_at = excluded.ingested_at, equity_days = excluded.equity_days`,
-		name, size, nowUTC(), equityDays); err != nil {
-		return err
+	keys := make([]string, 0, len(winners))
+	for key := range winners {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		winner := winners[key]
+		if _, err := tx.Exec(`INSERT INTO statement_equity_days
+  (account_id, day, equity_base, source_stmt, when_generated)
+VALUES (?, ?, ?, ?, ?)`, winner.accountID, winner.day, winner.equityBase, winner.sourceStmt,
+			winner.whenGenerated.Format(time.RFC3339)); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

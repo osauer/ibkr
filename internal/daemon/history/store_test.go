@@ -1,6 +1,8 @@
 package history
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,10 +23,24 @@ func testOptions(t *testing.T) Options {
 		RiskPolicyJournalPath: filepath.Join(dir, "risk-policy-journal.jsonl"),
 		ProposalOutcomesPath:  filepath.Join(dir, "trade-proposal-outcomes.jsonl"),
 		OrderJournalPath:      filepath.Join(dir, "order-journal.jsonl"),
+		ValidateOrderLine:     validateTestOrderLine,
 		StatementsDir:         filepath.Join(dir, "statements"),
 		RotatedDir:            filepath.Join(dir, "rotated"),
 		Logf:                  t.Logf,
 	}
+}
+
+func validateTestOrderLine(raw []byte) error {
+	var line struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &line); err != nil {
+		return err
+	}
+	if line.Version != 1 {
+		return fmt.Errorf("unsupported version %d", line.Version)
+	}
+	return nil
 }
 
 func openTestStore(t *testing.T, opts Options) *Store {

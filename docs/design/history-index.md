@@ -62,9 +62,10 @@ Bookkeeping tables (`ingest_sources`, `rotation_log`, `archive_files`,
 `statement_files`) and the derived `statement_equity_days` are updated in
 place.
 
-Schema is `PRAGMA user_version` 2. A v1 file migrates in place with a
+Schema is `PRAGMA user_version` 3. A v1 file migrates in place with a
 single-transaction delta (`ALTER TABLE ingest_sources ADD COLUMN base`,
-create the new tables) and zero row rewrites.
+create the new tables) and zero evidence-row rewrites. A v2 file adds the
+statement-file content fingerprint used to detect same-size restatements.
 
 ## Ingest and offset mechanics
 
@@ -149,18 +150,28 @@ Mechanics and guarantees:
   tail ingester can never misread the swap as a truncation.
 - **Crash-recovery contract.** The sequence is: write archives as temps →
   fsync → intent row (`rotation_log`, `state='pending'`, with per-archive
-  sizes and raw-content SHA-256) → rename temps to finals → rewrite the
-  live tail atomically → finalize transaction (`base += cut`, genesis reset
-  to the tail's first-line hash, `archive_files` rows, `state='done'`). On
-  the next start, before writer traffic, every pending row is discriminated
-  on the live file's first-line hash: pre-rotation hash ⇒ **roll back**
+  sizes and raw-content SHA-256) → publish and directory-fsync an
+  evidence-adjacent `.rotation-intent-<source>.json` manifest → rename temps
+  to finals and directory-fsync → rewrite the live tail atomically and
+  directory-fsync → compare-and-swap finalize (`base = base_before + cut`,
+  genesis reset to the tail's first-line hash, `archive_files` rows,
+  `state='done'`) → verify a full WAL checkpoint → durably remove the
+  manifest. The checkpoint is the power-loss boundary required before the
+  file-side recovery record can disappear while SQLite uses
+  `synchronous=NORMAL`. The manifest carries full pre-swap and tail SHA-256
+  values and survives
+  deletion of `history.db*`, so recovery still knows whether a final archive
+  duplicates the untouched live prefix or is its only surviving copy. On the
+  next start, before writer traffic, recovery resolves manifests first and
+  then any older DB-only pending rows: pre-rotation journal ⇒ **roll back**
   (each archive is verified byte-equal to the untouched journal prefix and
   then deleted — the only sanctioned archive deletion anywhere; a
-  verification mismatch quarantines the file instead); post-rotation hash
-  (or a planned-empty tail whose pre-hash no longer matches) ⇒ **roll
-  forward** (archives now hold the only raw copy; the finalize transaction
-  runs). Orphan `.tmp-*` files are deleted (temps are copies, not
-  evidence). The evidence multiset is invariant through every crash state.
+  verification mismatch is quarantined instead); post-rotation journal ⇒
+  **roll forward** (every archive or its temp is verified before idempotent
+  DB finalization, or before a fresh DB rebuild). Ingest and new rotations
+  fail closed while either intent remains. Cleanup deletes only temps that no
+  unresolved intent references. The evidence multiset is invariant through
+  every crash state.
 - Each completed rotation logs one info line: source, months, bytes,
   archive names, new live size.
 
@@ -184,14 +195,17 @@ Mechanics and guarantees:
 
 ## Statement equity derivation (recon.equity)
 
-Retained Flex statements are a **file-set ingest** (not offset-based): each
-`*.xml` in `statements/` missing from `statement_files` (or whose size
-changed) parses through `internal/flexstmt` and upserts one row per
-`(account_id, day)` into `statement_equity_days`. The restatement rule is
-exactly the recon engine's: **the statement with the newest
-`whenGenerated` wins a day** (`ON CONFLICT … WHERE excluded.when_generated >
-…`). Statements are never modified or pruned; a parse failure warns and
-retries next pass. The first pass backfills all retained statements, so the
+Retained Flex statements are a **file-set ingest** (not offset-based). Name,
+size, and SHA-256 identify the exact current `*.xml` set, including same-size
+corrections and removed files. When that set changes, every file first parses
+through `internal/flexstmt`; one transaction then replaces the statement-file
+inventory and all derived `(account_id, day)` rows. This retracts stale days
+and restores an older retained value when a newer file disappears. The
+restatement rule is **the statement with the newest `whenGenerated` wins a
+day**; descending filename/XML order is the deterministic equal-generation
+tie-break. Statements are never modified or pruned. A read or parse failure
+warns, preserves the last complete derived snapshot, and retries next pass.
+The first pass backfills all retained statements, so the
 runtime 45-day `DailyEquity` prune (untouched) stops being the only
 intraday-equity memory. `recon.equity` / `ibkr recon equity` serves the
 day series (default 90-day lookback, limit 200, max 1000) joined with the
@@ -232,8 +246,11 @@ range loads, preview-token redemption, plus the
 
 **The uniform safety rule: an indexed order read is served only when the
 index is provably complete for the journal at that instant** — the on-disk
-journal size equals the committed in-memory ingest watermark AND no
-`parse_ok = 0` rows exist (checked again inside each serving transaction).
+journal size equals the committed in-memory ingest watermark, its validated
+file generation and first-line genesis still match, and no `parse_ok = 0`
+rows exist (checked again inside each serving transaction). Every order line
+passes the daemon's canonical full-event decoder and 1 MiB scanner limit;
+projecting only the indexed columns is not treated as successful parsing.
 Anything else — staleness, parse markers, any query or decode error — falls
 back automatically to the unchanged legacy journal scan with a rate-limited
 (1/min/surface) log disclosure. There is deliberately **no settings escape

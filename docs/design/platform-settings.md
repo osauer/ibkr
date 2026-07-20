@@ -10,7 +10,8 @@ The daemon stores runtime preferences in
 `~/.local/state/ibkr/platform-settings.json` when `XDG_STATE_HOME` is unset.
 Only user preferences owned by `ibkr` belong in this file: feature toggles,
 the `trading.freeze` brake, rulebook earnings overrides, the regime-journal
-switch, and optional experimental trading-limit overrides.
+and canary-journal switches, history rotation preferences, and optional
+experimental trading-limit overrides.
 
 This document owns semantics and ownership, not the key list. The writable
 keys, types, and per-key descriptions are enumerated in the generated
@@ -60,6 +61,20 @@ the daemon hard-rejects agent-origin trading patches.
 
 `regime.journal.enabled` controls the regime-decisions forward-collection
 journal (`$XDG_STATE_HOME/ibkr/regime-decisions.jsonl`).
+
+`canary.journal.enabled` controls the canary-decisions forward-collection
+journal (`$XDG_STATE_HOME/ibkr/canary-decisions.jsonl`). It defaults to
+`true`, mirroring the regime journal; disabling it stops future collection
+without deleting existing evidence.
+
+`history.rotation.enabled` controls the automatic monthly maintenance pass
+for the regime, rules, and canary decision journals. It defaults to `true`.
+Rotation moves only fully indexed evidence into immutable gzip archives under
+`$XDG_STATE_HOME/ibkr/rotated/`; it compresses and relocates evidence but never
+deletes it. `history.rotation.keep_raw_months` selects how many most-recent
+calendar months remain in the live journals, counting the current month as
+month 1. Its default is `2`, its minimum is `1`, and `null` restores the
+default.
 
 Trading mode is never writable here. Stable builds expose trading and limits as
 read-only. Experimental trading builds may edit safety limits only after

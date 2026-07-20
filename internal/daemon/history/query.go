@@ -315,22 +315,36 @@ FROM capital_events WHERE at_unix_ms >= ? AND at_unix_ms < ? ORDER BY at_unix_ms
 // OrdersFresh reports whether order_events provably mirrors the entire
 // order journal at this instant: the on-disk size equals the committed
 // logical watermark (base is permanently 0 for orders) and no parse-marker
-// rows were recorded. One stat syscall plus a mutex read — it never
-// touches SQLite, so hot order paths cannot block on an ingest
-// transaction.
+// rows were recorded. The live path must also still name the exact file
+// generation whose identity and genesis were validated by the ingest
+// pass; equal-size replacement is therefore stale. It never touches
+// SQLite, so hot order paths cannot block on an ingest transaction.
 func (s *Store) OrdersFresh() bool {
-	if s == nil || s.opts.OrderJournalPath == "" {
+	if s == nil || s.opts.OrderJournalPath == "" || s.opts.ValidateOrderLine == nil {
 		return false
 	}
-	st, err := os.Stat(s.opts.OrderJournalPath)
+	f, err := os.Open(s.opts.OrderJournalPath)
 	if err != nil {
 		return false
 	}
-	wm, ok := s.watermark(sourceOrders)
-	if !ok || s.ordersParseBad() {
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
 		return false
 	}
-	return st.Size() == wm
+	firstHash, firstOK := firstLineHash(f)
+	changeIdentity, changeIdentityOK := orderChangeIdentityFor(st)
+	wm, watermarkOK, bad, generation, generationOK := s.ordersFreshState()
+	if !watermarkOK || bad || !generationOK || generation.info == nil ||
+		!changeIdentityOK || !generation.changeIdentityOK {
+		return false
+	}
+	return st.Size() == wm &&
+		changeIdentity == generation.changeIdentity &&
+		st.Size() == generation.info.Size() &&
+		st.ModTime().Equal(generation.info.ModTime()) &&
+		os.SameFile(st, generation.info) &&
+		firstOK == generation.genesisOK && firstHash == generation.genesis
 }
 
 // OrderEventLines returns raw order-journal lines from the index in
@@ -421,7 +435,7 @@ func (s *Store) MaxReservedOrderID() (int, error) {
 		return 0, err
 	}
 	var maxID int
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(reserved_order_id), 0) FROM order_events`).Scan(&maxID); err != nil {
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(reserved_order_id), 0) FROM order_events WHERE reserved_order_id > 0`).Scan(&maxID); err != nil {
 		return 0, err
 	}
 	return maxID, tx.Commit()

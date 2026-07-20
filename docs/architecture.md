@@ -138,7 +138,7 @@ index below is only a derived view of them.
 | Operator configuration | `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`; policy defaults under `~/.config/ibkr/policies/` | Gateway/account/client pins, daemon/trading settings, protection/opportunity policy, the operator-authored `risk-policy.toml`, and the separate `flex-token` secret. The risk policy has no embedded default: missing approval stays unapproved. |
 | Daemon durable state | `$XDG_STATE_HOME/ibkr`, falling back to `~/.local/state/ibkr` | `platform-settings.json`, order preview/readiness material, `order-journal.jsonl`, purge ledger, proposal/opportunity snapshots and journals, risk-capital state and event journals, governance/brief/rule/regime/canary journals, and `statements/flex-*.xml`. |
 | Rotated evidence archives | `$XDG_STATE_HOME/ibkr/rotated/` | Monthly gzip archives of the regime, rules, and canary decision journals, written only after the bytes are fully absorbed into the history index. Immutable evidence, kept forever: rotation compresses and relocates, it never deletes. The raw keep window is `history.rotation.keep_raw_months` (default 2). |
-| Derived history index | `$XDG_STATE_HOME/ibkr/history.db` (SQLite, WAL) | Daemon-only writer and opener. A rebuildable query index over the evidence journals and retained statements, kept current by automatic backfill and tail ingest. Deleting the file is safe; it rebuilds from archives, journals, and statements at daemon start. |
+| Derived history index | `$XDG_STATE_HOME/ibkr/history.db` (SQLite, WAL) | The daemon is the only product writer and runtime opener. This rebuildable query index over the evidence journals and retained statements stays current through automatic backfill and tail ingest. Deleting the file is safe; it rebuilds from archives, journals, and statements at daemon start. Humans and offline analysis scripts may also open it directly in read-only mode. |
 | App durable state | `$XDG_STATE_HOME/ibkr/app`, falling back to `~/.local/state/ibkr/app` | Private `state.json` with device grants, push subscriptions, VAPID material, alerts, governance evidence, and relay credentials; `app.lock` enforces one app process per state directory. |
 | Rebuildable cache | `$XDG_CACHE_HOME/ibkr`, falling back to `~/.cache/ibkr` | Contract cache, FX and earnings caches, breadth state and S&P membership, regime series/history/streaks, gamma results/OI/expiry grids, and updater scratch space. |
 | User data | `$XDG_DATA_HOME/ibkr`, falling back to `~/.local/share/ibkr` | `watchlist.json`; explicit research exports are separate operator-created files. |
@@ -146,12 +146,15 @@ index below is only a derived view of them.
 | Browser / PWA state | Browser cookie jar, IndexedDB, and `localStorage` | Short-lived session, durable HttpOnly device continuity, P-256 device key, local recovery material, preferences, and a non-authorizing relay route identifier. |
 | Hosted relay state | Cloudflare Durable Object | Connector token and expiry for the optional route. It stores no device grants or broker state. |
 
-The daemon is the history index's only writer and its only opener. CLI, MCP,
-and the app reach it through typed RPC; the app never opens the database
-file. Archives plus the live journal always reconstruct the original byte
-stream, so nothing is ever lost to rotation. Order reads serve from the
-index only while it provably matches the journal; anything else falls back
-to the journal scan automatically, and the journal stays authoritative.
+During normal product operation, the daemon is the history index's only
+writer and only opener. The four history commands — `ibkr regime history`,
+`ibkr rules history`, `ibkr canary history`, and `ibkr recon equity` — reach
+it through typed daemon RPC; MCP and the app currently expose no history
+surface. Humans and offline analysis scripts may open the file directly in
+read-only mode. Archives plus the live journal always reconstruct the original
+byte stream, so nothing is ever lost to rotation. Order reads serve from the
+index only while it provably matches the journal; anything else falls back to
+the journal scan automatically, and the journal stays authoritative.
 
 Never persist broker market-data entitlements. Expose observed data type,
 quality, freshness, and warnings on typed read surfaces instead.
@@ -204,11 +207,14 @@ and evidence journals. There are no metrics and no tracing.
 - Typed read surfaces carry their own source health. Regime clusters, gamma,
   the market calendar, and governance report stale, partial, degraded, or
   unknown instead of guessing.
-- Append-only JSONL journals are the evidence trail: orders, regime
-  decisions, rule decisions, proposal outcomes, risk-capital events, and the
-  purge ledger. `ibkr brief` is the human-readable aggregator over them,
-  and `ibkr regime history`, `ibkr rules history`, `ibkr canary history`,
-  and `ibkr recon equity` query them through the derived index.
+- Append-only JSONL journals are the evidence trail for orders, regime, rule,
+  and canary decisions, proposal outcomes, risk-capital events, and risk-policy
+  governance. The purge ledger is different: it is mutable JSON rewritten
+  atomically as purge and restore authority changes. `ibkr brief` composes
+  current typed daemon authority rather than aggregating journals. The CLI
+  history commands — `ibkr regime history`, `ibkr rules history`,
+  `ibkr canary history`, and `ibkr recon equity` — query journal and statement
+  evidence through the derived index.
 
 ## Change Flow
 

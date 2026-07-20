@@ -21,7 +21,7 @@ const v1BaseDDL = `CREATE TABLE ingest_sources (
 )`
 
 // buildV1Fixture creates a phase-1 database at path: v1 DDL (the regime
-// and rules DDL are unchanged between v1 and v2, so the shared builders
+// and rules DDL are unchanged between v1 and the current schema, so the shared builders
 // are the verbatim source), user_version 1, and seeded phase-1 rows.
 func buildV1Fixture(t *testing.T, path string) {
 	t.Helper()
@@ -99,16 +99,16 @@ func schemaShape(t *testing.T, s *Store) map[string][]string {
 	return shape
 }
 
-// TestMigrateV1ToV2SchemaEquality is the binding D2 test: a migrated v1
-// file and a fresh v2 file have identical sqlite_master name sets and
+// TestMigrateV1ToCurrentSchemaEquality is the binding migration test: a migrated v1
+// file and a fresh current-schema file have identical sqlite_master name sets and
 // identical per-table column layouts, phase-1 rows survive, and base is 0.
-func TestMigrateV1ToV2SchemaEquality(t *testing.T) {
+func TestMigrateV1ToCurrentSchemaEquality(t *testing.T) {
 	t.Parallel()
 	migratedOpts := testOptions(t)
 	buildV1Fixture(t, migratedOpts.DBPath)
 	migrated := openTestStore(t, migratedOpts)
-	if got := userVersion(t, migrated); got != 2 {
-		t.Fatalf("migrated user_version = %d, want 2", got)
+	if got := userVersion(t, migrated); got != schemaVersion {
+		t.Fatalf("migrated user_version = %d, want %d", got, schemaVersion)
 	}
 
 	fresh := openTestStore(t, testOptions(t))
@@ -150,6 +150,47 @@ func TestMigrateV1ToV2SchemaEquality(t *testing.T) {
 		} else if n != 0 {
 			t.Errorf("migrated table %s has %d rows, want 0", table, n)
 		}
+	}
+}
+
+func TestMigrateV2AddsStatementFingerprint(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	db, err := sql.Open("sqlite", "file:"+opts.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE statement_files (
+  name TEXT PRIMARY KEY,
+  size INTEGER NOT NULL,
+  ingested_at TEXT NOT NULL,
+  equity_days INTEGER NOT NULL
+)`,
+		`INSERT INTO statement_files (name, size, ingested_at, equity_days)
+VALUES ('flex-existing.xml', 42, '2026-07-01T00:00:00Z', 3)`,
+		`PRAGMA user_version = 2`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated := openTestStore(t, opts)
+	if got := userVersion(t, migrated); got != schemaVersion {
+		t.Fatalf("migrated user_version = %d, want %d", got, schemaVersion)
+	}
+	var name, fingerprint string
+	var size int64
+	if err := migrated.db.QueryRow(`SELECT name, size, sha256 FROM statement_files`).Scan(&name, &size, &fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if name != "flex-existing.xml" || size != 42 || fingerprint != "" {
+		t.Fatalf("migrated statement row = %q/%d/%q, want flex-existing.xml/42/empty fingerprint", name, size, fingerprint)
 	}
 }
 

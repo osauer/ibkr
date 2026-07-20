@@ -75,6 +75,35 @@ type rotationPlan struct {
 	runs        []archiveRun
 }
 
+// rotationManifest is the durable, file-side rotation intent. Unlike the
+// rotation_log row, it is evidence-adjacent state and survives deletion or
+// loss of the derived database. It is published before any archive final
+// name and removed only after the filesystem and (when still present) the
+// database have converged.
+type rotationManifest struct {
+	Version     int               `json:"version"`
+	Source      string            `json:"source"`
+	StartedAt   string            `json:"started_at"`
+	CutBytes    int64             `json:"cut_bytes"`
+	LiveSize    int64             `json:"live_size"`
+	BaseBefore  int64             `json:"base_before"`
+	PreGenesis  string            `json:"pre_genesis"`
+	PostGenesis string            `json:"post_genesis"`
+	PreSHA256   string            `json:"pre_sha256"`
+	PostSHA256  string            `json:"post_sha256"`
+	Archives    []rotationArchive `json:"archives"`
+}
+
+type rotationPendingRow struct {
+	id                        int64
+	source                    string
+	cut, liveSize, baseBefore int64
+	preGenesis, postGenesis   sql.NullString
+	archivesJSON              string
+}
+
+const rotationManifestVersion = 1
+
 // archiveNameRE pins the sanctioned archive shape:
 // <journal-base>-YYYY-MM[.partN].jsonl.gz with N in 2..9.
 var archiveNameRE = regexp.MustCompile(`^\d{4}-\d{2}(\.part[2-9])?\.jsonl\.gz$`)
@@ -126,6 +155,12 @@ func (s *Store) rotateSource(ctx context.Context, def sourceDef, locker sync.Loc
 	// a truncation and trigger a spurious rebuild.
 	s.ingestMu.Lock()
 	defer s.ingestMu.Unlock()
+
+	if pending, err := s.hasPendingRotation(def.name); err != nil {
+		return fmt.Errorf("check pending rotation: %w", err)
+	} else if pending {
+		return fmt.Errorf("a prior rotation is still pending recovery; refusing a new rotation")
+	}
 
 	st, err := os.Stat(def.path)
 	if err != nil {
@@ -187,11 +222,22 @@ func (s *Store) rotateSource(ctx context.Context, def sourceDef, locker sync.Loc
 	if err := s.failpoint("temps-written"); err != nil {
 		return err
 	}
+	if err := verifyLivePrefixMatchesArchives(def.path, archives); err != nil {
+		return fmt.Errorf("journal changed while archive temps were written: %w", err)
+	}
 
 	// Step 4: intent transaction.
 	archivesJSON, err := json.Marshal(archives)
 	if err != nil {
 		return err
+	}
+	preSHA, err := fileRangeSHA256(def.path, 0, liveSize)
+	if err != nil {
+		return fmt.Errorf("hash pre-rotation journal: %w", err)
+	}
+	postSHA, err := fileRangeSHA256(def.path, plan.cut, liveSize-plan.cut)
+	if err != nil {
+		return fmt.Errorf("hash post-rotation tail: %w", err)
 	}
 	res, err := s.db.Exec(`INSERT INTO rotation_log
 (source, started_at, state, cut_bytes, live_size, base_before, pre_genesis, post_genesis, archives_json)
@@ -207,6 +253,18 @@ VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
 	if err := s.failpoint("intent"); err != nil {
 		return err
 	}
+	manifest := rotationManifest{
+		Version: rotationManifestVersion, Source: def.name, StartedAt: nowUTC(),
+		CutBytes: plan.cut, LiveSize: liveSize, BaseBefore: base,
+		PreGenesis: plan.preGenesis, PostGenesis: plan.postGenesis,
+		PreSHA256: preSHA, PostSHA256: postSHA, Archives: archives,
+	}
+	if err := s.writeRotationManifest(manifest); err != nil {
+		return fmt.Errorf("publish rotation manifest: %w", err)
+	}
+	if err := s.failpoint("manifest"); err != nil {
+		return err
+	}
 
 	// Step 5: temps → final names; fsync the archive dir.
 	for _, arch := range archives {
@@ -218,9 +276,14 @@ VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
 			return err
 		}
 	}
-	syncDir(s.opts.RotatedDir)
+	if err := syncDir(s.opts.RotatedDir); err != nil {
+		return fmt.Errorf("sync archive directory: %w", err)
+	}
 	if err := s.failpoint("renamed"); err != nil {
 		return err
+	}
+	if err := verifyLiveBeforeSwap(def.path, liveSize, preSHA); err != nil {
+		return fmt.Errorf("journal changed before live-tail swap: %w", err)
 	}
 
 	// Step 6: rewrite the live tail atomically, preserving the original
@@ -234,8 +297,17 @@ VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
 
 	// Step 7: finalize transaction (base advance, archive inventory,
 	// rotation_log done) and watermark refresh.
-	if err := s.finalizeRotation(rotID, def.name, plan.cut, plan.postGenesis, archives); err != nil {
+	if err := s.finalizeRotation(rotID, def.name, base, plan.cut, plan.postGenesis, archives); err != nil {
 		return err
+	}
+	if err := s.failpoint("finalized"); err != nil {
+		return err
+	}
+	if err := s.checkpointRotation(); err != nil {
+		return fmt.Errorf("checkpoint completed rotation: %w", err)
+	}
+	if err := s.removeRotationManifest(def.name); err != nil {
+		return fmt.Errorf("remove completed rotation manifest: %w", err)
 	}
 
 	months := make([]string, 0, len(archives))
@@ -485,10 +557,10 @@ func swapLiveTail(path string, cut, size int64, mode os.FileMode) error {
 	}
 	_, err = io.Copy(out, io.NewSectionReader(src, cut, size-cut))
 	if err == nil {
-		err = out.Sync()
+		err = out.Chmod(mode)
 	}
 	if err == nil {
-		err = out.Chmod(mode)
+		err = out.Sync()
 	}
 	if cerr := out.Close(); err == nil {
 		err = cerr
@@ -500,22 +572,50 @@ func swapLiveTail(path string, cut, size int64, mode os.FileMode) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	syncDir(filepath.Dir(path))
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync live journal directory: %w", err)
+	}
 	return nil
 }
 
 // finalizeRotation is Txn B: advance base, reset genesis to the tail's
 // first-line hash, record the archives, and mark the rotation done. Shared
 // by the normal path and roll-forward recovery.
-func (s *Store) finalizeRotation(rotID int64, source string, cut int64, postGenesis string, archives []rotationArchive) error {
+func (s *Store) finalizeRotation(rotID int64, source string, baseBefore, cut int64, postGenesis string, archives []rotationArchive) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`UPDATE ingest_sources SET base = base + ?, genesis = ?, updated_at = ? WHERE source = ?`,
-		cut, nullableString(postGenesis), nowUTC(), source); err != nil {
+	var state string
+	if err := tx.QueryRow(`SELECT state FROM rotation_log WHERE id = ?`, rotID).Scan(&state); err != nil {
 		return err
+	}
+	if state == "done" {
+		return tx.Commit()
+	}
+	if state != "pending" {
+		return fmt.Errorf("rotation %d is %s, not pending", rotID, state)
+	}
+	var currentBase int64
+	if err := tx.QueryRow(`SELECT base FROM ingest_sources WHERE source = ?`, source).Scan(&currentBase); err != nil {
+		return err
+	}
+	switch currentBase {
+	case baseBefore:
+		res, err := tx.Exec(`UPDATE ingest_sources SET base = ?, genesis = ?, updated_at = ? WHERE source = ? AND base = ?`,
+			baseBefore+cut, nullableString(postGenesis), nowUTC(), source, baseBefore)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return fmt.Errorf("rotation %d base compare-and-swap affected %d rows: %v", rotID, n, err)
+		}
+	case baseBefore + cut:
+		// A prior finalize committed the base advance but recovery was
+		// re-entered before its durable manifest cleanup. Do not advance twice.
+	default:
+		return fmt.Errorf("rotation %d base is %d, want %d or already-finalized %d", rotID, currentBase, baseBefore, baseBefore+cut)
 	}
 	for _, arch := range archives {
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO archive_files (source, name, raw_bytes, gz_bytes, origin, created_at)
@@ -523,8 +623,12 @@ VALUES (?, ?, ?, ?, 'rotation', ?)`, source, arch.Name, arch.RawBytes, arch.GzBy
 			return err
 		}
 	}
-	if _, err := tx.Exec(`UPDATE rotation_log SET state = 'done', finished_at = ? WHERE id = ?`, nowUTC(), rotID); err != nil {
+	res, err := tx.Exec(`UPDATE rotation_log SET state = 'done', finished_at = ? WHERE id = ? AND state = 'pending'`, nowUTC(), rotID)
+	if err != nil {
 		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("rotation %d completion compare-and-swap affected %d rows: %v", rotID, n, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -533,6 +637,20 @@ VALUES (?, ?, ?, ?, 'rotation', ?)`, source, arch.Name, arch.RawBytes, arch.GzBy
 	// from bookkeeping anyway so it can never go stale across the swap.
 	if offset, _, err := s.sourceBookkeeping(source); err == nil {
 		s.setWatermark(source, offset)
+	}
+	return nil
+}
+
+// checkpointRotation makes a completed rotation transaction durable in the
+// main database before its file-side manifest may be removed. With WAL and
+// synchronous=NORMAL, transaction commit alone is not a power-loss boundary.
+func (s *Store) checkpointRotation() error {
+	var busy, logFrames, checkpointed int
+	if err := s.db.QueryRow(`PRAGMA wal_checkpoint(FULL)`).Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 || checkpointed != logFrames {
+		return fmt.Errorf("WAL checkpoint incomplete: busy=%d log=%d checkpointed=%d", busy, logFrames, checkpointed)
 	}
 	return nil
 }
@@ -557,22 +675,15 @@ func (s *Store) RecoverRotations(sources []RotationSource) {
 		}
 	}
 
-	type pendingRow struct {
-		id                      int64
-		source                  string
-		cut                     int64
-		preGenesis, postGenesis sql.NullString
-		archivesJSON            string
-	}
-	var pending []pendingRow
-	rows, err := s.db.Query(`SELECT id, source, cut_bytes, pre_genesis, post_genesis, archives_json FROM rotation_log WHERE state = 'pending' ORDER BY id`)
+	var pending []rotationPendingRow
+	rows, err := s.db.Query(`SELECT id, source, cut_bytes, live_size, base_before, pre_genesis, post_genesis, archives_json FROM rotation_log WHERE state = 'pending' ORDER BY id`)
 	if err != nil {
 		s.warnf("history: rotation recovery scan failed: %v", err)
 		return
 	}
 	for rows.Next() {
-		var row pendingRow
-		if err := rows.Scan(&row.id, &row.source, &row.cut, &row.preGenesis, &row.postGenesis, &row.archivesJSON); err != nil {
+		var row rotationPendingRow
+		if err := rows.Scan(&row.id, &row.source, &row.cut, &row.liveSize, &row.baseBefore, &row.preGenesis, &row.postGenesis, &row.archivesJSON); err != nil {
 			s.warnf("history: rotation recovery scan failed: %v", err)
 			rows.Close()
 			return
@@ -581,59 +692,209 @@ func (s *Store) RecoverRotations(sources []RotationSource) {
 	}
 	rows.Close()
 
+	handled := map[int64]bool{}
+	manifestPaths, err := filepath.Glob(filepath.Join(s.opts.RotatedDir, ".rotation-intent-*.json"))
+	if err != nil {
+		s.warnf("history: rotation manifest scan failed: %v", err)
+		return
+	}
+	for _, path := range manifestPaths {
+		m, err := s.readRotationManifest(path)
+		if err != nil {
+			s.warnf("history: rotation manifest %s is unreadable: %v; leaving it in place", filepath.Base(path), err)
+			continue
+		}
+		locker, ok := lockers[m.Source]
+		if !ok {
+			s.warnf("history: rotation manifest for %s has no writer lock; leaving it pending", m.Source)
+			continue
+		}
+		var dbRow *rotationPendingRow
+		for i := range pending {
+			if pending[i].source == m.Source && pending[i].cut == m.CutBytes && pending[i].baseBefore == m.BaseBefore {
+				dbRow = &pending[i]
+				break
+			}
+		}
+		locker.Lock()
+		resolved := s.recoverManifest(m, dbRow)
+		locker.Unlock()
+		if resolved && dbRow != nil {
+			handled[dbRow.id] = true
+		}
+	}
+
 	for _, row := range pending {
+		if handled[row.id] {
+			continue
+		}
 		locker, ok := lockers[row.source]
 		if !ok {
 			s.warnf("history: pending rotation %d for %s has no writer lock; leaving it pending", row.id, row.source)
 			continue
 		}
 		locker.Lock()
-		s.recoverRotation(row.id, row.source, row.cut, row.preGenesis.String, row.postGenesis.String, row.archivesJSON)
+		s.recoverRotation(row)
 		locker.Unlock()
 	}
 
-	// Orphan temps are copies, never evidence: clear them unconditionally.
-	if entries, err := os.ReadDir(s.opts.RotatedDir); err == nil {
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), ".tmp-") {
-				_ = os.Remove(filepath.Join(s.opts.RotatedDir, e.Name()))
-			}
-		}
-	}
+	s.cleanupOrphanRotationTemps()
 }
 
 // recoverRotation discriminates one pending rotation on the live file's
 // first-line hash and rolls it back (swap never happened; archives are
 // verified duplicates and deleted) or forward (swap happened; archives
 // are the only copy of the prefix and the finalize transaction runs).
-func (s *Store) recoverRotation(rotID int64, source string, cut int64, preGenesis, postGenesis, archivesJSON string) {
-	def, ok := s.sourceByName(source)
+func (s *Store) recoverRotation(row rotationPendingRow) {
+	def, ok := s.sourceByName(row.source)
 	if !ok {
-		s.warnf("history: pending rotation %d references unknown source %q; leaving it pending", rotID, source)
+		s.warnf("history: pending rotation %d references unknown source %q; leaving it pending", row.id, row.source)
 		return
 	}
 	var archives []rotationArchive
-	if err := json.Unmarshal([]byte(archivesJSON), &archives); err != nil {
-		s.warnf("history: pending rotation %d has an undecodable intent record: %v; leaving it pending", rotID, err)
+	if err := json.Unmarshal([]byte(row.archivesJSON), &archives); err != nil {
+		s.warnf("history: pending rotation %d has an undecodable intent record: %v; leaving it pending", row.id, err)
 		return
 	}
-
-	liveHash := ""
-	liveOK := false
-	if f, err := os.Open(def.path); err == nil {
-		liveHash, liveOK = firstLineHash(f)
-		_ = f.Close()
+	if err := validateRotationArchives(def, row.cut, archives); err != nil {
+		s.warnf("history: pending rotation %d has an invalid archive plan: %v; leaving it pending", row.id, err)
+		return
 	}
-
-	switch {
-	case liveOK && liveHash == preGenesis:
-		s.rollbackRotation(rotID, def, archives)
-	case (liveOK && postGenesis != "" && liveHash == postGenesis) || (postGenesis == "" && (!liveOK || liveHash != preGenesis)):
-		s.rollForwardRotation(rotID, def, cut, postGenesis, archives)
+	state, err := rotationLiveState(def.path, row.liveSize, row.cut, row.preGenesis.String, row.postGenesis.String)
+	if err != nil {
+		s.warnf("history: pending rotation %d could not inspect live journal: %v; leaving it pending", row.id, err)
+		return
+	}
+	switch state {
+	case rotationPreSwap:
+		if err := s.rollbackRotation(row.id, def, archives); err != nil {
+			s.warnf("history: rotation %d rollback incomplete: %v; leaving it pending", row.id, err)
+			return
+		}
+		if err := s.markRotationAborted(row.id); err != nil {
+			s.warnf("history: could not mark rotation %d aborted: %v", row.id, err)
+		}
+	case rotationPostSwap:
+		s.rollForwardRotation(row.id, def, row.baseBefore, row.cut, row.postGenesis.String, archives)
 	default:
-		s.warnf("history: pending rotation %d for %s matches neither the pre- nor post-rotation journal (external change?); archives kept, rotation marked aborted — manual review advised", rotID, source)
-		s.markRotationAborted(rotID)
+		s.warnf("history: pending rotation %d for %s matches neither the pre- nor post-rotation journal; archives kept and rotation left pending for manual review", row.id, row.source)
 	}
+}
+
+type rotationFileState uint8
+
+const (
+	rotationUnknown rotationFileState = iota
+	rotationPreSwap
+	rotationPostSwap
+)
+
+func rotationLiveState(path string, liveSize, cut int64, preGenesis, postGenesis string) (rotationFileState, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return rotationUnknown, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return rotationUnknown, err
+	}
+	hash, ok := firstLineHash(f)
+	_ = f.Close()
+	if ok && hash == preGenesis && st.Size() >= liveSize {
+		return rotationPreSwap, nil
+	}
+	postSize := liveSize - cut
+	if postGenesis == "" {
+		if st.Size() == 0 {
+			return rotationPostSwap, nil
+		}
+		return rotationUnknown, nil
+	}
+	if ok && hash == postGenesis && st.Size() >= postSize {
+		return rotationPostSwap, nil
+	}
+	return rotationUnknown, nil
+}
+
+func manifestLiveState(path string, m rotationManifest) (rotationFileState, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return rotationUnknown, err
+	}
+	if st.Size() >= m.LiveSize {
+		if got, err := fileRangeSHA256(path, 0, m.LiveSize); err != nil {
+			return rotationUnknown, err
+		} else if got == m.PreSHA256 {
+			return rotationPreSwap, nil
+		}
+	}
+	postSize := m.LiveSize - m.CutBytes
+	if st.Size() >= postSize {
+		if got, err := fileRangeSHA256(path, 0, postSize); err != nil {
+			return rotationUnknown, err
+		} else if got == m.PostSHA256 {
+			return rotationPostSwap, nil
+		}
+	}
+	return rotationUnknown, nil
+}
+
+func (s *Store) recoverManifest(m rotationManifest, row *rotationPendingRow) bool {
+	def, ok := s.sourceByName(m.Source)
+	if !ok {
+		s.warnf("history: rotation manifest references unknown source %q; leaving it pending", m.Source)
+		return false
+	}
+	state, err := manifestLiveState(def.path, m)
+	if err != nil {
+		s.warnf("history: rotation manifest for %s could not inspect live journal: %v; leaving it pending", m.Source, err)
+		return false
+	}
+	switch state {
+	case rotationPreSwap:
+		rotID := int64(0)
+		if row != nil {
+			rotID = row.id
+		}
+		if err := s.rollbackRotation(rotID, def, m.Archives); err != nil {
+			s.warnf("history: rotation manifest rollback for %s incomplete: %v; leaving it pending", m.Source, err)
+			return false
+		}
+		if row != nil {
+			if err := s.markRotationAborted(row.id); err != nil {
+				s.warnf("history: could not mark rotation %d aborted: %v; leaving manifest pending", row.id, err)
+				return false
+			}
+			if err := s.checkpointRotation(); err != nil {
+				s.warnf("history: aborted rotation %d WAL checkpoint failed: %v; leaving manifest pending", row.id, err)
+				return false
+			}
+		}
+	case rotationPostSwap:
+		if err := s.ensureRotationArchives(m.Archives); err != nil {
+			s.warnf("history: rotation manifest for %s cannot roll forward: %v; leaving it pending", m.Source, err)
+			return false
+		}
+		if row != nil {
+			if err := s.finalizeRotation(row.id, def.name, m.BaseBefore, m.CutBytes, m.PostGenesis, m.Archives); err != nil {
+				s.warnf("history: rotation %d roll-forward finalize failed: %v; leaving manifest pending", row.id, err)
+				return false
+			}
+			if err := s.checkpointRotation(); err != nil {
+				s.warnf("history: rotation %d WAL checkpoint failed: %v; leaving manifest pending", row.id, err)
+				return false
+			}
+		}
+	default:
+		s.warnf("history: rotation manifest for %s matches neither pre- nor post-swap journal; leaving it pending", m.Source)
+		return false
+	}
+	if err := s.removeRotationManifest(m.Source); err != nil {
+		s.warnf("history: rotation manifest cleanup for %s failed: %v; leaving recovery pending", m.Source, err)
+		return false
+	}
+	return true
 }
 
 // rollbackRotation handles "swap did not happen": every intent archive
@@ -642,16 +903,25 @@ func (s *Store) recoverRotation(rotID int64, source string, cut int64, preGenesi
 // deleted — the only sanctioned archive deletion anywhere. On any
 // mismatch the file is quarantined (renamed out of the archive namespace)
 // instead of deleted, loudly.
-func (s *Store) rollbackRotation(rotID int64, def sourceDef, archives []rotationArchive) {
-	prefixOK := verifyLivePrefixMatchesArchives(def.path, archives) == nil
+func (s *Store) rollbackRotation(rotID int64, def sourceDef, archives []rotationArchive) error {
+	if err := verifyLivePrefixMatchesArchives(def.path, archives); err != nil {
+		return fmt.Errorf("live prefix is not a verified duplicate: %w", err)
+	}
 	for _, arch := range archives {
 		final := filepath.Join(s.opts.RotatedDir, arch.Name)
 		if _, err := os.Stat(final); err != nil {
-			continue // never renamed from temp; temp cleanup handles it
+			if !os.IsNotExist(err) {
+				return err
+			}
+			tmp := filepath.Join(s.opts.RotatedDir, ".tmp-"+arch.Name)
+			if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove duplicate temp %s: %w", arch.Name, err)
+			}
+			continue
 		}
-		if prefixOK && verifyArchiveFile(final, arch) == nil {
+		if verifyArchiveFile(final, arch) == nil {
 			if err := os.Remove(final); err != nil {
-				s.warnf("history: rotation %d rollback could not delete duplicate archive %s: %v", rotID, arch.Name, err)
+				return fmt.Errorf("delete duplicate archive %s: %w", arch.Name, err)
 			}
 			continue
 		}
@@ -659,47 +929,65 @@ func (s *Store) rollbackRotation(rotID int64, def sourceDef, archives []rotation
 		s.warnf("history: rotation %d rollback: archive %s does not verify against the journal prefix; quarantining as %s instead of deleting",
 			rotID, arch.Name, filepath.Base(quarantine))
 		if err := os.Rename(final, quarantine); err != nil {
-			s.warnf("history: quarantine of %s failed: %v (file left in place; backfill will not ingest it twice thanks to archive_files)", arch.Name, err)
+			return fmt.Errorf("quarantine archive %s: %w", arch.Name, err)
 		}
 	}
-	s.markRotationAborted(rotID)
+	if err := syncDir(s.opts.RotatedDir); err != nil {
+		return fmt.Errorf("sync rollback directory: %w", err)
+	}
 	s.infof("history: rotation %d for %s rolled back after crash; journal untouched, next scheduled rotation retries", rotID, def.name)
+	return nil
 }
 
 // rollForwardRotation handles "swap happened": the archives now hold the
 // only raw copy of the prefix. Their presence is verified (the DB itself
 // still holds every row, so a missing archive is an evidence-copy loss to
 // disclose, not a data loss) and the finalize transaction runs.
-func (s *Store) rollForwardRotation(rotID int64, def sourceDef, cut int64, postGenesis string, archives []rotationArchive) {
-	for _, arch := range archives {
-		final := filepath.Join(s.opts.RotatedDir, arch.Name)
-		if _, err := os.Stat(final); err == nil {
-			continue
-		}
-		// The rename step is strictly before the swap, so finals must
-		// exist; check temps anyway in case of an unexpected state.
-		tmp := filepath.Join(s.opts.RotatedDir, ".tmp-"+arch.Name)
-		if _, terr := os.Stat(tmp); terr == nil {
-			if verifyArchiveFile(tmp, arch) == nil {
-				if rerr := os.Rename(tmp, final); rerr == nil {
-					continue
-				}
-			}
-		}
-		s.warnf("history: CRITICAL: rotation %d for %s completed its journal swap but archive %s is missing — the raw prefix copy is lost (index rows remain intact in history.db)", rotID, def.name, arch.Name)
+func (s *Store) rollForwardRotation(rotID int64, def sourceDef, baseBefore, cut int64, postGenesis string, archives []rotationArchive) {
+	if err := s.ensureRotationArchives(archives); err != nil {
+		s.warnf("history: CRITICAL: rotation %d for %s cannot verify all archive copies: %v; left pending", rotID, def.name, err)
+		return
 	}
-	syncDir(s.opts.RotatedDir)
-	if err := s.finalizeRotation(rotID, def.name, cut, postGenesis, archives); err != nil {
+	if err := s.finalizeRotation(rotID, def.name, baseBefore, cut, postGenesis, archives); err != nil {
 		s.warnf("history: rotation %d roll-forward finalize failed: %v (left pending for the next start)", rotID, err)
+		return
+	}
+	if err := s.checkpointRotation(); err != nil {
+		s.warnf("history: rotation %d roll-forward checkpoint failed: %v (DB-only intent remains recoverable)", rotID, err)
 		return
 	}
 	s.infof("history: rotation %d for %s rolled forward after crash; archives finalized", rotID, def.name)
 }
 
-func (s *Store) markRotationAborted(rotID int64) {
-	if _, err := s.db.Exec(`UPDATE rotation_log SET state = 'aborted', finished_at = ? WHERE id = ?`, nowUTC(), rotID); err != nil {
-		s.warnf("history: could not mark rotation %d aborted: %v", rotID, err)
+func (s *Store) ensureRotationArchives(archives []rotationArchive) error {
+	for _, arch := range archives {
+		final := filepath.Join(s.opts.RotatedDir, arch.Name)
+		if err := verifyArchiveFile(final, arch); err == nil {
+			continue
+		}
+		tmp := filepath.Join(s.opts.RotatedDir, ".tmp-"+arch.Name)
+		if err := verifyArchiveFile(tmp, arch); err != nil {
+			return fmt.Errorf("archive %s missing or corrupt (temp: %v)", arch.Name, err)
+		}
+		if err := os.Rename(tmp, final); err != nil {
+			return fmt.Errorf("publish recovered archive %s: %w", arch.Name, err)
+		}
 	}
+	if err := syncDir(s.opts.RotatedDir); err != nil {
+		return fmt.Errorf("sync recovered archives: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) markRotationAborted(rotID int64) error {
+	res, err := s.db.Exec(`UPDATE rotation_log SET state = 'aborted', finished_at = ? WHERE id = ? AND state = 'pending'`, nowUTC(), rotID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("abort compare-and-swap affected %d rows: %v", n, err)
+	}
+	return nil
 }
 
 // verifyArchiveFile checks a gzip archive against its intent record: exact
@@ -759,12 +1047,55 @@ func verifyLivePrefixMatchesArchives(path string, archives []rotationArchive) er
 	return nil
 }
 
+func fileRangeSHA256(path string, offset, length int64) (string, error) {
+	if offset < 0 || length < 0 {
+		return "", errors.New("negative file hash range")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, io.NewSectionReader(f, offset, length))
+	if err != nil {
+		return "", err
+	}
+	if n != length {
+		return "", fmt.Errorf("hashed %d bytes, want %d", n, length)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func verifyLiveBeforeSwap(path string, wantSize int64, wantSHA string) error {
+	st, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if st.Size() != wantSize {
+		return fmt.Errorf("journal size is %d, planned %d", st.Size(), wantSize)
+	}
+	got, err := fileRangeSHA256(path, 0, wantSize)
+	if err != nil {
+		return err
+	}
+	if got != wantSHA {
+		return errors.New("journal content no longer matches the rotation plan")
+	}
+	return nil
+}
+
 // backfillArchives streams every on-disk archive of the source that
 // archive_files does not record yet — the (re)build path that keeps
 // "every DB row rebuildable from files" true after rotation. During
 // normal operation every archive is recorded and this is a cheap no-op;
 // archives are never read outside a rebuild. Callers hold ingestMu.
 func (s *Store) backfillArchives(ctx context.Context, def sourceDef) error {
+	if pending, err := s.hasPendingRotation(def.name); err != nil {
+		return fmt.Errorf("check pending rotation: %w", err)
+	} else if pending {
+		return fmt.Errorf("rotation recovery is pending for %s; refusing archive backfill", def.name)
+	}
 	entries, err := os.ReadDir(s.opts.RotatedDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -934,6 +1265,194 @@ func (s *Store) sourceBookkeeping(name string) (offset, base int64, err error) {
 	return offset, base, err
 }
 
+func (s *Store) hasPendingRotation(source string) (bool, error) {
+	if _, err := os.Stat(s.rotationManifestPath(source)); err == nil {
+		return true, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	var pending bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM rotation_log WHERE source = ? AND state = 'pending')`, source).Scan(&pending); err != nil {
+		return false, err
+	}
+	return pending, nil
+}
+
+func (s *Store) rotationManifestPath(source string) string {
+	return filepath.Join(s.opts.RotatedDir, ".rotation-intent-"+source+".json")
+}
+
+func (s *Store) writeRotationManifest(m rotationManifest) error {
+	if err := s.validateRotationManifest(m); err != nil {
+		return err
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	final := s.rotationManifestPath(m.Source)
+	tmp := final + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(append(b, '\n')); err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		return err
+	}
+	return syncDir(s.opts.RotatedDir)
+}
+
+func (s *Store) readRotationManifest(path string) (rotationManifest, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return rotationManifest{}, err
+	}
+	var m rotationManifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		return rotationManifest{}, err
+	}
+	if path != s.rotationManifestPath(m.Source) {
+		return rotationManifest{}, fmt.Errorf("manifest source %q does not match file name", m.Source)
+	}
+	if err := s.validateRotationManifest(m); err != nil {
+		return rotationManifest{}, err
+	}
+	return m, nil
+}
+
+func (s *Store) validateRotationManifest(m rotationManifest) error {
+	if m.Version != rotationManifestVersion || m.Source == "" || m.CutBytes <= 0 || m.CutBytes > m.LiveSize ||
+		len(m.PreSHA256) != sha256.Size*2 || len(m.PostSHA256) != sha256.Size*2 {
+		return errors.New("invalid rotation manifest")
+	}
+	if _, err := hex.DecodeString(m.PreSHA256); err != nil {
+		return fmt.Errorf("invalid pre-rotation sha256: %w", err)
+	}
+	if _, err := hex.DecodeString(m.PostSHA256); err != nil {
+		return fmt.Errorf("invalid post-rotation sha256: %w", err)
+	}
+	def, ok := s.sourceByName(m.Source)
+	if !ok || !def.rotatable {
+		return fmt.Errorf("manifest source %q is not rotatable", m.Source)
+	}
+	return validateRotationArchives(def, m.CutBytes, m.Archives)
+}
+
+func validateRotationArchives(def sourceDef, cut int64, archives []rotationArchive) error {
+	if cut <= 0 || len(archives) == 0 {
+		return errors.New("empty rotation archive plan")
+	}
+	prefix := journalArchiveBase(def.path) + "-"
+	seen := map[string]bool{}
+	var total int64
+	for _, arch := range archives {
+		if filepath.Base(arch.Name) != arch.Name || !strings.HasPrefix(arch.Name, prefix) ||
+			!archiveNameRE.MatchString(strings.TrimPrefix(arch.Name, prefix)) {
+			return fmt.Errorf("unsafe archive name %q", arch.Name)
+		}
+		if seen[arch.Name] {
+			return fmt.Errorf("duplicate archive name %q", arch.Name)
+		}
+		seen[arch.Name] = true
+		if arch.RawBytes <= 0 || arch.RawBytes > cut-total || arch.GzBytes <= 0 {
+			return fmt.Errorf("invalid archive sizes for %q", arch.Name)
+		}
+		if len(arch.SHA256) != sha256.Size*2 {
+			return fmt.Errorf("invalid archive sha256 for %q", arch.Name)
+		}
+		if _, err := hex.DecodeString(arch.SHA256); err != nil {
+			return fmt.Errorf("invalid archive sha256 for %q: %w", arch.Name, err)
+		}
+		total += arch.RawBytes
+	}
+	if total != cut {
+		return fmt.Errorf("archive raw bytes total %d, want cut %d", total, cut)
+	}
+	return nil
+}
+
+func (s *Store) removeRotationManifest(source string) error {
+	path := s.rotationManifestPath(source)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return syncDir(s.opts.RotatedDir)
+}
+
+// cleanupOrphanRotationTemps removes only archive temps that no unresolved
+// file- or DB-side intent can reference. A referenced temp may be the sole
+// remaining raw prefix copy after a post-swap crash and is never cleanup.
+func (s *Store) cleanupOrphanRotationTemps() {
+	entries, err := os.ReadDir(s.opts.RotatedDir)
+	if err != nil {
+		return
+	}
+	referenced := map[string]bool{}
+	manifestPaths, err := filepath.Glob(filepath.Join(s.opts.RotatedDir, ".rotation-intent-*.json"))
+	if err != nil {
+		return
+	}
+	for _, path := range manifestPaths {
+		m, err := s.readRotationManifest(path)
+		if err != nil {
+			return // unreadable intent: fail closed and retain every temp
+		}
+		for _, arch := range m.Archives {
+			referenced[".tmp-"+arch.Name] = true
+		}
+	}
+	rows, err := s.db.Query(`SELECT archives_json FROM rotation_log WHERE state = 'pending'`)
+	if err != nil {
+		return
+	}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			rows.Close()
+			return
+		}
+		var archives []rotationArchive
+		if err := json.Unmarshal([]byte(raw), &archives); err != nil {
+			rows.Close()
+			return
+		}
+		for _, arch := range archives {
+			referenced[".tmp-"+arch.Name] = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return
+	}
+	removed := false
+	for _, e := range entries {
+		isArchiveTemp := strings.HasPrefix(e.Name(), ".tmp-")
+		isManifestTemp := strings.HasPrefix(e.Name(), ".rotation-intent-") && strings.HasSuffix(e.Name(), ".json.tmp")
+		if (!isArchiveTemp && !isManifestTemp) || referenced[e.Name()] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.opts.RotatedDir, e.Name())); err != nil {
+			s.warnf("history: could not remove orphan rotation temp %s: %v", e.Name(), err)
+			continue
+		}
+		removed = true
+	}
+	if removed {
+		if err := syncDir(s.opts.RotatedDir); err != nil {
+			s.warnf("history: could not durably remove orphan rotation temps: %v", err)
+		}
+	}
+}
+
 func (s *Store) failpoint(stage string) error {
 	if s.rotateFailpoint == nil {
 		return nil
@@ -941,13 +1460,19 @@ func (s *Store) failpoint(stage string) error {
 	return s.rotateFailpoint(stage)
 }
 
-// syncDir best-effort fsyncs a directory so renames inside it are
-// durable before dependent state commits.
-func syncDir(dir string) {
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+// syncDir fsyncs a directory so renames and removals inside it are durable
+// before dependent state commits. Failure is never advisory in rotation:
+// callers must leave the durable intent pending and recover later.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
 	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // lineTimestamp extracts and parses the journal timestamp field ("ts" or

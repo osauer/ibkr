@@ -109,6 +109,7 @@ func (s *Server) installHistoryIndex() {
 		RiskPolicyJournalPath: riskPolicyPath,
 		ProposalOutcomesPath:  outcomesPath,
 		OrderJournalPath:      orderPath,
+		ValidateOrderLine:     validateOrderJournalLine,
 		StatementsDir:         statementsDir,
 		RotatedDir:            rotatedDir,
 		Logf:                  s.logger.Warnf,

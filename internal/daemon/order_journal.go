@@ -359,16 +359,36 @@ func orderJournalPriorTokenUse(events []orderJournalEvent, tokenID string) error
 func decodeOrderJournalRawLines(raws [][]byte) ([]orderJournalEvent, bool) {
 	events := make([]orderJournalEvent, 0, len(raws))
 	for _, raw := range raws {
-		var ev orderJournalEvent
-		if err := json.Unmarshal(raw, &ev); err != nil {
-			return nil, false
-		}
-		if ev.Version != orderJournalFileVersion {
+		ev, err := decodeOrderJournalLine(raw)
+		if err != nil {
 			return nil, false
 		}
 		events = append(events, ev)
 	}
 	return events, true
+}
+
+// validateOrderJournalLine is injected into the derived history index so
+// parse_ok has precisely the reference scanner's full-event semantics.
+// The size check matches loadEventsLocked's Scanner buffer: the newline
+// delimiter must fit inside maxFrameBytes as well as the payload.
+func validateOrderJournalLine(raw []byte) error {
+	if len(raw) >= maxFrameBytes {
+		return fmt.Errorf("order journal line exceeds the %d-byte cap", maxFrameBytes)
+	}
+	_, err := decodeOrderJournalLine(raw)
+	return err
+}
+
+func decodeOrderJournalLine(raw []byte) (orderJournalEvent, error) {
+	var ev orderJournalEvent
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		return orderJournalEvent{}, err
+	}
+	if ev.Version != orderJournalFileVersion {
+		return orderJournalEvent{}, fmt.Errorf("unsupported order journal version %d", ev.Version)
+	}
+	return ev, nil
 }
 
 func (s *orderJournalStore) Summary() (orderJournalSummary, error) {

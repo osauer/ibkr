@@ -290,6 +290,7 @@ func TestRotationCrashMatrix(t *testing.T) {
 	}{
 		{"temps-written", false},
 		{"intent", false},
+		{"manifest", false},
 		{"rename:regime-decisions-2026-04.jsonl.gz", false},
 		{"renamed", false},
 		{"swapped", true},
@@ -362,6 +363,9 @@ func TestRotationCrashMatrix(t *testing.T) {
 			for _, e := range entries {
 				if strings.HasPrefix(e.Name(), ".tmp-") {
 					t.Fatalf("orphan temp %s survived recovery", e.Name())
+				}
+				if strings.HasPrefix(e.Name(), ".rotation-intent-") {
+					t.Fatalf("rotation manifest %s survived successful recovery", e.Name())
 				}
 			}
 
@@ -705,14 +709,11 @@ func slicesContainsString(names []string, want string) bool {
 	return slices.Contains(names, want)
 }
 
-// TestRotationBoundaryConflictHeals pins the recovery path for a rotation
-// that swapped the live file and then failed before its finalize
-// transaction while the daemon stayed up, so RecoverRotations never ran.
-// The archive then exists with no bookkeeping row; every later ingest pass
-// meets the backfill boundary refusal before the truncation check that
-// would otherwise heal it. Ingest must rebuild instead of freezing the
-// source's offset while the journal keeps growing.
-func TestRotationBoundaryConflictHeals(t *testing.T) {
+// TestRotationBoundaryConflictFailsClosed pins the same-process crash path:
+// while a durable rotation intent is pending, ingest must not rebuild from a
+// temporarily duplicated archive+live stream. Startup recovery resolves the
+// intent under the writer lock, after which ingest catches up normally.
+func TestRotationBoundaryConflictFailsClosed(t *testing.T) {
 	t.Parallel()
 	opts := testOptions(t)
 	buildMonthlyJournal(t, opts.RegimeJournalPath, []string{"2026-04", "2026-05", "2026-06"}, 3)
@@ -741,11 +742,30 @@ func TestRotationBoundaryConflictHeals(t *testing.T) {
 	}
 
 	s.ingestAll(context.Background())
+	rowsWhilePending := dumpRows(t, s, "regime_decisions")
+	if strings.Contains(rowsWhilePending[len(rowsWhilePending)-1], "fp-post-crash") {
+		t.Fatal("ingest advanced while a rotation intent was pending")
+	}
+	var intentsBefore int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM rotation_log`).Scan(&intentsBefore); err != nil {
+		t.Fatal(err)
+	}
+	s.RotateAll(context.Background(), regimeRotationSource(), 2, rotationNow)
+	var intentsAfter int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM rotation_log`).Scan(&intentsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if intentsAfter != intentsBefore {
+		t.Fatalf("new rotation started while an intent was pending: rows %d -> %d", intentsBefore, intentsAfter)
+	}
+
+	s.RecoverRotations(regimeRotationSource())
+	s.ingestAll(context.Background())
 
 	stream := reconstructStream(t, opts, opts.RegimeJournalPath)
 	rows := dumpRows(t, s, "regime_decisions")
 	if want := strings.Count(stream, "\n"); len(rows) != want {
-		t.Fatalf("indexed rows = %d, want %d (evidence stream lines): ingest wedged after the failed rotation", len(rows), want)
+		t.Fatalf("indexed rows = %d, want %d after recovery", len(rows), want)
 	}
 	if !strings.Contains(rows[len(rows)-1], "fp-post-crash") {
 		t.Fatal("the line journaled after the failed rotation was never indexed")

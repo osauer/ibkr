@@ -181,6 +181,82 @@ func TestOrdersFreshWatermarkTransitions(t *testing.T) {
 	}
 }
 
+func TestOrdersFreshRequiresCanonicalValidatorAfterReopen(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	writeJournal(t, opts.OrderJournalPath,
+		`{"version":1,"at":"2026-07-01T10:00:00Z","type":"previewed","order_ref":"o1"}`+"\n")
+	s := openTestStore(t, opts)
+	s.ingestAll(t.Context())
+	if !s.OrdersFresh() {
+		t.Fatal("validated index is not fresh")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.ValidateOrderLine = nil
+	s2 := openTestStore(t, opts)
+	s2.ingestAll(t.Context())
+	if s2.OrdersFresh() {
+		t.Fatal("index reported fresh without the daemon's canonical validator")
+	}
+}
+
+func TestOrdersEqualSizeReplacementRebuildsAcrossRestart(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	first := `{"version":1,"at":"2026-07-01T10:00:00Z","type":"previewed","order_ref":"same"}` + "\n"
+	oldSecond := `{"version":1,"at":"2026-07-01T11:00:00Z","type":"send-attempted","reserved_order_id":111}` + "\n"
+	newSecond := `{"version":1,"at":"2026-07-01T11:00:00Z","type":"send-attempted","reserved_order_id":999}` + "\n"
+	if len(oldSecond) != len(newSecond) {
+		t.Fatal("test replacement must preserve byte length")
+	}
+	writeJournal(t, opts.OrderJournalPath, first+oldSecond)
+	s := openTestStore(t, opts)
+	s.ingestAll(context.Background())
+	if !s.OrdersFresh() {
+		t.Fatal("initial journal not fresh")
+	}
+	if id, err := s.MaxReservedOrderID(); err != nil || id != 111 {
+		t.Fatalf("initial max id = %d (%v), want 111", id, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Preserve size and genesis, the two facts previously used by the
+	// no-op path. A cold store must compare the actual indexed evidence
+	// before accepting this new generation.
+	writeJournal(t, opts.OrderJournalPath, first+newSecond)
+	s2 := openTestStore(t, opts)
+	if s2.OrdersFresh() {
+		t.Fatal("cold replacement reported fresh before validation")
+	}
+	s2.ingestAll(context.Background())
+	if !s2.OrdersFresh() {
+		t.Fatal("rebuilt replacement not fresh")
+	}
+	if id, err := s2.MaxReservedOrderID(); err != nil || id != 999 {
+		t.Fatalf("replacement max id = %d (%v), want 999", id, err)
+	}
+}
+
+func TestMaxReservedOrderIDIgnoresNonPositiveValues(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	writeJournal(t, opts.OrderJournalPath,
+		`{"version":1,"at":"2026-07-01T11:00:00Z","type":"send-attempted","reserved_order_id":-7}`+"\n")
+	s := openTestStore(t, opts)
+	s.ingestAll(t.Context())
+	if !s.OrdersFresh() {
+		t.Fatal("orders index is not fresh")
+	}
+	if got, err := s.MaxReservedOrderID(); err != nil || got != 0 {
+		t.Fatalf("MaxReservedOrderID = %d (%v), want 0", got, err)
+	}
+}
+
 func TestOrdersParseBadSeededAcrossRestart(t *testing.T) {
 	t.Parallel()
 	opts := testOptions(t)

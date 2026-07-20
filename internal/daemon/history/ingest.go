@@ -236,23 +236,46 @@ func (s *Store) ingestSourcePass(ctx context.Context, def sourceDef) (rebuilt bo
 	}
 	size := st.Size()
 	physical := offset - base
-	if size == physical {
-		if err := tx.Commit(); err != nil {
-			return false, err
-		}
-		s.setWatermark(def.name, offset)
-		return false, nil
-	}
-
+	// Identity must be checked before the equal-size no-op. Otherwise an
+	// atomic replacement with the same byte length leaves stale indexed
+	// rows looking current.
 	firstHash, firstOK := firstLineHash(f)
 	if size < physical || (genesis.String != "" && (!firstOK || firstHash != genesis.String)) {
 		_ = tx.Rollback()
+		if def.name == sourceOrders {
+			s.clearOrderGeneration()
+		}
 		s.warnf("history: %s journal %s was truncated or replaced (size %d, ingested %d past %d rotated); dropping and rebuilding its index tables from offset 0",
 			def.name, def.path, size, physical, base)
 		if err := s.rebuildSource(def, nowUTC()); err != nil {
 			return false, fmt.Errorf("rebuild after truncation: %w", err)
 		}
 		return true, nil
+	}
+	if size == physical {
+		if def.name == sourceOrders && !s.orderGenerationMatches(st, firstHash, firstOK) {
+			matches, matchErr := orderIndexMatchesJournal(tx, f)
+			if matchErr != nil {
+				return false, fmt.Errorf("verify equal-size orders journal: %w", matchErr)
+			}
+			if !matches {
+				_ = tx.Rollback()
+				s.clearOrderGeneration()
+				s.warnf("history: orders journal %s changed content without changing size; dropping and rebuilding its index tables from offset 0", def.path)
+				if err := s.rebuildSource(def, nowUTC()); err != nil {
+					return false, fmt.Errorf("rebuild after equal-size replacement: %w", err)
+				}
+				return true, nil
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		s.setWatermark(def.name, offset)
+		if def.name == sourceOrders {
+			s.setOrderGeneration(st, firstHash, firstOK)
+		}
+		return false, nil
 	}
 
 	if _, err := f.Seek(physical, io.SeekStart); err != nil {
@@ -316,10 +339,66 @@ func (s *Store) ingestSourcePass(ctx context.Context, def sourceDef) (rebuilt bo
 		}
 		return false, scanErr
 	}
+	if def.name == sourceOrders {
+		// Capture the generation after scanning. If the file grew beyond the
+		// committed offset, OrdersFresh's size comparison still rejects it;
+		// if the path was replaced, os.SameFile rejects it.
+		if finalInfo, statErr := f.Stat(); statErr == nil && sameOrderFileGeneration(st, finalInfo) {
+			s.setOrderGeneration(finalInfo, firstHash, firstOK)
+		} else {
+			// A concurrent append or rewrite means this pass did not observe
+			// one stable generation. The next kick/no-op pass performs an
+			// exact DB/file comparison before enabling indexed reads.
+			s.clearOrderGeneration()
+		}
+	}
 	if skipped > 0 {
 		s.warnf("history: %s ingest skipped %d unparseable line(s); offsets advanced past them", def.name, skipped)
 	}
 	return false, nil
+}
+
+// orderIndexMatchesJournal performs the cold-start/equal-size generation
+// proof. A persisted byte count and first-line hash cannot distinguish a
+// replacement that preserves both, so when no validated in-memory file
+// identity exists we compare every indexed raw line with the evidence
+// file before allowing the fast path. This is a startup/replacement cost,
+// not a hot-read cost.
+func orderIndexMatchesJournal(tx *sql.Tx, f *os.File) (bool, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	rows, err := tx.Query(`SELECT raw_json FROM order_events ORDER BY src_offset`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	sc := newLineScanner(f)
+	for rows.Next() {
+		if !sc.Scan() {
+			if err := sc.Err(); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		var indexed []byte
+		if err := rows.Scan(&indexed); err != nil {
+			return false, err
+		}
+		if !bytes.Equal(indexed, sc.Bytes()) {
+			return false, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if sc.Scan() {
+		return false, nil
+	}
+	if err := sc.Err(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // scanCompleteLines is a bufio.SplitFunc that emits only newline-terminated
@@ -655,8 +734,13 @@ type orderLine struct {
 func (s *Store) insertOrderLine(tx *sql.Tx, srcOffset int64, line []byte, replay bool) error {
 	var l orderLine
 	parseOK := true
+	if s.opts.ValidateOrderLine == nil || s.opts.ValidateOrderLine(line) != nil {
+		parseOK = false
+	}
 	if err := json.Unmarshal(line, &l); err != nil || l.Version != 1 {
 		parseOK = false
+	}
+	if !parseOK {
 		l = orderLine{Version: l.Version}
 	}
 	var atText string

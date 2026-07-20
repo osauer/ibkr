@@ -62,6 +62,12 @@ type Options struct {
 	// OrderJournalPath is order-journal.jsonl. Trading evidence: indexed in
 	// place, never rotated, truncated, or rewritten by this package.
 	OrderJournalPath string
+	// ValidateOrderLine is the daemon's canonical full order-journal
+	// decoder. The history package cannot import the daemon's writer type
+	// without an import cycle, so the owner injects that authority here.
+	// When nil, order rows are indexed for rebuildability but marked
+	// unparseable and can never serve the indexed order-read fast path.
+	ValidateOrderLine func([]byte) error
 	// StatementsDir is the retained Flex statement directory; *.xml files
 	// there derive statement_equity_days (file-set ingest, newest
 	// whenGenerated wins per day).
@@ -102,6 +108,13 @@ type Store struct {
 	wmMu       sync.Mutex
 	watermarks map[string]int64
 	ordersBad  bool
+	// orderGeneration is the file identity validated by the ingest pass
+	// which produced the current orders watermark. Freshness requires the
+	// live path to still name this same generation; size equality alone is
+	// insufficient because an equal-length replacement can contain wholly
+	// different evidence.
+	orderGeneration   orderFileGeneration
+	orderGenerationOK bool
 
 	// rotateFailpoint, when set (tests only), is invoked at named rotation
 	// and backfill stages and aborts the operation when it errors —
@@ -204,15 +217,6 @@ func (s *Store) setWatermark(source string, offset int64) {
 	s.wmMu.Unlock()
 }
 
-// watermark returns a source's committed logical ingest offset; ok is
-// false before the first committed ingest of this process lifetime.
-func (s *Store) watermark(source string) (int64, bool) {
-	s.wmMu.Lock()
-	defer s.wmMu.Unlock()
-	wm, ok := s.watermarks[source]
-	return wm, ok
-}
-
 func (s *Store) setOrdersParseBad(bad bool) {
 	if s == nil {
 		return
@@ -226,6 +230,78 @@ func (s *Store) ordersParseBad() bool {
 	s.wmMu.Lock()
 	defer s.wmMu.Unlock()
 	return s.ordersBad
+}
+
+type orderFileGeneration struct {
+	info             os.FileInfo
+	genesis          string
+	genesisOK        bool
+	changeIdentity   orderChangeIdentity
+	changeIdentityOK bool
+}
+
+func (s *Store) setOrderGeneration(info os.FileInfo, genesis string, genesisOK bool) {
+	if s == nil {
+		return
+	}
+	changeIdentity, changeIdentityOK := orderChangeIdentityFor(info)
+	s.wmMu.Lock()
+	s.orderGeneration = orderFileGeneration{
+		info:             info,
+		genesis:          genesis,
+		genesisOK:        genesisOK,
+		changeIdentity:   changeIdentity,
+		changeIdentityOK: changeIdentityOK,
+	}
+	// Platforms where FileInfo exposes no non-user-settable change identity
+	// fail closed to the journal scan. Size/mtime/genesis alone cannot prove
+	// that a same-size in-place rewrite did not occur.
+	s.orderGenerationOK = info != nil && changeIdentityOK
+	s.wmMu.Unlock()
+}
+
+func (s *Store) clearOrderGeneration() {
+	if s == nil {
+		return
+	}
+	s.wmMu.Lock()
+	s.orderGeneration = orderFileGeneration{}
+	s.orderGenerationOK = false
+	s.wmMu.Unlock()
+}
+
+func (s *Store) ordersFreshState() (int64, bool, bool, orderFileGeneration, bool) {
+	s.wmMu.Lock()
+	defer s.wmMu.Unlock()
+	wm, watermarkOK := s.watermarks[sourceOrders]
+	return wm, watermarkOK, s.ordersBad, s.orderGeneration, s.orderGenerationOK
+}
+
+func (s *Store) orderGenerationMatches(info os.FileInfo, genesis string, genesisOK bool) bool {
+	if s == nil || info == nil {
+		return false
+	}
+	s.wmMu.Lock()
+	defer s.wmMu.Unlock()
+	g := s.orderGeneration
+	changeIdentity, changeIdentityOK := orderChangeIdentityFor(info)
+	return s.orderGenerationOK && g.info != nil &&
+		changeIdentityOK && g.changeIdentityOK && changeIdentity == g.changeIdentity &&
+		info.Size() == g.info.Size() &&
+		info.ModTime().Equal(g.info.ModTime()) &&
+		os.SameFile(info, g.info) &&
+		genesisOK == g.genesisOK && genesis == g.genesis
+}
+
+func sameOrderFileGeneration(a, b os.FileInfo) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	aChange, aOK := orderChangeIdentityFor(a)
+	bChange, bOK := orderChangeIdentityFor(b)
+	return aOK && bOK && aChange == bChange &&
+		a.Size() == b.Size() && a.ModTime().Equal(b.ModTime()) &&
+		os.SameFile(a, b)
 }
 
 // warnf logs through Options.Logf when set.

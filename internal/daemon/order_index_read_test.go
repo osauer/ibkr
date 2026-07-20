@@ -337,6 +337,32 @@ func TestReservedOrderIDFloorIndexAndFallback(t *testing.T) {
 	}
 }
 
+func TestReservedOrderIDFloorIgnoresNegativeIDs(t *testing.T) {
+	s := newHistoryIndexServer(t)
+	if err := s.orderJournal.Append(orderJournalEvent{
+		At: time.Now().UTC(), Type: orderJournalEventSendAttempted,
+		OrderRef: "negative-floor", ReservedOrderID: -7, Account: "UTEST", Mode: "paper",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitOrdersFresh(t, s)
+
+	fromIndex, err := s.reservedBrokerOrderIDFloor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := s.historyIndex.Load()
+	s.historyIndex.Store(nil)
+	fromScan, scanErr := s.reservedBrokerOrderIDFloor()
+	s.historyIndex.Store(store)
+	if scanErr != nil {
+		t.Fatal(scanErr)
+	}
+	if fromIndex != 0 || fromScan != 0 {
+		t.Fatalf("negative-only floor index=%d scan=%d, want 0/0", fromIndex, fromScan)
+	}
+}
+
 func appendOrderJournalLineDirect(t *testing.T, path, line string) {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -407,5 +433,136 @@ func TestOrderIndexParseMarkerFallsBackToScanFailure(t *testing.T) {
 		Type: orderJournalEventTokenConfirmed, PreviewTokenID: "tok-marker",
 	}); err == nil || !strings.Contains(err.Error(), "parse order journal line") {
 		t.Fatalf("marker redemption = %v, want the legacy scan failure", err)
+	}
+}
+
+func TestOrderIndexCanonicalDecodeFailuresDisableFastPath(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+	}{
+		{
+			name: "field omitted by index projection has wrong type",
+			line: `{"version":1,"at":"2026-07-13T12:00:00Z","type":"previewed","quantity":"corrupt"}`,
+		},
+		{
+			name: "bad timestamp",
+			line: `{"version":1,"at":"not-a-timestamp","type":"previewed"}`,
+		},
+		{
+			name: "larger than canonical scanner limit",
+			line: `{"version":1,"at":"2026-07-13T12:00:00Z","type":"previewed","message":"` + strings.Repeat("x", maxFrameBytes) + `"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newHistoryIndexServer(t)
+			appendOrderJournalLineDirect(t, s.orderJournal.Path, tt.line)
+			s.kickHistoryIndex()
+			waitForHistory(t, func() (bool, error) {
+				h, err := s.historyIndex.Load().Health("orders")
+				return err == nil && h.JournalBytes == h.IngestedBytes && !s.historyIndex.Load().OrdersFresh(), err
+			})
+
+			if _, _, err := s.loadOrderViews(); err == nil {
+				t.Fatal("order read succeeded; want canonical journal-scan failure")
+			}
+			if _, err := s.reservedBrokerOrderIDFloor(); err == nil {
+				t.Fatal("reserved-id floor succeeded; want canonical journal-scan failure")
+			}
+			if err := s.orderJournal.ConfirmPreviewTokenUseAndAppend(orderJournalEvent{
+				Type: orderJournalEventTokenConfirmed, PreviewTokenID: "redacted-test-token",
+			}); err == nil {
+				t.Fatal("token redemption succeeded; want canonical journal-scan failure")
+			}
+		})
+	}
+}
+
+func TestOrderIndexBlankLineIsConservativeFallback(t *testing.T) {
+	s := newHistoryIndexServer(t)
+	appendOrderJournalLineDirect(t, s.orderJournal.Path,
+		`{"version":1,"at":"2026-07-13T12:00:00Z","type":"send-attempted","reserved_order_id":321}`)
+	appendOrderJournalLineDirect(t, s.orderJournal.Path, "")
+	s.kickHistoryIndex()
+	waitForHistory(t, func() (bool, error) {
+		h, err := s.historyIndex.Load().Health("orders")
+		return err == nil && h.JournalBytes == h.IngestedBytes && !s.historyIndex.Load().OrdersFresh(), err
+	})
+
+	// The index refuses the file, but the unchanged reference scanner
+	// ignores the blank line and still supplies the correct result.
+	floor, err := s.reservedBrokerOrderIDFloor()
+	if err != nil {
+		t.Fatalf("blank-line fallback failed: %v", err)
+	}
+	if floor != 321 {
+		t.Fatalf("blank-line fallback floor = %d, want 321", floor)
+	}
+}
+
+func TestOrderIndexEqualSizeReplacementIsImmediatelyStale(t *testing.T) {
+	s := newHistoryIndexServer(t)
+	first := `{"version":1,"at":"2026-07-13T10:00:00Z","type":"previewed","order_ref":"same"}` + "\n"
+	oldSecond := `{"version":1,"at":"2026-07-13T11:00:00Z","type":"send-attempted","reserved_order_id":111}` + "\n"
+	newSecond := `{"version":1,"at":"2026-07-13T11:00:00Z","type":"send-attempted","reserved_order_id":999}` + "\n"
+	if err := os.WriteFile(s.orderJournal.Path, []byte(first+oldSecond), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.kickHistoryIndex()
+	waitOrdersFresh(t, s)
+	original, err := os.Stat(s.orderJournal.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmp := s.orderJournal.Path + ".replacement"
+	if err := os.WriteFile(tmp, []byte(first+newSecond), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(tmp, original.ModTime(), original.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, s.orderJournal.Path); err != nil {
+		t.Fatal(err)
+	}
+	if s.historyIndex.Load().OrdersFresh() {
+		t.Fatal("same-size, same-mtime replacement reported fresh")
+	}
+
+	s.kickHistoryIndex()
+	waitOrdersFresh(t, s)
+	floor, err := s.reservedBrokerOrderIDFloor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if floor != 999 {
+		t.Fatalf("rebuilt floor = %d, want 999", floor)
+	}
+
+	// Same inode, size, mtime, and first line: ctime is the remaining
+	// generation boundary. Restoring mtime must not make an in-place rewrite
+	// look fresh.
+	validated, err := os.Stat(s.orderJournal.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.orderJournal.Path, []byte(first+oldSecond), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(s.orderJournal.Path, validated.ModTime(), validated.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if s.historyIndex.Load().OrdersFresh() {
+		t.Fatal("same-inode, same-size, restored-mtime rewrite reported fresh")
+	}
+	s.kickHistoryIndex()
+	waitOrdersFresh(t, s)
+	floor, err = s.reservedBrokerOrderIDFloor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if floor != 111 {
+		t.Fatalf("in-place rebuilt floor = %d, want 111", floor)
 	}
 }
