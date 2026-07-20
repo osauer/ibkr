@@ -1,7 +1,14 @@
 const notificationRoutes = Object.freeze({
   monitor: "/?tab=monitor",
+  brief: "/?tab=brief",
   alerts: "/?tab=alerts",
 });
+
+// Destinations are a fixed allowlist. Any value the daemon did not author —
+// including a hostile payload string — fails closed to the Monitor tab.
+function coerceDestination(value) {
+  return value === "alerts" || value === "brief" ? value : "monitor";
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -19,7 +26,7 @@ self.addEventListener("push", (event) => {
     payload = {};
   }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) payload = {};
-  const destination = payload.destination === "alerts" ? "alerts" : "monitor";
+  const destination = coerceDestination(payload.destination);
   const title = typeof payload.title === "string" && payload.title ? payload.title : "ibkr canary";
   const body = typeof payload.body === "string" && payload.body ? payload.body : "Open ibkr canary for details.";
   const tag = notificationTag(payload);
@@ -58,7 +65,7 @@ async function refreshAppIconBadge() {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const destination = event.notification.data?.destination === "alerts" ? "alerts" : "monitor";
+  const destination = coerceDestination(event.notification.data?.destination);
   const route = notificationRoutes[destination];
   event.waitUntil(openNotificationRoute(route));
 });

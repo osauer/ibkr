@@ -30,6 +30,10 @@ const (
 
 	NudgeDestinationMonitor = "monitor"
 	NudgeDestinationAlerts  = "alerts"
+	// NudgeDestinationBrief lands a process/governance nudge on the Brief tab,
+	// where the reconcile clock, monthly pulse, and confirmed-flow context live.
+	// Act-severity governance occurrences still land on Alerts.
+	NudgeDestinationBrief = "brief"
 
 	MonthlyPulseStatusNotDue    = "not_due"
 	MonthlyPulseStatusDue       = "due"
@@ -355,7 +359,9 @@ func newNudgeCandidate(kind, state string, occurredAt, dueAt, expiresAt time.Tim
 	if title == "" {
 		return nil
 	}
-	destination := NudgeDestinationMonitor
+	// Process-kind nudges land on the Brief tab (the process artifact); only
+	// act-severity governance occurrences escalate to Alerts.
+	destination := NudgeDestinationBrief
 	if severity == NudgeSeverityAct {
 		destination = NudgeDestinationAlerts
 	}
@@ -443,7 +449,7 @@ func CanonicalizeNudgeCandidate(candidate NudgeCandidate) (NudgeCandidate, error
 	candidate.Title = title
 	candidate.Body = body
 	candidate.Severity = severity
-	candidate.Destination = NudgeDestinationMonitor
+	candidate.Destination = NudgeDestinationBrief
 	if severity == NudgeSeverityAct {
 		candidate.Destination = NudgeDestinationAlerts
 	}

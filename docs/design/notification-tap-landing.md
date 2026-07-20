@@ -13,9 +13,21 @@ semantics untouched.
 ## Current state (v2.2.0-13 era)
 
 - The service worker routes clicks through a frozen destination map
-  (`monitor` → `/?tab=monitor`, `alerts` → `/?tab=alerts`); every unknown
-  destination degrades to `monitor`. Payload URLs are never followed
-  (`service-worker.test.mjs` pins hostile destinations out of routes).
+  (`monitor` → `/?tab=monitor`, `brief` → `/?tab=brief`, `alerts` →
+  `/?tab=alerts`); every unknown destination degrades to `monitor`. Payload URLs
+  are never followed (`service-worker.test.mjs` pins hostile destinations out of
+  routes).
+
+  *Amended 2026-07-20:* the `brief` destination was added when the daily brief
+  moved to its own bottom tab. Process/governance nudges that previously landed
+  on `monitor` (reconcile-due-soon, confirmed-flow, monthly-pulse — the
+  watch-severity governance kinds) now land on `brief`, where the reconcile
+  clock, monthly pulse, and confirmed-flow context live. Act-severity governance
+  occurrences still land on `alerts`, so the focus-landing contract below is
+  unchanged for them. The destination remains a strict enum coerced by
+  `coerceDestination`; the frozen destination map in
+  [`risk-governance-nudges.md`](risk-governance-nudges.md) is amended
+  accordingly.
 - Push payloads already carry `display_id` (governance, `gov-<16 hex>`) or
   `alert_id` (canary) — used only as the notification tag today.
 - A tap never marks anything read; reads happen solely through the SPA's

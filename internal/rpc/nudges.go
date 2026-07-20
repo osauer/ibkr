@@ -45,6 +45,7 @@ const (
 
 	NudgeDestinationMonitor = risk.NudgeDestinationMonitor
 	NudgeDestinationAlerts  = risk.NudgeDestinationAlerts
+	NudgeDestinationBrief   = risk.NudgeDestinationBrief
 
 	NudgeDrawdownTierBlock = risk.CapitalTierBlock
 )

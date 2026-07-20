@@ -313,14 +313,14 @@ func TestNudgeCandidatesUseOnlySafeTemplateCopy(t *testing.T) {
 		kind, state      string
 		severity, target string
 	}{
-		{EvaluateReconcileDue(ReconcileDueInput{Now: now, Deadline: deadline, WarningDays: &warning}), NudgeKindReconcileDue, NudgeStateDueSoon, NudgeSeverityWatch, NudgeDestinationMonitor},
+		{EvaluateReconcileDue(ReconcileDueInput{Now: now, Deadline: deadline, WarningDays: &warning}), NudgeKindReconcileDue, NudgeStateDueSoon, NudgeSeverityWatch, NudgeDestinationBrief},
 		{EvaluateReconcileDue(ReconcileDueInput{Now: deadline.Add(time.Second), Deadline: deadline, WarningDays: &warning}), NudgeKindReconcileDue, NudgeStateOverdue, NudgeSeverityAct, NudgeDestinationAlerts},
 		{EvaluateReconcileException([]ReconcileExceptionIdentity{{Kind: "amount", Identity: "account-secret", Material: []string{"EUR 12345", "/private/report.xml"}}}, now), NudgeKindReconcileException, NudgeStateOpen, NudgeSeverityAct, NudgeDestinationAlerts},
 		{EvaluateShadowWouldBlock(ShadowWouldBlockInput{PolicyFingerprint: "raw-upstream-fingerprint", LatchEpisode: "order-secret", RiskIncreasing: true, WouldBlock: true, OccurredAt: now}).Candidate, NudgeKindShadowWouldBlock, NudgeStateObserved, NudgeSeverityAct, NudgeDestinationAlerts},
 		{EvaluateDrawdownLatched("latch-secret", true, now), NudgeKindDrawdownLatched, NudgeStateOpen, NudgeSeverityAct, NudgeDestinationAlerts},
 		{EvaluatePolicyDrift([]NudgePinMismatch{{Policy: "secret-symbol", PinnedID: "pin-secret", PinnedVersion: "1", LiveID: "live-secret", LiveVersion: "2"}}, now), NudgeKindPolicyDrift, NudgeStateOpen, NudgeSeverityAct, NudgeDestinationAlerts},
-		{EvaluateConfirmedFlow("statement-row-secret", now), NudgeKindConfirmedFlow, NudgeStateObserved, NudgeSeverityWatch, NudgeDestinationMonitor},
-		{EvaluateMonthlyPulse(MonthlyPulseInput{Now: time.Date(2026, 7, 1, 7, 0, 0, 0, time.UTC), Cadence: approvedV4Constitution().Cadence, PolicyFingerprint: "policy-secret", PolicyEvidenceReady: true}).Candidate, NudgeKindMonthlyPulse, NudgeStateDue, NudgeSeverityWatch, NudgeDestinationMonitor},
+		{EvaluateConfirmedFlow("statement-row-secret", now), NudgeKindConfirmedFlow, NudgeStateObserved, NudgeSeverityWatch, NudgeDestinationBrief},
+		{EvaluateMonthlyPulse(MonthlyPulseInput{Now: time.Date(2026, 7, 1, 7, 0, 0, 0, time.UTC), Cadence: approvedV4Constitution().Cadence, PolicyFingerprint: "policy-secret", PolicyEvidenceReady: true}).Candidate, NudgeKindMonthlyPulse, NudgeStateDue, NudgeSeverityWatch, NudgeDestinationBrief},
 	}
 	serializedCandidates := make([]*NudgeCandidate, 0, len(candidates))
 	for _, tc := range candidates {
@@ -381,7 +381,7 @@ func TestCanonicalizeNudgeCandidateUsesOnlyApprovedSemantics(t *testing.T) {
 		if got.Title != title || got.Body != body || got.Severity != severity {
 			t.Fatalf("canonical %s/%s copy = %#v", candidate.Kind, candidate.State, got)
 		}
-		wantDestination := NudgeDestinationMonitor
+		wantDestination := NudgeDestinationBrief
 		if severity == NudgeSeverityAct {
 			wantDestination = NudgeDestinationAlerts
 		}

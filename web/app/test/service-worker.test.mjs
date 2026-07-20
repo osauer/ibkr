@@ -83,6 +83,18 @@ test("push payload uses governance display id before legacy Canary alert id", as
   assert.equal(JSON.stringify(worker.notifications).includes("evil.example"), false);
 });
 
+test("a brief-destined governance push shows on the Brief tab", async () => {
+  const worker = loadWorker();
+  await dispatch(worker.listeners.get("push"), {
+    data: { json: () => ({
+      title: "Monthly risk pulse due", body: "Review the monthly risk brief and policy pins.",
+      kind: "monthly_pulse", display_id: "gov-2222222222222222", destination: "brief",
+    }) },
+  });
+  assert.equal(worker.notifications[0].options.data.destination, "brief");
+  assert.equal(worker.notifications[0].options.tag, "gov-2222222222222222");
+});
+
 test("distinct governance occurrence ids remain distinct while Canary keeps alert-id coalescing", async () => {
   const worker = loadWorker();
   for (const display_id of ["gov-aaaaaaaaaaaaaaaa", "gov-bbbbbbbbbbbbbbbb"]) {
@@ -120,22 +132,25 @@ test("notification click navigates and focuses an existing client", async () => 
     notification: { data: { destination: "alerts", url: "https://evil.example" }, close() { closed++; } },
   });
   await dispatch(worker.listeners.get("notificationclick"), {
+    notification: { data: { destination: "brief", url: "https://evil.example/private" }, close() { closed++; } },
+  });
+  await dispatch(worker.listeners.get("notificationclick"), {
     notification: { data: { destination: "javascript:alert(1)", url: "https://evil.example/private" }, close() { closed++; } },
   });
-  assert.deepEqual(navigated, ["/?tab=alerts", "/?tab=monitor"]);
-  assert.equal(focused, 2);
-  assert.equal(closed, 2);
+  assert.deepEqual(navigated, ["/?tab=alerts", "/?tab=brief", "/?tab=monitor"]);
+  assert.equal(focused, 3);
+  assert.equal(closed, 3);
   assert.deepEqual(worker.opened, []);
 });
 
 test("notification click opens only fixed monitor and alerts routes when no client exists", async () => {
   const worker = loadWorker();
-  for (const destination of ["alerts", "monitor", "https://evil.example", null]) {
+  for (const destination of ["alerts", "brief", "monitor", "https://evil.example", null]) {
     await dispatch(worker.listeners.get("notificationclick"), {
       notification: { data: { destination, url: "file:///private/sentinel" }, close() {} },
     });
   }
-  assert.deepEqual(worker.opened, ["/?tab=alerts", "/?tab=monitor", "/?tab=monitor", "/?tab=monitor"]);
+  assert.deepEqual(worker.opened, ["/?tab=alerts", "/?tab=brief", "/?tab=monitor", "/?tab=monitor", "/?tab=monitor"]);
   assert.equal(worker.opened.some((route) => /evil|file:|private/.test(route)), false);
 });
 
