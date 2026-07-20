@@ -27,6 +27,12 @@ const (
 	// MethodRiskPolicyResetDrawdown clears a latched drawdown block and
 	// re-bases the adjusted peak. Human-only.
 	MethodRiskPolicyResetDrawdown = "policy.reset_drawdown"
+	// MethodRiskPolicyCorrectPeak lowers a corrupted adjusted peak to an
+	// evidence-anchored value without touching the drawdown latch (2026-07-19
+	// incident: a paper-session equity observation ratcheted the live peak).
+	// Corrections may only lower the peak; higher peaks are what the
+	// observation path is for. Human-only.
+	MethodRiskPolicyCorrectPeak = "policy.correct_peak"
 	// MethodRiskPolicyArtefact records completion of a declared cadence
 	// artefact. Human-only.
 	MethodRiskPolicyArtefact = "policy.artefact"
@@ -85,6 +91,17 @@ type OverrideParams struct {
 	// Hours must be positive and at most override.max_duration_hours.
 	Hours  int    `json:"hours"`
 	Origin string `json:"origin,omitempty"`
+}
+
+// CorrectPeakParams repairs a poisoned adjusted peak. Exactly one anchor must
+// be chosen: FromStatements re-derives the peak from the retained-statement
+// replay (evidence-based), or PeakBase supplies an explicit value. The latch
+// is deliberately untouched — clearing it stays reset_drawdown's job.
+type CorrectPeakParams struct {
+	FromStatements bool    `json:"from_statements,omitempty"`
+	PeakBase       float64 `json:"peak_base,omitempty"`
+	Reason         string  `json:"reason"`
+	Origin         string  `json:"origin,omitempty"`
 }
 
 // ResetDrawdownParams clears the latch with a mandatory reason. The reset

@@ -2459,6 +2459,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyOverride(ctx, req) })
 	case rpc.MethodRiskPolicyResetDrawdown:
 		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyResetDrawdown(ctx, req) })
+	case rpc.MethodRiskPolicyCorrectPeak:
+		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyCorrectPeak(ctx, req) })
 	case rpc.MethodRiskPolicyArtefact:
 		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyArtefact(ctx, req) })
 	case rpc.MethodReconSnapshot:

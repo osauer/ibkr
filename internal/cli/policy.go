@@ -33,6 +33,8 @@ func runPolicy(ctx context.Context, env *Env, args []string) int {
 		return runPolicyOverride(ctx, env, args)
 	case "reset-drawdown":
 		return runPolicyResetDrawdown(ctx, env, args)
+	case "correct-peak":
+		return runPolicyCorrectPeak(ctx, env, args)
 	case "artefact":
 		return runPolicyArtefact(ctx, env, args)
 	default:
@@ -309,6 +311,19 @@ func runPolicyResetDrawdown(ctx context.Context, env *Env, args []string) int {
 	}
 	params := rpc.ResetDrawdownParams{Reason: *reason, Origin: env.Origin}
 	return callPolicyWrite(ctx, env, rpc.MethodRiskPolicyResetDrawdown, params, *jsonOut)
+}
+
+func runPolicyCorrectPeak(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "policy correct-peak")
+	fromStatements := fs.Bool("from-statements", false, "anchor the corrected peak to the retained-statement replay (evidence-based)")
+	peak := fs.Float64("peak", 0, "explicit corrected peak in base currency (corrections may only lower the peak)")
+	reason := fs.String("reason", "", "why the recorded peak is wrong (journaled verbatim; the latch is untouched)")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	params := rpc.CorrectPeakParams{FromStatements: *fromStatements, PeakBase: *peak, Reason: *reason, Origin: env.Origin}
+	return callPolicyWrite(ctx, env, rpc.MethodRiskPolicyCorrectPeak, params, *jsonOut)
 }
 
 func runPolicyArtefact(ctx context.Context, env *Env, args []string) int {

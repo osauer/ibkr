@@ -45,9 +45,16 @@ const (
 )
 
 type riskCapitalStateFileV1 struct {
-	Version                           int                  `json:"version"`
-	GenesisAt                         time.Time            `json:"genesis_at,omitzero"`
-	Seeded                            bool                 `json:"seeded"`
+	Version   int       `json:"version"`
+	GenesisAt time.Time `json:"genesis_at,omitzero"`
+	Seeded    bool      `json:"seeded"`
+	// AccountID/AccountMode bind this capital state to one broker identity,
+	// adopted from the first accepted live-scope observation. A session on a
+	// different account or a non-live mode can never write the peak again
+	// (2026-07-19 incident: a paper-pinned rehearsal daemon sharing this
+	// state dir ratcheted the live peak with the paper account's equity).
+	AccountID                         string               `json:"account_id,omitempty"`
+	AccountMode                       string               `json:"account_mode,omitempty"`
 	AdjustedPeakBase                  float64              `json:"adjusted_peak_base"`
 	PeakAsOf                          time.Time            `json:"peak_as_of,omitzero"`
 	LastEquityBase                    float64              `json:"last_equity_base"`
@@ -119,6 +126,9 @@ type riskCapitalStore struct {
 	reconciledReportIDs    map[string]struct{}
 	lastPersistAt          time.Time
 	overrideSeq            int
+	// scopeRejectionsJournaled throttles equity_observation_rejected journal
+	// rows to one per (reason, account) per process.
+	scopeRejectionsJournaled map[string]bool
 }
 
 func (s *Server) installRiskCapitalStore() {
@@ -268,8 +278,11 @@ func (st *riskCapitalStore) effectiveFlowsLocked(c *risk.Constitution) (effectiv
 // cash-flow-adjusted peak, evaluates the tier under the active constitution,
 // engages the latch on a block breach, and journals tier transitions.
 // Called from the account-summary success path — observation cadence is
-// usage cadence; there is deliberately no new scheduler in v1.
-func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.Constitution) {
+// usage cadence; there is deliberately no new scheduler in v1. The scope is
+// the caller's connected broker identity: an observation from an unresolved
+// scope, a non-live mode, or a different account is refused and journaled,
+// never folded into the peak.
+func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.Constitution, scope brokerStateScope) {
 	if st == nil || equityBase <= 0 || asOf.IsZero() {
 		return
 	}
@@ -278,6 +291,19 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 	st.loadLocked()
 
 	now := st.now()
+	if reason := st.observationScopeRejectionLocked(scope); reason != "" {
+		st.journalScopeRejectionLocked(scope, equityBase, asOf, reason, c, now)
+		return
+	}
+	if st.state.AccountID == "" {
+		st.state.AccountID = scope.Account
+		st.state.AccountMode = scope.Mode
+		appendRiskPolicyJournal(map[string]any{
+			"version": 1, "at": now.UTC(), "kind": "capital_state_scoped",
+			"account": scope.Account, "account_mode": scope.Mode,
+			"policy_fingerprint": constitutionFingerprint(c),
+		})
+	}
 	force := false
 	if st.state.GenesisAt.IsZero() {
 		st.state.GenesisAt = now.UTC()
@@ -340,6 +366,82 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 		force = true
 	}
 	st.persistLocked(force)
+}
+
+// observationScopeRejectionLocked names why an equity observation may not
+// touch this capital state, or returns "" when it may. Fail closed: an
+// unidentified session is treated exactly like a wrong one.
+func (st *riskCapitalStore) observationScopeRejectionLocked(scope brokerStateScope) string {
+	if !brokerScopeConcrete(scope) {
+		return "scope_unresolved"
+	}
+	if scope.Mode != rpc.AccountModeLive {
+		return "non_live_mode"
+	}
+	if st.state.AccountID != "" && !strings.EqualFold(st.state.AccountID, scope.Account) {
+		return "account_mismatch"
+	}
+	return ""
+}
+
+// journalScopeRejectionLocked records a refused observation once per
+// (reason, account) per process — loud enough to diagnose, quiet enough that
+// a mis-pinned daemon polling every few seconds cannot flood the journal.
+func (st *riskCapitalStore) journalScopeRejectionLocked(scope brokerStateScope, equityBase float64, asOf time.Time, reason string, c *risk.Constitution, now time.Time) {
+	key := reason + "\x00" + strings.ToUpper(scope.Account)
+	if st.scopeRejectionsJournaled == nil {
+		st.scopeRejectionsJournaled = make(map[string]bool)
+	}
+	if st.scopeRejectionsJournaled[key] {
+		return
+	}
+	st.scopeRejectionsJournaled[key] = true
+	appendRiskPolicyJournal(map[string]any{
+		"version": 1, "at": now.UTC(), "kind": "equity_observation_rejected",
+		"reason": reason, "observed_account": scope.Account, "observed_mode": scope.Mode,
+		"bound_account": st.state.AccountID, "equity_base": equityBase, "equity_as_of": asOf.UTC(),
+		"policy_fingerprint": constitutionFingerprint(c),
+	})
+}
+
+// CorrectPeak lowers a corrupted adjusted peak to an evidence-anchored value.
+// Human-only (caller-verified); reason mandatory. It deliberately never
+// touches the latch: the latch records a real engagement, and clearing it
+// stays ResetDrawdown's job. Corrections may only lower the peak — higher
+// peaks come exclusively from scoped observations.
+func (st *riskCapitalStore) CorrectPeak(peakBase float64, peakAsOf time.Time, source, reason string, c *risk.Constitution) (float64, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return 0, fmt.Errorf("peak correction requires a reason")
+	}
+	if peakBase <= 0 {
+		return 0, fmt.Errorf("peak correction requires a positive peak value")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	if !st.state.Seeded {
+		return 0, fmt.Errorf("capital state is not seeded; there is no peak to correct")
+	}
+	from := st.state.AdjustedPeakBase
+	if peakBase >= from {
+		return 0, fmt.Errorf("peak correction must lower the peak (current %.2f, requested %.2f); higher peaks come from observations", from, peakBase)
+	}
+	now := st.now().UTC()
+	st.state.AdjustedPeakBase = peakBase
+	if !peakAsOf.IsZero() {
+		st.state.PeakAsOf = peakAsOf
+	} else {
+		st.state.PeakAsOf = now
+	}
+	appendRiskPolicyJournal(map[string]any{
+		"version": 1, "at": now, "kind": "adjusted_peak_corrected",
+		"from_base": from, "to_base": peakBase, "source": source, "reason": reason,
+		"peak_as_of": st.state.PeakAsOf, "latch_untouched": st.state.BlockLatched,
+		"policy_fingerprint": constitutionFingerprint(c),
+	})
+	st.persistLocked(true)
+	return from, nil
 }
 
 // ApplyCapitalEvent journals a declared capital fact and folds it into the

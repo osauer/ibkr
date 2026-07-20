@@ -1529,8 +1529,8 @@ func TestLatchResetRearmsOpaqueEpisodeEvenAtSameTimestamp(t *testing.T) {
 	if _, err := s.riskCapital.ApplyCapitalEvent(rpc.CapitalEventParams{Type: "reconcile"}, rpc.OrderOriginHumanTTY); err != nil {
 		t.Fatal(err)
 	}
-	s.riskCapital.Observe(260000, now, policy)
-	s.riskCapital.Observe(240000, now, policy)
+	s.riskCapital.Observe(260000, now, policy, testLiveObserveScope)
+	s.riskCapital.Observe(240000, now, policy, testLiveObserveScope)
 	open, first, _ := s.riskCapital.NudgeLatch()
 	if !open || first == "" {
 		t.Fatalf("first latch open=%v episode=%q", open, first)
@@ -1538,7 +1538,7 @@ func TestLatchResetRearmsOpaqueEpisodeEvenAtSameTimestamp(t *testing.T) {
 	if err := s.riskCapital.ResetDrawdown("test reset", policy); err != nil {
 		t.Fatal(err)
 	}
-	s.riskCapital.Observe(220000, now, policy)
+	s.riskCapital.Observe(220000, now, policy, testLiveObserveScope)
 	open, second, _ := s.riskCapital.NudgeLatch()
 	if !open || second == "" || second == first {
 		t.Fatalf("reset did not rearm at same time: first=%q second=%q open=%v", first, second, open)

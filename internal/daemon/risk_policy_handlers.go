@@ -305,6 +305,40 @@ func (s *Server) handleRiskPolicyResetDrawdown(_ context.Context, req *rpc.Reque
 	}, nil
 }
 
+func (s *Server) handleRiskPolicyCorrectPeak(_ context.Context, req *rpc.Request) (*rpc.RiskPolicyWriteResult, error) {
+	var p rpc.CorrectPeakParams
+	if err := decodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	if err := requireHumanRiskPolicyOrigin(p.Origin); err != nil {
+		return nil, err
+	}
+	if p.FromStatements == (p.PeakBase != 0) {
+		return nil, errBadRequest("choose exactly one anchor: from_statements or an explicit peak value")
+	}
+	mgr := s.riskPolicies.snapshot()
+	peak, asOf, source := p.PeakBase, time.Time{}, "manual"
+	if p.FromStatements {
+		bt := s.buildReconBacktest()
+		if bt == nil || bt.Replay == nil || bt.Replay.ReplayedPeakBase <= 0 {
+			msg := "statement replay peak is unavailable"
+			if bt != nil && bt.Message != "" {
+				msg += ": " + bt.Message
+			}
+			return nil, errBadRequest(msg)
+		}
+		peak, asOf, source = bt.Replay.ReplayedPeakBase, bt.Replay.ReplayedPeakAt, "statement_replay"
+	}
+	from, err := s.riskCapital.CorrectPeak(peak, asOf, source, p.Reason, mgr.policy)
+	if err != nil {
+		return nil, errBadRequest(err.Error())
+	}
+	return &rpc.RiskPolicyWriteResult{
+		OK: true, At: time.Now().UTC(),
+		Message: fmt.Sprintf("adjusted peak corrected %.2f → %.2f (%s) and journaled; the drawdown latch is untouched — clearing it stays a separate reset-drawdown decision", from, peak, source),
+	}, nil
+}
+
 func (s *Server) handleRiskPolicyArtefact(_ context.Context, req *rpc.Request) (*rpc.RiskPolicyWriteResult, error) {
 	var p rpc.ArtefactParams
 	if err := decodeParams(req.Params, &p); err != nil {

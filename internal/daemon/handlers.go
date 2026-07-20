@@ -160,7 +160,7 @@ func (s *Server) buildAccountSummary(ctx context.Context, observe bool) (*rpc.Ac
 		}
 		if pol == nil || pol.Capital.BaseCurrency == "" || res.BaseCurrency == "" ||
 			strings.EqualFold(pol.Capital.BaseCurrency, res.BaseCurrency) {
-			s.riskCapital.Observe(res.NetLiquidation, res.AsOf, pol)
+			s.riskCapital.Observe(res.NetLiquidation, res.AsOf, pol, s.currentBrokerStateScope())
 		}
 	}
 	return res, nil

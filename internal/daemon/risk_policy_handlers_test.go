@@ -175,8 +175,8 @@ func TestRiskPolicyPreviewWarnings(t *testing.T) {
 	if _, err := s.riskCapital.ApplyCapitalEvent(rpc.CapitalEventParams{Type: "reconcile"}, rpc.OrderOriginHumanTTY); err != nil {
 		t.Fatal(err)
 	}
-	s.riskCapital.Observe(260000, now.Add(-2*time.Minute), c)
-	s.riskCapital.Observe(250000, now.Add(-time.Minute), c) // 20% consumed → warn
+	s.riskCapital.Observe(260000, now.Add(-2*time.Minute), c, testLiveObserveScope)
+	s.riskCapital.Observe(250000, now.Add(-time.Minute), c, testLiveObserveScope) // 20% consumed → warn
 
 	stockBuy := rpc.OrderDraft{Action: "BUY", Contract: rpc.ContractParams{Symbol: "MSFT", SecType: "STK"}}
 	open := rpc.OrderPositionImpact{Effect: "open"}
@@ -202,7 +202,7 @@ func TestRiskPolicyPreviewWarnings(t *testing.T) {
 	}
 
 	// Block tier escalates the severity word to act — no ninth word.
-	s.riskCapital.Observe(240000, now, c) // 40% consumed → block + latch
+	s.riskCapital.Observe(240000, now, c, testLiveObserveScope) // 40% consumed → block + latch
 	warns = s.riskPolicyPreviewWarnings(stockBuy, open)
 	if len(warns) != 1 || warns[0].Severity != "act" {
 		t.Fatalf("warnings = %+v, want capital_drawdown/act", warns)
@@ -262,5 +262,27 @@ func TestRiskPolicyPreviewShadowBookkeepingUsesCapturedLatchGeneration(t *testin
 	s.nudges.mu.Unlock()
 	if shadow.LatchEpisode != capturedEpisode {
 		t.Fatalf("shadow episode=%q, want atomically captured preview episode %q", shadow.LatchEpisode, capturedEpisode)
+	}
+}
+
+func TestCorrectPeakHandlerOriginAndAnchorValidation(t *testing.T) {
+	s := newRiskPolicyTestServer(t, validRiskPolicyTOML)
+	ctx := context.Background()
+	for _, origin := range []string{rpc.OrderOriginAgent, "", "made-up-origin"} {
+		if _, err := s.handleRiskPolicyCorrectPeak(ctx, rawParams(t, rpc.CorrectPeakParams{PeakBase: 100, Reason: "r", Origin: origin})); err == nil || !strings.Contains(err.Error(), "human-only") {
+			t.Fatalf("origin %q: err = %v, want human-only rejection", origin, err)
+		}
+	}
+	human := rpc.OrderOriginHumanTTY
+	if _, err := s.handleRiskPolicyCorrectPeak(ctx, rawParams(t, rpc.CorrectPeakParams{Reason: "r", Origin: human})); err == nil || !strings.Contains(err.Error(), "exactly one anchor") {
+		t.Fatalf("no anchor: err = %v", err)
+	}
+	if _, err := s.handleRiskPolicyCorrectPeak(ctx, rawParams(t, rpc.CorrectPeakParams{FromStatements: true, PeakBase: 5, Reason: "r", Origin: human})); err == nil || !strings.Contains(err.Error(), "exactly one anchor") {
+		t.Fatalf("both anchors: err = %v", err)
+	}
+	s.riskCapital.Observe(260000, time.Now(), nil, testLiveObserveScope)
+	res, err := s.handleRiskPolicyCorrectPeak(ctx, rawParams(t, rpc.CorrectPeakParams{PeakBase: 250000, Reason: "poisoned by wrong-account observation", Origin: human}))
+	if err != nil || !res.OK || !strings.Contains(res.Message, "latch is untouched") {
+		t.Fatalf("human explicit correction: res=%+v err=%v", res, err)
 	}
 }
