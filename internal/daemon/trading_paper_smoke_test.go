@@ -4,7 +4,6 @@ package daemon
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +22,13 @@ func newPaperSmokeTestServer(t *testing.T) (*Server, string) {
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	path := filepath.Join(t.TempDir(), "trading-readiness.json")
 	srv.tradingReadiness = newTradingReadinessStore(path, srv.orderTokens)
+	authority, err := srv.orderJournal.coreStore()
+	if err != nil {
+		t.Fatalf("order authority: %v", err)
+	}
+	if err := srv.tradingReadiness.UseCoreStore(t.Context(), authority); err != nil {
+		t.Fatalf("attach readiness authority: %v", err)
+	}
 	srv.version = "test-version"
 	srv.paperSmokeCancelBudgetOverride = 300 * time.Millisecond
 	srv.orderPreviewQuote = fixedPreviewQuote(600.10, 600.20)
@@ -72,7 +78,7 @@ func paperSmokeTestEvent(srv *Server, eventType, orderRef string, orderID int, b
 func TestPaperSmokeAcceptsAnyOrigin(t *testing.T) {
 	t.Parallel()
 	for _, origin := range []string{"", rpc.OrderOriginAgent, "mystery-origin"} {
-		srv, path := newPaperSmokeTestServer(t)
+		srv, _ := newPaperSmokeTestServer(t)
 		res, err := srv.runPaperSmoke(context.Background(), rpc.TradingPaperSmokeParams{Origin: origin})
 		if err != nil && strings.Contains(err.Error(), "origin") {
 			t.Fatalf("origin %q: err = %v, want no origin refusal", origin, err)
@@ -84,15 +90,15 @@ func TestPaperSmokeAcceptsAnyOrigin(t *testing.T) {
 		if res == nil {
 			t.Fatalf("origin %q: res = nil err = %v, want an attempted run", origin, err)
 		}
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("origin %q: evidence file missing after attempted run: %v", origin, err)
+		if evidence, loadErr := srv.tradingReadiness.Load(); loadErr != nil || evidence.PaperSmoke == nil {
+			t.Fatalf("origin %q: readiness evidence missing after attempted run: %+v %v", origin, evidence, loadErr)
 		}
 	}
 }
 
 func TestPaperSmokeRefusesLiveRoute(t *testing.T) {
 	t.Parallel()
-	srv, path := newPaperSmokeTestServer(t)
+	srv, _ := newPaperSmokeTestServer(t)
 	// A fully-ready live gate: acks set, port/account live, and valid prior
 	// paper-smoke evidence so no blocker fires before the mode backstop.
 	if err := srv.tradingReadiness.SavePaperSmoke(tradingPaperSmokeEvidence{
@@ -106,7 +112,7 @@ func TestPaperSmokeRefusesLiveRoute(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed evidence: %v", err)
 	}
-	seeded, err := os.ReadFile(path)
+	seeded, err := srv.tradingReadiness.Load()
 	if err != nil {
 		t.Fatalf("read seeded evidence: %v", err)
 	}
@@ -120,8 +126,8 @@ func TestPaperSmokeRefusesLiveRoute(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "paper route") {
 		t.Fatalf("err = %v, want paper-route refusal", err)
 	}
-	after, err := os.ReadFile(path)
-	if err != nil || string(after) != string(seeded) {
+	after, err := srv.tradingReadiness.Load()
+	if err != nil || after.PaperSmokeMAC != seeded.PaperSmokeMAC || after.PaperSmoke == nil || seeded.PaperSmoke == nil || !after.PaperSmoke.At.Equal(seeded.PaperSmoke.At) {
 		t.Fatalf("live-route refusal must leave evidence untouched (err=%v)", err)
 	}
 }
@@ -139,7 +145,7 @@ func TestPaperSmokeRefusesConcurrentRun(t *testing.T) {
 
 func TestPaperSmokePassesAndWritesSignedEvidence(t *testing.T) {
 	t.Parallel()
-	srv, path := newPaperSmokeTestServer(t)
+	srv, _ := newPaperSmokeTestServer(t)
 	var orderRef string
 	srv.orderPlaceBroker = ackOnPlace(srv, "Submitted", &orderRef)
 	var cancelledID int
@@ -168,12 +174,12 @@ func TestPaperSmokePassesAndWritesSignedEvidence(t *testing.T) {
 
 	// Evidence must be MAC'd and satisfy the live gate for the paired live
 	// account family on the same host/client/version.
-	raw, err := os.ReadFile(path)
+	readiness, err := srv.tradingReadiness.Load()
 	if err != nil {
 		t.Fatalf("read evidence: %v", err)
 	}
-	if !strings.Contains(string(raw), `"paper_smoke_mac"`) {
-		t.Fatalf("evidence file missing MAC: %s", raw)
+	if readiness.PaperSmoke == nil || readiness.PaperSmokeMAC == "" {
+		t.Fatalf("readiness authority missing signed smoke evidence: %+v", readiness)
 	}
 	check := srv.tradingReadiness.CheckPaperSmoke("U1234567", "127.0.0.1:4001", 31, "test-version", 168*time.Hour, srv.orderNow())
 	if check.Status != tradingPaperSmokeStatusValid {
@@ -250,7 +256,7 @@ func TestPaperSmokeFillFailsWithCleanupGuidance(t *testing.T) {
 
 func TestPaperSmokePreTransmitFailureLeavesEvidenceUntouched(t *testing.T) {
 	t.Parallel()
-	srv, path := newPaperSmokeTestServer(t)
+	srv, _ := newPaperSmokeTestServer(t)
 	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
 		return rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusRejected, Available: true, Message: "rejected by broker"}, nil
 	}
@@ -258,7 +264,8 @@ func TestPaperSmokePreTransmitFailureLeavesEvidenceUntouched(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not submit-eligible") {
 		t.Fatalf("err = %v, want submit-eligibility refusal", err)
 	}
-	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Fatalf("pre-transmit failure must not write evidence, stat err = %v", statErr)
+	readiness, loadErr := srv.tradingReadiness.Load()
+	if loadErr != nil || readiness.PaperSmoke != nil {
+		t.Fatalf("pre-transmit failure must leave empty readiness authority: %+v err=%v", readiness, loadErr)
 	}
 }

@@ -108,7 +108,7 @@ Loaded from the path in `[opportunities].policy_file` (default `~/.config/ibkr/p
 
 ## Runtime platform settings
 
-Daemon-owned preferences stored in `$XDG_STATE_HOME/ibkr/platform-settings.json` and changed at runtime — no restart — via `ibkr settings set <key>=<value>`, the SPA Settings tab, or `PATCH /api/settings`. Setting a key to `null` clears the runtime override, and every response field carries access/source/reason metadata. Keys in the trading-limit class are writable only on experimental trading builds with `[trading].mode` set, and live routes reject agent-origin writes. Ownership and semantics: `docs/design/platform-settings.md`.
+Daemon-owned preferences persisted in `$XDG_STATE_HOME/ibkr/daemon.db` and changed at runtime — no restart — via `ibkr settings set <key>=<value>`, the SPA Settings tab, or `PATCH /api/settings`. Setting a key to `null` clears the runtime override, and every response field carries access/source/reason metadata. Keys in the trading-limit class are writable only on experimental trading builds with `[trading].mode` set, and live routes reject agent-origin writes. Ownership and semantics: `docs/design/platform-settings.md`.
 
 | Key | Value | Class | Description |
 |-----|-------|-------|-------------|
@@ -121,10 +121,8 @@ Daemon-owned preferences stored in `$XDG_STATE_HOME/ibkr/platform-settings.json`
 | `trading.limits.max_option_contracts` | `integer/null` | trading-limit | Runtime override of [trading].max_option_contracts, the opening option-quantity cap; null falls back to the TOML value. |
 | `trading.limits.allow_stock_short` | `true/false/null` | trading-limit | Runtime override of [trading].allow_stock_short; null falls back to the TOML value. |
 | `trading.limits.allow_option_sell_to_open` | `true/false/null` | trading-limit | Runtime override of [trading].allow_option_sell_to_open; null falls back to the TOML value. |
-| `regime.journal.enabled` | `true/false/null` | runtime | Turns the regime-decisions forward-collection journal on ($XDG_STATE_HOME/ibkr/regime-decisions.jsonl). |
-| `canary.journal.enabled` | `true/false/null` | runtime | Turns the canary-decisions forward-collection journal on ($XDG_STATE_HOME/ibkr/canary-decisions.jsonl), mirroring regime.journal.enabled. |
-| `history.rotation.enabled` | `true/false/null` | runtime | Turns automatic monthly journal rotation (regime/rules/canary decision journals → gzip archives under rotated/) on; rotation only compresses fully-indexed evidence and never deletes it (default true). |
-| `history.rotation.keep_raw_months` | `integer/null` | runtime | How many most-recent calendar months of decision-journal lines stay raw in the live files before rotating to gzip archives; minimum 1, null restores the default 2. |
+| `regime.journal.enabled` | `true/false/null` | runtime | Turns forward regime decision-event collection in daemon.db on (default true). |
+| `canary.journal.enabled` | `true/false/null` | runtime | Turns forward canary decision-event collection in daemon.db on, mirroring regime.journal.enabled (default true). |
 
 ## Environment variables
 

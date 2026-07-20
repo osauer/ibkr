@@ -33,7 +33,7 @@ account on 2026-07-06; the behavioral target is "hardest trade first", not
   card on the overview beside the canary hero with in-place drill-in, and
   advisory `rule_*` warnings on `ibkr order preview`.
 - Owner layers: rulebook policy (embedded default + operator TOML,
-  protection-policy manager semantics), earnings cache (daemon XDG cache),
+  protection-policy manager semantics), earnings state (daemon.db),
   manual earnings overrides + feature toggle (runtime platform settings),
   rule evaluation (daemon), rendering (CLI/MCP/SPA adapters, no policy
   duplication).
@@ -174,8 +174,8 @@ and Go-implementation lenses, both "implement with amendments"):
   calm; early_warning/stabilization → early_warning; confirmed_stress/
   panic/forced_defense → confirmed; data_quality holds the previous latch;
   unrecognized future stages take the MIDDLE bucket, never silently calm)
-  and persists it (`rules-regime-stage.json`) so a restart mid-stress
-  cannot reset thresholds to calm. Stage older than
+  and persists it as a versioned daemon.db state document so a restart
+  mid-stress cannot reset thresholds to calm. Stage older than
   `regime_stage_max_age_minutes` (default 240) serves as *carried*: the
   rule evaluates under BOTH the carried set and the calm set and reports
   the worse verdict — stale regime data can hold or tighten, never relax,
@@ -264,9 +264,9 @@ web/app/*                         rules card + drill-in
   are out of Nasdaq coverage and stay `unknown` unless overridden — for this
   book that means EUR names; the drill-in shows per-name source
   (`fetched | estimated | override | unknown`) via `RulesResult.Earnings[]`.
-- Cache: `~/.cache/ibkr/earnings-dates.json`
-  `{version, entries: {SYM: {date, time_of_day, estimated, observed_at,
-  source}}}`, fresh 24h, TTL 45d, 1/min throttled flush, atomic rename.
+- Persistence: daemon.db current state plus immutable earnings observations,
+  shaped as `{version, entries: {SYM: {date, time_of_day, estimated,
+  observed_at, source}}}`, fresh 24h, TTL 45d, 1/min throttled flush.
   Manual override `features.rulebook.earnings_overrides` (map sym →
   YYYY-MM-DD or YYYY-MM-DDTamc/bmo, `null` clears) wins over fetch;
   platform-settings contract (access/source/reason) applies.
@@ -285,12 +285,11 @@ web/app/*                         rules card + drill-in
   manager semantics, 30s reload) is **planned, not shipped** — v1 doc
   described it aspirationally; corrected 2026-07-08. Until it lands,
   threshold changes are code changes.
-- Journal: rule-status transitions append to
-  `~/.local/state/ibkr/rules-decisions.jsonl` (`defaultTradingStatePath`;
-  the v1 doc's `~/.local/share/ibkr/trading-state/` path was wrong —
-  corrected 2026-07-08, and the journal now creates the state dir before
-  appending) so threshold calibration has data. Sibling state:
-  `rules-regime-stage.json` (latched regime bucket, same directory).
+- Evidence: rule-status transitions append as typed events to the daemon's
+  sole live authority, `~/.local/state/ibkr/daemon.db`, so threshold
+  calibration has data. The latched regime bucket is a versioned state
+  document in the same database. Retired JSON/JSONL paths exist only as
+  one-time cutover inputs and isolated test seams.
 - Settings: `features.rulebook.enabled` (default true, runtime) gates
   evaluation + SPA card + preview causes; disabled leaves `ibkr rules`
   readable with `status: disabled` (stock_protection pattern).
@@ -389,8 +388,8 @@ human: plugin-cache redeploy at next plugin release.
 
 ## Rollback
 
-- Revert files above; runtime state added: `earnings-dates.json` cache,
-  `features.rulebook.*` settings keys, `rules-decisions.jsonl` journal (all
-  safe to orphan).
+- Revert files above; runtime state added: daemon.db earnings/settings/latch
+  documents, earnings observations, and rule-transition events. A rollback may
+  ignore the rulebook records, but must not delete or replace daemon.db.
 - User-visible on rollback: rules card, `ibkr rules`, and advisory `rule_*`
   preview warnings disappear; no trading-path change either way.

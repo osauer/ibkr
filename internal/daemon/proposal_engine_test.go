@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/discover"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
@@ -614,11 +615,8 @@ func TestProposalEnginePreservesSnapshotOnTransientRefreshFailure(t *testing.T) 
 	srv := &Server{now: func() time.Time { return now }}
 	engine := &proposalEngine{
 		server: srv,
-		store: &proposalStore{
-			currentPath: filepath.Join(t.TempDir(), "trade-proposals-current.json"),
-			eventsPath:  filepath.Join(t.TempDir(), "trade-proposals.jsonl"),
-		},
-		now: func() time.Time { return now },
+		store:  testProposalStore(t),
+		now:    func() time.Time { return now },
 		scope: func() brokerStateScope {
 			return brokerStateScope{Account: "DU1234567", Mode: rpc.AccountModePaper}
 		},
@@ -1011,11 +1009,8 @@ func TestTrailingStopFastPathPreviewUsesCurrentSnapshot(t *testing.T) {
 		CreatedAt:         now,
 	}
 	srv.tradeProposals = &proposalEngine{
-		server: srv,
-		store: &proposalStore{
-			currentPath: filepath.Join(t.TempDir(), "trade-proposals-current.json"),
-			eventsPath:  filepath.Join(t.TempDir(), "trade-proposals.jsonl"),
-		},
+		server:  srv,
+		store:   testProposalStore(t),
 		now:     func() time.Time { return now },
 		ignored: map[string]struct{}{},
 		snapshot: rpc.TradeProposalSnapshot{
@@ -1402,10 +1397,23 @@ func hasOrderJournalEvent(events []orderJournalEvent, eventType string) bool {
 
 func testProposalStore(t *testing.T) *proposalStore {
 	t.Helper()
-	return &proposalStore{
-		currentPath: filepath.Join(t.TempDir(), "trade-proposals-current.json"),
-		eventsPath:  filepath.Join(t.TempDir(), "trade-proposals.jsonl"),
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("secure proposal test authority directory: %v", err)
 	}
+	core, err := corestore.Open(t.Context(), corestore.Options{Path: filepath.Join(dir, "daemon.db")})
+	if err != nil {
+		t.Fatalf("open proposal test authority: %v", err)
+	}
+	t.Cleanup(func() { _ = core.Close() })
+	if err := initializeCleanProposalOpportunityAuthority(t.Context(), core); err != nil {
+		t.Fatalf("initialize proposal test authority: %v", err)
+	}
+	store := &proposalStore{}
+	if _, _, err := store.bindCore(t.Context(), core); err != nil {
+		t.Fatalf("attach proposal test authority: %v", err)
+	}
+	return store
 }
 
 func TestTrailingStopFastPathPreviewBlocksPreservedSnapshotBlockers(t *testing.T) {
@@ -2038,13 +2046,22 @@ func TestProposalSnapshotServeRefusesScopeMismatch(t *testing.T) {
 	if got.AccountID != "U1234567" || got.AccountMode != rpc.AccountModeLive {
 		t.Fatalf("refusal shell identity %q/%q, want connected session", got.AccountID, got.AccountMode)
 	}
-	// Refusal must not mark the stored proposals as shown nor overwrite
-	// the stored snapshot/persisted file with the shell.
-	if raw, err := os.ReadFile(e.store.eventsPath); err == nil && strings.Contains(string(raw), `"shown"`) {
-		t.Fatalf("refused serve appended shown events: %s", raw)
+	// Refusal must not mark the cached proposals as shown nor overwrite the
+	// clean authoritative current document with the refusal shell.
+	e.store.mu.Lock()
+	for _, event := range e.store.events {
+		if event.Type == "shown" {
+			e.store.mu.Unlock()
+			t.Fatalf("refused serve appended shown event: %+v", event)
+		}
 	}
-	if _, err := os.Stat(e.store.currentPath); !os.IsNotExist(err) {
-		t.Fatalf("refused serve persisted a snapshot: stat err=%v", err)
+	e.store.mu.Unlock()
+	persisted, err := e.store.LoadCurrent()
+	if err != nil {
+		t.Fatalf("load authoritative current: %v", err)
+	}
+	if persisted.Revision != "empty" || len(persisted.Proposals) != 0 {
+		t.Fatalf("refused serve changed authoritative current: %+v", persisted)
 	}
 	if e.snapshot.AccountID != "DU7654321" || len(e.snapshot.Proposals) != 1 {
 		t.Fatalf("refused serve mutated stored snapshot: %+v", e.snapshot)
@@ -2102,39 +2119,43 @@ func TestProposalInstallScopedFailsClosedOnScopeChange(t *testing.T) {
 	e.scope = func() brokerStateScope { return brokerStateScope{Account: "U1234567", Mode: rpc.AccountModeLive} }
 	snap := scopedTestSnapshot("DU7654321", rpc.AccountModePaper, now)
 
-	got := e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false, nil)
+	got, err := e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false, nil)
+	if err != nil {
+		t.Fatalf("scope-change install: %v", err)
+	}
 	if len(got.Proposals) != 0 || !hasBlocker(got.Blockers, "proposal_scope_mismatch") {
 		t.Fatalf("installScoped result = %+v, want proposal_scope_mismatch shell", got)
 	}
-	// The wrong-scope generated snapshot must never reach disk. Shells
-	// serve in-memory only (see replaceSnapshot), so the fail-closed
-	// install writes nothing and a fresh store stays empty.
-	if raw, err := os.ReadFile(e.store.currentPath); err == nil {
-		if strings.Contains(string(raw), "theta_hygiene:abc") {
-			t.Fatalf("persisted snapshot carries stale-scope proposals: %s", raw)
-		}
-		t.Fatalf("fail-closed install must not persist anything, got: %s", raw)
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("read persisted snapshot: %v", err)
+	// The wrong-scope generated snapshot must never replace the clean SQLite
+	// current document. The mismatch shell remains a transient served view.
+	persisted, err := e.store.LoadCurrent()
+	if err != nil {
+		t.Fatalf("load current after scope mismatch: %v", err)
+	}
+	if persisted.Revision != "empty" || len(persisted.Proposals) != 0 {
+		t.Fatalf("scope mismatch changed authoritative current: %+v", persisted)
 	}
 
 	// Stable scope installs the generated snapshot unchanged — and that
 	// one IS persisted for warm-start adoption.
 	e.scope = func() brokerStateScope { return brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper} }
-	got = e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false, nil)
+	got, err = e.installScoped(snap, brokerStateScope{Account: "DU7654321", Mode: rpc.AccountModePaper}, false, nil)
+	if err != nil {
+		t.Fatalf("stable-scope install: %v", err)
+	}
 	if len(got.Proposals) != 1 || len(got.Blockers) != 0 {
 		t.Fatalf("stable scope install = %+v, want generated snapshot", got)
 	}
-	raw, err := os.ReadFile(e.store.currentPath)
+	persisted, err = e.store.LoadCurrent()
 	if err != nil {
-		t.Fatalf("stable-scope install should persist the generated snapshot: %v", err)
+		t.Fatalf("load stable-scope current: %v", err)
 	}
-	if !strings.Contains(string(raw), "theta_hygiene:abc") {
-		t.Fatalf("persisted snapshot missing the generated proposal: %s", raw)
+	if persisted.Revision != snap.Revision || len(persisted.Proposals) != 1 || persisted.Proposals[0].Key != "theta_hygiene:abc" {
+		t.Fatalf("authoritative current missing generated proposal: %+v", persisted)
 	}
 }
 
-func TestInstallProposalEngineFailsClosedOnLegacySnapshot(t *testing.T) {
+func TestInstallProposalEngineNeverReadsLegacySnapshot(t *testing.T) {
 	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
 	writeCurrent := func(t *testing.T, body string) *Server {
 		t.Helper()
@@ -2168,8 +2189,8 @@ func TestInstallProposalEngineFailsClosedOnLegacySnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv = writeCurrent(t, string(scoped))
-	if got := srv.tradeProposals.snapshot; !got.LoadedFromState || got.AccountID != "DU7654321" || got.AccountMode != rpc.AccountModePaper {
-		t.Fatalf("scoped v2 snapshot not adopted: %+v", got)
+	if got := srv.tradeProposals.snapshot; got.Kind != "" {
+		t.Fatalf("constructor adopted a legacy scoped snapshot before SQLite attach: %+v", got)
 	}
 
 	shell, err := json.Marshal(emptyProposalSnapshot(now))
@@ -2178,7 +2199,7 @@ func TestInstallProposalEngineFailsClosedOnLegacySnapshot(t *testing.T) {
 	}
 	srv = writeCurrent(t, string(shell))
 	if got := srv.tradeProposals.snapshot; got.Kind != "" {
-		t.Fatalf("identity-less v2 shell adopted at load: %+v", got)
+		t.Fatalf("constructor adopted a legacy shell before SQLite attach: %+v", got)
 	}
 }
 
@@ -2312,10 +2333,7 @@ func TestProposalRevisionChangesWithScope(t *testing.T) {
 func TestReplaceSnapshotDoesNotPersistShells(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 11, 13, 39, 0, 0, time.UTC)
-	store := &proposalStore{
-		currentPath: filepath.Join(t.TempDir(), "trade-proposals-current.json"),
-		eventsPath:  filepath.Join(t.TempDir(), "trade-proposals.jsonl"),
-	}
+	store := testProposalStore(t)
 	engine := &proposalEngine{
 		store:   store,
 		now:     func() time.Time { return now },
@@ -2331,11 +2349,15 @@ func TestReplaceSnapshotDoesNotPersistShells(t *testing.T) {
 		AccountMode:   rpc.AccountModeLive,
 		Proposals:     []rpc.TradeProposal{},
 	}
-	engine.replaceSnapshot(good)
+	if err := engine.installSnapshot(good, false); err != nil {
+		t.Fatalf("install generated snapshot: %v", err)
+	}
 
 	shell := emptyProposalSnapshot(now.Add(time.Minute))
 	shell.Blockers = []rpc.TradingBlocker{{Code: "account_unavailable", Message: "ibkr connection unavailable"}}
-	engine.replaceSnapshot(shell)
+	if err := engine.installSnapshot(shell, false); err != nil {
+		t.Fatalf("install transient shell: %v", err)
+	}
 
 	persisted, err := store.LoadCurrent()
 	if err != nil {
@@ -2667,10 +2689,23 @@ func TestInstallSnapshotGatesJournalOnRevisionChange(t *testing.T) {
 		}
 		return strings.Count(string(raw), needle)
 	}
+	countProposalEvents := func(eventType string) int {
+		e.store.mu.Lock()
+		defer e.store.mu.Unlock()
+		count := 0
+		for _, event := range e.store.events {
+			if event.Type == eventType {
+				count++
+			}
+		}
+		return count
+	}
 
 	snap := scopedTestSnapshot("DU7654321", rpc.AccountModePaper, day1)
-	e.installSnapshot(snap, false)
-	if got := countLines(e.store.eventsPath, `"generated"`); got != 1 {
+	if err := e.installSnapshot(snap, false); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	if got := countProposalEvents("generated"); got != 1 {
 		t.Fatalf("first install appended %d generated events, want 1", got)
 	}
 	if got := countLines(srv.proposalOutcomes.Path, `"marked"`); got != 1 {
@@ -2679,8 +2714,10 @@ func TestInstallSnapshotGatesJournalOnRevisionChange(t *testing.T) {
 
 	// Same revision, same day: a 2m-cadence re-derive must not append.
 	snap.AsOf = day1.Add(2 * time.Minute)
-	e.installSnapshot(snap, false)
-	if got := countLines(e.store.eventsPath, `"generated"`); got != 1 {
+	if err := e.installSnapshot(snap, false); err != nil {
+		t.Fatalf("same-revision install: %v", err)
+	}
+	if got := countProposalEvents("generated"); got != 1 {
 		t.Fatalf("revision-identical install appended events: %d, want 1", got)
 	}
 	if got := countLines(srv.proposalOutcomes.Path, `"marked"`); got != 1 {
@@ -2690,8 +2727,10 @@ func TestInstallSnapshotGatesJournalOnRevisionChange(t *testing.T) {
 	// Same revision across midnight: marks are daily, so the new date
 	// passes; generated events stay gated.
 	snap.AsOf = day1.Add(24 * time.Hour)
-	e.installSnapshot(snap, false)
-	if got := countLines(e.store.eventsPath, `"generated"`); got != 1 {
+	if err := e.installSnapshot(snap, false); err != nil {
+		t.Fatalf("date-rollover install: %v", err)
+	}
+	if got := countProposalEvents("generated"); got != 1 {
 		t.Fatalf("date rollover appended generated events: %d, want 1", got)
 	}
 	if got := countLines(srv.proposalOutcomes.Path, `"marked"`); got != 2 {
@@ -2701,8 +2740,10 @@ func TestInstallSnapshotGatesJournalOnRevisionChange(t *testing.T) {
 	// A new revision appends again.
 	snap.Revision = "sha256:test-2"
 	snap.Proposals[0].Revision = snap.Revision
-	e.installSnapshot(snap, false)
-	if got := countLines(e.store.eventsPath, `"generated"`); got != 2 {
+	if err := e.installSnapshot(snap, false); err != nil {
+		t.Fatalf("new-revision install: %v", err)
+	}
+	if got := countProposalEvents("generated"); got != 2 {
 		t.Fatalf("new revision appended %d generated events total, want 2", got)
 	}
 }

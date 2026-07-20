@@ -239,6 +239,8 @@ func TestPurgeExecuteIsIdempotentWithOpenPurgeOrder(t *testing.T) {
 		ReservedOrderID: 1001,
 		ClientID:        31,
 		Account:         "DU1234567",
+		Endpoint:        "127.0.0.1:4002",
+		Mode:            rpc.AccountModePaper,
 		Action:          rpc.OrderActionSell,
 		OrderType:       rpc.OrderTypeLMT,
 		TIF:             rpc.OrderTIFDay,
@@ -372,7 +374,14 @@ func newPurgeExecuteTestServer(t *testing.T) *Server {
 	t.Helper()
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	srv.orderWritesEnabled = func() bool { return true }
+	authority, err := srv.orderJournal.coreStore()
+	if err != nil {
+		t.Fatalf("order authority: %v", err)
+	}
 	srv.purgeLedger = newPurgeLedgerStore(filepath.Join(t.TempDir(), "purge-ledger.json"), srv.now)
+	if err := srv.purgeLedger.UseCoreStore(authority); err != nil {
+		t.Fatalf("attach purge authority: %v", err)
+	}
 	nextID := 1000
 	srv.orderReserveBrokerID = func(context.Context) (int, error) {
 		nextID++

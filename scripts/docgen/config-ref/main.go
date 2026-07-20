@@ -523,7 +523,7 @@ func render(tables [][]tomlField, envs []envVar) string {
 	}
 
 	out.WriteString("## Runtime platform settings\n\n")
-	out.WriteString("Daemon-owned preferences stored in `$XDG_STATE_HOME/ibkr/platform-settings.json` and changed at runtime — no restart — via `ibkr settings set <key>=<value>`, the SPA Settings tab, or `PATCH /api/settings`. ")
+	out.WriteString("Daemon-owned preferences persisted in `$XDG_STATE_HOME/ibkr/daemon.db` and changed at runtime — no restart — via `ibkr settings set <key>=<value>`, the SPA Settings tab, or `PATCH /api/settings`. ")
 	out.WriteString("Setting a key to `null` clears the runtime override, and every response field carries access/source/reason metadata. ")
 	out.WriteString("Keys in the trading-limit class are writable only on experimental trading builds with `[trading].mode` set, and live routes reject agent-origin writes. ")
 	out.WriteString("Ownership and semantics: `docs/design/platform-settings.md`.\n\n")

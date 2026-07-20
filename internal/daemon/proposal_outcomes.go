@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -21,12 +23,12 @@ const (
 )
 
 type proposalOutcomeStore struct {
-	Path        string
+	Path        string // legacy unit/import helper only
+	core        *corestore.Store
 	mu          sync.Mutex
 	outcomeKeys map[string]struct{}
-	// onAppend nudges the history-index ingester after a successful mark
-	// append (data-free kick; the journal file is the only ingest input).
-	// Nil-safe; invoked under mu.
+	// onAppend is retained as a nil-safe legacy test hook. Production history
+	// reads the committed SQLite event directly.
 	onAppend func()
 }
 
@@ -76,7 +78,7 @@ func (s *Server) installProposalOutcomeStore() {
 }
 
 func (s *proposalOutcomeStore) AppendMark(mark proposalOutcomeMark) error {
-	if s == nil || s.Path == "" {
+	if s == nil || (s.core == nil && s.Path == "") {
 		return fmt.Errorf("proposal outcome path is empty")
 	}
 	s.mu.Lock()
@@ -111,12 +113,35 @@ func (s *proposalOutcomeStore) appendMarkLocked(mark proposalOutcomeMark) error 
 	if _, seen := s.outcomeKeys[identity]; seen {
 		return nil
 	}
-	if err := ensurePrivateStateDir(s.Path); err != nil {
-		return err
-	}
 	data, err := json.Marshal(mark)
 	if err != nil {
 		return fmt.Errorf("marshal proposal outcome: %w", err)
+	}
+	if s.core != nil {
+		key, err := coreStoreEventKey(context.Background(), s.core, coreEventProposalOutcome, mark.At, data, 0)
+		if err != nil {
+			return err
+		}
+		if _, err := s.core.AppendEvents(context.Background(), []corestore.EventInput{{
+			ScopeKey: daemonStateScope, EventKey: key, Type: coreEventProposalOutcome,
+			Action: coreEventActionRecord, Origin: coreEventOriginDaemon,
+			OccurredAt: mark.At, PayloadJSON: data,
+			Projection: corestore.EventProjection{ProposalOutcome: &corestore.ProposalOutcomeProjection{
+				ProposalKey: proposalOutcomeSubject(mark), Revision: mark.Revision,
+				Bucket: mark.Bucket, Symbol: mark.Symbol, SecType: mark.SecType,
+				Action: mark.Action, State: mark.State,
+			}},
+		}}); err != nil {
+			return fmt.Errorf("append proposal outcome to SQLite: %w", err)
+		}
+		s.outcomeKeys[identity] = struct{}{}
+		if s.onAppend != nil {
+			s.onAppend()
+		}
+		return nil
+	}
+	if err := ensurePrivateStateDir(s.Path); err != nil {
+		return err
 	}
 	data = append(data, '\n')
 	f, err := os.OpenFile(s.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -140,6 +165,20 @@ func (s *proposalOutcomeStore) appendMarkLocked(mark proposalOutcomeMark) error 
 
 func (s *proposalOutcomeStore) loadOutcomeKeysLocked() (map[string]struct{}, error) {
 	out := map[string]struct{}{}
+	if s.core != nil {
+		events, err := loadAllCoreEvents(context.Background(), s.core, coreEventProposalOutcome)
+		if err != nil {
+			return nil, err
+		}
+		for _, event := range events {
+			var mark proposalOutcomeMark
+			if err := json.Unmarshal(event.PayloadJSON, &mark); err != nil {
+				return nil, fmt.Errorf("decode proposal outcome event %d: %w", event.EventSeq, err)
+			}
+			out[proposalOutcomeIdentity(mark)] = struct{}{}
+		}
+		return out, nil
+	}
 	f, err := os.Open(s.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -173,33 +212,52 @@ func (s *proposalOutcomeStore) loadOutcomeKeysLocked() (map[string]struct{}, err
 // offers); "acted" is a proposal that was submitted or filled. Raw proposal
 // identities are used only to count distinct subjects and never returned.
 func (s *proposalOutcomeStore) SessionSummary() (offered, acted int, day string, ok bool, err error) {
-	if s == nil || s.Path == "" {
+	if s == nil || (s.core == nil && s.Path == "") {
 		return 0, 0, "", false, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f, err := os.Open(s.Path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, 0, "", false, nil
+	var marks []proposalOutcomeMark
+	if s.core != nil {
+		events, loadErr := loadAllCoreEvents(context.Background(), s.core, coreEventProposalOutcome)
+		if loadErr != nil {
+			return 0, 0, "", false, loadErr
 		}
-		return 0, 0, "", false, fmt.Errorf("open proposal outcomes %s: %w", s.Path, err)
+		for _, event := range events {
+			var mark proposalOutcomeMark
+			if json.Unmarshal(event.PayloadJSON, &mark) == nil {
+				marks = append(marks, mark)
+			}
+		}
+	} else {
+		f, err := os.Open(s.Path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return 0, 0, "", false, nil
+			}
+			return 0, 0, "", false, fmt.Errorf("open proposal outcomes %s: %w", s.Path, err)
+		}
+		defer func() { _ = f.Close() }()
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" {
+				continue
+			}
+			var mark proposalOutcomeMark
+			if json.Unmarshal([]byte(line), &mark) == nil {
+				marks = append(marks, mark)
+			}
+		}
+		if err := sc.Err(); err != nil {
+			return 0, 0, "", false, fmt.Errorf("read proposal outcomes: %w", err)
+		}
 	}
-	defer func() { _ = f.Close() }()
 	offeredByDay := map[string]map[string]struct{}{}
 	actedByDay := map[string]map[string]struct{}{}
 	latest := ""
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		var mark proposalOutcomeMark
-		if json.Unmarshal([]byte(line), &mark) != nil {
-			continue
-		}
+	for _, mark := range marks {
 		subject := proposalOutcomeSubject(mark)
 		if subject == "" || mark.MarkDate == "" {
 			continue
@@ -215,9 +273,6 @@ func (s *proposalOutcomeStore) SessionSummary() (offered, acted int, day string,
 		if mark.State == proposalOutcomeStateSubmitted || mark.State == proposalOutcomeStateFilled {
 			actedByDay[mark.MarkDate][subject] = struct{}{}
 		}
-	}
-	if err := sc.Err(); err != nil {
-		return 0, 0, "", false, fmt.Errorf("read proposal outcomes: %w", err)
 	}
 	if latest == "" {
 		return 0, 0, "", false, nil

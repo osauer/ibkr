@@ -13,13 +13,16 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 type platformSettingsStore struct {
-	path string
-	mu   sync.Mutex
-	data platformSettingsData
+	path     string // legacy importer/test helper only; live daemon binds core
+	core     *corestore.Store
+	revision int64
+	mu       sync.Mutex
+	data     platformSettingsData
 }
 
 type platformSettingsData struct {
@@ -103,6 +106,41 @@ func newPlatformSettingsStore(path string) (*platformSettingsStore, error) {
 	return s, nil
 }
 
+// bindCore switches the live store to SQLite authority. The legacy path is
+// deliberately ignored after binding; cutover imports happen before this
+// method and runtime never falls back to the old file.
+func (s *platformSettingsStore) bindCore(ctx context.Context, core *corestore.Store) error {
+	if s == nil || core == nil {
+		return fmt.Errorf("platform settings SQLite authority is unavailable")
+	}
+	doc, ok, err := core.GetStateDocument(ctx, daemonStateScope, stateKindPlatformSettings)
+	if err != nil {
+		return fmt.Errorf("load platform settings from SQLite: %w", err)
+	}
+	data := platformSettingsData{Version: 1}
+	revision := int64(0)
+	if ok {
+		if err := json.Unmarshal(doc.JSON, &data); err != nil {
+			return fmt.Errorf("decode platform settings from SQLite: %w", err)
+		}
+		if data.Version == 0 {
+			data.Version = 1
+		}
+		if data.Version != 1 {
+			return fmt.Errorf("decode platform settings from SQLite: unsupported version %d", data.Version)
+		}
+		revision = doc.Revision
+	} else {
+		return fmt.Errorf("platform settings are missing from SQLite; cutover bootstrap was not completed")
+	}
+	s.mu.Lock()
+	s.core = core
+	s.revision = revision
+	s.data = data
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *platformSettingsStore) load() error {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -143,17 +181,37 @@ func (s *platformSettingsStore) update(fn func(*platformSettingsData) error) err
 	if err := fn(&next); err != nil {
 		return err
 	}
+	if err := s.saveLocked(next); err != nil {
+		return err
+	}
+	// Publish only after the authoritative write commits. A full/busy/corrupt
+	// database therefore cannot relax an in-memory freeze or limit.
 	s.data = next
-	return s.saveLocked()
+	return nil
 }
 
-func (s *platformSettingsStore) saveLocked() error {
-	raw, err := json.MarshalIndent(s.data, "", "  ")
+func (s *platformSettingsStore) saveLocked(next platformSettingsData) error {
+	raw, err := json.Marshal(next)
 	if err != nil {
 		return err
 	}
-	raw = append(raw, '\n')
-	return writePrivateStateAtomic(s.path, raw)
+	if s.core != nil {
+		saved, err := s.core.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
+			ScopeKey: daemonStateScope, Kind: stateKindPlatformSettings,
+			ExpectedRevision: s.revision, JSON: raw,
+		})
+		if err != nil {
+			return fmt.Errorf("persist platform settings in SQLite: %w", err)
+		}
+		s.revision = saved.Revision
+		return nil
+	}
+	// This branch exists only for legacy importer/unit-test constructors.
+	pretty, err := json.MarshalIndent(next, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writePrivateStateAtomic(s.path, append(pretty, '\n'))
 }
 
 func (s *Server) handleSettingsGet() (*rpc.PlatformSettings, error) {
@@ -334,15 +392,6 @@ func applySettingsKey(next *platformSettingsData, key string, raw json.RawMessag
 		return boolField(&next.Regime.Journal.Enabled)
 	case "canary.journal.enabled":
 		return boolField(&next.Canary.Journal.Enabled)
-	case "history.rotation.enabled":
-		return boolField(&next.History.Rotation.Enabled)
-	case "history.rotation.keep_raw_months":
-		v, err := nullableInt(raw)
-		if err != nil || (v != nil && *v < 1) {
-			return errBadRequest("history.rotation.keep_raw_months must be an integer >= 1 or null")
-		}
-		next.History.Rotation.KeepRawMonths = v
-		return nil
 	default:
 		return errBadRequest("unknown settings field " + key)
 	}
@@ -502,18 +551,18 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 		},
 		Regime: rpc.PlatformRegimeSettings{
 			Journal: rpc.RegimeJournalSettings{
-				Enabled: settingsBool(regimeJournalEnabledFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "regime-decisions forward-collection journal (calibration corpus); safe to disable"),
+				Enabled: settingsBool(regimeJournalEnabledFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "forward regime decision-event collection in daemon.db (calibration corpus); safe to disable"),
 			},
 		},
 		Canary: rpc.PlatformCanarySettings{
 			Journal: rpc.CanaryJournalSettings{
-				Enabled: settingsBool(canaryJournalEnabledFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "canary-decisions forward-collection journal (calibration corpus); safe to disable"),
+				Enabled: settingsBool(canaryJournalEnabledFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "forward canary decision-event collection in daemon.db (calibration corpus); safe to disable"),
 			},
 		},
 		History: rpc.PlatformHistorySettings{
 			Rotation: rpc.HistoryRotationSettings{
-				Enabled:       settingsBool(historyRotationEnabledFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "monthly decision-journal rotation into gzip archives; compresses fully-indexed evidence, never deletes it"),
-				KeepRawMonths: settingsInt(historyRotationKeepRawMonthsFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "most-recent calendar months kept raw in the live journals (minimum 1; null restores 2)"),
+				Enabled:       settingsBool(false, rpc.SettingsAccessRead, rpc.SettingsSourceBuild, "retired: daemon.db stores decision events directly and has no journal-rotation layer"),
+				KeepRawMonths: settingsInt(0, rpc.SettingsAccessRead, rpc.SettingsSourceBuild, "retired with the legacy JSONL history-index rotation layer"),
 			},
 		},
 		MarketData: rpc.PlatformMarketDataSetting{Quality: observedMarketDataQuality(observed)},
@@ -545,31 +594,11 @@ func canaryJournalEnabledFrom(data platformSettingsData) bool {
 	return *data.Canary.Journal.Enabled
 }
 
-// historyRotationDefaultKeepRawMonths is the built-in keep window: the
-// current calendar month plus the previous one stay raw.
-const historyRotationDefaultKeepRawMonths = 2
-
-func historyRotationEnabledFrom(data platformSettingsData) bool {
-	if data.History.Rotation.Enabled == nil {
-		return true
-	}
-	return *data.History.Rotation.Enabled
-}
-
-func historyRotationKeepRawMonthsFrom(data platformSettingsData) int {
-	if data.History.Rotation.KeepRawMonths == nil {
-		return historyRotationDefaultKeepRawMonths
-	}
-	return max(*data.History.Rotation.KeepRawMonths, 1)
-}
-
-// historyRotationSettings reports the effective rotation runtime policy.
+// historyRotationSettings is retained only for the disconnected legacy
+// history-index test oracle. daemon.db stores events directly and never
+// rotates an external journal.
 func (s *Server) historyRotationSettings() (enabled bool, keepRawMonths int) {
-	if s == nil || s.platformSettings == nil {
-		return true, historyRotationDefaultKeepRawMonths
-	}
-	data := s.platformSettings.snapshot()
-	return historyRotationEnabledFrom(data), historyRotationKeepRawMonthsFrom(data)
+	return false, 0
 }
 
 func buildChannel() string {

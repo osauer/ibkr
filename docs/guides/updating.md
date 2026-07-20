@@ -97,10 +97,14 @@ After reinstalling, fully quit Claude Desktop and reopen it so it respawns the M
 The daemon refreshes the constituent list from [Wikipedia's "List of S&P 500 companies"](https://en.wikipedia.org/wiki/List_of_S%26P_500_companies) on three triggers, all converging on one shared fetch:
 
 - **Daily at 02:30 ET**: between midnight NY-session-key roll and 04:00 ET pre-market open. Catches reconstitution effective dates that Wikipedia editors typically have ready by the morning of the change.
-- **On daemon startup** if the cached file is from a NY trading date earlier than today (covers laptop-closed-at-02:30).
+- **On daemon startup** if the persisted membership snapshot is from a NY trading date earlier than today (covers laptop-closed-at-02:30).
 - **On the first breadth call after midnight ET rollover** if neither of the above fired (network outage during the ticker, etc.).
 
-On success the new list is written to `~/.cache/ibkr/spx-members/sp500-members.json` and pushed into the breadth engine. On any failure (network, parse error, count outside the 450–520 sanity band), the daemon keeps using whatever was loaded, so breadth never goes silent.
+On success the new list is written as current state plus an immutable
+observation in `~/.local/state/ibkr/daemon.db` and pushed into the breadth
+engine. On any failure (network, parse error, count outside the 450–520 sanity
+band), the daemon keeps using the last valid SQLite snapshot, then the embedded
+list as the cold-start fallback, so breadth never goes silent.
 
 ### Pinning the list (regulated traders, reproducibility audits, air-gapped)
 
@@ -146,13 +150,15 @@ Calendar updates arrive with normal `ibkr` binary updates. If a supported exchan
 
 - `~/.local/bin/ibkr`: installed binary; `.bak` carries the immediately-prior version.
 - Claude Desktop extension storage: MCPB-managed installs carry a separate embedded binary; update by reinstalling `ibkr.mcpb`.
-- `~/.cache/ibkr/spx-members/sp500-members.json`: runtime-refreshed members file.
+- `~/.local/state/ibkr/daemon.db`: runtime-refreshed S&P membership state and observations, along with other daemon-owned business state.
 - `~/.cache/ibkr/update/`: install-time scratch space (downloaded tarball, lock file).
 - `~/.config/ibkr/config.toml`: optional persistent config (see [config reference](../reference/config.md)).
 
-All under `$XDG_CACHE_HOME` / `$XDG_CONFIG_HOME` when set; the paths above are the fallback.
+All under `$XDG_STATE_HOME` / `$XDG_CACHE_HOME` / `$XDG_CONFIG_HOME` when set;
+the paths above are the fallback.
 
 ## Reference
 
 - [Configuration reference](../reference/config.md): every TOML field and `IBKR_*` env var.
-- The updater keeps one `.bak` binary beside `~/.local/bin/ibkr`, and the SPX members cache lives under `~/.cache/ibkr/` unless XDG paths override it.
+- The updater keeps one `.bak` binary beside `~/.local/bin/ibkr`; live SPX
+  membership state lives in daemon.db under the XDG state root.

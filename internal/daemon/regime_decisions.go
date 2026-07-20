@@ -1,28 +1,23 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
-// regimeDecisionJournal appends one JSON line per decision-relevant regime
-// snapshot to a private state file — the forward-collection corpus that
-// makes the pending_backtest thresholds calibratable
-// (docs/design/regime-calibration.md Part 4). Before it existed nothing
-// persisted indicator values, bands, or lifecycle decisions, so the
-// 2026-06-12 false positive could not be reconstructed from disk.
-//
-// Contract mirrors gamma-skew-diagnostics.jsonl: append-only, never read at
-// runtime, safe to delete at any time. Lines are deduped on the snapshot's
-// semantic fingerprint with an hourly heartbeat for time-in-state
-// statistics (the app polls every minute; without dedupe the journal would
-// be poll noise).
+// regimeDecisionJournal appends one typed SQLite event per decision-relevant
+// snapshot. It is the forward-collection corpus for threshold calibration;
+// the path branch survives only as a unit/import oracle. Events are deduped on
+// the semantic fingerprint with an hourly heartbeat for time-in-state data.
 type regimeDecisionJournal struct {
-	path string
+	path string // legacy unit/import helper only
+	core *corestore.Store
 
 	mu              sync.Mutex
 	lastFingerprint string
@@ -35,7 +30,7 @@ func regimeDecisionsDefaultPath() (string, error) {
 
 const regimeDecisionHeartbeat = time.Hour
 
-// regimeDecisionLine is the v1 journal record: enough raw measurement,
+// regimeDecisionLine is the v1 event payload: enough raw measurement,
 // gate evidence, and decision output to measure false-alarm and recall
 // rates offline and to replay incidents.
 type regimeDecisionLine struct {
@@ -118,9 +113,6 @@ func (j *regimeDecisionJournal) append(now time.Time, res *rpc.RegimeSnapshotRes
 	if fp != "" && fp == j.lastFingerprint && now.Sub(j.lastWrite) < regimeDecisionHeartbeat {
 		return nil
 	}
-	j.lastFingerprint = fp
-	j.lastWrite = now
-
 	line := regimeDecisionLine{
 		V:           1,
 		TS:          now,
@@ -143,6 +135,47 @@ func (j *regimeDecisionJournal) append(now time.Time, res *rpc.RegimeSnapshotRes
 	if err != nil {
 		return err
 	}
+	if j.core != nil {
+		indicators := make([]corestore.RegimeIndicatorProjection, 0, len(line.Indicators))
+		for _, indicator := range streakIndicators {
+			key := indicator.key()
+			value, ok := line.Indicators[key]
+			if !ok {
+				continue
+			}
+			var streak *int64
+			if value.StreakSessions != 0 {
+				v := int64(value.StreakSessions)
+				streak = &v
+			}
+			indicators = append(indicators, corestore.RegimeIndicatorProjection{
+				Indicator: key, Status: value.Status, Band: value.Band,
+				Value: value.Value, Depth: value.Depth, StreakSessions: streak,
+				Freshness: value.Freshness, Eligible: value.Eligible,
+				Latched: value.Latched, ThresholdsLabel: value.ThresholdsLabel,
+			})
+		}
+		key, err := coreStoreEventKey(context.Background(), j.core, coreEventRegimeDecision, now, b, 0)
+		if err != nil {
+			return err
+		}
+		_, err = j.core.AppendEvents(context.Background(), []corestore.EventInput{{
+			ScopeKey: daemonStateScope, EventKey: key, Type: coreEventRegimeDecision,
+			Action: coreEventActionRecord, Origin: coreEventOriginDaemon,
+			OccurredAt: now, PayloadJSON: b,
+			Projection: corestore.EventProjection{RegimeDecision: &corestore.RegimeDecisionProjection{
+				DecisionKey: key, Stage: line.Stage, Severity: line.Severity,
+				Readiness: line.Readiness, Confidence: line.Confidence,
+				Verdict: line.Verdict, Fingerprint: line.Fingerprint, Indicators: indicators,
+			}},
+		}})
+		if err != nil {
+			return err
+		}
+		j.lastFingerprint, j.lastWrite = fp, now
+		return nil
+	}
+	j.lastFingerprint, j.lastWrite = fp, now
 	b = append(b, '\n')
 	if err := ensurePrivateStateDir(j.path); err != nil {
 		return err

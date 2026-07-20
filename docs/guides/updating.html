@@ -80,10 +80,14 @@ ibkr update --force          # re-install latest even if same version (corrupt-b
 <p>The daemon refreshes the constituent list from <a href="https://en.wikipedia.org/wiki/List_of_S%26P_500_companies">Wikipedia's &quot;List of S&amp;P 500 companies&quot;</a> on three triggers, all converging on one shared fetch:</p>
 <ul>
 <li><strong>Daily at 02:30 ET</strong>: between midnight NY-session-key roll and 04:00 ET pre-market open. Catches reconstitution effective dates that Wikipedia editors typically have ready by the morning of the change.</li>
-<li><strong>On daemon startup</strong> if the cached file is from a NY trading date earlier than today (covers laptop-closed-at-02:30).</li>
+<li><strong>On daemon startup</strong> if the persisted membership snapshot is from a NY trading date earlier than today (covers laptop-closed-at-02:30).</li>
 <li><strong>On the first breadth call after midnight ET rollover</strong> if neither of the above fired (network outage during the ticker, etc.).</li>
 </ul>
-<p>On success the new list is written to <code>~/.cache/ibkr/spx-members/sp500-members.json</code> and pushed into the breadth engine. On any failure (network, parse error, count outside the 450–520 sanity band), the daemon keeps using whatever was loaded, so breadth never goes silent.</p>
+<p>On success the new list is written as current state plus an immutable
+observation in <code>~/.local/state/ibkr/daemon.db</code> and pushed into the breadth
+engine. On any failure (network, parse error, count outside the 450–520 sanity
+band), the daemon keeps using the last valid SQLite snapshot, then the embedded
+list as the cold-start fallback, so breadth never goes silent.</p>
 <h3 id="pinning-the-list-regulated-traders-reproducibility-audits-air-gapped">Pinning the list (regulated traders, reproducibility audits, air-gapped)</h3>
 <p>Some users need a frozen membership list. Two override layers, with symmetric semantics:</p>
 <p><strong>Persistent (TOML config):</strong></p>
@@ -110,15 +114,17 @@ Members  embedded:2026-05-22  count:503  refresh:network_failed # offline / DNS 
 <ul>
 <li><code>~/.local/bin/ibkr</code>: installed binary; <code>.bak</code> carries the immediately-prior version.</li>
 <li>Claude Desktop extension storage: MCPB-managed installs carry a separate embedded binary; update by reinstalling <code>ibkr.mcpb</code>.</li>
-<li><code>~/.cache/ibkr/spx-members/sp500-members.json</code>: runtime-refreshed members file.</li>
+<li><code>~/.local/state/ibkr/daemon.db</code>: runtime-refreshed S&amp;P membership state and observations, along with other daemon-owned business state.</li>
 <li><code>~/.cache/ibkr/update/</code>: install-time scratch space (downloaded tarball, lock file).</li>
 <li><code>~/.config/ibkr/config.toml</code>: optional persistent config (see <a href="../reference/config.html">config reference</a>).</li>
 </ul>
-<p>All under <code>$XDG_CACHE_HOME</code> / <code>$XDG_CONFIG_HOME</code> when set; the paths above are the fallback.</p>
+<p>All under <code>$XDG_STATE_HOME</code> / <code>$XDG_CACHE_HOME</code> / <code>$XDG_CONFIG_HOME</code> when set;
+the paths above are the fallback.</p>
 <h2 id="reference">Reference</h2>
 <ul>
 <li><a href="../reference/config.html">Configuration reference</a>: every TOML field and <code>IBKR_*</code> env var.</li>
-<li>The updater keeps one <code>.bak</code> binary beside <code>~/.local/bin/ibkr</code>, and the SPX members cache lives under <code>~/.cache/ibkr/</code> unless XDG paths override it.</li>
+<li>The updater keeps one <code>.bak</code> binary beside <code>~/.local/bin/ibkr</code>; live SPX
+membership state lives in daemon.db under the XDG state root.</li>
 </ul>
   </main>
   <footer>

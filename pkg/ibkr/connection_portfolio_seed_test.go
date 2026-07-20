@@ -33,13 +33,13 @@ func TestHandlePortfolioValueSeedsOptionContractCache(t *testing.T) {
 		"747397667",    // 2: contract.conId
 		"AMZN",         // 3: contract.symbol
 		"OPT",          // 4: contract.secType
-		"20260618",     // 5: contract.expiry
+		"20260821",     // 5: contract.expiry
 		"305",          // 6: contract.strike
 		"C",            // 7: contract.right
 		"100",          // 8: contract.multiplier
 		"AMEX",         // 9: contract.primaryExchange ← appears in parsed Contract.Exchange
 		"USD",          // 10: contract.currency
-		"AMZN 260618C", // 11: contract.localSymbol
+		"AMZN 260821C", // 11: contract.localSymbol
 		"AMZN",         // 12: contract.tradingClass
 		"5",            // 13: position
 		"1.27",         // 14: marketPrice
@@ -55,7 +55,7 @@ func TestHandlePortfolioValueSeedsOptionContractCache(t *testing.T) {
 	// The OPRA-style cache key is built by optionContractKey from the
 	// parsed Contract fields. SubscribeOption uses the same key shape.
 	// TradingClass="AMZN" matches the test fixture field 12.
-	cacheKey := optionContractKey("AMZN", "AMZN", "20260618", 305, "C")
+	cacheKey := optionContractKey("AMZN", "AMZN", "20260821", 305, "C")
 	conn.optionContractMu.RLock()
 	detail, ok := conn.optionContractCache[cacheKey]
 	conn.optionContractMu.RUnlock()
@@ -76,6 +76,31 @@ func TestHandlePortfolioValueSeedsOptionContractCache(t *testing.T) {
 	}
 	if detail.TradingClass != "AMZN" {
 		t.Errorf("TradingClass = %q, want AMZN", detail.TradingClass)
+	}
+	if detail.SecType != "OPT" || detail.Expiry != "20260821" || detail.Strike != 305 || detail.Right != "C" {
+		t.Errorf("persisted option identity fields = sec=%q expiry=%q strike=%v right=%q", detail.SecType, detail.Expiry, detail.Strike, detail.Right)
+	}
+
+	// Persist the exact portfolio-seeded row through the authority seam and
+	// prove the strict restart decoder accepts and preserves its full identity.
+	authority := &memoryContractAuthority{}
+	store := NewContractStore(t.TempDir())
+	if err := store.UseAuthority(authority); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(map[string]ContractDetailsLite{}, map[string]ContractDetailsLite{cacheKey: detail}, ""); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewContractStore(t.TempDir())
+	if err := restarted.UseAuthority(authority); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := restarted.LoadOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded[cacheKey]; got.ConID != detail.ConID || got.SecType != "OPT" || got.Expiry != "20260821" || got.Strike != 305 || got.Right != "C" {
+		t.Fatalf("portfolio-seeded option after authority restart = %+v", got)
 	}
 }
 

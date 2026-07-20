@@ -35,7 +35,7 @@ func TestTradingStatusBlocksEnabledWithoutPinnedGateway(t *testing.T) {
 	}}
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 15})
 
-	for _, code := range []string{"gateway_port_unpinned", "gateway_account_unpinned", "gateway_client_id_unpinned"} {
+	for _, code := range []string{"daemon_storage_unavailable", "gateway_port_unpinned", "gateway_account_unpinned", "gateway_client_id_unpinned"} {
 		if !hasTradingBlocker(st, code) {
 			t.Fatalf("missing blocker %q in %+v", code, st.Blockers)
 		}
@@ -152,9 +152,9 @@ func TestTradingStatusReadyPaperPreviewCapability(t *testing.T) {
 			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
 			Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
 		},
-		orderJournal:           newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
 		gatewayReadyForTrading: func() bool { return true },
 	}
+	attachTradingStatusTestAuthority(t, srv)
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU1234567", PortOrigin: discover.OriginPinned})
 
 	if st.Blocked {
@@ -184,9 +184,9 @@ func TestTradingStatusPrefersPinnedAccountOverEndpointAggregate(t *testing.T) {
 			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
 			Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
 		},
-		orderJournal:           newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
 		gatewayReadyForTrading: func() bool { return true },
 	}
+	attachTradingStatusTestAuthority(t, srv)
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 7497, ClientID: 31, Account: "All", PortOrigin: discover.OriginPinned})
 
 	if st.Blocked {
@@ -204,7 +204,8 @@ func TestTradingStatusLiveReadyWithPinsAndConnectedGateway(t *testing.T) {
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
 		Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
-	}, orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")), gatewayReadyForTrading: func() bool { return true }}
+	}, gatewayReadyForTrading: func() bool { return true }}
+	attachTradingStatusTestAuthority(t, srv)
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 31, Account: "U1234567", PortOrigin: discover.OriginPinned})
 
 	// Live-gate simplification 2026-06-11: mode="live" plus the gateway pins
@@ -235,7 +236,8 @@ func TestTradingStatusBlocksWhenGatewayUnavailable(t *testing.T) {
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
 		Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
-	}, orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl"))}
+	}}
+	attachTradingStatusTestAuthority(t, srv)
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 31, Account: "U1234567", PortOrigin: discover.OriginPinned})
 
 	if !hasTradingBlocker(st, "gateway_unavailable") {
@@ -256,7 +258,8 @@ func TestTradingStatusBlocksLiveModeOnPaperLookingEndpoint(t *testing.T) {
 	srv := &Server{cfg: &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "DU1234567"},
 		Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
-	}, orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl"))}
+	}}
+	attachTradingStatusTestAuthority(t, srv)
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU1234567", PortOrigin: discover.OriginPinned})
 
 	if !hasTradingBlocker(st, "live_endpoint_unconfirmed") {
@@ -269,7 +272,20 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 	port := 4001
 	clientID := 31
 	now := time.Date(2026, 5, 28, 7, 0, 0, 0, time.UTC)
+	srv := &Server{
+		cfg: &config.Resolved{
+			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
+			Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
+		},
+		version:                "test-version",
+		now:                    func() time.Time { return now },
+		gatewayReadyForTrading: func() bool { return true },
+	}
+	attachTradingStatusTestAuthority(t, srv)
 	store := newTradingReadinessStore(filepath.Join(t.TempDir(), "trading-readiness.json"), newTestPaperSmokeSigner(t))
+	if err := store.UseCoreStore(t.Context(), srv.coreStore); err != nil {
+		t.Fatalf("attach readiness authority: %v", err)
+	}
 	if err := store.SavePaperSmoke(tradingPaperSmokeEvidence{
 		Account:       "DU1234567",
 		Endpoint:      "127.0.0.1:4002",
@@ -281,17 +297,7 @@ func TestTradingStatusLiveReadyWithMatchingPaperSmoke(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SavePaperSmoke: %v", err)
 	}
-	srv := &Server{
-		cfg: &config.Resolved{
-			Gateway: config.Gateway{Host: "127.0.0.1", Port: &port, ClientID: &clientID, Account: "U1234567"},
-			Trading: config.Trading{Mode: config.TradingModeLive}.WithDefaults(),
-		},
-		version:                "test-version",
-		now:                    func() time.Time { return now },
-		tradingReadiness:       store,
-		orderJournal:           newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
-		gatewayReadyForTrading: func() bool { return true },
-	}
+	srv.tradingReadiness = store
 	st := srv.tradingStatus(discover.Endpoint{Host: "127.0.0.1", Port: 4001, ClientID: 31, Account: "U1234567", PortOrigin: discover.OriginPinned})
 
 	if st.Blocked {
@@ -331,4 +337,15 @@ func hasTradingWriteBlocker(st rpc.TradingStatus, code string) bool {
 	return slices.ContainsFunc(st.WriteBlockers, func(b rpc.TradingBlocker) bool {
 		return b.Code == code
 	})
+}
+
+func attachTradingStatusTestAuthority(t *testing.T, srv *Server) {
+	t.Helper()
+	journal := newTestOrderJournalStore(t, filepath.Join(t.TempDir(), "order-journal.jsonl"))
+	authority, err := journal.coreStore()
+	if err != nil {
+		t.Fatalf("test trading status authority: %v", err)
+	}
+	srv.orderJournal = journal
+	srv.coreStore = authority
 }

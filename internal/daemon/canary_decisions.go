@@ -8,20 +8,18 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/canary"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
-// canaryDecisionJournal appends one JSON line per decision-relevant
-// portfolio-canary snapshot to a private state file — the forward-collection
-// corpus that makes canary act/defend calibration measurable offline
-// (docs/design/history-index.md). Mirrors regimeDecisionJournal exactly:
-// append-only, never read at runtime, safe to delete at any time, deduped
-// on the canary's semantic fingerprint with an hourly heartbeat. The mutex
-// is held across the file write so the rotation engine can exclude the
-// writer during a live-file swap (rotation-ready from birth).
+// canaryDecisionJournal appends one typed SQLite event per decision-relevant
+// portfolio-canary snapshot. It mirrors regimeDecisionJournal's fingerprint
+// dedupe and hourly heartbeat. The path branch and writer lock remain only for
+// legacy unit/import oracles.
 type canaryDecisionJournal struct {
-	path string
+	path string // legacy unit/import helper only
+	core *corestore.Store
 
 	mu              sync.Mutex
 	lastFingerprint string
@@ -134,9 +132,6 @@ func (j *canaryDecisionJournal) append(now time.Time, account, accountMode strin
 	if fp != "" && fp == j.lastFingerprint && now.Sub(j.lastWrite) < canaryDecisionHeartbeat {
 		return nil
 	}
-	j.lastFingerprint = fp
-	j.lastWrite = now
-
 	line := canaryDecisionLine{
 		V:                      1,
 		TS:                     now,
@@ -172,6 +167,28 @@ func (j *canaryDecisionJournal) append(now time.Time, account, accountMode strin
 	if err != nil {
 		return err
 	}
+	if j.core != nil {
+		key, err := coreStoreEventKey(context.Background(), j.core, coreEventCanaryDecision, now, b, 0)
+		if err != nil {
+			return err
+		}
+		_, err = j.core.AppendEvents(context.Background(), []corestore.EventInput{{
+			ScopeKey: daemonStateScope, EventKey: key, Type: coreEventCanaryDecision,
+			Action: coreEventActionRecord, Origin: coreEventOriginDaemon,
+			OccurredAt: now, PayloadJSON: b,
+			Projection: corestore.EventProjection{CanaryTransition: &corestore.CanaryTransitionProjection{
+				Action: line.Action, Severity: string(line.Severity), Direction: string(line.Direction),
+				MarketStage: line.Market.RegimePosture.Stage, InputHealth: line.InputHealth,
+				PortfolioAlertRelevant: line.PortfolioAlertRelevant,
+			}},
+		}})
+		if err != nil {
+			return err
+		}
+		j.lastFingerprint, j.lastWrite = fp, now
+		return nil
+	}
+	j.lastFingerprint, j.lastWrite = fp, now
 	b = append(b, '\n')
 	if err := ensurePrivateStateDir(j.path); err != nil {
 		return err

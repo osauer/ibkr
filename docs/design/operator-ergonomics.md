@@ -336,9 +336,9 @@ fixture), then `make app-refresh` on the real host.
   the brief's one-tap row exposes the ordered list. Explicit `--report`
   behavior is untouched.
 - **Rules deltas** diff the current rulebook snapshot against the row set
-  persisted at the last *stamped* brief (`brief-state.json`, runtime-owned,
-  written only by `brief.ack`); first run discloses "no delta baseline
-  yet". The shared unreconciled-clock arithmetic moved to
+  persisted at the last *stamped* brief (a runtime-owned daemon.db state
+  document written only by `brief.ack`); first run discloses "no delta
+  baseline yet". The shared unreconciled-clock arithmetic moved to
   `risk.EvaluateUnreconciledClock` (override can only extend; zero
   last-reconcile fabricates no deadline) and feeds both evaluation and the
   brief's typed `deadline`/`days_remaining`.
@@ -447,8 +447,9 @@ This is a **regrouping** of facts the daemon already had: row severities, the
 attention semantics, and the worst-child section rollup are unchanged in kind.
 The five domain composers remain as internal intermediates; the two movements
 reassemble their rows. The one new derivation is **proposals offered vs acted**,
-read read-only from `trade-proposal-outcomes.jsonl` (only the counts and the
-covered day reach the wire — no proposal keys, symbols, order refs, or tokens).
+read read-only from typed daemon.db proposal-outcome events (only the counts and
+the covered day reach the wire — no proposal keys, symbols, order refs, or
+tokens).
 VaR and any risk-unit measure are explicitly out of scope (reserved to the
 operator). The one-tap reconcile sign-off keeps its exact endpoint, evidence
 class, and semantics. Where a named facet is not a fact the brief already held,

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -119,6 +120,10 @@ type marketEventCache struct {
 	regSHOFailedAt     time.Time
 	haltsFailedAt      time.Time
 	borrowFeesFailedAt time.Time
+
+	// authority is the sole durable runtime store after startup attachment.
+	// Failure/backoff and shortableAbsent intentionally remain memory-only.
+	authority *corestore.Store
 }
 
 // shortableAbsentRecently reports whether sym's shortable tick was
@@ -151,53 +156,53 @@ func (c *marketEventCache) clearShortableAbsence() {
 }
 
 type marketEventRegSHOEntry struct {
-	FetchedAt time.Time
-	AsOf      time.Time
-	SourceURL string
-	Symbols   map[string]marketEventRegSHORecord
+	FetchedAt time.Time                          `json:"fetched_at"`
+	AsOf      time.Time                          `json:"as_of"`
+	SourceURL string                             `json:"source_url"`
+	Symbols   map[string]marketEventRegSHORecord `json:"symbols"`
 }
 
 type marketEventRegSHORecord struct {
-	Symbol         string
-	SecurityName   string
-	MarketCategory string
-	Rule3210       string
+	Symbol         string `json:"symbol"`
+	SecurityName   string `json:"security_name,omitempty"`
+	MarketCategory string `json:"market_category,omitempty"`
+	Rule3210       string `json:"rule_3210,omitempty"`
 }
 
 type marketEventHaltsEntry struct {
-	FetchedAt time.Time
-	AsOf      time.Time
-	SourceURL string
-	Records   []marketEventHaltRecord
+	FetchedAt time.Time               `json:"fetched_at"`
+	AsOf      time.Time               `json:"as_of"`
+	SourceURL string                  `json:"source_url"`
+	Records   []marketEventHaltRecord `json:"records"`
 }
 
 type marketEventHaltRecord struct {
-	Symbol              string
-	IssueName           string
-	Market              string
-	ReasonCode          string
-	HaltedAt            time.Time
-	ResumptionQuoteAt   time.Time
-	ResumptionTradeAt   time.Time
-	PauseThresholdPrice string
+	Symbol              string    `json:"symbol"`
+	IssueName           string    `json:"issue_name,omitempty"`
+	Market              string    `json:"market,omitempty"`
+	ReasonCode          string    `json:"reason_code"`
+	HaltedAt            time.Time `json:"halted_at"`
+	ResumptionQuoteAt   time.Time `json:"resumption_quote_at,omitzero"`
+	ResumptionTradeAt   time.Time `json:"resumption_trade_at,omitzero"`
+	PauseThresholdPrice string    `json:"pause_threshold_price,omitempty"`
 }
 
 type marketEventBorrowFeeEntry struct {
-	FetchedAt time.Time
-	AsOf      time.Time
-	SourceURL string
-	Symbols   map[string]marketEventBorrowFeeRecord
+	FetchedAt time.Time                             `json:"fetched_at"`
+	AsOf      time.Time                             `json:"as_of"`
+	SourceURL string                                `json:"source_url"`
+	Symbols   map[string]marketEventBorrowFeeRecord `json:"symbols"`
 }
 
 type marketEventBorrowFeeRecord struct {
-	Symbol     string
-	Currency   string
-	Name       string
-	ConID      string
-	ISIN       string
-	RebateRate float64
-	FeeRate    float64
-	Available  int64
+	Symbol     string  `json:"symbol"`
+	Currency   string  `json:"currency,omitempty"`
+	Name       string  `json:"name,omitempty"`
+	ConID      string  `json:"conid,omitempty"`
+	ISIN       string  `json:"isin,omitempty"`
+	RebateRate float64 `json:"rebate_rate"`
+	FeeRate    float64 `json:"fee_rate"`
+	Available  int64   `json:"available"`
 }
 
 func newMarketEventCache(now func() time.Time) *marketEventCache {
@@ -347,6 +352,14 @@ func (c *marketEventCache) loadRegSHO(ctx context.Context, now time.Time) (marke
 		c.mu.Unlock()
 		return regSHOFallback(cached, now, err)
 	}
+	entry.FetchedAt = now
+	if err := c.persistRegSHO(ctx, entry); err != nil {
+		c.mu.Lock()
+		c.regSHOFailedAt = now
+		cached := cloneRegSHOEntry(c.regSHO)
+		c.mu.Unlock()
+		return regSHOFallback(cached, now, fmt.Errorf("persist normalized Reg SHO snapshot: %w", err))
+	}
 	c.mu.Lock()
 	c.regSHO = cloneRegSHOEntry(entry)
 	c.regSHOFailedAt = time.Time{}
@@ -395,6 +408,13 @@ func (c *marketEventCache) loadHalts(ctx context.Context, now time.Time) (market
 		return haltsFallback(cached, now, c.haltsFreshFor, err)
 	}
 	entry.FetchedAt = now
+	if err := c.persistHalts(ctx, entry); err != nil {
+		c.mu.Lock()
+		c.haltsFailedAt = now
+		cached := cloneHaltsEntry(c.halts)
+		c.mu.Unlock()
+		return haltsFallback(cached, now, c.haltsFreshFor, fmt.Errorf("persist normalized trading-halts snapshot: %w", err))
+	}
 	c.mu.Lock()
 	c.halts = cloneHaltsEntry(entry)
 	c.haltsFailedAt = time.Time{}
@@ -435,6 +455,13 @@ func (c *marketEventCache) loadBorrowFees(ctx context.Context, now time.Time) (m
 		return borrowFeesFallback(cached, now, err)
 	}
 	entry.FetchedAt = now
+	if err := c.persistBorrowFees(ctx, entry); err != nil {
+		c.mu.Lock()
+		c.borrowFeesFailedAt = now
+		cached := cloneBorrowFeeEntry(c.borrowFees)
+		c.mu.Unlock()
+		return borrowFeesFallback(cached, now, fmt.Errorf("persist normalized borrow-fee snapshot: %w", err))
+	}
 	c.mu.Lock()
 	c.borrowFees = cloneBorrowFeeEntry(entry)
 	c.borrowFeesFailedAt = time.Time{}
@@ -970,6 +997,7 @@ func (c *marketEventCache) borrowInventory(ctx context.Context, symbols []string
 		observed bool
 		hasFlag  bool
 		flag     rpc.MarketEventFlag
+		record   *marketEventBorrowInventoryRecord
 	}
 	probes := make([]borrowProbe, len(symbols))
 	var jobs []int
@@ -995,6 +1023,15 @@ func (c *marketEventCache) borrowInventory(ctx context.Context, symbols []string
 		})
 		if md := connector.MarketDataSnapshot()[sym]; md != nil && md.ShortableObserved {
 			probes[i].observed = true
+			asOf := md.Timestamp
+			if asOf.IsZero() {
+				asOf = now
+			}
+			record := marketEventBorrowInventoryRecord{
+				Symbol: sym, ShortableShares: md.ShortableShares, AsOf: asOf,
+				DataType: md.DataType, Delayed: md.IsDelayed,
+			}
+			probes[i].record = &record
 			if flag, ok := marketEventBorrowInventoryFlag(sym, *md, now); ok {
 				probes[i].hasFlag = true
 				probes[i].flag = flag
@@ -1011,9 +1048,13 @@ func (c *marketEventCache) borrowInventory(ctx context.Context, symbols []string
 	})
 
 	var observed, tight int
+	observations := make(map[string]marketEventBorrowInventoryRecord)
 	for i := range probes {
 		if probes[i].observed {
 			observed++
+		}
+		if probes[i].record != nil {
+			observations[probes[i].record.Symbol] = *probes[i].record
 		}
 		if probes[i].hasFlag {
 			tight++
@@ -1033,6 +1074,11 @@ func (c *marketEventCache) borrowInventory(ctx context.Context, symbols []string
 	}
 	if skipped > 0 {
 		notes = append(notes, fmt.Sprintf("skipped %d symbols whose shortable tick was recently absent; re-probing every %s", skipped, marketEventsShortableAbsentRetry))
+	}
+	if err := c.persistBorrowInventory(ctx, now, observations); err != nil {
+		status = rpc.SourceStatusUnknown
+		confidence = "low"
+		notes = append(notes, "normalized shortable-share observations were not durably recorded: "+err.Error())
 	}
 	return marketEventSourceHealth("borrow_inventory", status, now, now, 2*time.Minute, confidence, notes)
 }

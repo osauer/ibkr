@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -75,7 +76,12 @@ func (s *Server) buildReconBacktest() *rpc.ReconBacktestResult {
 	for _, row := range baseline {
 		baselineByLine[row.LineID] = true
 	}
-	events := replayCapitalFlowEvents()
+	events, err := s.riskCapital.CapitalFlowEventsContext(context.Background(), nil)
+	if err != nil {
+		res.Status = rpc.ReconStatusUnavailable
+		res.Message = "capital event authority unavailable: " + err.Error()
+		return res
+	}
 	if pol.PolicyVersion >= 3 {
 		events, _, _ = splitV3ReconEvents(events, ctx, res.CoverageTo)
 	}
@@ -88,7 +94,11 @@ func (s *Server) buildReconBacktest() *rpc.ReconBacktestResult {
 		}
 	}
 	exceptions := append(merged.exceptions, matchedExceptions...)
-	applyReconDismissals(exceptions)
+	if err := s.applyReconDismissalsContext(context.Background(), exceptions, nil); err != nil {
+		res.Status = rpc.ReconStatusUnavailable
+		res.Message = "risk governance authority unavailable: " + err.Error()
+		return res
+	}
 	exceptionByLine := make(map[string]rpc.ReconException, len(exceptions))
 	for _, ex := range exceptions {
 		exceptionByLine[ex.LineID] = ex
@@ -132,7 +142,7 @@ func (s *Server) buildReconBacktest() *rpc.ReconBacktestResult {
 	if len(missing) > 0 {
 		res.Message = "equity replay unavailable: missing " + strings.Join(missing, ", ")
 	} else {
-		res.Replay = buildCapitalReplay(merged, ctx, *pol.Drawdown.WarnConsumedPct, *pol.Drawdown.BlockConsumedPct, *pol.Capital.DeclaredRiskCapital)
+		res.Replay = buildCapitalReplay(merged, ctx, *pol.Drawdown.WarnConsumedPct, *pol.Drawdown.BlockConsumedPct, *pol.Capital.DeclaredRiskCapital, s.earliestCapitalWarnAt())
 	}
 	res.ReportID = reconBacktestReportID(res, pol.FingerprintKey())
 	res.InputHealth = health
@@ -158,7 +168,7 @@ func replayPrerequisites(ctx capitalReplayContext, pol *risk.Constitution) []str
 	return missing
 }
 
-func buildCapitalReplay(merged retainedStatementMerge, ctx capitalReplayContext, warnPct, blockPct, declared float64) *rpc.ReconBacktestReplay {
+func buildCapitalReplay(merged retainedStatementMerge, ctx capitalReplayContext, warnPct, blockPct, declared float64, warnRuntimeAt time.Time) *rpc.ReconBacktestReplay {
 	replay := &rpc.ReconBacktestReplay{
 		Notes: []string{backtestEODNote, backtestGenesisNote},
 	}
@@ -188,7 +198,6 @@ func buildCapitalReplay(merged retainedStatementMerge, ctx capitalReplayContext,
 		return eraFlows[i].valueDate.Before(eraFlows[j].valueDate)
 	})
 
-	warnRuntimeAt := earliestCapitalWarnAt()
 	flowIndex := 0
 	var cumulative float64
 	var havePeak, sawWarn, sawBlock bool
@@ -257,6 +266,32 @@ func earliestCapitalWarnAt() time.Time {
 			To   string    `json:"to"`
 		}
 		if json.Unmarshal([]byte(line), &entry) != nil || entry.Kind != "capital_tier" || entry.To != "warn" || entry.At.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || entry.At.Before(earliest) {
+			earliest = entry.At
+		}
+	}
+	return earliest
+}
+
+func (s *Server) earliestCapitalWarnAt() time.Time {
+	if s == nil || s.riskCapital == nil || s.riskCapital.core == nil {
+		// Legacy unit/import helper only; Start binds core before runtime.
+		return earliestCapitalWarnAt()
+	}
+	payloads, err := s.riskCapital.GovernanceEventPayloads(context.Background())
+	if err != nil {
+		return time.Time{}
+	}
+	var earliest time.Time
+	for _, payload := range payloads {
+		var entry struct {
+			At   time.Time `json:"at"`
+			Kind string    `json:"kind"`
+			To   string    `json:"to"`
+		}
+		if json.Unmarshal(payload, &entry) != nil || entry.Kind != "capital_tier" || entry.To != "warn" || entry.At.IsZero() {
 			continue
 		}
 		if earliest.IsZero() || entry.At.Before(earliest) {

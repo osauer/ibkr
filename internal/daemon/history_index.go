@@ -40,7 +40,7 @@ const (
 // errHistoryIndexUnavailable is the classified operator-facing failure for
 // a nil or broken index. Deliberately a plain error (maps to internal):
 // the remediation is always the same because the index is derived state.
-var errHistoryIndexUnavailable = errors.New("history index unavailable (derived index; delete history.db and restart to rebuild — see daemon log)")
+var errHistoryIndexUnavailable = errors.New("authoritative history storage unavailable (daemon.db; inspect daemon storage health and logs)")
 
 // installHistoryIndex resolves history.db, journal, statement, and
 // archive paths at construction time only. It must not open the DB: New
@@ -214,23 +214,35 @@ func (s *Server) handleRegimeHistory(req *rpc.Request) (*rpc.RegimeHistoryResult
 	if err != nil {
 		return nil, err
 	}
-	store := s.historyIndex.Load()
-	if store == nil {
-		return nil, errHistoryIndexUnavailable
-	}
-	entries, total, err := store.RegimeHistory(history.RegimeQuery{
-		Since: since, Until: until,
-		Stage: strings.TrimSpace(p.Stage),
-		Limit: limit,
-	})
-	if err != nil {
-		s.logger.Warnf("history index: regime query failed: %v", err)
-		return nil, errHistoryIndexUnavailable
-	}
-	health, err := store.Health("regime")
-	if err != nil {
-		s.logger.Warnf("history index: regime health read failed: %v", err)
-		return nil, errHistoryIndexUnavailable
+	var (
+		entries []rpc.RegimeHistoryEntry
+		total   int
+		health  rpc.HistoryIndexHealth
+	)
+	if s.coreStore != nil {
+		entries, total, err = s.sqliteRegimeHistory(context.Background(), since, until, strings.TrimSpace(p.Stage), limit)
+		if err != nil {
+			s.logger.Warnf("daemon authority: regime history query failed: %v", err)
+			return nil, errHistoryIndexUnavailable
+		}
+	} else {
+		// Legacy importer/test-oracle compatibility only. Production Start
+		// requires daemon.db before publishing a socket and never installs
+		// history.db.
+		store := s.historyIndex.Load()
+		if store == nil {
+			return nil, errHistoryIndexUnavailable
+		}
+		entries, total, err = store.RegimeHistory(history.RegimeQuery{
+			Since: since, Until: until, Stage: strings.TrimSpace(p.Stage), Limit: limit,
+		})
+		if err != nil {
+			return nil, errHistoryIndexUnavailable
+		}
+		health, err = store.Health("regime")
+		if err != nil {
+			return nil, errHistoryIndexUnavailable
+		}
 	}
 	if entries == nil {
 		entries = []rpc.RegimeHistoryEntry{} // JSON [] like orders.history, never null
@@ -262,23 +274,32 @@ func (s *Server) handleRulesHistory(req *rpc.Request) (*rpc.RulesHistoryResult, 
 	if err != nil {
 		return nil, err
 	}
-	store := s.historyIndex.Load()
-	if store == nil {
-		return nil, errHistoryIndexUnavailable
-	}
-	entries, total, err := store.RulesHistory(history.RulesQuery{
-		Since: since, Until: until,
-		Rule:  strings.TrimSpace(p.Rule),
-		Limit: limit,
-	})
-	if err != nil {
-		s.logger.Warnf("history index: rules query failed: %v", err)
-		return nil, errHistoryIndexUnavailable
-	}
-	health, err := store.Health("rules")
-	if err != nil {
-		s.logger.Warnf("history index: rules health read failed: %v", err)
-		return nil, errHistoryIndexUnavailable
+	var (
+		entries []rpc.RuleTransitionEntry
+		total   int
+		health  rpc.HistoryIndexHealth
+	)
+	if s.coreStore != nil {
+		entries, total, err = s.sqliteRulesHistory(context.Background(), since, until, strings.TrimSpace(p.Rule), limit)
+		if err != nil {
+			s.logger.Warnf("daemon authority: rules history query failed: %v", err)
+			return nil, errHistoryIndexUnavailable
+		}
+	} else {
+		store := s.historyIndex.Load()
+		if store == nil {
+			return nil, errHistoryIndexUnavailable
+		}
+		entries, total, err = store.RulesHistory(history.RulesQuery{
+			Since: since, Until: until, Rule: strings.TrimSpace(p.Rule), Limit: limit,
+		})
+		if err != nil {
+			return nil, errHistoryIndexUnavailable
+		}
+		health, err = store.Health("rules")
+		if err != nil {
+			return nil, errHistoryIndexUnavailable
+		}
 	}
 	if entries == nil {
 		entries = []rpc.RuleTransitionEntry{} // JSON [] like orders.history, never null
@@ -372,24 +393,32 @@ func (s *Server) handleCanaryHistory(req *rpc.Request) (*rpc.CanaryHistoryResult
 	if err != nil {
 		return nil, err
 	}
-	store := s.historyIndex.Load()
-	if store == nil {
-		return nil, errHistoryIndexUnavailable
-	}
-	entries, total, err := store.CanaryHistory(history.CanaryQuery{
-		Since: since, Until: until,
-		Severity: strings.TrimSpace(p.Severity),
-		Action:   strings.TrimSpace(p.Action),
-		Limit:    limit,
-	})
-	if err != nil {
-		s.logger.Warnf("history index: canary query failed: %v", err)
-		return nil, errHistoryIndexUnavailable
-	}
-	health, err := store.Health("canary")
-	if err != nil {
-		s.logger.Warnf("history index: canary health read failed: %v", err)
-		return nil, errHistoryIndexUnavailable
+	var (
+		entries []rpc.CanaryHistoryEntry
+		total   int
+		health  rpc.HistoryIndexHealth
+	)
+	if s.coreStore != nil {
+		entries, total, err = s.sqliteCanaryHistory(context.Background(), since, until, strings.TrimSpace(p.Severity), strings.TrimSpace(p.Action), limit)
+		if err != nil {
+			s.logger.Warnf("daemon authority: canary history query failed: %v", err)
+			return nil, errHistoryIndexUnavailable
+		}
+	} else {
+		store := s.historyIndex.Load()
+		if store == nil {
+			return nil, errHistoryIndexUnavailable
+		}
+		entries, total, err = store.CanaryHistory(history.CanaryQuery{
+			Since: since, Until: until, Severity: strings.TrimSpace(p.Severity), Action: strings.TrimSpace(p.Action), Limit: limit,
+		})
+		if err != nil {
+			return nil, errHistoryIndexUnavailable
+		}
+		health, err = store.Health("canary")
+		if err != nil {
+			return nil, errHistoryIndexUnavailable
+		}
 	}
 	if entries == nil {
 		entries = []rpc.CanaryHistoryEntry{} // JSON [] like orders.history, never null
@@ -421,29 +450,46 @@ func (s *Server) handleReconEquity(req *rpc.Request) (*rpc.ReconEquityResult, er
 	if err != nil {
 		return nil, err
 	}
-	store := s.historyIndex.Load()
-	if store == nil {
-		return nil, errHistoryIndexUnavailable
-	}
-	days, total, err := store.EquityDays(history.EquityQuery{Since: since, Until: until, Limit: limit})
-	if err != nil {
-		s.logger.Warnf("history index: equity query failed: %v", err)
-		return nil, errHistoryIndexUnavailable
-	}
-	events, eventsTruncated, err := store.CapitalEvents(since, until, reconEquityEventsCap)
-	if err != nil {
-		s.logger.Warnf("history index: capital events query failed: %v", err)
-		return nil, errHistoryIndexUnavailable
-	}
-	health, err := store.Health("capital")
-	if err != nil {
-		s.logger.Warnf("history index: capital health read failed: %v", err)
-		return nil, errHistoryIndexUnavailable
-	}
-	stmtHealth, err := store.StatementsHealth()
-	if err != nil {
-		s.logger.Warnf("history index: statements health read failed: %v", err)
-		return nil, errHistoryIndexUnavailable
+	var (
+		days            []rpc.EquityDayEntry
+		events          []rpc.CapitalEventEntry
+		total           int
+		eventsTruncated bool
+		health          rpc.HistoryIndexHealth
+		stmtHealth      rpc.HistoryIndexHealth
+	)
+	if s.coreStore != nil {
+		days, total, err = s.sqliteStatementEquityDays(context.Background(), since, until, limit)
+		if err == nil {
+			events, eventsTruncated, err = s.sqliteCapitalEvents(context.Background(), since, until, reconEquityEventsCap)
+		}
+		if err == nil {
+			stmtHealth, err = s.sqliteStatementsHealth(context.Background())
+		}
+		if err != nil {
+			s.logger.Warnf("daemon authority: recon equity query failed: %v", err)
+			return nil, errHistoryIndexUnavailable
+		}
+	} else {
+		// Legacy importer/test-oracle compatibility only; production never
+		// opens history.db after the SQLite authority cutover.
+		store := s.historyIndex.Load()
+		if store == nil {
+			return nil, errHistoryIndexUnavailable
+		}
+		days, total, err = store.EquityDays(history.EquityQuery{Since: since, Until: until, Limit: limit})
+		if err == nil {
+			events, eventsTruncated, err = store.CapitalEvents(since, until, reconEquityEventsCap)
+		}
+		if err == nil {
+			health, err = store.Health("capital")
+		}
+		if err == nil {
+			stmtHealth, err = store.StatementsHealth()
+		}
+		if err != nil {
+			return nil, errHistoryIndexUnavailable
+		}
 	}
 	if days == nil {
 		days = []rpc.EquityDayEntry{} // JSON [] never null

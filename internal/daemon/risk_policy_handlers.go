@@ -260,10 +260,12 @@ func (s *Server) handleReconDismiss(_ context.Context, req *rpc.Request) (*rpc.R
 		return nil, errBadRequest("line " + lineID + " is not an exception on the current report; run `ibkr recon` for the live list")
 	}
 	now := time.Now().UTC()
-	appendRiskPolicyJournal(map[string]any{
+	if err := s.riskCapital.RecordGovernanceEvent(map[string]any{
 		"version": 1, "at": now, "kind": "recon_dismiss", "line_id": lineID, "reason": reason,
 		"report": rep.ReportID, "policy_fingerprint": constitutionFingerprint(s.riskPolicies.snapshot().policy),
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("persist reconciliation dismissal: %w", err)
+	}
 	s.kickHistoryIndex()
 	return &rpc.RiskPolicyWriteResult{OK: true, At: now,
 		Message: "exception dismissed and journaled; the report id changes to reflect it — rerun `ibkr recon` before reconciling"}, nil

@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -254,14 +253,16 @@ func newPurgeRestoreTestServer(t *testing.T, trading config.Trading) *Server {
 	trading = trading.WithDefaults()
 	srv.cfg.Trading = trading
 	srv.orderWritesEnabled = func() bool { return true }
-	srv.purgeLedger = newPurgeLedgerStore(filepath.Join(t.TempDir(), "purge-ledger.json"), srv.now)
 	return srv
 }
 
 func seedPurgeLedgerFill(t *testing.T, store *purgeLedgerStore, purgeID, legID string, contract rpc.ContractParams, action string, quantity float64, avgFillPrice float64) {
 	t.Helper()
 	ev := purgeLedgerFillEvent(purgeExecuteSource, "purge-"+legID, purgeID, legID, contract, action, quantity, quantity, avgFillPrice)
+	ev.Endpoint = "127.0.0.1:4002"
+	ev.ClientID = 31
 	ev.Account = "DU1234567"
+	ev.Mode = rpc.AccountModePaper
 	if err := store.ApplyOrderFill(ev); err != nil {
 		t.Fatalf("seed purge ledger %s: %v", legID, err)
 	}

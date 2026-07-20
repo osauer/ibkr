@@ -1,15 +1,20 @@
 package daemon
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
-	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 )
 
 const (
@@ -30,11 +35,19 @@ const (
 	// tokens, which share the same key but MAC a bare base64 JSON body that
 	// can never start with this prefix.
 	tradingPaperSmokeMACPrefix = "ibkr-paper-smoke-v1."
+
+	tradingReadinessStateScope = "daemon"
+	tradingReadinessStateKind  = "trading_readiness_v1"
 )
 
 type tradingReadinessStore struct {
-	Path   string
-	signer *orderTokenSigner
+	// Path is retained only for the explicit legacy codec. Live reads and
+	// writes never fall back to trading-readiness.json after cutover.
+	Path      string
+	signer    *orderTokenSigner
+	mu        sync.RWMutex
+	authority *corestore.Store
+	published corestore.StateDocument
 }
 
 type tradingReadinessFile struct {
@@ -63,12 +76,93 @@ type tradingPaperSmokeCheck struct {
 	Evidence *tradingPaperSmokeEvidence
 }
 
-func defaultTradingReadinessPath() (string, error) {
-	return defaultTradingStatePath("trading-readiness.json")
-}
-
 func newTradingReadinessStore(path string, signer *orderTokenSigner) *tradingReadinessStore {
 	return &tradingReadinessStore{Path: path, signer: signer}
+}
+
+// initializeLockedOrderSignerAndReadiness must run only after the caller owns
+// both the daemon instance lock and daemon.db's persistence lock. It is the
+// first allowed point for creating the signer key. Tests may inject a signer;
+// production startup creates it here, then initializes readiness with that
+// exact signer before attachCoreOrderAuthority binds token verification.
+func (s *Server) initializeLockedOrderSignerAndReadiness(ctx context.Context, authority *corestore.Store) error {
+	if s == nil || authority == nil {
+		return fmt.Errorf("initialize locked order authority: unavailable server or store")
+	}
+	if s.orderTokens == nil {
+		path, err := orderTokenKeyPathForDatabase(s.coreStorePath)
+		if err != nil {
+			return fmt.Errorf("resolve order preview token key: %w", err)
+		}
+		signer, err := newOrderTokenSigner(path, s.now)
+		if err != nil {
+			return fmt.Errorf("initialize order preview token signer: %w", err)
+		}
+		s.orderTokens = signer
+	}
+	if s.tradingReadiness == nil {
+		path := filepath.Join(filepath.Dir(s.coreStorePath), "trading-readiness.json")
+		s.tradingReadiness = newTradingReadinessStore(path, s.orderTokens)
+	} else {
+		s.tradingReadiness.signer = s.orderTokens
+	}
+	if err := s.tradingReadiness.UseCoreStore(ctx, authority); err != nil {
+		return fmt.Errorf("initialize trading readiness: %w", err)
+	}
+	return nil
+}
+
+func (s *tradingReadinessStore) attachedTo(authority *corestore.Store) bool {
+	if s == nil || authority == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.authority == authority && s.published.Revision > 0
+}
+
+// UseCoreStore attaches the sole live readiness authority. A missing document
+// is deliberately initialized empty: legacy smoke evidence is not imported
+// across the cutover's trust boundary. Existing SQLite evidence survives a
+// normal daemon restart.
+func (s *tradingReadinessStore) UseCoreStore(ctx context.Context, authority *corestore.Store) error {
+	if s == nil || authority == nil || s.signer == nil {
+		return fmt.Errorf("trading readiness authority is unavailable")
+	}
+	if !authority.Health().Ready {
+		return fmt.Errorf("trading readiness authority is blocked")
+	}
+	doc, ok, err := authority.GetStateDocument(ctx, tradingReadinessStateScope, tradingReadinessStateKind)
+	if err != nil {
+		return fmt.Errorf("load trading readiness authority: %w", err)
+	}
+	if !ok {
+		raw, marshalErr := json.Marshal(tradingReadinessFile{Version: tradingReadinessFileVersion})
+		if marshalErr != nil {
+			return fmt.Errorf("initialize trading readiness authority: %w", marshalErr)
+		}
+		doc, err = authority.CompareAndSwapStateDocument(ctx, corestore.StateDocumentCAS{
+			ScopeKey: tradingReadinessStateScope, Kind: tradingReadinessStateKind, JSON: raw,
+		})
+		if errors.Is(err, corestore.ErrRevisionConflict) {
+			doc, ok, err = authority.GetStateDocument(ctx, tradingReadinessStateScope, tradingReadinessStateKind)
+			if err == nil && !ok {
+				err = fmt.Errorf("readiness document disappeared after concurrent initialization")
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("initialize trading readiness authority: %w", err)
+		}
+	}
+	if _, err := decodeTradingReadinessDocument(doc.JSON); err != nil {
+		return fmt.Errorf("validate trading readiness authority: %w", err)
+	}
+	// Publish only after the document exists durably and validates.
+	s.mu.Lock()
+	s.authority = authority
+	s.published = doc
+	s.mu.Unlock()
+	return nil
 }
 
 // signPaperSmoke MACs daemon-authored paper-smoke evidence with the order
@@ -101,20 +195,10 @@ func (s *orderTokenSigner) verifyPaperSmoke(ev tradingPaperSmokeEvidence, mac st
 	return hmac.Equal([]byte(want), []byte(mac))
 }
 
-func (s *tradingReadinessStore) Load() (*tradingReadinessFile, error) {
-	if s == nil || s.Path == "" {
-		return &tradingReadinessFile{Version: tradingReadinessFileVersion}, nil
-	}
-	data, err := os.ReadFile(s.Path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &tradingReadinessFile{Version: tradingReadinessFileVersion}, nil
-		}
-		return nil, fmt.Errorf("read %s: %w", s.Path, err)
-	}
+func decodeTradingReadinessDocument(data []byte) (*tradingReadinessFile, error) {
 	var f tradingReadinessFile
 	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", s.Path, err)
+		return nil, fmt.Errorf("parse trading readiness document: %w", err)
 	}
 	if f.Version == 0 {
 		f.Version = tradingReadinessFileVersion
@@ -125,9 +209,32 @@ func (s *tradingReadinessStore) Load() (*tradingReadinessFile, error) {
 	return &f, nil
 }
 
+func (s *tradingReadinessStore) Load() (*tradingReadinessFile, error) {
+	if s == nil {
+		return nil, fmt.Errorf("trading readiness authority is unavailable")
+	}
+	s.mu.RLock()
+	authority := s.authority
+	s.mu.RUnlock()
+	if authority == nil {
+		return nil, fmt.Errorf("trading readiness authority is unavailable")
+	}
+	if !authority.Health().Ready {
+		return nil, fmt.Errorf("trading readiness authority is blocked")
+	}
+	doc, ok, err := authority.GetStateDocument(context.Background(), tradingReadinessStateScope, tradingReadinessStateKind)
+	if err != nil {
+		return nil, fmt.Errorf("load trading readiness authority: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("trading readiness authority document is missing")
+	}
+	return decodeTradingReadinessDocument(doc.JSON)
+}
+
 func (s *tradingReadinessStore) SavePaperSmoke(ev tradingPaperSmokeEvidence) error {
-	if s == nil || s.Path == "" {
-		return fmt.Errorf("trading readiness path is empty")
+	if s == nil {
+		return fmt.Errorf("trading readiness authority is unavailable")
 	}
 	mac, err := s.signer.signPaperSmoke(ev)
 	if err != nil {
@@ -138,16 +245,48 @@ func (s *tradingReadinessStore) SavePaperSmoke(ev tradingPaperSmokeEvidence) err
 		PaperSmoke:    &ev,
 		PaperSmokeMAC: mac,
 	}
-	data, err := json.MarshalIndent(f, "", "  ")
+	data, err := json.Marshal(f)
 	if err != nil {
 		return fmt.Errorf("marshal trading readiness: %w", err)
 	}
-	data = append(data, '\n')
-	return writePrivateStateAtomic(s.Path, data)
+	for range 8 {
+		s.mu.RLock()
+		authority := s.authority
+		s.mu.RUnlock()
+		if authority == nil {
+			return fmt.Errorf("trading readiness authority is unavailable")
+		}
+		if !authority.Health().Ready {
+			return fmt.Errorf("trading readiness authority is blocked")
+		}
+		current, ok, err := authority.GetStateDocument(context.Background(), tradingReadinessStateScope, tradingReadinessStateKind)
+		if err != nil {
+			return fmt.Errorf("load trading readiness authority: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("trading readiness authority document is missing")
+		}
+		saved, err := authority.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
+			ScopeKey: tradingReadinessStateScope, Kind: tradingReadinessStateKind,
+			ExpectedRevision: current.Revision, JSON: data,
+		})
+		if errors.Is(err, corestore.ErrRevisionConflict) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("save trading readiness authority: %w", err)
+		}
+		// Publish only after the durable CAS succeeds.
+		s.mu.Lock()
+		s.published = saved
+		s.mu.Unlock()
+		return nil
+	}
+	return fmt.Errorf("save trading readiness authority: too many revision conflicts")
 }
 
 func (s *tradingReadinessStore) CheckPaperSmoke(liveAccount, liveEndpoint string, clientID int, version string, maxAge time.Duration, now time.Time) tradingPaperSmokeCheck {
-	if s == nil || s.Path == "" {
+	if s == nil {
 		return tradingPaperSmokeCheck{
 			Status:  tradingPaperSmokeStatusMissing,
 			Message: "live trading requires recent paper-smoke evidence in daemon-owned state",
@@ -159,7 +298,7 @@ func (s *tradingReadinessStore) CheckPaperSmoke(liveAccount, liveEndpoint string
 		return tradingPaperSmokeCheck{
 			Status:  tradingPaperSmokeStatusUnreadable,
 			Message: "paper-smoke evidence is unreadable",
-			Action:  "Inspect or remove the trading-readiness state file, then rerun `ibkr trading paper-smoke`.",
+			Action:  "Inspect daemon storage health, then rerun `ibkr trading paper-smoke`.",
 		}
 	}
 	if f.PaperSmoke == nil {

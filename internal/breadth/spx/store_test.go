@@ -1,12 +1,33 @@
 package spx
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 )
+
+func openBreadthTestCoreStore(t *testing.T) *corestore.Store {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("secure test corestore dir: %v", err)
+	}
+	store, err := corestore.Open(context.Background(), corestore.Options{Path: filepath.Join(dir, "daemon.db")})
+	if err != nil {
+		t.Fatalf("open test corestore: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close test corestore: %v", err)
+		}
+	})
+	return store
+}
 
 func TestStoreSnapshotRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -40,6 +61,104 @@ func TestStoreSnapshotRoundTrip(t *testing.T) {
 	}
 	if len(got.Excluded) != 1 || got.Excluded[0].Symbol != "NEW" {
 		t.Errorf("excluded list lost in round-trip: got %+v", got.Excluded)
+	}
+}
+
+func TestStoreUsesSQLiteWithoutLegacyFallback(t *testing.T) {
+	legacyDir := t.TempDir()
+	authority := openBreadthTestCoreStore(t)
+	store := NewStore(legacyDir)
+	if err := store.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	now := time.Date(2026, 5, 17, 20, 35, 0, 0, time.UTC)
+	want := Snapshot{
+		Value: 58.7, AsOf: now, SessionKey: "2026-05-16",
+		Method: methodConstituentFanout, MemberCount: 503, Coverage: 501,
+	}
+	if err := store.SaveSnapshot(want); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	if err := store.SaveWindows(map[string]ConstituentWindow{
+		"AAPL": {Symbol: "AAPL", Closes: []float64{100, 101}, LastBarAt: "2026-05-16"},
+	}, now); err != nil {
+		t.Fatalf("SaveWindows: %v", err)
+	}
+	if err := store.SaveHistory([]HistoryPoint{{Date: "2026-05-16", PctAbove50DMA: 58.7}}); err != nil {
+		t.Fatalf("SaveHistory: %v", err)
+	}
+	entries, err := os.ReadDir(legacyDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("legacy breadth cache was written: entries=%v err=%v", entries, err)
+	}
+
+	restarted := NewStore(legacyDir)
+	if err := restarted.UseCoreStore(authority); err != nil {
+		t.Fatalf("restart UseCoreStore: %v", err)
+	}
+	got, err := restarted.LoadSnapshot()
+	if err != nil || got == nil || got.Value != want.Value || got.Method != want.Method {
+		t.Fatalf("SQLite snapshot round trip: got=%+v err=%v", got, err)
+	}
+	observations, err := authority.ListObservations(context.Background(), corestore.ObservationQuery{
+		ScopeKey: breadthAuthorityScope, Source: breadthSource,
+	})
+	if err != nil || len(observations) != 3 {
+		t.Fatalf("observations=%d err=%v", len(observations), err)
+	}
+	for _, observation := range observations {
+		if !observation.DecisionEligible {
+			t.Fatal("current breadth observation is not decision-eligible")
+		}
+	}
+}
+
+func TestEngineUseCoreStoreReplacesPreloadedLegacyProjection(t *testing.T) {
+	legacyDir := t.TempDir()
+	legacy := NewStore(legacyDir)
+	legacySnapshot := Snapshot{
+		Value: 99, AsOf: time.Date(2026, 5, 17, 20, 35, 0, 0, time.UTC),
+		SessionKey: "2026-05-16", Method: methodConstituentFanout,
+	}
+	if err := legacy.SaveSnapshot(legacySnapshot); err != nil {
+		t.Fatalf("seed legacy snapshot: %v", err)
+	}
+	engine := New(legacy, &FakeBarFetcher{}, Options{Members: []string{"AAPL"}})
+	if got, ok := engine.Get(); !ok || got.Value != legacySnapshot.Value {
+		t.Fatalf("engine did not preload legacy fixture: got=%+v ok=%v", got, ok)
+	}
+
+	authority := openBreadthTestCoreStore(t)
+	if err := engine.UseCoreStore(authority); err != nil {
+		t.Fatalf("Engine.UseCoreStore: %v", err)
+	}
+	if got, ok := engine.Get(); ok || got != nil {
+		t.Fatalf("empty SQLite authority did not replace legacy projection: got=%+v ok=%v", got, ok)
+	}
+}
+
+func TestEngineDeferredStoreLoadDoesNotReadLegacyProjection(t *testing.T) {
+	legacyDir := t.TempDir()
+	legacy := NewStore(legacyDir)
+	legacySnapshot := Snapshot{
+		Value: 99, AsOf: time.Date(2026, 5, 17, 20, 35, 0, 0, time.UTC),
+		SessionKey: "2026-05-16", Method: methodConstituentFanout,
+	}
+	if err := legacy.SaveSnapshot(legacySnapshot); err != nil {
+		t.Fatal(err)
+	}
+	engine := New(legacy, &FakeBarFetcher{}, Options{
+		Members: []string{"AAPL"}, DeferStoreLoad: true,
+	})
+	if got, ok := engine.Get(); ok || got != nil {
+		t.Fatalf("deferred construction read legacy snapshot: got=%+v ok=%v", got, ok)
+	}
+	authority := openBreadthTestCoreStore(t)
+	if err := engine.UseCoreStore(authority); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := engine.Get(); ok || got != nil {
+		t.Fatalf("empty SQLite authority did not stay cold: got=%+v ok=%v", got, ok)
 	}
 }
 

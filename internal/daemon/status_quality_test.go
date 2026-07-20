@@ -181,6 +181,10 @@ func TestStatusDataFarmsKeepsOnlyUnhealthyFarms(t *testing.T) {
 func TestSubsystemHealthDegradesWhenFarmNoticesAreMissing(t *testing.T) {
 	t.Parallel()
 	subs := (&Server{}).subsystemHealth(true, nil)
+	storage := mustFindSubsystem(t, subs, "storage")
+	if storage.Status != "unavailable" {
+		t.Fatalf("storage subsystem = %+v, want unavailable without daemon.db", storage)
+	}
 	for _, name := range []string{"quote", "scanner", "chain"} {
 		sub := mustFindSubsystem(t, subs, name)
 		if sub.Status != "degraded" || !strings.Contains(sub.Message, "no market-data farm connection notice observed") {

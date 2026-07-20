@@ -1,14 +1,13 @@
 package daemon
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,12 +76,6 @@ const (
 	stockTrailVolatilityCacheTTL = 4 * time.Hour
 )
 
-type proposalStore struct {
-	currentPath string
-	eventsPath  string
-	mu          sync.Mutex
-}
-
 type proposalEvent struct {
 	Version            int                                 `json:"version"`
 	At                 time.Time                           `json:"at"`
@@ -91,6 +84,7 @@ type proposalEvent struct {
 	Revision           string                              `json:"revision,omitempty"`
 	Bucket             string                              `json:"bucket,omitempty"`
 	AccountID          string                              `json:"account_id,omitempty"`
+	AccountMode        string                              `json:"account_mode,omitempty"`
 	PolicyID           string                              `json:"policy_id,omitempty"`
 	PolicyVersion      int                                 `json:"policy_version,omitempty"`
 	PolicyFingerprint  rpc.Fingerprint                     `json:"policy_fingerprint,omitzero"`
@@ -102,33 +96,12 @@ type proposalEvent struct {
 }
 
 func (s *Server) installProposalEngine() {
-	current, err := defaultTradingStatePath("trade-proposals-current.json")
-	if err != nil {
-		s.warnf("trade proposals: resolve current path: %v", err)
-		return
-	}
-	events, err := defaultTradingStatePath("trade-proposals.jsonl")
-	if err != nil {
-		s.warnf("trade proposals: resolve events path: %v", err)
-		return
-	}
 	e := &proposalEngine{
 		server:  s,
-		store:   &proposalStore{currentPath: current, eventsPath: events},
+		store:   &proposalStore{},
 		cadence: s.cfg.AutoTrade.WithDefaults().ProposalCadenceDuration(),
 		now:     s.now,
 		ignored: map[string]struct{}{},
-	}
-	if snap, err := e.store.LoadCurrent(); err == nil && snap.Kind != "" {
-		if proposalSnapshotAdoptable(snap) {
-			snap.LoadedFromState = true
-			e.snapshot = snap
-		} else {
-			// Legacy/unscoped snapshot (e.g. account_id "All" from the
-			// pre-v2 era): fail closed and let the first refresh
-			// regenerate for the connected session.
-			s.warnf("trade proposals: ignoring persisted snapshot without a concrete account/mode scope (account %q mode %q); regenerating on first refresh", snap.AccountID, snap.AccountMode)
-		}
 	}
 	s.tradeProposals = e
 }
@@ -408,7 +381,9 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		snap.AutoTrade = autoStatus
 		snap.PolicyStatus = autoStatus.Policy
 		snap.Blockers = []rpc.TradingBlocker{{Code: "proposals_disabled", Message: "manual protection proposals are disabled by config"}}
-		e.installSnapshot(snap, show)
+		if err := e.installSnapshot(snap, show); err != nil {
+			return e.Snapshot(false), err
+		}
 		return snap, nil
 	}
 	policy, policyStatus := e.server.protectionPolicies.Active()
@@ -417,8 +392,12 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		snap.AutoTrade = autoStatus
 		snap.PolicyStatus = policyStatus
 		snap.Blockers = append([]rpc.TradingBlocker(nil), policyStatus.Blockers...)
-		e.installSnapshot(snap, show)
-		e.appendEvent(proposalEvent{At: now, Type: "policy-" + policyStatus.Status, PolicyID: policyStatus.PolicyID, PolicyVersion: policyStatus.PolicyVersion, PolicyFingerprint: policyStatus.Fingerprint, Message: policyStatus.Message})
+		if err := e.installSnapshot(snap, show); err != nil {
+			return e.Snapshot(false), err
+		}
+		if err := e.appendEvent(proposalEvent{At: now, Type: "policy-" + policyStatus.Status, PolicyID: policyStatus.PolicyID, PolicyVersion: policyStatus.PolicyVersion, PolicyFingerprint: policyStatus.Fingerprint, Message: policyStatus.Message}); err != nil {
+			return snap, err
+		}
 		return snap, nil
 	}
 	// Bind the refresh to the connected session identity before touching
@@ -432,7 +411,9 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		snap.AutoTrade = autoStatus
 		snap.PolicyStatus = policyStatus
 		snap.Blockers = []rpc.TradingBlocker{proposalScopeUnscopedBlocker(scope)}
-		e.installSnapshot(snap, show)
+		if err := e.installSnapshot(snap, show); err != nil {
+			return e.Snapshot(false), err
+		}
 		return snap, nil
 	}
 	acct, err := e.server.handleAccountSummary(ctx)
@@ -447,7 +428,9 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		snap.AccountID = scope.Account
 		snap.AccountMode = scope.Mode
 		snap.Blockers = blockers
-		e.installSnapshot(snap, show)
+		if installErr := e.installSnapshot(snap, show); installErr != nil {
+			return e.Snapshot(false), installErr
+		}
 		return snap, err
 	}
 	pos, err := e.server.handlePositionsList(ctx, &rpc.Request{})
@@ -462,7 +445,9 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		snap.AccountID = scope.Account
 		snap.AccountMode = scope.Mode
 		snap.Blockers = blockers
-		e.installSnapshot(snap, show)
+		if installErr := e.installSnapshot(snap, show); installErr != nil {
+			return e.Snapshot(false), installErr
+		}
 		return snap, err
 	}
 	if proposalPositionsUnprimed(pos, acct) {
@@ -476,7 +461,9 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		snap.AccountID = scope.Account
 		snap.AccountMode = scope.Mode
 		snap.Blockers = blockers
-		e.installSnapshot(snap, show)
+		if err := e.installSnapshot(snap, show); err != nil {
+			return e.Snapshot(false), err
+		}
 		return snap, nil
 	}
 	accountFP := rpc.BuildAccountFingerprint(acct)
@@ -526,7 +513,7 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		Proposals:          proposals,
 		Counts:             proposalCounts(proposals, protectionCoverageBaseCurrency(pos)),
 	}
-	return e.installScoped(snap, scope, show, thetaSuppressions), nil
+	return e.installScoped(snap, scope, show, thetaSuppressions)
 }
 
 // installScoped re-resolves the broker scope immediately before publishing a
@@ -535,42 +522,39 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 // under the scope resolved at refresh start would persist proposals labeled
 // with one session's identity but built from another's positions. Fail
 // closed with a proposal-free shell instead.
-func (e *proposalEngine) installScoped(snap rpc.TradeProposalSnapshot, scope brokerStateScope, show bool, thetaSuppressions []thetaSuppression) rpc.TradeProposalSnapshot {
+func (e *proposalEngine) installScoped(snap rpc.TradeProposalSnapshot, scope brokerStateScope, show bool, thetaSuppressions []thetaSuppression) (rpc.TradeProposalSnapshot, error) {
 	if current := e.currentScope(); !sameBrokerScope(current, scope) {
 		shell := emptyProposalSnapshot(snap.AsOf)
 		shell.AutoTrade = snap.AutoTrade
 		shell.PolicyStatus = snap.PolicyStatus
 		shell.Blockers = proposalScopeBlockers(scope.Account, scope.Mode, current)
-		e.installSnapshot(shell, show)
-		return shell
+		if err := e.installSnapshot(shell, show); err != nil {
+			return e.Snapshot(false), err
+		}
+		return shell, nil
 	}
-	// Journal theta suppressions before installing, while e.snapshot still
-	// holds the previous revision, so the revision-change gate matches the one
-	// installSnapshot uses for "generated" events (no 2-minute-cadence spam).
-	e.journalThetaSuppressions(snap, thetaSuppressions)
-	e.installSnapshot(snap, show)
-	return snap
+	if err := e.installSnapshot(snap, show, e.thetaSuppressionEvents(snap, thetaSuppressions)...); err != nil {
+		return e.Snapshot(false), err
+	}
+	return snap, nil
 }
 
-// journalThetaSuppressions records near-expiry options that were deliberately
-// not turned into close proposals, gated on a revision change so the unbounded
-// trade-proposals.jsonl does not accrue a duplicate line every refresh cycle.
-func (e *proposalEngine) journalThetaSuppressions(snap rpc.TradeProposalSnapshot, suppressions []thetaSuppression) {
+// thetaSuppressionEvents records near-expiry options that were deliberately
+// not turned into close proposals. installSnapshot applies the revision-change
+// gate and commits these events atomically with the current snapshot.
+func (e *proposalEngine) thetaSuppressionEvents(snap rpc.TradeProposalSnapshot, suppressions []thetaSuppression) []proposalEvent {
 	if len(suppressions) == 0 {
-		return
+		return nil
 	}
-	e.mu.Lock()
-	prevRevision := e.snapshot.Revision
-	e.mu.Unlock()
-	if snap.Revision == prevRevision {
-		return
-	}
+	events := make([]proposalEvent, 0, len(suppressions))
 	for _, s := range suppressions {
-		e.appendEvent(proposalEvent{
+		events = append(events, proposalEvent{
 			At:                 snap.AsOf,
 			Type:               "theta-suppressed",
 			Key:                s.Key,
 			Bucket:             rpc.TradeProposalBucketThetaHygiene,
+			AccountID:          snap.AccountID,
+			AccountMode:        snap.AccountMode,
 			PolicyID:           snap.PolicyID,
 			PolicyVersion:      snap.PolicyVersion,
 			PolicyFingerprint:  snap.PolicyFingerprint,
@@ -579,6 +563,7 @@ func (e *proposalEngine) journalThetaSuppressions(snap rpc.TradeProposalSnapshot
 			SourceFingerprints: snap.SourceFingerprints,
 		})
 	}
+	return events
 }
 
 func (e *proposalEngine) generate(ctx context.Context, policy protectionPolicy, status rpc.ProtectionPolicyStatus, acct *rpc.AccountResult, pos *rpc.PositionsResult, sources rpc.TradeProposalSourceFingerprints, marketEvents *rpc.MarketEventsResult, scope brokerStateScope, now time.Time) ([]rpc.TradeProposal, []thetaSuppression) {
@@ -1759,15 +1744,25 @@ func truncateBlockerCause(s string) string {
 func (e *proposalEngine) Ignore(p rpc.TradeProposalIgnoreParams) rpc.TradeProposalIgnoreResult {
 	now := e.clock()
 	key := strings.TrimSpace(p.Key)
+	if key == "" {
+		return rpc.TradeProposalIgnoreResult{Accepted: false, Message: "proposal key is required", AsOf: now}
+	}
 	scope := e.currentScope()
+	if !brokerScopeConcrete(scope) {
+		return rpc.TradeProposalIgnoreResult{Accepted: false, Key: key, Revision: strings.TrimSpace(p.Revision), Message: "proposal ignore requires a concrete account and paper/live mode", AsOf: now}
+	}
+	ev := proposalEvent{At: now, Type: "ignored", Key: key, Revision: strings.TrimSpace(p.Revision), Reason: strings.TrimSpace(p.Reason), Message: "proposal ignored"}
+	ev.AccountID = scope.Account
+	ev.AccountMode = scope.Mode
+	if err := e.appendEvent(ev); err != nil {
+		return rpc.TradeProposalIgnoreResult{Accepted: false, Key: key, Revision: strings.TrimSpace(p.Revision), Message: "proposal ignore was not persisted", AsOf: now}
+	}
 	e.mu.Lock()
+	if e.ignored == nil {
+		e.ignored = map[string]struct{}{}
+	}
 	e.ignored[scopedIgnoreKey(scope, key)] = struct{}{}
 	e.mu.Unlock()
-	ev := proposalEvent{At: now, Type: "ignored", Key: key, Revision: strings.TrimSpace(p.Revision), Reason: strings.TrimSpace(p.Reason), Message: "proposal ignored"}
-	if brokerScopeConcrete(scope) {
-		ev.AccountID = scope.Account
-	}
-	e.appendEvent(ev)
 	return rpc.TradeProposalIgnoreResult{Accepted: true, Key: key, Revision: strings.TrimSpace(p.Revision), Message: "proposal ignored", AsOf: now}
 }
 
@@ -2081,26 +2076,45 @@ func sanitizeProposalPreviewForProposal(in *rpc.OrderPreviewResult, prop rpc.Tra
 	return &rpc.TradeProposalOrderPreview{PreviewTokenID: in.PreviewTokenID, PreviewTokenScope: in.PreviewTokenScope, PreviewTokenExpiresAt: in.PreviewTokenExpiresAt, TokenMinted: in.TokenMinted, SubmitEligible: in.SubmitEligible, Mode: in.Mode, Account: in.Account, Endpoint: in.Endpoint, ClientID: in.ClientID, Draft: in.Draft, Quote: in.Quote, Position: in.Position, ExecutionSemantics: cloneExecutionSemantics(prop.ExecutionSemantics), StopRisk: cloneStopRisk(prop.StopRisk), Notional: in.Notional, MaxNotional: in.MaxNotional, WhatIf: in.WhatIf, Warnings: append([]rpc.DataWarning(nil), in.Warnings...), AsOf: in.AsOf}
 }
 
-func (e *proposalEngine) installSnapshot(snap rpc.TradeProposalSnapshot, show bool) {
+func (e *proposalEngine) installSnapshot(snap rpc.TradeProposalSnapshot, show bool, extraEvents ...proposalEvent) error {
 	e.mu.Lock()
 	prevRevision := e.snapshot.Revision
 	prevMarkDate := e.snapshot.AsOf.Format(time.DateOnly)
 	e.mu.Unlock()
-	e.replaceSnapshot(snap)
 	// "generated" events and daily outcome marks record new generation
 	// work. At a 30s cadence most refreshes re-derive a revision-identical
 	// proposal set; appending per-proposal duplicates would grow the
-	// unbounded trade-proposals.jsonl ~7.5x faster and rescan the outcomes
-	// file per proposal per cycle for nothing. Marks still pass on a date
+	// event stream ~7.5x faster and rescan the outcomes journal per proposal
+	// per cycle for nothing. Marks still pass on a date
 	// change: their identity is daily (proposalOutcomeIdentity includes
 	// MarkDate), so a revision frozen across midnight still owes the new
 	// day's mark.
 	newRevision := snap.Revision != prevRevision
 	newMarkDate := snap.AsOf.Format(time.DateOnly) != prevMarkDate
-	for _, prop := range snap.Proposals {
-		if newRevision {
-			e.appendEvent(proposalEventForProposal("generated", prop, snap.AsOf, "", "", "proposal generated"))
+	var generated []proposalEvent
+	if newRevision {
+		generated = append(generated, extraEvents...)
+		for _, prop := range snap.Proposals {
+			ev := proposalEventForProposal("generated", prop, snap.AsOf, "", "", "proposal generated")
+			ev.AccountID = snap.AccountID
+			ev.AccountMode = snap.AccountMode
+			generated = append(generated, ev)
 		}
+	}
+	// Persist the authoritative current document and its generation events in
+	// one SQLite transaction before changing the served cache. A failed CAS,
+	// closed database, or latched integrity error therefore leaves both the
+	// previous current row and the in-memory view unchanged.
+	if proposalSnapshotPersistable(snap) {
+		if e.store == nil {
+			return errors.New("proposal store is not attached")
+		}
+		if err := e.store.SaveCurrentWithEvents(context.Background(), snap, generated); err != nil {
+			return fmt.Errorf("persist proposal snapshot: %w", err)
+		}
+	}
+	e.replaceSnapshot(snap)
+	for _, prop := range snap.Proposals {
 		if (newRevision || newMarkDate) && e.server != nil && e.server.proposalOutcomes != nil {
 			if err := e.server.proposalOutcomes.AppendMark(proposalOutcomeMarked(prop, snap.AsOf)); err != nil {
 				e.server.warnf("trade proposal outcomes: append daily mark: %v", err)
@@ -2110,6 +2124,7 @@ func (e *proposalEngine) installSnapshot(snap rpc.TradeProposalSnapshot, show bo
 	if show {
 		e.appendShownEvents(snap)
 	}
+	return nil
 }
 
 func (e *proposalEngine) installPreservedSnapshot(snap rpc.TradeProposalSnapshot, show bool) {
@@ -2123,22 +2138,6 @@ func (e *proposalEngine) replaceSnapshot(snap rpc.TradeProposalSnapshot) {
 	e.mu.Lock()
 	e.snapshot = cloneProposalSnapshot(snap)
 	e.mu.Unlock()
-	if e.store == nil {
-		return
-	}
-	// Only generated, concretely scoped snapshots survive a restart.
-	// Error/unscoped shells (revision "empty") serve in-memory only:
-	// the startup refresh runs before the gateway connects, and
-	// persisting its shell overwrote the last good snapshot on every
-	// start — installProposalEngine then warned "ignoring persisted
-	// snapshot without a concrete account/mode scope" and warm-start
-	// adoption never happened.
-	if !proposalSnapshotPersistable(snap) {
-		return
-	}
-	if err := e.store.SaveCurrent(snap); err != nil && e.server != nil {
-		e.server.warnf("trade proposals: save current snapshot: %v", err)
-	}
 }
 
 func (e *proposalEngine) preserveSnapshotOnRefreshFailure(scope brokerStateScope, autoStatus rpc.AutoTradeStatus, policyStatus rpc.ProtectionPolicyStatus, blockers []rpc.TradingBlocker, show bool) (rpc.TradeProposalSnapshot, bool) {
@@ -2223,15 +2222,27 @@ func proposalEventForProposal(eventType string, prop rpc.TradeProposal, at time.
 	return proposalEvent{At: at, Type: eventType, Key: prop.Key, Revision: prop.Revision, Bucket: prop.Bucket, PolicyID: prop.PolicyID, PolicyVersion: prop.PolicyVersion, PolicyFingerprint: prop.PolicyFingerprint, PreviewTokenID: tokenID, OrderRef: orderRef, Message: msg, SourceFingerprints: prop.SourceFingerprints}
 }
 
-func (e *proposalEngine) appendEvent(ev proposalEvent) {
-	if ev.AccountID == "" {
+func (e *proposalEngine) appendEvent(ev proposalEvent) error {
+	if e == nil || e.store == nil {
+		return errors.New("proposal store is not attached")
+	}
+	if ev.AccountID == "" || ev.AccountMode == "" {
 		e.mu.Lock()
-		ev.AccountID = e.snapshot.AccountID
+		if ev.AccountID == "" {
+			ev.AccountID = e.snapshot.AccountID
+		}
+		if ev.AccountMode == "" {
+			ev.AccountMode = e.snapshot.AccountMode
+		}
 		e.mu.Unlock()
 	}
 	if err := e.store.AppendEvent(ev); err != nil {
-		e.server.warnf("trade proposals: append event: %v", err)
+		if e.server != nil {
+			e.server.warnf("trade proposals: append event: %v", err)
+		}
+		return err
 	}
+	return nil
 }
 
 func (e *proposalEngine) isIgnored(scope brokerStateScope, key string) bool {
@@ -2255,16 +2266,6 @@ func (e *proposalEngine) currentScope() brokerStateScope {
 		return e.scope()
 	}
 	return e.server.currentBrokerStateScope()
-}
-
-// proposalSnapshotAdoptable reports whether a persisted snapshot may seed
-// the in-memory state at startup. The gate is the scope being concrete,
-// not the schema version string: legacy v1 snapshots have no account_mode
-// and "All"-scoped snapshots have no concrete account, so both fail closed
-// and the first refresh regenerates state for the connected session.
-func proposalSnapshotAdoptable(snap rpc.TradeProposalSnapshot) bool {
-	return snap.Kind == rpc.TradeProposalSnapshotKind &&
-		brokerScopeConcrete(brokerStateScope{Account: snap.AccountID, Mode: snap.AccountMode})
 }
 
 // proposalScopeBlockers reports why a snapshot bound to snapAccount/snapMode
@@ -2480,97 +2481,4 @@ func cloneProposalSnapshot(in rpc.TradeProposalSnapshot) rpc.TradeProposalSnapsh
 		out.MarketEvents = &events
 	}
 	return out
-}
-
-func (s *proposalStore) SaveCurrent(snap rpc.TradeProposalSnapshot) error {
-	data, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return writePrivateStateAtomic(s.currentPath, data)
-}
-
-func (s *proposalStore) LoadCurrent() (rpc.TradeProposalSnapshot, error) {
-	data, err := os.ReadFile(s.currentPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return rpc.TradeProposalSnapshot{}, nil
-		}
-		return rpc.TradeProposalSnapshot{}, err
-	}
-	var snap rpc.TradeProposalSnapshot
-	err = json.Unmarshal(data, &snap)
-	return snap, err
-}
-
-func (s *proposalStore) AppendEvent(ev proposalEvent) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if ev.At.IsZero() {
-		ev.At = time.Now().UTC()
-	}
-	if ev.Version == 0 {
-		ev.Version = proposalEventFileVersion
-	}
-	data, err := json.Marshal(ev)
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	if err := ensurePrivateStateDir(s.eventsPath); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(s.eventsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
-	_, err = f.Write(data)
-	return err
-}
-
-func (s *proposalStore) FindSubmittedEvent(orderRef, tokenID string) (proposalEvent, bool, error) {
-	if s == nil || s.eventsPath == "" {
-		return proposalEvent{}, false, nil
-	}
-	orderRef = strings.TrimSpace(orderRef)
-	tokenID = strings.TrimSpace(tokenID)
-	if orderRef == "" && tokenID == "" {
-		return proposalEvent{}, false, nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	f, err := os.Open(s.eventsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return proposalEvent{}, false, nil
-		}
-		return proposalEvent{}, false, err
-	}
-	defer func() { _ = f.Close() }()
-	var found proposalEvent
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		var ev proposalEvent
-		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
-			return proposalEvent{}, false, err
-		}
-		if ev.Type != "submitted" {
-			continue
-		}
-		if orderRef != "" && ev.OrderRef == orderRef || tokenID != "" && ev.PreviewTokenID == tokenID {
-			found = ev
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return proposalEvent{}, false, err
-	}
-	if found.Type == "" {
-		return proposalEvent{}, false, nil
-	}
-	return found, true, nil
 }

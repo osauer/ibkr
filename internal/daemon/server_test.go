@@ -297,42 +297,47 @@ func TestRequestCtxNoDeadlineForStreamingMethod(t *testing.T) {
 }
 
 // Server.Start must open the Unix socket and start serving before the
-// gateway handshake completes — otherwise a slow or unreachable gateway
-// blocks `ibkr status` for 30-40s during the IBKR pool's TCP timeouts.
-// We exercise this by running a real Server.Start against a config
-// pointing at a closed TCP port (handshake will fail after ~8s) and
-// verifying the socket is listening within 1 second.
+// gateway handshake starts — otherwise a slow or unreachable gateway blocks
+// `ibkr status` for 30-40s during the IBKR pool's TCP timeouts. The fake
+// attempter checks the Unix socket synchronously on entry to Start and then
+// blocks, so this pins the ordering invariant without a load-sensitive wall
+// clock assumption about authority initialization.
 func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 	t.Parallel()
 	dir := shortTempDir(t)
 	sockPath := filepath.Join(dir, "ibkrd.sock")
 
-	// Find a free TCP port and immediately close it — the daemon's
-	// handshake against it will fail (refused connection or timeout),
-	// proving Start did not block on connector readiness.
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("probe listen: %v", err)
-	}
-	addr := probe.Addr().(*net.TCPAddr)
-	_ = probe.Close()
-
 	tlsFalse := false
 	cfg := &config.Resolved{
-		Gateway: config.Gateway{Host: "127.0.0.1", Port: new(addr.Port), ClientID: new(99), TLS: &tlsFalse},
+		Gateway: config.Gateway{Host: "127.0.0.1", Port: new(4002), ClientID: new(99), TLS: &tlsFalse},
 	}
-	cfg.Daemon.SetIdleTimeout(50 * time.Millisecond)
+	cfg.Daemon.SetIdleTimeout(2 * time.Second)
 
 	srv := New(Options{
-		Config:     cfg,
-		SocketPath: sockPath,
-		Version:    "test",
-		Logger:     NewLogger(&bytes.Buffer{}, "error"),
+		Config:            cfg,
+		SocketPath:        sockPath,
+		Version:           "test",
+		Logger:            NewLogger(&bytes.Buffer{}, "error"),
+		StateDatabasePath: filepath.Join(dir, "daemon.db"),
 	})
 	// Hermetic journal: New() resolves the host's XDG state path, and a real
 	// open order there would (correctly) veto idle shutdown via the
 	// open-orders background task.
 	srv.orderJournal = newOrderJournalStore(filepath.Join(dir, "order-journal.jsonl"))
+	startCheck := make(chan error, 1)
+	srv.attempterFactory = func(_ discover.Endpoint) connectAttempter {
+		return &fakeAttempter{
+			blockUntilCtxDone: true,
+			startCheck: func() error {
+				conn, err := net.DialTimeout("unix", sockPath, time.Second)
+				if err == nil {
+					_ = conn.Close()
+				}
+				return err
+			},
+			startCheckResult: startCheck,
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -342,26 +347,23 @@ func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 		startReturned <- srv.Start(ctx)
 	}()
 
-	// Within 1s the socket must be listening — proves we're not blocked
-	// on the connector handshake.
-	socketDeadline := time.Now().Add(1 * time.Second)
-	for time.Now().Before(socketDeadline) {
-		if c, err := net.DialTimeout("unix", sockPath, 100*time.Millisecond); err == nil {
-			_ = c.Close()
-			goto socketOK
+	select {
+	case err := <-startCheck:
+		if err != nil {
+			t.Fatalf("gateway handshake started before daemon socket was reachable: %v", err)
 		}
-		time.Sleep(20 * time.Millisecond)
+	case err := <-startReturned:
+		t.Fatalf("Start returned before gateway handshake: %v", err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("gateway handshake did not start")
 	}
-	t.Fatalf("socket not reachable within 1s — Start blocked on connector?")
 
-socketOK:
-	// Idle watcher will fire and Start will return; let it do so cleanly.
+	// Release the deliberately blocked handshake and let Start return cleanly.
+	cancel()
 	select {
 	case <-startReturned:
 	case <-time.After(3 * time.Second):
-		cancel()
-		<-startReturned
-		t.Fatal("Start did not return within 3s of idle fire")
+		t.Fatal("Start did not return within 3s of cancellation")
 	}
 	srv.Stop()
 }
@@ -398,10 +400,11 @@ func TestStartDoesNotLaunchBreadthBeforePostConnect(t *testing.T) {
 	cfg.Daemon.SetIdleTimeout(2 * time.Second)
 
 	srv := New(Options{
-		Config:     cfg,
-		SocketPath: sockPath,
-		Version:    "test",
-		Logger:     NewLogger(&bytes.Buffer{}, "error"),
+		Config:            cfg,
+		SocketPath:        sockPath,
+		Version:           "test",
+		Logger:            NewLogger(&bytes.Buffer{}, "error"),
+		StateDatabasePath: filepath.Join(dir, "daemon.db"),
 	})
 	// Hermetic journal — see TestStartOpensSocketBeforeGatewayHandshake.
 	srv.orderJournal = newOrderJournalStore(filepath.Join(shortTempDir(t), "order-journal.jsonl"))
@@ -1243,6 +1246,8 @@ type fakeAttempter struct {
 	startErr          error
 	lastError         string
 	blockUntilCtxDone bool
+	startCheck        func() error
+	startCheckResult  chan<- error
 	connected         atomic.Bool
 	stopCalls         atomic.Int32
 
@@ -1252,6 +1257,9 @@ type fakeAttempter struct {
 }
 
 func (f *fakeAttempter) Start(ctx context.Context) error {
+	if f.startCheck != nil && f.startCheckResult != nil {
+		f.startCheckResult <- f.startCheck()
+	}
 	if f.blockUntilCtxDone {
 		<-ctx.Done()
 		return ctx.Err()

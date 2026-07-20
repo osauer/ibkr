@@ -1,11 +1,29 @@
 package ibkr
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+type memoryContractAuthority struct {
+	payload []byte
+}
+
+func (a *memoryContractAuthority) LoadContractCache() ([]byte, bool, error) {
+	if len(a.payload) == 0 {
+		return nil, false, nil
+	}
+	return bytes.Clone(a.payload), true, nil
+}
+
+func (a *memoryContractAuthority) SaveContractCache(payload []byte, _ time.Time) error {
+	a.payload = bytes.Clone(payload)
+	return nil
+}
 
 // TestContractStoreRoundTrip pins the basic load/save contract: what
 // goes in via Save comes back out via Load, including the members-hash
@@ -232,6 +250,97 @@ func TestContractStoreOptionsRoundTripSPXvsSPXW(t *testing.T) {
 	}
 	if got[spxwKey].ConID != 700000002 {
 		t.Errorf("SPXW-class ConID after round-trip: got %d, want 700000002", got[spxwKey].ConID)
+	}
+}
+
+func TestDecodeCurrentContractCacheHydratesCanonicalSparseOption(t *testing.T) {
+	key := optionContractKey("BB", "BB", "20260821", 11, "C")
+	raw := []byte(`{"version":3,"as_of":"2026-07-20T22:00:00Z","contracts":{},"options":{"` + key + `":{"Symbol":"BB","TradingClass":"BB","ConID":12345}}}`)
+	got, err := decodeContractCache(raw, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := got.Options[key]
+	if detail.Symbol != "BB" || detail.SecType != "OPT" || detail.TradingClass != "BB" || detail.Expiry != "20260821" || detail.Strike != 11 || detail.Right != "C" || detail.ConID != 12345 {
+		t.Fatalf("normalized sparse option = %+v", detail)
+	}
+}
+
+func TestDecodeCurrentContractCacheRejectsOptionValueContradictions(t *testing.T) {
+	key := optionContractKey("SPX", "SPXW", "20260821", 6500, "P")
+	cases := []string{
+		`{"Symbol":"NDX","ConID":1}`,
+		`{"Symbol":"SPX","SecType":"STK","ConID":1}`,
+		`{"Symbol":"SPX","TradingClass":"SPX","ConID":1}`,
+		`{"Symbol":"SPX","Expiry":"20260822","ConID":1}`,
+		`{"Symbol":"SPX","Strike":6505,"ConID":1}`,
+		`{"Symbol":"SPX","Right":"C","ConID":1}`,
+	}
+	for _, value := range cases {
+		raw := []byte(`{"version":3,"as_of":"2026-07-20T22:00:00Z","contracts":{},"options":{"` + key + `":` + value + `}}`)
+		if _, err := decodeContractCache(raw, true); err == nil {
+			t.Fatalf("contradictory option value accepted: %s", value)
+		}
+	}
+}
+
+func TestDecodeCurrentContractCacheRejectsMalformedOptionIdentity(t *testing.T) {
+	valid := optionContractKey("SPX", "SPXW", "20260821", 6500, "P")
+	cases := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "four parts", key: "SPX|SPXW|20260821|6500.000000", value: `{"ConID":1}`},
+		{name: "six parts", key: valid + "|EXTRA", value: `{"ConID":1}`},
+		{name: "noncanonical", key: "spx|SPXW|20260821|6500.000000|P", value: `{"ConID":1}`},
+		{name: "empty class", key: "SPX||20260821|6500.000000|P", value: `{"ConID":1}`},
+		{name: "invalid date", key: "SPX|SPXW|20260230|6500.000000|P", value: `{"ConID":1}`},
+		{name: "invalid right", key: "SPX|SPXW|20260821|6500.000000|X", value: `{"ConID":1}`},
+		{name: "zero strike", key: "SPX|SPXW|20260821|0.000000|P", value: `{"ConID":1}`},
+		{name: "negative strike", key: "SPX|SPXW|20260821|-1.000000|P", value: `{"ConID":1}`},
+		{name: "nan strike", key: "SPX|SPXW|20260821|NaN|P", value: `{"ConID":1}`},
+		{name: "infinite strike", key: "SPX|SPXW|20260821|+Inf|P", value: `{"ConID":1}`},
+		{name: "zero conid", key: valid, value: `{"ConID":0}`},
+		{name: "negative conid", key: valid, value: `{"ConID":-1}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"version":3,"as_of":"2026-07-20T22:00:00Z","contracts":{},"options":{"` + tc.key + `":` + tc.value + `}}`)
+			if _, err := decodeContractCache(raw, true); err == nil {
+				t.Fatalf("malformed option identity accepted: key=%q value=%s", tc.key, tc.value)
+			}
+		})
+	}
+}
+
+func TestContractStoreSaveRejectsBadOptionWithoutReplacingAuthority(t *testing.T) {
+	authority := &memoryContractAuthority{}
+	store := NewContractStore(t.TempDir())
+	if err := store.UseAuthority(authority); err != nil {
+		t.Fatal(err)
+	}
+	key := optionContractKey("SPX", "SPXW", "20990821", 6500, "P")
+	good := ContractDetailsLite{Symbol: "SPX", SecType: "OPT", TradingClass: "SPXW", Expiry: "20990821", Strike: 6500, Right: "P", ConID: 12345}
+	if err := store.Save(map[string]ContractDetailsLite{}, map[string]ContractDetailsLite{key: good}, ""); err != nil {
+		t.Fatal(err)
+	}
+	before := bytes.Clone(authority.payload)
+	bad := good
+	bad.Right = "C"
+	if err := store.Save(map[string]ContractDetailsLite{}, map[string]ContractDetailsLite{key: bad}, ""); err == nil {
+		t.Fatal("contradictory option save succeeded")
+	}
+	if !bytes.Equal(authority.payload, before) {
+		t.Fatal("failed save replaced last-good authority payload")
+	}
+	restarted := NewContractStore(t.TempDir())
+	if err := restarted.UseAuthority(authority); err != nil {
+		t.Fatal(err)
+	}
+	got, err := restarted.LoadOptions()
+	if err != nil || got[key].ConID != good.ConID {
+		t.Fatalf("last-good option after restart = %+v, %v", got[key], err)
 	}
 }
 

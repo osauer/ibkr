@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -17,19 +18,27 @@ import (
 // compute itself can run 5+ minutes cold after the slot-anchored
 // expiry picker, so restart-cost matters.
 //
-// Convention mirrors internal/breadth/spx/store.go's per-domain
-// pattern (own directory, atomic temp+rename, version field with
-// mismatch-is-cold semantics, method-token gate). It is deliberately
-// not unified into a shared store because the invalidation semantics
-// are domain-specific and the shared code would be tiny.
-//
-// One file per scope: gamma-zero-{scope}.json. Scopes are
-// rpc.GammaZeroScope* constants ("spy", "spx", "spy+spx"). Each scope
-// has its own envelope, independent session_key and method gates, and
-// independent atomic write — a stale SPY-only file can't poison a
-// combined load, and vice versa.
+// Runtime persistence uses one daemon.db state document and immutable
+// observation stream per scope. The legacy per-scope JSON codec remains only
+// for deterministic cutover import and isolated tests. The store is not folded
+// into a generic cache because gamma's invalidation semantics are domain-
+// specific and the shared code would be tiny.
 type gammaZeroStore struct {
-	dir string
+	// dir is the sealed legacy-cache location used only by the cutover
+	// importer and file-codec tests. authority, once attached, is the sole
+	// runtime read/write path and never falls back to dir.
+	dir       string
+	authority *corestore.Store
+}
+
+const (
+	gammaZeroStateKind       = "gamma_zero.current.v1"
+	gammaZeroObservationKind = "gamma_zero.compute.v1"
+	gammaZeroSource          = "ibkr.tws.option_chain"
+)
+
+func gammaZeroAuthorityScope(scope string) string {
+	return "market/gamma/zero/" + scope
 }
 
 // gammaZeroStoreFilename returns the canonical filename for a given
@@ -40,7 +49,7 @@ func gammaZeroStoreFilename(scope string) string {
 	return "gamma-zero-" + scope + ".json"
 }
 
-// gammaZeroPersistEnvelope is the on-disk wire shape. The header
+// gammaZeroPersistEnvelope is the persisted payload shape. The header
 // fields are independent cold-cache gates:
 //
 //   - Version mismatch: a future format bump triggers cold rebuild
@@ -73,26 +82,55 @@ func newGammaZeroStore(dir string) *gammaZeroStore {
 	return &gammaZeroStore{dir: dir}
 }
 
+// UseCoreStore switches all runtime reads and writes to daemon.db. Callers
+// attach it under the daemon persistence lock before any cache load.
+func (s *gammaZeroStore) UseCoreStore(store *corestore.Store) error {
+	if s == nil {
+		return errors.New("gamma-zero cache: nil store")
+	}
+	if store == nil {
+		return errors.New("gamma-zero cache: nil corestore")
+	}
+	s.authority = store
+	return nil
+}
+
+// UseCoreStore attaches both the served gamma snapshot store and the skew
+// diagnostics stream without relying on legacy path resolution. It must run
+// before ensureLoaded; daemon startup enforces that ordering under the
+// persistence lock.
+func (c *gammaZeroCache) UseCoreStore(store *corestore.Store) error {
+	if c == nil {
+		return errors.New("gamma cache: nil cache")
+	}
+	if c.store == nil {
+		c.store = newGammaZeroStore("")
+	}
+	if err := c.store.UseCoreStore(store); err != nil {
+		return err
+	}
+	if c.skewDiag == nil {
+		c.skewDiag = &gammaSkewDiagJournal{}
+	}
+	return c.skewDiag.UseCoreStore(store)
+}
+
 // Load returns the persisted result for scope or (nil, nil) on:
-//   - missing file (cold start for this scope),
+//   - missing state (cold start for this scope),
 //   - version mismatch,
 //   - session-key mismatch with today's NY date,
 //   - method mismatch with the persisted Result.Method,
-//   - scope mismatch (envelope's Scope ≠ requested scope; defense
-//     against a renamed/relinked file).
+//   - scope mismatch (envelope's Scope ≠ requested scope; defense against a
+//     wrong-key write or malformed legacy import).
 //
 // An error is returned only for actual I/O problems or JSON
 // corruption — neither should happen in steady state but both must
 // surface clearly when they do. Callers treat (nil, nil) as cold and
 // kick a fresh compute for that scope.
 func (s *gammaZeroStore) Load(scope string, nyNow time.Time) (*rpc.GammaZeroComputed, error) {
-	path := filepath.Join(s.dir, gammaZeroStoreFilename(scope))
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read gamma-zero cache scope=%s: %w", scope, err)
+	data, ok, err := s.loadEnvelope(scope)
+	if err != nil || !ok {
+		return nil, err
 	}
 	var env gammaZeroPersistEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
@@ -134,20 +172,16 @@ func (s *gammaZeroStore) Load(scope string, nyNow time.Time) (*rpc.GammaZeroComp
 // Version / Scope / Method gates still apply — a v1-shape file from a
 // prior methodology era is still rejected as cold.
 //
-// Used by the cache boot path when today's session-keyed file is
+// Used by the cache boot path when today's session-keyed state is
 // absent. The stale value is loaded as last-known-good context:
 // during regular option hours kickOrJoin refreshes behind it, and
 // outside regular option hours it is served without a non-force
 // refresh. Freshness/quality gates make the stale age visible to
 // callers.
 func (s *gammaZeroStore) LoadStale(scope string) (*rpc.GammaZeroComputed, error) {
-	path := filepath.Join(s.dir, gammaZeroStoreFilename(scope))
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read gamma-zero cache scope=%s: %w", scope, err)
+	data, ok, err := s.loadEnvelope(scope)
+	if err != nil || !ok {
+		return nil, err
 	}
 	var env gammaZeroPersistEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
@@ -171,7 +205,27 @@ func (s *gammaZeroStore) LoadStale(scope string) (*rpc.GammaZeroComputed, error)
 	return env.Result, nil
 }
 
-// Save writes the result atomically to the scope's canonical file.
+func (s *gammaZeroStore) loadEnvelope(scope string) ([]byte, bool, error) {
+	if s.authority != nil {
+		data, ok, err := loadMarketState(s.authority, gammaZeroAuthorityScope(scope), gammaZeroStateKind)
+		if err != nil {
+			return nil, false, fmt.Errorf("read gamma-zero authority scope=%s: %w", scope, err)
+		}
+		return data, ok, nil
+	}
+	path := filepath.Join(s.dir, gammaZeroStoreFilename(scope))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("read legacy gamma-zero cache scope=%s: %w", scope, err)
+	}
+	return data, true, nil
+}
+
+// Save commits the current result and its immutable observation to the scope's
+// canonical daemon.db authority key. The file branch is legacy/test-only.
 // sessionKey is captured separately (rather than derived from
 // time.Now() inside Save) so the caller's notion of "what session
 // this compute belongs to" is the same one the cache uses for
@@ -190,6 +244,36 @@ func (s *gammaZeroStore) Save(scope, sessionKey string, r *rpc.GammaZeroComputed
 		Scope:      scope,
 		Method:     r.Method,
 		Result:     r,
+	}
+	if s.authority != nil {
+		payload, err := json.Marshal(env)
+		if err != nil {
+			return fmt.Errorf("encode gamma-zero authority scope=%s: %w", scope, err)
+		}
+		metadata, err := json.Marshal(struct {
+			Version    int       `json:"version"`
+			SessionKey string    `json:"session_key"`
+			Scope      string    `json:"scope"`
+			Method     string    `json:"method"`
+			AsOf       time.Time `json:"as_of"`
+			Quality    any       `json:"quality,omitempty"`
+		}{
+			Version: currentGammaPersistVersion, SessionKey: sessionKey,
+			Scope: scope, Method: r.Method, AsOf: r.AsOf, Quality: r.Quality,
+		})
+		if err != nil {
+			return fmt.Errorf("encode gamma-zero metadata scope=%s: %w", scope, err)
+		}
+		return saveMarketState(s.authority, gammaZeroAuthorityScope(scope), gammaZeroStateKind, corestore.ObservationInput{
+			ScopeKey:         gammaZeroAuthorityScope(scope),
+			Source:           gammaZeroSource,
+			Kind:             gammaZeroObservationKind,
+			ObservedAt:       r.AsOf,
+			ContentType:      "application/json",
+			Payload:          payload,
+			MetadataJSON:     metadata,
+			DecisionEligible: true,
+		})
 	}
 	return s.writeAtomic(gammaZeroStoreFilename(scope), env)
 }

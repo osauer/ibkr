@@ -1,6 +1,7 @@
 package spx
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 )
 
 // Store persists the engine's on-disk artefacts: the latest snapshot
@@ -21,8 +24,20 @@ import (
 // Reads do not lock — the engine holds its own RWMutex around the
 // in-memory copy.
 type Store struct {
-	dir string
+	dir       string // sealed legacy cache; never used after UseCoreStore
+	authority *corestore.Store
 }
+
+const (
+	breadthAuthorityScope          = "market/breadth/spx"
+	breadthSource                  = "ibkr.tws.hmds.constituent_fanout"
+	breadthSnapshotStateKind       = "breadth_spx.snapshot.current.v1"
+	breadthSnapshotObservationKind = "breadth_spx.snapshot.v1"
+	breadthWindowsStateKind        = "breadth_spx.windows.current.v2"
+	breadthWindowsObservationKind  = "breadth_spx.windows.v2"
+	breadthHistoryStateKind        = "breadth_spx.history.current.v2"
+	breadthHistoryObservationKind  = "breadth_spx.history.v2"
+)
 
 // NewStore returns a Store rooted at dir. The directory is created on
 // first write (lazy mkdir keeps tests that pass an unwritable dir
@@ -31,6 +46,20 @@ type Store struct {
 // resolve XDG paths itself — that's the caller's job (see DefaultDir).
 func NewStore(dir string) *Store {
 	return &Store{dir: dir}
+}
+
+// UseCoreStore makes daemon.db the sole runtime persistence path. NewStore's
+// directory remains available only to the explicit cutover importer and
+// isolated legacy codec tests.
+func (s *Store) UseCoreStore(store *corestore.Store) error {
+	if s == nil {
+		return errors.New("breadth store: nil store")
+	}
+	if store == nil {
+		return errors.New("breadth store: nil corestore")
+	}
+	s.authority = store
+	return nil
 }
 
 // LoadSnapshot returns the persisted snapshot or (nil, nil) when no
@@ -47,13 +76,9 @@ func NewStore(dir string) *Store {
 // publishes 0% breadth + 0 new highs as if they were real readings.
 // Cold-rebuilding instead is the honest move on a methodology bump.
 func (s *Store) LoadSnapshot() (*Snapshot, error) {
-	path := filepath.Join(s.dir, "snapshot.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read snapshot: %w", err)
+	data, ok, err := s.load("snapshot.json", breadthSnapshotStateKind)
+	if err != nil || !ok {
+		return nil, err
 	}
 	var snap Snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
@@ -69,6 +94,23 @@ func (s *Store) LoadSnapshot() (*Snapshot, error) {
 
 // SaveSnapshot writes snap atomically. Existing file is replaced.
 func (s *Store) SaveSnapshot(snap Snapshot) error {
+	if s.authority != nil {
+		metadata, err := json.Marshal(struct {
+			Version    int       `json:"version"`
+			AsOf       time.Time `json:"as_of"`
+			SessionKey string    `json:"session_key"`
+			Method     string    `json:"method"`
+			Coverage   int       `json:"coverage"`
+			Members    int       `json:"member_count"`
+		}{
+			Version: 1, AsOf: snap.AsOf, SessionKey: snap.SessionKey,
+			Method: snap.Method, Coverage: snap.Coverage, Members: snap.MemberCount,
+		})
+		if err != nil {
+			return err
+		}
+		return s.saveAuthority(breadthSnapshotStateKind, breadthSnapshotObservationKind, snap.AsOf, snap, metadata)
+	}
 	return s.writeAtomic("snapshot.json", snap)
 }
 
@@ -77,13 +119,9 @@ func (s *Store) SaveSnapshot(snap Snapshot) error {
 // version-mismatch case is intentionally non-fatal: a future format
 // bump triggers a cold-rebuild rather than a daemon error.
 func (s *Store) LoadWindows() (map[string]ConstituentWindow, error) {
-	path := filepath.Join(s.dir, "windows.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read windows: %w", err)
+	data, ok, err := s.load("windows.json", breadthWindowsStateKind)
+	if err != nil || !ok {
+		return nil, err
 	}
 	var set WindowSet
 	if err := json.Unmarshal(data, &set); err != nil {
@@ -104,6 +142,21 @@ func (s *Store) SaveWindows(windows map[string]ConstituentWindow, asOf time.Time
 		AsOf:    asOf,
 		Windows: windows,
 	}
+	if s.authority != nil {
+		metadata, err := json.Marshal(struct {
+			Version     int       `json:"version"`
+			AsOf        time.Time `json:"as_of"`
+			WindowCount int       `json:"window_count"`
+			Method      string    `json:"method"`
+		}{
+			Version: CurrentWindowSetVersion, AsOf: asOf,
+			WindowCount: len(windows), Method: methodConstituentFanout,
+		})
+		if err != nil {
+			return err
+		}
+		return s.saveAuthority(breadthWindowsStateKind, breadthWindowsObservationKind, asOf, set, metadata)
+	}
 	return s.writeAtomic("windows.json", set)
 }
 
@@ -112,13 +165,9 @@ func (s *Store) SaveWindows(windows map[string]ConstituentWindow, asOf time.Time
 // schema version triggers a cold rebuild rather than an error so a
 // future format bump doesn't poison startup.
 func (s *Store) LoadHistory() ([]HistoryPoint, error) {
-	path := filepath.Join(s.dir, "history.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read history: %w", err)
+	data, ok, err := s.load("history.json", breadthHistoryStateKind)
+	if err != nil || !ok {
+		return nil, err
 	}
 	var set HistorySet
 	if err := json.Unmarshal(data, &set); err != nil {
@@ -134,7 +183,145 @@ func (s *Store) LoadHistory() ([]HistoryPoint, error) {
 // wipe.
 func (s *Store) SaveHistory(points []HistoryPoint) error {
 	set := HistorySet{Version: CurrentHistorySetVersion, Points: points}
+	if s.authority != nil {
+		now := time.Now().UTC()
+		var latest string
+		if len(points) > 0 {
+			latest = points[len(points)-1].Date
+		}
+		metadata, err := json.Marshal(struct {
+			Version    int       `json:"version"`
+			RecordedAt time.Time `json:"recorded_at"`
+			LatestDate string    `json:"latest_date,omitempty"`
+			PointCount int       `json:"point_count"`
+			Method     string    `json:"method"`
+		}{
+			Version: CurrentHistorySetVersion, RecordedAt: now, LatestDate: latest,
+			PointCount: len(points), Method: methodConstituentFanout,
+		})
+		if err != nil {
+			return err
+		}
+		return s.saveAuthority(breadthHistoryStateKind, breadthHistoryObservationKind, now, set, metadata)
+	}
 	return s.writeAtomic("history.json", set)
+}
+
+func (s *Store) load(legacyName, stateKind string) ([]byte, bool, error) {
+	if s.authority != nil {
+		doc, ok, err := s.authority.GetStateDocument(context.Background(), breadthAuthorityScope, stateKind)
+		if err != nil {
+			return nil, false, fmt.Errorf("read breadth authority %s: %w", stateKind, err)
+		}
+		if !ok {
+			return nil, false, nil
+		}
+		return append([]byte(nil), doc.JSON...), true, nil
+	}
+	data, err := os.ReadFile(filepath.Join(s.dir, legacyName))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("read legacy breadth %s: %w", legacyName, err)
+	}
+	return data, true, nil
+}
+
+func (s *Store) saveAuthority(stateKind, observationKind string, observedAt time.Time, value any, metadata []byte) error {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return s.saveAuthorityPayload(context.Background(), stateKind, observationKind, observedAt, payload, metadata)
+}
+
+func (s *Store) saveAuthorityPayload(ctx context.Context, stateKind, observationKind string, observedAt time.Time, payload, metadata []byte) error {
+	for range 4 {
+		doc, ok, err := s.authority.GetStateDocument(ctx, breadthAuthorityScope, stateKind)
+		if err != nil {
+			return err
+		}
+		var revision int64
+		if ok {
+			revision = doc.Revision
+		}
+		_, _, err = s.authority.CompareAndSwapStateDocumentWithObservations(ctx, corestore.StateDocumentCAS{
+			ScopeKey: breadthAuthorityScope, Kind: stateKind,
+			ExpectedRevision: revision, JSON: payload,
+		}, []corestore.ObservationInput{{
+			ScopeKey: breadthAuthorityScope, Source: breadthSource, Kind: observationKind,
+			ObservedAt: observedAt, ContentType: "application/json",
+			Payload: payload, MetadataJSON: metadata, DecisionEligible: true,
+		}})
+		if !errors.Is(err, corestore.ErrRevisionConflict) {
+			return err
+		}
+	}
+	return fmt.Errorf("save breadth authority %s: %w", stateKind, corestore.ErrRevisionConflict)
+}
+
+// ImportLegacySnapshot/Windows/History preserve exact legacy JSON bytes as
+// non-authorizing observations. They intentionally do not publish current
+// state: clean-slate cutover starts every live cache cold, and only a
+// current-code fetch may create a state document.
+func ImportLegacySnapshot(ctx context.Context, authority *corestore.Store, payload, metadata []byte, observedAt time.Time) error {
+	_, err := authority.AppendObservation(ctx, corestore.ObservationInput{
+		ScopeKey: breadthAuthorityScope, Source: breadthSource, Kind: breadthSnapshotObservationKind,
+		ObservedAt: observedAt, ContentType: "application/json", Payload: payload, MetadataJSON: metadata, DecisionEligible: false,
+	})
+	return err
+}
+
+func ImportLegacyWindows(ctx context.Context, authority *corestore.Store, payload, metadata []byte, observedAt time.Time) error {
+	_, err := authority.AppendObservation(ctx, corestore.ObservationInput{
+		ScopeKey: breadthAuthorityScope, Source: breadthSource, Kind: breadthWindowsObservationKind,
+		ObservedAt: observedAt, ContentType: "application/json", Payload: payload, MetadataJSON: metadata, DecisionEligible: false,
+	})
+	return err
+}
+
+func ImportLegacyHistory(ctx context.Context, authority *corestore.Store, payload, metadata []byte, observedAt time.Time) error {
+	_, err := authority.AppendObservation(ctx, corestore.ObservationInput{
+		ScopeKey: breadthAuthorityScope, Source: breadthSource, Kind: breadthHistoryObservationKind,
+		ObservedAt: observedAt, ContentType: "application/json", Payload: payload, MetadataJSON: metadata, DecisionEligible: false,
+	})
+	return err
+}
+
+// UseCoreStore attaches daemon.db and loads the engine projection from it.
+// Production constructs the engine with Options.DeferStoreLoad so no legacy
+// cache is read before the daemon acquires its persistence lock.
+func (e *Engine) UseCoreStore(store *corestore.Store) error {
+	if e == nil || e.store == nil {
+		return errors.New("breadth engine: nil store")
+	}
+	e.refreshMu.Lock()
+	defer e.refreshMu.Unlock()
+	if err := e.store.UseCoreStore(store); err != nil {
+		return err
+	}
+	snapshot, err := e.store.LoadSnapshot()
+	if err != nil {
+		return err
+	}
+	windows, err := e.store.LoadWindows()
+	if err != nil {
+		return err
+	}
+	history, err := e.store.LoadHistory()
+	if err != nil {
+		return err
+	}
+	if windows == nil {
+		windows = map[string]ConstituentWindow{}
+	}
+	e.mu.Lock()
+	e.snapshot = snapshot
+	e.windows = windows
+	e.history = history
+	e.mu.Unlock()
+	return nil
 }
 
 // writeAtomic encodes v as JSON and replaces dir/name with the result

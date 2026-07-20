@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
@@ -143,7 +144,7 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 			res.Message = err.Error()
 			return res, nil
 		}
-		s.executePurgeLeg(ctx, status, quotes, res, plan)
+		s.executePurgeLeg(ctx, status, quotes, res, plan, p.Origin)
 	}
 
 	if res.SubmittedLegs > 0 && wait > 0 {
@@ -449,7 +450,7 @@ func (s *Server) prefetchPurgeLegQuotes(ctx context.Context, plans []purgeLegPla
 	return out
 }
 
-func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, quotes map[string]purgeQuoteResult, res *rpc.PurgeExecuteResult, plan purgeLegPlan) {
+func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, quotes map[string]purgeQuoteResult, res *rpc.PurgeExecuteResult, plan purgeLegPlan, origin string) {
 	leg := plan.leg
 	if plan.warning != "" {
 		res.Warnings = append(res.Warnings, plan.warning)
@@ -497,7 +498,8 @@ func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, 
 		return
 	}
 	attempt := purgeJournalEventForDraft(draft, status, res.PurgeID, leg.LegID, orderID, s.orderNow())
-	if err := s.orderJournal.Append(attempt); err != nil {
+	attempt.Origin = normalizedWriteOrigin(origin)
+	if err := s.orderJournal.StagePreTransmit("", "", 0, orderID, corestore.ActionPurge, coreOrderOrigin(origin), []orderJournalEvent{attempt}); err != nil {
 		addPurgeError(res, leg, "append send journal: "+err.Error())
 		return
 	}

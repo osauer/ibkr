@@ -89,19 +89,11 @@ func SettingsKeys() []SettingsKeySpec {
 		},
 		{
 			Key: "regime.journal.enabled", Kind: SettingsKindBool, Class: SettingsClassRuntime,
-			Doc: "Turns the regime-decisions forward-collection journal on ($XDG_STATE_HOME/ibkr/regime-decisions.jsonl).",
+			Doc: "Turns forward regime decision-event collection in daemon.db on (default true).",
 		},
 		{
 			Key: "canary.journal.enabled", Kind: SettingsKindBool, Class: SettingsClassRuntime,
-			Doc: "Turns the canary-decisions forward-collection journal on ($XDG_STATE_HOME/ibkr/canary-decisions.jsonl), mirroring regime.journal.enabled.",
-		},
-		{
-			Key: "history.rotation.enabled", Kind: SettingsKindBool, Class: SettingsClassRuntime,
-			Doc: "Turns automatic monthly journal rotation (regime/rules/canary decision journals → gzip archives under rotated/) on; rotation only compresses fully-indexed evidence and never deletes it (default true).",
-		},
-		{
-			Key: "history.rotation.keep_raw_months", Kind: SettingsKindInt, Class: SettingsClassRuntime,
-			Doc: "How many most-recent calendar months of decision-journal lines stay raw in the live files before rotating to gzip archives; minimum 1, null restores the default 2.",
+			Doc: "Turns forward canary decision-event collection in daemon.db on, mirroring regime.journal.enabled (default true).",
 		},
 	}
 }

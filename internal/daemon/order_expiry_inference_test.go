@@ -111,7 +111,7 @@ func TestDuplicateProtectiveBlockersCouplesWithExpiryInference(t *testing.T) {
 			Exchange: "SMART", PrimaryExch: "IBIS", Currency: "EUR",
 			Action: rpc.OrderActionSell, OrderType: rpc.OrderTypeTRAIL, TIF: rpc.OrderTIFDay,
 			SendState: orderSendStateSendAttempted, Source: proposalOrderSource,
-			Account: "DU1234567", Quantity: 1,
+			Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU1234567", Mode: rpc.AccountModePaper, Quantity: 1,
 		})
 		if err != nil {
 			t.Fatalf("append journal: %v", err)
@@ -153,7 +153,7 @@ func TestDuplicateProtectiveBlockersCouplesWithExpiryInference(t *testing.T) {
 		Exchange: "SMART", PrimaryExch: "IBIS", Currency: "EUR",
 		Action: rpc.OrderActionSell, OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay,
 		SendState: orderSendStateSendAttempted, Source: proposalOrderSource,
-		Account: "DU1234567", Quantity: 1,
+		Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU1234567", Mode: rpc.AccountModePaper, Quantity: 1,
 	}); err != nil {
 		t.Fatalf("append zombie: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestDuplicateProtectiveBlockersIgnorePlainLimitAndMismatchedStops(t *testin
 			Exchange: "SMART", PrimaryExch: "IBIS", Currency: "EUR",
 			Action: rpc.OrderActionSell, OrderType: orderType, TIF: rpc.OrderTIFGTC,
 			SendState: orderSendStateSendAttempted, Source: proposalOrderSource,
-			Account: "DU1234567", Quantity: qty,
+			Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU1234567", Mode: rpc.AccountModePaper, Quantity: qty,
 		}); err != nil {
 			t.Fatalf("append %s: %v", ref, err)
 		}
@@ -221,8 +221,9 @@ func TestBrokerCantFindOrderHealsGTCZombie(t *testing.T) {
 		Version: 1, OrderRef: "ibkr-gtc-trail", Symbol: "MBG", SecType: "STK",
 		ConID: 29622935, Exchange: "SMART", PrimaryExch: "IBIS", Currency: "EUR",
 		Action: rpc.OrderActionSell, OrderType: rpc.OrderTypeTRAIL, TIF: rpc.OrderTIFGTC,
-		Source:  proposalOrderSource,
-		Account: "DU1234567", Quantity: 1, ReservedOrderID: 42,
+		Source:   proposalOrderSource,
+		Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU1234567", Mode: rpc.AccountModePaper,
+		Quantity: 1, ReservedOrderID: 42,
 	}
 	at := srv.now()
 	appendEv := func(mut func(*orderJournalEvent)) {
@@ -262,6 +263,7 @@ func TestBrokerCantFindOrderHealsGTCZombie(t *testing.T) {
 	appendEv(func(ev *orderJournalEvent) { ev.Type = orderJournalEventCancelRequested })
 	appendEv(func(ev *orderJournalEvent) {
 		ev.Type = orderJournalEventBrokerError
+		ev.ErrorCode = 135
 		ev.Message = "broker error 135: Can't find order with id =42"
 	})
 	views, _, err := srv.loadOrderViews()

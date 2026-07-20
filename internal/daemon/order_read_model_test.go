@@ -26,6 +26,7 @@ func TestBuildOrderViewsFromJournalLifecycle(t *testing.T) {
 			PreviewTokenID: "tok_1",
 			Account:        "DU1234567",
 			Endpoint:       "127.0.0.1:4002",
+			ClientID:       31,
 			Mode:           "paper",
 			Symbol:         "AAPL",
 			SecType:        "STK",
@@ -40,7 +41,11 @@ func TestBuildOrderViewsFromJournalLifecycle(t *testing.T) {
 			Type:            orderJournalEventBrokerAcknowledged,
 			OrderRef:        "ibkr-20260528-093000",
 			ReservedOrderID: 1001,
+			ClientID:        31,
 			PermID:          987654,
+			Account:         "DU1234567",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            "paper",
 			Status:          "Submitted",
 			SendState:       orderSendStateBrokerAcknowledged,
 		},
@@ -49,7 +54,11 @@ func TestBuildOrderViewsFromJournalLifecycle(t *testing.T) {
 			Type:            orderJournalEventStatusUpdated,
 			OrderRef:        "ibkr-20260528-093000",
 			ReservedOrderID: 1001,
+			ClientID:        31,
 			PermID:          987654,
+			Account:         "DU1234567",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            "paper",
 			Status:          "Submitted",
 			Filled:          2,
 			Remaining:       8,
@@ -97,7 +106,7 @@ func TestOrdersOpenCurrentContextRequiresConcreteAccountAndMode(t *testing.T) {
 
 	now := time.Date(2026, 6, 8, 18, 30, 0, 0, time.UTC)
 	srv := &Server{
-		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		orderJournal: newTestOrderJournalStore(t, filepath.Join(t.TempDir(), "order-journal.jsonl")),
 		endpoint: discover.Endpoint{
 			Host:    "127.0.0.1",
 			Port:    7496,
@@ -142,6 +151,14 @@ func TestOrdersOpenCurrentContextRequiresConcreteAccountAndMode(t *testing.T) {
 			Status:          "Submitted",
 			SendState:       orderSendStateBrokerAcknowledged,
 		},
+	}
+	for i := range events {
+		events[i].ClientID = 31
+		if events[i].Mode == rpc.AccountModePaper {
+			events[i].Endpoint = "127.0.0.1:7497"
+		} else {
+			events[i].Endpoint = "127.0.0.1:7496"
+		}
 	}
 	if err := srv.orderJournal.AppendAll(events); err != nil {
 		t.Fatalf("append orders: %v", err)
@@ -196,7 +213,7 @@ func TestOrdersOpenUsesPinnedConcreteAccountWhenConnectorReportsAll(t *testing.T
 			Gateway: config.Gateway{Host: "127.0.0.1", Port: new(7497), Account: "DU7654321"},
 		},
 		connector:    connector,
-		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		orderJournal: newTestOrderJournalStore(t, filepath.Join(t.TempDir(), "order-journal.jsonl")),
 		endpoint: discover.Endpoint{
 			Host:    "127.0.0.1",
 			Port:    7497,
@@ -273,7 +290,7 @@ func TestOrdersHistoryFiltersRangeLimitAndCurrentScope(t *testing.T) {
 
 	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
 	srv := &Server{
-		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		orderJournal: newTestOrderJournalStore(t, filepath.Join(t.TempDir(), "order-journal.jsonl")),
 		endpoint: discover.Endpoint{
 			Host:    "127.0.0.1",
 			Port:    7496,
@@ -384,6 +401,14 @@ func TestOrdersHistoryFiltersRangeLimitAndCurrentScope(t *testing.T) {
 			Filled:          1,
 			SendState:       orderSendStateTerminal,
 		},
+	}
+	for i := range events {
+		events[i].ClientID = 31
+		if events[i].Mode == rpc.AccountModePaper {
+			events[i].Endpoint = "127.0.0.1:7497"
+		} else {
+			events[i].Endpoint = "127.0.0.1:7496"
+		}
 	}
 	if err := srv.orderJournal.AppendAll(events); err != nil {
 		t.Fatalf("append orders: %v", err)
@@ -505,6 +530,7 @@ func TestBuildOrderViewsAliasesBrokerOnlyLifecycleToOrderRef(t *testing.T) {
 			PreviewTokenID: "tok_1",
 			Account:        "DU1234567",
 			Endpoint:       "127.0.0.1:4002",
+			ClientID:       31,
 			Mode:           "paper",
 			Symbol:         "AAPL",
 			SecType:        "STK",
@@ -520,13 +546,21 @@ func TestBuildOrderViewsAliasesBrokerOnlyLifecycleToOrderRef(t *testing.T) {
 			OrderRef:        "ibkr-20260528-093000",
 			PreviewTokenID:  "tok_1",
 			ReservedOrderID: 1001,
+			ClientID:        31,
+			Account:         "DU1234567",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            "paper",
 			SendState:       orderSendStateSendAttempted,
 		},
 		{
 			At:              base.Add(2 * time.Second),
 			Type:            orderJournalEventStatusUpdated,
 			ReservedOrderID: 1001,
+			ClientID:        31,
 			PermID:          987654,
+			Account:         "DU1234567",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            "paper",
 			Status:          "Cancelled",
 			SendState:       orderSendStateTerminal,
 		},
@@ -545,10 +579,11 @@ func TestBuildOrderViewsAliasesBrokerOnlyLifecycleToOrderRef(t *testing.T) {
 	}
 
 	eventsByKey := buildOrderEventsByKey(events)
-	if got := len(eventsByKey["ref:ibkr-20260528-093000"]); got != 3 {
+	routeKey := orderJournalRouteIdentity("127.0.0.1:4002", 31, "DU1234567", "paper")
+	if got := len(eventsByKey[routeKey+"|ref:ibkr-20260528-093000"]); got != 3 {
 		t.Fatalf("canonical events = %d, want 3: %+v", got, eventsByKey)
 	}
-	if _, ok := eventsByKey["order:1001"]; ok {
+	if _, ok := eventsByKey[routeKey+"|order:1001"]; ok {
 		t.Fatalf("broker-only alias should not create separate events row: %+v", eventsByKey)
 	}
 }
@@ -737,8 +772,11 @@ func TestOrderJournalEventFromLifecycleBrokerError(t *testing.T) {
 	if !ok {
 		t.Fatal("orderJournalEventFromLifecycle ok=false")
 	}
-	if ev.Type != orderJournalEventBrokerError || ev.SendState != orderSendStateTerminal || ev.Status != "Rejected" {
+	if ev.Type != orderJournalEventBrokerError || ev.ErrorCode != 201 || ev.SendState != orderSendStateTerminal || ev.Status != "Rejected" {
 		t.Fatalf("event = %+v, want terminal broker error", ev)
+	}
+	if audit := orderEventFromJournal(ev); audit.ErrorCode != 201 {
+		t.Fatalf("audit event error_code = %d, want 201", audit.ErrorCode)
 	}
 	views := buildOrderViews([]orderJournalEvent{
 		{At: at.Add(-time.Second), Type: orderJournalEventSendAttempted, OrderRef: "ord-1", ReservedOrderID: 1001, SendState: orderSendStateSendAttempted},
@@ -747,8 +785,90 @@ func TestOrderJournalEventFromLifecycleBrokerError(t *testing.T) {
 	if len(views) != 1 {
 		t.Fatalf("views = %d, want 1", len(views))
 	}
-	if views[0].Open || views[0].LifecycleStatus != rpc.OrderLifecycleRejected || !strings.Contains(views[0].LastMessage, "advanced_reject_json") {
+	if views[0].Open || views[0].LifecycleStatus != rpc.OrderLifecycleRejected || views[0].LastErrorCode != 201 || !strings.Contains(views[0].LastMessage, "advanced_reject_json") {
 		t.Fatalf("view = %+v, want closed rejected with broker message", views[0])
+	}
+}
+
+func TestBrokerErrorMessageCannotDecideTerminality(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 7, 20, 9, 31, 0, 0, time.UTC)
+	ev, ok := orderJournalEventFromLifecycle(ibkrlib.OrderLifecycleEvent{
+		Type:      ibkrlib.OrderLifecycleEventError,
+		OrderID:   1001,
+		ErrorCode: 399,
+		Message:   "Order reject warning; can't find order text is untrusted",
+	}, at)
+	if !ok {
+		t.Fatal("orderJournalEventFromLifecycle ok=false")
+	}
+	if ev.ErrorCode != 399 || ev.SendState != orderSendStateUncertainSend || mapOrderJournalLifecycleStatus(ev) != rpc.OrderLifecycleUnknownReconcileRequired {
+		t.Fatalf("event = %+v, want typed unknown/reconcile-required error", ev)
+	}
+	views := buildOrderViews([]orderJournalEvent{
+		{At: at.Add(-time.Second), Type: orderJournalEventSendAttempted, OrderRef: "ord-unknown", ReservedOrderID: 1001, Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU123", Mode: "paper", SendState: orderSendStateSendAttempted},
+		{At: ev.At, Type: ev.Type, OrderRef: "ord-unknown", ReservedOrderID: ev.ReservedOrderID, Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU123", Mode: "paper", ErrorCode: ev.ErrorCode, Status: ev.Status, SendState: ev.SendState, Message: ev.Message},
+	})
+	if len(views) != 1 || !views[0].Open || views[0].LifecycleStatus != rpc.OrderLifecycleUnknownReconcileRequired || views[0].LastErrorCode != 399 {
+		t.Fatalf("views = %+v, want open unknown order despite reject/gone message text", views)
+	}
+}
+
+func TestBrokerErrorLifecycleUsesTypedCodeAndStatusAllowlists(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		code   int
+		status string
+		want   string
+	}{
+		{name: "duplicate id rejects attempt", code: 103, want: rpc.OrderLifecycleRejected},
+		{name: "minimum tick rejects attempt", code: 110, want: rpc.OrderLifecycleRejected},
+		{name: "broker reject", code: 201, want: rpc.OrderLifecycleRejected},
+		{name: "broker cancellation", code: 202, want: rpc.OrderLifecycleCancelled},
+		{name: "missing order", code: 135, want: rpc.OrderLifecycleInactive},
+		{name: "generic validation stays unknown", code: 321, want: rpc.OrderLifecycleUnknownReconcileRequired},
+		{name: "code-less legacy status stays unknown", status: "Rejected", want: rpc.OrderLifecycleUnknownReconcileRequired},
+		{name: "unknown code explicit cancellation", code: 399, status: "Cancelled", want: rpc.OrderLifecycleCancelled},
+		{name: "unknown code without status", code: 399, want: rpc.OrderLifecycleUnknownReconcileRequired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mapBrokerErrorLifecycleStatus(tt.code, tt.status); got != tt.want {
+				t.Fatalf("mapBrokerErrorLifecycleStatus(%d, %q) = %q, want %q", tt.code, tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBrokerValidationErrorNeverProvesOrderTerminal(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 20, 9, 35, 0, 0, time.UTC)
+	route := orderJournalEvent{OrderRef: "ord-321", ReservedOrderID: 321, Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU123", Mode: "paper"}
+	errorEvent := route
+	errorEvent.At = base.Add(time.Second)
+	errorEvent.Type = orderJournalEventBrokerError
+	errorEvent.ErrorCode = 321
+	errorEvent.Message = "untrusted request text says reject"
+
+	transmit := route
+	transmit.At = base
+	transmit.Type = orderJournalEventSendAttempted
+	transmit.SendState = orderSendStateSendAttempted
+	views := buildOrderViews([]orderJournalEvent{transmit, errorEvent})
+	if len(views) != 1 || !views[0].Open || views[0].LifecycleStatus != rpc.OrderLifecycleUnknownReconcileRequired || views[0].SendState != orderSendStateUncertainSend {
+		t.Fatalf("transmit views = %+v, want open unknown order", views)
+	}
+
+	acknowledged := route
+	acknowledged.At = base
+	acknowledged.Type = orderJournalEventBrokerAcknowledged
+	acknowledged.Status = "Submitted"
+	acknowledged.SendState = orderSendStateBrokerAcknowledged
+	views = buildOrderViews([]orderJournalEvent{acknowledged, errorEvent})
+	if len(views) != 1 || !views[0].Open || views[0].LifecycleStatus != rpc.OrderLifecycleUnknownReconcileRequired || views[0].SendState != orderSendStateUncertainSend {
+		t.Fatalf("colliding request views = %+v, want open unknown order", views)
 	}
 }
 
@@ -761,7 +881,11 @@ func TestBuildOrderViewsDoesNotAliasPreexistingBrokerOnlyOrderID(t *testing.T) {
 			At:              oldAt,
 			Type:            orderJournalEventStatusUpdated,
 			ReservedOrderID: 11,
+			ClientID:        31,
 			PermID:          1995374765,
+			Account:         "DU1234567",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            "paper",
 			Status:          "Filled",
 			Filled:          1,
 			AvgFillPrice:    49.51,
@@ -773,6 +897,10 @@ func TestBuildOrderViewsDoesNotAliasPreexistingBrokerOnlyOrderID(t *testing.T) {
 			Type:            orderJournalEventSendAttempted,
 			OrderRef:        "purge-20260608-sap",
 			ReservedOrderID: 11,
+			ClientID:        31,
+			Account:         "DU1234567",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            "paper",
 			Source:          purgeExecuteSource,
 			LegID:           "leg_sap",
 			Symbol:          "SAP",
@@ -787,6 +915,10 @@ func TestBuildOrderViewsDoesNotAliasPreexistingBrokerOnlyOrderID(t *testing.T) {
 			Type:            orderJournalEventBrokerError,
 			OrderRef:        "purge-20260608-sap",
 			ReservedOrderID: 11,
+			ClientID:        31,
+			Account:         "DU1234567",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            "paper",
 			Source:          purgeExecuteSource,
 			LegID:           "leg_sap",
 			Symbol:          "SAP",
@@ -794,6 +926,7 @@ func TestBuildOrderViewsDoesNotAliasPreexistingBrokerOnlyOrderID(t *testing.T) {
 			Action:          rpc.OrderActionSell,
 			Quantity:        1,
 			LimitPrice:      159.53,
+			ErrorCode:       110,
 			SendState:       orderSendStateUncertainSend,
 			Message:         "broker error 110: The price does not conform to the minimum price variation for this contract.",
 		},
@@ -820,10 +953,11 @@ func TestBuildOrderViewsDoesNotAliasPreexistingBrokerOnlyOrderID(t *testing.T) {
 	}
 
 	eventsByKey := buildOrderEventsByKey(events)
-	if got := len(eventsByKey["ref:purge-20260608-sap"]); got != 2 {
+	routeKey := orderJournalRouteIdentity("127.0.0.1:4002", 31, "DU1234567", "paper")
+	if got := len(eventsByKey[routeKey+"|ref:purge-20260608-sap"]); got != 2 {
 		t.Fatalf("purge canonical events = %d, want 2: %+v", got, eventsByKey)
 	}
-	if got := len(eventsByKey["order:11"]); got != 1 {
+	if got := len(eventsByKey[routeKey+"|order:11"]); got != 1 {
 		t.Fatalf("broker-only canonical events = %d, want 1: %+v", got, eventsByKey)
 	}
 }
@@ -837,6 +971,7 @@ func TestBuildOrderViewsModifyBrokerErrorPreservesWorkingOrder(t *testing.T) {
 			Type:            orderJournalEventBrokerAcknowledged,
 			OrderRef:        "ord-1",
 			ReservedOrderID: 1001,
+			ClientID:        31,
 			Account:         "DU1234567",
 			Endpoint:        "127.0.0.1:4002",
 			Mode:            "paper",
@@ -856,6 +991,10 @@ func TestBuildOrderViewsModifyBrokerErrorPreservesWorkingOrder(t *testing.T) {
 			Type:            orderJournalEventModifyRequested,
 			OrderRef:        "ord-1",
 			ReservedOrderID: 1001,
+			ClientID:        31,
+			Account:         "DU1234567",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            "paper",
 			Quantity:        1,
 			Remaining:       1,
 			LimitPrice:      189.50,
@@ -866,7 +1005,11 @@ func TestBuildOrderViewsModifyBrokerErrorPreservesWorkingOrder(t *testing.T) {
 			At:              base.Add(2 * time.Second),
 			Type:            orderJournalEventBrokerError,
 			ReservedOrderID: 1001,
-			Status:          "Rejected",
+			ClientID:        31,
+			Account:         "DU1234567",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            "paper",
+			ErrorCode:       321,
 			SendState:       orderSendStateTerminal,
 			Message:         "broker order error code 321: modify rejected",
 		},

@@ -216,12 +216,12 @@ sample: 2023-03-13 (SVB Monday) reads `early_warning` day 0 and confirms with
 persistence, while crash days (volmageddon, COVID, the 2024 carry unwind)
 still confirm same-day via fast paths and tape co-signs.
 
-Sequence-aware streak replay is the follow-up: the runtime decisions journal
-(`$XDG_STATE_HOME/ibkr/regime-decisions.jsonl`, see the dashboard contract)
-forward-collects raw values, depths, streaks, eligibility, and governor
-decisions per snapshot, and is the calibration corpus for promoting threshold
-sets out of `pending_backtest`, per versioned label, with measured
-false-alarm and recall rates.
+Sequence-aware streak replay is the follow-up: typed regime decision events in
+the daemon's sole live authority (`$XDG_STATE_HOME/ibkr/daemon.db`, see the
+dashboard contract) forward-collect raw values, depths, streaks, eligibility,
+and governor decisions per snapshot. That event corpus is the calibration
+source for promoting threshold sets out of `pending_backtest`, per versioned
+label, with measured false-alarm and recall rates.
 
 ## Data Gates
 

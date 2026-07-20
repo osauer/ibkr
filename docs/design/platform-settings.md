@@ -1,17 +1,18 @@
 # Platform Settings
 
-Platform settings are the narrow writeable preference surface for runtime UX
+Platform settings are the narrow writable preference surface for runtime UX
 choices. They are not a second config system.
 
 ## Ownership
 
-The daemon stores runtime preferences in
-`$XDG_STATE_HOME/ibkr/platform-settings.json`, or
-`~/.local/state/ibkr/platform-settings.json` when `XDG_STATE_HOME` is unset.
-Only user preferences owned by `ibkr` belong in this file: feature toggles,
-the `trading.freeze` brake, rulebook earnings overrides, the regime-journal
-and canary-journal switches, history rotation preferences, and optional
-experimental trading-limit overrides.
+The daemon stores runtime preferences as a versioned, compare-and-swap state
+document in `$XDG_STATE_HOME/ibkr/daemon.db` (or the corresponding fallback
+state root). It does not read, mirror, or fall back to
+`platform-settings.json` after SQLite authority attaches. Only user
+preferences owned by `ibkr` belong in this document: feature toggles, the
+`trading.freeze` brake, rulebook earnings overrides, the regime/canary
+forward-collection switches, and optional experimental trading-limit
+overrides.
 
 This document owns semantics and ownership, not the key list. The writable
 keys, types, and per-key descriptions are enumerated in the generated
@@ -22,6 +23,10 @@ list.
 TOML/config/build still own gateway endpoint, account, client ID, trading
 enablement, trading mode, and whether write-capable trading code exists. MCP
 broker writes are not exposed as a local setting.
+
+Cutover imports the validated settings document exactly, including
+`trading.freeze` and any limit overrides. Trading readiness is a separate
+safety proof and resets until a new paper-smoke artifact is issued.
 
 ## Contract
 
@@ -34,6 +39,10 @@ Every returned setting field carries:
 `settings.update` and `PATCH /api/settings` accept only writable fields. Unknown
 fields and read-only writes return 400. `null` clears a runtime override and
 reveals the underlying default/config value again.
+
+An accepted update commits the SQLite state document before the daemon
+publishes the new in-memory/settings-event view. Revision conflicts or critical
+database errors fail the update; no legacy-file write or fallback follows.
 
 ## Policy
 
@@ -59,22 +68,18 @@ write while cancels stay allowed. Freeze and trading-limit changes are
 human-only policy: the patch origin is stamped and audited, and on live routes
 the daemon hard-rejects agent-origin trading patches.
 
-`regime.journal.enabled` controls the regime-decisions forward-collection
-journal (`$XDG_STATE_HOME/ibkr/regime-decisions.jsonl`).
+`regime.journal.enabled` retains its public name but controls forward
+collection of typed regime-decision events in `daemon.db`. It does not enable
+a JSONL writer.
 
-`canary.journal.enabled` controls the canary-decisions forward-collection
-journal (`$XDG_STATE_HOME/ibkr/canary-decisions.jsonl`). It defaults to
-`true`, mirroring the regime journal; disabling it stops future collection
+`canary.journal.enabled` similarly controls typed canary-decision events in
+`daemon.db`. It defaults to `true`; disabling it stops future collection
 without deleting existing evidence.
 
-`history.rotation.enabled` controls the automatic monthly maintenance pass
-for the regime, rules, and canary decision journals. It defaults to `true`.
-Rotation moves only fully indexed evidence into immutable gzip archives under
-`$XDG_STATE_HOME/ibkr/rotated/`; it compresses and relocates evidence but never
-deletes it. `history.rotation.keep_raw_months` selects how many most-recent
-calendar months remain in the live journals, counting the current month as
-month 1. Its default is `2`, its minimum is `1`, and `null` restores the
-default.
+`history.rotation.enabled` and `history.rotation.keep_raw_months` are retired.
+There are no live decision JSONL files or rotation worker after cutover.
+Compatibility fields may remain in the typed response while clients migrate,
+but they are not writable preferences and have no runtime effect.
 
 Trading mode is never writable here. Stable builds expose trading and limits as
 read-only. Experimental trading builds may edit safety limits only after

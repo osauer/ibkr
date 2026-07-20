@@ -2,15 +2,20 @@ package daemon
 
 import (
 	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -39,21 +44,9 @@ const (
 var errOrderPreviewTokenAlreadyUsed = errors.New("preview token already used")
 
 type orderJournalStore struct {
-	Path string
-	mu   sync.Mutex
-	// onAppend nudges the history-index ingester after a successful append
-	// (data-free kick; the journal file is the only ingest input). Nil-safe
-	// and non-blocking; invoked under mu at the end of appendLocked /
-	// appendAllLocked so every present and future append site is covered.
-	onAppend func()
-	// tokenIndex, when set, may answer the token-redemption prior-event
-	// lookup from the derived history index: it returns the raw journal
-	// lines carrying the token and ok=true only when the index is provably
-	// complete for the journal at this instant (watermark == size, no
-	// parse markers, query succeeded). ok=false always falls back to the
-	// unchanged full journal scan. The journal scan remains the
-	// semantics-defining reference implementation.
-	tokenIndex func(tokenID string) ([][]byte, bool)
+	Path      string
+	mu        sync.RWMutex
+	authority *corestore.Store
 }
 
 type orderJournalEvent struct {
@@ -103,13 +96,100 @@ type orderJournalEvent struct {
 	MktCapPrice     float64             `json:"mkt_cap_price,omitempty"`
 	ExecID          string              `json:"exec_id,omitempty"`
 	ExecTime        string              `json:"exec_time,omitempty"`
+	ErrorCode       int                 `json:"error_code,omitempty"`
 	SendState       string              `json:"send_state,omitempty"`
 	Message         string              `json:"message,omitempty"`
+
+	// clientIDPresent records whether a decoded legacy JSON object actually
+	// carried client_id. Zero is a valid IBKR client ID, so the numeric Go
+	// value alone cannot distinguish an explicit zero from an omitted field.
+	// It is importer metadata only and never becomes part of the event JSON.
+	clientIDPresent bool `json:"-"`
 }
 
 type orderJournalSummary struct {
 	OpenOrders int
 	LastEvent  string
+}
+
+// legacyOrderRoute is the complete broker identity carried forward during the
+// one-time JSONL import. A broker order ID or local reference has no authority
+// outside this four-dimensional route.
+type legacyOrderRoute struct {
+	Endpoint      string
+	ClientID      int
+	ClientIDKnown bool
+	Account       string
+	Mode          string
+}
+
+type legacyConsumedPreviewToken struct {
+	TokenID string
+	Route   legacyOrderRoute
+	At      time.Time
+	Type    string
+}
+
+type legacyScopedOrderIDFloor struct {
+	Route legacyOrderRoute
+	Floor int
+}
+
+// legacyOrderImportSelection is deliberately narrower than the old journal.
+// Events retains complete chains only where omitting history could weaken a
+// recovery decision. ConsumedTokens and GlobalOrderIDFloor are computed over
+// every valid input row, including safely omitted terminal chains.
+type legacyOrderImportSelection struct {
+	SourceFingerprint    string
+	Events               []orderJournalEvent
+	SourceEvents         []orderJournalEvent
+	ConsumedTokens       []legacyConsumedPreviewToken
+	GlobalOrderIDFloor   int
+	ScopedOrderIDFloors  map[string]legacyScopedOrderIDFloor
+	ReconciliationEvents int
+}
+
+type legacyOrderImportParity struct {
+	SourceFingerprint    string
+	RetainedEventCount   int
+	RetainedChainCount   int
+	ConsumedTokenCount   int
+	ConsumedTokenRoutes  map[string]legacyOrderRoute
+	GlobalOrderIDFloor   int
+	ScopedOrderIDFloors  map[string]int
+	ReconciliationEvents int
+}
+
+type legacyTradingAuthorityParity struct {
+	Orders legacyOrderImportParity
+	Purge  legacyPurgeImportParity
+}
+
+// initializeFreshTradingAuthority establishes deterministic empty order and
+// purge safety state without consulting legacy paths. The corestore operation
+// is atomic and refuses partial or nonempty trading authority.
+func initializeFreshTradingAuthority(ctx context.Context, store *corestore.Store) error {
+	if store == nil {
+		return fmt.Errorf("trading authority is unavailable")
+	}
+	ledger := purgeLedgerFile{
+		Kind:          purgeLedgerKind,
+		SchemaVersion: purgeLedgerSchemaVersion,
+		UpdatedAt:     time.Unix(0, 0).UTC(),
+		Rows:          []purgeLedgerRow{},
+	}
+	raw, err := marshalPurgeLedger(ledger)
+	if err != nil {
+		return fmt.Errorf("encode fresh purge authority: %w", err)
+	}
+	if _, err := store.InitializeFreshOrderAuthority(ctx, corestore.StateDocumentCAS{
+		ScopeKey: purgeLedgerStateScope,
+		Kind:     purgeLedgerStateKind,
+		JSON:     raw,
+	}); err != nil {
+		return fmt.Errorf("initialize fresh trading authority: %w", err)
+	}
+	return nil
 }
 
 func defaultOrderJournalPath() (string, error) {
@@ -120,154 +200,114 @@ func newOrderJournalStore(path string) *orderJournalStore {
 	return &orderJournalStore{Path: path}
 }
 
-func (s *orderJournalStore) Append(ev orderJournalEvent) error {
-	if s == nil {
-		return fmt.Errorf("order journal path is empty")
+// UseCoreStore switches every live order read and write to daemon.db. Path is
+// retained only for the explicit legacy importer; it is never a fallback.
+func (s *orderJournalStore) UseCoreStore(store *corestore.Store) error {
+	if s == nil || store == nil {
+		return fmt.Errorf("order journal authority is unavailable")
+	}
+	if !store.Health().Ready {
+		return fmt.Errorf("order journal authority is blocked")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.appendLocked(ev)
+	s.authority = store
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *orderJournalStore) coreStore() (*corestore.Store, error) {
+	if s == nil {
+		return nil, fmt.Errorf("order journal authority is unavailable")
+	}
+	s.mu.RLock()
+	store := s.authority
+	s.mu.RUnlock()
+	if store == nil {
+		return nil, fmt.Errorf("order journal authority is unavailable")
+	}
+	if !store.Health().Ready {
+		return nil, fmt.Errorf("order journal authority is blocked")
+	}
+	return store, nil
+}
+
+// attachCoreOrderAuthority is called by the Start winner after cutover and
+// before RPC serving or broker connection. It also rotates token verification
+// into daemon.db's authority epoch/signer generation.
+func (s *Server) attachCoreOrderAuthority(ctx context.Context, store *corestore.Store) error {
+	if s == nil || store == nil || s.orderJournal == nil || s.purgeLedger == nil || s.orderTokens == nil || !s.tradingReadiness.attachedTo(store) {
+		return fmt.Errorf("order authority adapters are unavailable")
+	}
+	head, err := store.AuthorityHead(ctx)
+	if err != nil {
+		return fmt.Errorf("read order authority head: %w", err)
+	}
+	if err := s.orderTokens.bindAuthority(head.AuthorityEpoch, head.SignerGeneration); err != nil {
+		return err
+	}
+	if err := s.orderJournal.UseCoreStore(store); err != nil {
+		return err
+	}
+	if err := s.purgeLedger.UseCoreStore(store); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *orderJournalStore) Append(ev orderJournalEvent) error {
+	return s.AppendAll([]orderJournalEvent{ev})
 }
 
 func (s *orderJournalStore) AppendAll(events []orderJournalEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
-	if s == nil {
-		return fmt.Errorf("order journal path is empty")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.appendAllLocked(events)
-}
-
-func (s *orderJournalStore) appendLocked(ev orderJournalEvent) error {
-	if s == nil || s.Path == "" {
-		return fmt.Errorf("order journal path is empty")
-	}
-	if ev.At.IsZero() {
-		ev.At = time.Now().UTC()
-	}
-	if ev.Version == 0 {
-		ev.Version = orderJournalFileVersion
-	}
-	if err := validateOrderJournalEvent(ev); err != nil {
+	store, err := s.coreStore()
+	if err != nil {
 		return err
 	}
-	if err := ensurePrivateStateDir(s.Path); err != nil {
-		return err
-	}
-	data, err := json.Marshal(ev)
-	if err != nil {
-		return fmt.Errorf("marshal order journal event: %w", err)
-	}
-	data = append(data, '\n')
-	f, err := os.OpenFile(s.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open order journal %s: %w", s.Path, err)
-	}
-	defer func() { _ = f.Close() }()
-	if err := f.Chmod(0o600); err != nil {
-		return fmt.Errorf("chmod order journal: %w", err)
-	}
-	if _, err := f.Write(data); err != nil {
-		return fmt.Errorf("append order journal: %w", err)
-	}
-	if s.onAppend != nil {
-		s.onAppend()
-	}
-	return nil
-}
-
-func (s *orderJournalStore) appendAllLocked(events []orderJournalEvent) error {
-	if s == nil || s.Path == "" {
-		return fmt.Errorf("order journal path is empty")
-	}
-	var data []byte
+	records := make([]corestore.OrderEventRecord, 0, len(events))
 	for _, ev := range events {
-		if ev.At.IsZero() {
-			ev.At = time.Now().UTC()
-		}
-		if ev.Version == 0 {
-			ev.Version = orderJournalFileVersion
-		}
-		if err := validateOrderJournalEvent(ev); err != nil {
+		record, _, err := coreOrderEventRecord(ev, "", "")
+		if err != nil {
 			return err
 		}
-		raw, err := json.Marshal(ev)
-		if err != nil {
-			return fmt.Errorf("marshal order journal event: %w", err)
-		}
-		data = append(data, raw...)
-		data = append(data, '\n')
+		records = append(records, record)
 	}
-	if err := ensurePrivateStateDir(s.Path); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(s.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open order journal %s: %w", s.Path, err)
-	}
-	defer func() { _ = f.Close() }()
-	if err := f.Chmod(0o600); err != nil {
-		return fmt.Errorf("chmod order journal: %w", err)
-	}
-	if _, err := f.Write(data); err != nil {
-		return fmt.Errorf("append order journal: %w", err)
-	}
-	if s.onAppend != nil {
-		s.onAppend()
+	if _, err := store.AppendOrderEvents(context.Background(), records); err != nil {
+		return fmt.Errorf("append authoritative order event: %w", err)
 	}
 	return nil
 }
 
 func (s *orderJournalStore) LoadEvents(limit int) ([]orderJournalEvent, error) {
-	if s == nil {
-		return nil, fmt.Errorf("order journal path is empty")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.loadEventsLocked(limit)
-}
-
-func (s *orderJournalStore) loadEventsLocked(limit int) ([]orderJournalEvent, error) {
-	if s == nil || s.Path == "" {
-		return nil, fmt.Errorf("order journal path is empty")
-	}
-	f, err := os.Open(s.Path)
+	store, err := s.coreStore()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("open order journal %s: %w", s.Path, err)
+		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxFrameBytes)
-	events := make([]orderJournalEvent, 0)
-	line := 0
-	for scanner.Scan() {
-		line++
-		raw := strings.TrimSpace(scanner.Text())
-		if raw == "" {
-			continue
+	var records []corestore.OrderEventRecord
+	var after int64
+	for {
+		page, err := store.LoadOrderEvents(context.Background(), corestore.OrderQuery{AfterEventSeq: after, Limit: 10_000})
+		if err != nil {
+			return nil, fmt.Errorf("load authoritative order events: %w", err)
 		}
-		var ev orderJournalEvent
-		if err := json.Unmarshal([]byte(raw), &ev); err != nil {
-			return nil, fmt.Errorf("parse order journal line %d: %w", line, err)
+		records = append(records, page...)
+		if len(page) < 10_000 {
+			break
 		}
-		if ev.Version != orderJournalFileVersion {
-			return nil, fmt.Errorf("unsupported order journal version %d on line %d", ev.Version, line)
+		after = page[len(page)-1].EventSeq
+	}
+	events := make([]orderJournalEvent, 0, len(records))
+	for _, record := range records {
+		ev, err := decodeCoreOrderEvent(record)
+		if err != nil {
+			return nil, err
 		}
 		events = append(events, ev)
-		if limit > 0 && len(events) > limit {
-			copy(events, events[1:])
-			events = events[:limit]
-		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan order journal: %w", err)
+	if limit > 0 && len(events) > limit {
+		events = append([]orderJournalEvent(nil), events[len(events)-limit:]...)
 	}
 	return events, nil
 }
@@ -277,9 +317,6 @@ func (s *orderJournalStore) ConfirmPreviewTokenUse(ev orderJournalEvent) error {
 }
 
 func (s *orderJournalStore) ConfirmPreviewTokenUseAndAppend(ev orderJournalEvent, after ...orderJournalEvent) error {
-	if s == nil {
-		return fmt.Errorf("order journal path is empty")
-	}
 	if ev.PreviewTokenID == "" {
 		return fmt.Errorf("preview token id is required")
 	}
@@ -289,83 +326,170 @@ func (s *orderJournalStore) ConfirmPreviewTokenUseAndAppend(ev orderJournalEvent
 	if ev.Type != orderJournalEventTokenConfirmed {
 		return fmt.Errorf("preview token confirmation event type must be %q", orderJournalEventTokenConfirmed)
 	}
-
-	// The existing mu critical section is the serialization guarantee: all
-	// appends go through it, so while it is held the journal cannot grow
-	// and the prior-event check races nothing.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Indexed fast path: only when the history index proves itself
-	// complete for the journal at this instant AND every returned line
-	// decodes under the daemon's own event type. Anything else falls back
-	// to the unchanged full scan below. Both paths run the same
-	// consumption predicate and error formatting, so accept/reject
-	// decisions and error strings are byte-identical by construction.
-	checked := false
-	if s.tokenIndex != nil {
-		if raws, ok := s.tokenIndex(ev.PreviewTokenID); ok {
-			if priors, decodeOK := decodeOrderJournalRawLines(raws); decodeOK {
-				if err := orderJournalPriorTokenUse(priors, ev.PreviewTokenID); err != nil {
-					return err
-				}
-				checked = true
-			}
-		}
-	}
-	if !checked {
-		events, err := s.loadEventsLocked(0)
-		if err != nil {
-			return err
-		}
-		if err := orderJournalPriorTokenUse(events, ev.PreviewTokenID); err != nil {
-			return err
-		}
-	}
-	if err := s.appendLocked(ev); err != nil {
+	store, err := s.coreStore()
+	if err != nil {
 		return err
 	}
-	for _, next := range after {
-		if err := s.appendLocked(next); err != nil {
+	head, err := store.AuthorityHead(context.Background())
+	if err != nil {
+		return fmt.Errorf("read order authority head: %w", err)
+	}
+	events := append([]orderJournalEvent{ev}, after...)
+	action := corestore.ActionPlace
+	if len(after) > 0 && after[0].Type == orderJournalEventModifyRequested {
+		action = corestore.ActionModify
+	}
+	return s.StagePreTransmit(ev.PreviewTokenID, head.AuthorityEpoch, head.SignerGeneration, ev.ReservedOrderID, action, corestore.OriginDaemon, events)
+}
+
+// StagePreTransmit atomically consumes the global preview-token tombstone (if
+// present), binds the complete route, advances global and scoped floors, and
+// appends every ordered intent event before the caller may touch the broker.
+func (s *orderJournalStore) StagePreTransmit(tokenID, authorityEpoch string, signerGeneration int64, requestedFloor int, action corestore.ActionKind, origin corestore.TransmitOrigin, events []orderJournalEvent) error {
+	store, err := s.coreStore()
+	if err != nil {
+		return err
+	}
+	if len(events) == 0 {
+		return fmt.Errorf("pre-transmit order events are required")
+	}
+	records := make([]corestore.OrderEventRecord, 0, len(events))
+	var scope corestore.BrokerScope
+	reserved := requestedFloor
+	for _, ev := range events {
+		record, normalized, err := coreOrderEventRecord(ev, action, origin)
+		if err != nil {
 			return err
 		}
+		if scope == (corestore.BrokerScope{}) {
+			scope = record.Scope
+		} else if record.Scope != scope {
+			return corestore.ErrBrokerScopeCollision
+		}
+		if normalized.ReservedOrderID > reserved {
+			reserved = normalized.ReservedOrderID
+		}
+		records = append(records, record)
+	}
+	request := corestore.PreTransmitRequest{
+		Scope: scope, AuthorityEpoch: authorityEpoch, SignerGeneration: signerGeneration,
+		RequestedOrderIDFloor: int64(requestedFloor), ReservedOrderID: int64(reserved),
+		Action: action, Origin: origin, Events: records,
+	}
+	if tokenID != "" {
+		request.TokenDigest = corestore.HashPreviewTokenID(tokenID)
+	}
+	if _, err := store.StagePreTransmit(context.Background(), request); err != nil {
+		if errors.Is(err, corestore.ErrPreviewTokenConsumed) {
+			return fmt.Errorf("%w: %s was already consumed", errOrderPreviewTokenAlreadyUsed, tokenID)
+		}
+		return fmt.Errorf("stage authoritative pre-transmit intent: %w", err)
 	}
 	return nil
 }
 
-// orderJournalPriorTokenUse is the single reference implementation of the
-// token-consumption check, shared verbatim by the journal-scan and
-// indexed paths (SQL only prunes; this Go predicate decides).
-func orderJournalPriorTokenUse(events []orderJournalEvent, tokenID string) error {
-	for _, prior := range events {
-		if prior.PreviewTokenID != tokenID {
-			continue
-		}
-		if orderJournalEventConsumesPreviewToken(prior) {
-			when := ""
-			if !prior.At.IsZero() {
-				when = " at " + prior.At.Format(time.RFC3339)
-			}
-			return fmt.Errorf("%w: %s was already consumed by %s%s", errOrderPreviewTokenAlreadyUsed, tokenID, prior.Type, when)
-		}
+func coreOrderEventRecord(ev orderJournalEvent, action corestore.ActionKind, origin corestore.TransmitOrigin) (corestore.OrderEventRecord, orderJournalEvent, error) {
+	if ev.At.IsZero() {
+		ev.At = time.Now().UTC()
+	} else {
+		ev.At = ev.At.UTC()
 	}
-	return nil
+	if ev.Version == 0 {
+		ev.Version = orderJournalFileVersion
+	}
+	ev.Endpoint = strings.TrimSpace(ev.Endpoint)
+	ev.Account = strings.ToUpper(strings.TrimSpace(ev.Account))
+	ev.Mode = strings.ToLower(strings.TrimSpace(ev.Mode))
+	if err := validateOrderJournalEvent(ev); err != nil {
+		return corestore.OrderEventRecord{}, orderJournalEvent{}, err
+	}
+	scope, err := coreBrokerScopeFromEvent(ev)
+	if err != nil {
+		return corestore.OrderEventRecord{}, orderJournalEvent{}, err
+	}
+	if action == "" {
+		action = coreOrderActionForEvent(ev)
+	}
+	if origin == "" {
+		origin = coreOrderOrigin(ev.Origin)
+	}
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		return corestore.OrderEventRecord{}, orderJournalEvent{}, fmt.Errorf("marshal order event: %w", err)
+	}
+	eventID, err := randomTokenID()
+	if err != nil {
+		return corestore.OrderEventRecord{}, orderJournalEvent{}, fmt.Errorf("generate order event key: %w", err)
+	}
+	return corestore.OrderEventRecord{
+		Scope: scope, EventKey: "order-" + eventID, AtMS: ev.At.UnixMilli(), Type: ev.Type,
+		Action: action, Origin: origin, OrderRef: ev.OrderRef, PreviewTokenID: ev.PreviewTokenID,
+		ReservedOrderID: int64(ev.ReservedOrderID), PermID: int64(ev.PermID), Status: ev.Status, RawJSON: raw,
+	}, ev, nil
 }
 
-// decodeOrderJournalRawLines decodes indexed raw journal lines with the
-// daemon's own event type and the same version validation LoadEvents
-// applies. ok=false on any failure — the caller must fall back to the
-// journal scan, which fails loudly on the same line.
-func decodeOrderJournalRawLines(raws [][]byte) ([]orderJournalEvent, bool) {
-	events := make([]orderJournalEvent, 0, len(raws))
-	for _, raw := range raws {
-		ev, err := decodeOrderJournalLine(raw)
-		if err != nil {
-			return nil, false
-		}
-		events = append(events, ev)
+func coreBrokerScopeFromEvent(ev orderJournalEvent) (corestore.BrokerScope, error) {
+	if strings.TrimSpace(ev.Endpoint) == "" || strings.TrimSpace(ev.Account) == "" || ev.ClientID < 0 {
+		return corestore.BrokerScope{}, fmt.Errorf("order event requires complete endpoint/client/account/mode identity")
 	}
-	return events, true
+	mode := strings.ToLower(strings.TrimSpace(ev.Mode))
+	if mode != "paper" && mode != "live" {
+		return corestore.BrokerScope{}, fmt.Errorf("order event broker mode %q is invalid", ev.Mode)
+	}
+	route := orderJournalRouteIdentity(ev.Endpoint, ev.ClientID, ev.Account, mode)
+	digest := sha256.Sum256([]byte(route))
+	return corestore.BrokerScope{
+		ScopeKey: "broker-" + hex.EncodeToString(digest[:]), Endpoint: strings.TrimSpace(ev.Endpoint),
+		ClientID: ev.ClientID, Account: strings.ToUpper(strings.TrimSpace(ev.Account)), Mode: mode,
+	}, nil
+}
+
+func coreOrderActionForEvent(ev orderJournalEvent) corestore.ActionKind {
+	switch ev.Source {
+	case purgeExecuteSource:
+		return corestore.ActionPurge
+	case purgeRestoreSource:
+		return corestore.ActionRestore
+	case "opportunity":
+		return corestore.ActionExercise
+	}
+	switch ev.Type {
+	case orderJournalEventModifyRequested:
+		return corestore.ActionModify
+	case orderJournalEventCancelRequested:
+		return corestore.ActionCancel
+	default:
+		return corestore.ActionPlace
+	}
+}
+
+func coreOrderOrigin(origin string) corestore.TransmitOrigin {
+	if strings.TrimSpace(origin) == "" {
+		return corestore.OriginDaemon
+	}
+	switch normalizedWriteOrigin(origin) {
+	case rpc.OrderOriginHumanTTY, rpc.OrderOriginPairedDevice:
+		return corestore.OriginHumanCLI
+	case rpc.OrderOriginAgent:
+		return corestore.OriginAgentCLI
+	default:
+		return corestore.OriginDaemon
+	}
+}
+
+func decodeCoreOrderEvent(record corestore.OrderEventRecord) (orderJournalEvent, error) {
+	ev, err := decodeOrderJournalLine(record.RawJSON)
+	if err != nil {
+		return orderJournalEvent{}, fmt.Errorf("decode authoritative order event seq %d: %w", record.EventSeq, err)
+	}
+	want, err := coreBrokerScopeFromEvent(ev)
+	if err != nil {
+		return orderJournalEvent{}, fmt.Errorf("validate authoritative order event seq %d: %w", record.EventSeq, err)
+	}
+	if want != record.Scope || ev.Type != record.Type || ev.OrderRef != record.OrderRef || ev.PreviewTokenID != record.PreviewTokenID || int64(ev.ReservedOrderID) != record.ReservedOrderID || int64(ev.PermID) != record.PermID || ev.Status != record.Status {
+		return orderJournalEvent{}, fmt.Errorf("authoritative order event seq %d projection does not match payload", record.EventSeq)
+	}
+	return ev, nil
 }
 
 // validateOrderJournalLine is injected into the derived history index so
@@ -385,10 +509,344 @@ func decodeOrderJournalLine(raw []byte) (orderJournalEvent, error) {
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return orderJournalEvent{}, err
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return orderJournalEvent{}, err
+	}
+	if rawClientID, present := fields["client_id"]; present {
+		var clientID *int
+		if err := json.Unmarshal(rawClientID, &clientID); err != nil || clientID == nil {
+			return orderJournalEvent{}, fmt.Errorf("client_id must be an integer")
+		}
+		ev.ClientID = *clientID
+		ev.clientIDPresent = true
+	}
 	if ev.Version != orderJournalFileVersion {
 		return orderJournalEvent{}, fmt.Errorf("unsupported order journal version %d", ev.Version)
 	}
 	return ev, nil
+}
+
+// loadLegacyOrderImportSelection is the only post-cutover reader for the old
+// order journal. It uses the same bounded decoder as the former runtime scan,
+// accepts a valid unterminated final line, and never becomes a live fallback.
+func loadLegacyOrderImportSelection(path string) (legacyOrderImportSelection, error) {
+	var selection legacyOrderImportSelection
+	selection.ScopedOrderIDFloors = map[string]legacyScopedOrderIDFloor{}
+	if strings.TrimSpace(path) == "" {
+		return selection, fmt.Errorf("legacy order journal path is empty")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			empty := sha256.Sum256(nil)
+			selection.SourceFingerprint = "sha256:" + hex.EncodeToString(empty[:])
+			return selection, nil
+		}
+		return selection, fmt.Errorf("open legacy order journal %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	hash := sha256.New()
+	scanner := bufio.NewScanner(io.TeeReader(f, hash))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxFrameBytes)
+	events := make([]orderJournalEvent, 0)
+	line := 0
+	consumedByID := map[string]legacyConsumedPreviewToken{}
+	for scanner.Scan() {
+		line++
+		raw := strings.TrimSpace(scanner.Text())
+		if raw == "" {
+			continue
+		}
+		ev, err := decodeOrderJournalLine([]byte(raw))
+		if err != nil {
+			return legacyOrderImportSelection{}, fmt.Errorf("parse legacy order journal line %d: %w", line, err)
+		}
+		events = append(events, ev)
+		if ev.ReservedOrderID > selection.GlobalOrderIDFloor {
+			selection.GlobalOrderIDFloor = ev.ReservedOrderID
+		}
+		if ev.ReservedOrderID > 0 {
+			route := legacyOrderRouteFromEvent(ev)
+			if route.complete() {
+				key := route.key()
+				floor := selection.ScopedOrderIDFloors[key]
+				if ev.ReservedOrderID > floor.Floor {
+					selection.ScopedOrderIDFloors[key] = legacyScopedOrderIDFloor{Route: route, Floor: ev.ReservedOrderID}
+				}
+			}
+		}
+		if ev.PreviewTokenID != "" && orderJournalEventConsumesPreviewToken(ev) {
+			route := legacyOrderRouteFromEvent(ev)
+			if !route.complete() {
+				return legacyOrderImportSelection{}, fmt.Errorf("legacy consumed preview token on line %d lacks complete endpoint/client/account/mode identity", line)
+			}
+			next := legacyConsumedPreviewToken{TokenID: ev.PreviewTokenID, Route: route, At: ev.At, Type: ev.Type}
+			if prior, ok := consumedByID[ev.PreviewTokenID]; ok {
+				if prior.Route.key() != route.key() {
+					return legacyOrderImportSelection{}, fmt.Errorf("legacy preview token %q was consumed in multiple broker routes", ev.PreviewTokenID)
+				}
+			} else {
+				consumedByID[ev.PreviewTokenID] = next
+				selection.ConsumedTokens = append(selection.ConsumedTokens, next)
+			}
+		}
+		if ev.Type == orderJournalEventReconciledUnknown || ev.Type == orderJournalEventReconciledAbsent {
+			selection.ReconciliationEvents++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return legacyOrderImportSelection{}, fmt.Errorf("scan legacy order journal: %w", err)
+	}
+	selection.SourceFingerprint = "sha256:" + hex.EncodeToString(hash.Sum(nil))
+	selection.SourceEvents = append([]orderJournalEvent(nil), events...)
+
+	// Partition before aliasing so an omitted client_id cannot collide with
+	// an explicitly journaled client_id=0. Legacy route fields are evidence;
+	// later rows and the currently configured daemon scope may not fill them.
+	partitions := make(map[string][]orderJournalEvent)
+	for _, ev := range events {
+		partition := legacyOrderRoutePartitionKey(ev)
+		partitions[partition] = append(partitions[partition], ev)
+	}
+	aliasesByPartition := make(map[string]map[string]string, len(partitions))
+	chains := make(map[string][]orderJournalEvent)
+	for partition, partitionEvents := range partitions {
+		aliases := orderJournalKeyAliases(partitionEvents)
+		aliasesByPartition[partition] = aliases
+		for _, ev := range partitionEvents {
+			if key := orderJournalCanonicalKey(ev, aliases); key != "" {
+				chainKey := partition + "\x1e" + key
+				chains[chainKey] = append(chains[chainKey], ev)
+			}
+		}
+	}
+	keep := make(map[string]bool, len(chains))
+	for key, chain := range chains {
+		if !legacyOrderChainBrokerProvenTerminal(chain) {
+			keep[key] = true
+		}
+	}
+	for _, ev := range events {
+		partition := legacyOrderRoutePartitionKey(ev)
+		key := orderJournalCanonicalKey(ev, aliasesByPartition[partition])
+		if key != "" {
+			key = partition + "\x1e" + key
+		}
+		if key == "" || !keep[key] {
+			continue
+		}
+		if !legacyOrderRouteFromEvent(ev).complete() {
+			return legacyOrderImportSelection{}, fmt.Errorf("retained legacy order event %q lacks complete endpoint/client/account/mode identity", orderJournalEventLabel(ev))
+		}
+		selection.Events = append(selection.Events, ev)
+	}
+	return selection, nil
+}
+
+// importLegacyOrderAuthority is the cutover's single fail-closed order call.
+// It selects through the canonical decoder/fold, commits chains/tombstones/
+// floors in one corestore transaction, then verifies event and floor parity.
+func importLegacyOrderAuthority(ctx context.Context, store *corestore.Store, path string) (legacyOrderImportParity, error) {
+	selection, err := loadLegacyOrderImportSelection(path)
+	if err != nil {
+		return legacyOrderImportParity{}, err
+	}
+	return importSelectedLegacyOrderAuthority(ctx, store, selection)
+}
+
+// importLegacyTradingAuthority is startup's first-cutover entrypoint. It reads
+// and fingerprints the order journal exactly once, then feeds the same decoded
+// safety selection to both order and purge imports so route derivation cannot
+// observe a different legacy snapshot.
+func importLegacyTradingAuthority(ctx context.Context, store *corestore.Store, orderPath, purgePath string) (legacyTradingAuthorityParity, error) {
+	var parity legacyTradingAuthorityParity
+	selection, err := loadLegacyOrderImportSelection(orderPath)
+	if err != nil {
+		return parity, err
+	}
+	parity.Orders, err = importSelectedLegacyOrderAuthority(ctx, store, selection)
+	if err != nil {
+		return parity, err
+	}
+	parity.Purge, err = importLegacyPurgeAuthority(ctx, store, purgePath, selection)
+	if err != nil {
+		return parity, err
+	}
+	return parity, nil
+}
+
+func importSelectedLegacyOrderAuthority(ctx context.Context, store *corestore.Store, selection legacyOrderImportSelection) (legacyOrderImportParity, error) {
+	var parity legacyOrderImportParity
+	if store == nil {
+		return parity, fmt.Errorf("order authority is unavailable")
+	}
+	if strings.TrimSpace(selection.SourceFingerprint) == "" {
+		return parity, fmt.Errorf("legacy order source fingerprint is missing")
+	}
+	input := corestore.LegacyOrderImport{
+		SourceFingerprint: selection.SourceFingerprint,
+		GlobalFloor:       int64(selection.GlobalOrderIDFloor),
+	}
+	expectedPayloads := make(map[[sha256.Size]byte]int)
+	chains := map[string]bool{}
+	selectedAliases := orderJournalKeyAliases(selection.Events)
+	for _, ev := range selection.Events {
+		if ev.At.IsZero() {
+			return parity, fmt.Errorf("retained legacy order event %q has no event time", orderJournalEventLabel(ev))
+		}
+		record, normalized, err := coreOrderEventRecord(ev, "", "")
+		if err != nil {
+			return parity, fmt.Errorf("prepare retained legacy order event: %w", err)
+		}
+		input.Events = append(input.Events, record)
+		expectedPayloads[sha256.Sum256(record.RawJSON)]++
+		chains[orderJournalCanonicalKey(normalized, selectedAliases)] = true
+	}
+	for _, token := range selection.ConsumedTokens {
+		scope, err := coreBrokerScopeFromLegacyRoute(token.Route)
+		if err != nil {
+			return parity, err
+		}
+		if token.At.IsZero() {
+			return parity, fmt.Errorf("legacy preview token %q has no consumption time", token.TokenID)
+		}
+		input.ConsumedTokens = append(input.ConsumedTokens, corestore.LegacyConsumedToken{
+			Scope: scope, PreviewTokenID: token.TokenID, ConsumedAt: token.At,
+		})
+	}
+	for _, floor := range selection.ScopedOrderIDFloors {
+		scope, err := coreBrokerScopeFromLegacyRoute(floor.Route)
+		if err != nil {
+			return parity, err
+		}
+		input.ScopedFloors = append(input.ScopedFloors, corestore.LegacyOrderFloor{Scope: scope, Floor: int64(floor.Floor)})
+	}
+	if _, err := store.ImportLegacyOrderAuthority(ctx, input); err != nil {
+		return parity, fmt.Errorf("import legacy order authority: %w", err)
+	}
+
+	global, err := store.GlobalOrderIDFloor(ctx)
+	if err != nil {
+		return parity, fmt.Errorf("verify imported global order id floor: %w", err)
+	}
+	if global < int64(selection.GlobalOrderIDFloor) {
+		return parity, fmt.Errorf("imported global order id floor %d is below legacy floor %d", global, selection.GlobalOrderIDFloor)
+	}
+	for _, floor := range input.ScopedFloors {
+		got, err := store.ScopedOrderIDFloor(ctx, floor.Scope.ScopeKey)
+		if err != nil {
+			return parity, fmt.Errorf("verify imported scoped order id floor: %w", err)
+		}
+		if got < floor.Floor || got < global {
+			return parity, fmt.Errorf("imported scoped order id floor %d is below required floor", got)
+		}
+	}
+	if err := verifyLegacyOrderPayloads(ctx, store, expectedPayloads); err != nil {
+		return parity, err
+	}
+
+	parity = legacyOrderImportParity{
+		SourceFingerprint: selection.SourceFingerprint, RetainedEventCount: len(selection.Events), RetainedChainCount: len(chains),
+		ConsumedTokenCount: len(selection.ConsumedTokens), ConsumedTokenRoutes: map[string]legacyOrderRoute{},
+		GlobalOrderIDFloor: selection.GlobalOrderIDFloor, ScopedOrderIDFloors: map[string]int{},
+		ReconciliationEvents: selection.ReconciliationEvents,
+	}
+	for _, token := range selection.ConsumedTokens {
+		parity.ConsumedTokenRoutes[token.TokenID] = token.Route
+	}
+	for key, floor := range selection.ScopedOrderIDFloors {
+		parity.ScopedOrderIDFloors[key] = floor.Floor
+	}
+	return parity, nil
+}
+
+func coreBrokerScopeFromLegacyRoute(route legacyOrderRoute) (corestore.BrokerScope, error) {
+	return coreBrokerScopeFromEvent(orderJournalEvent{
+		Endpoint: route.Endpoint, ClientID: route.ClientID, Account: route.Account, Mode: route.Mode,
+	})
+}
+
+func verifyLegacyOrderPayloads(ctx context.Context, store *corestore.Store, expected map[[sha256.Size]byte]int) error {
+	if len(expected) == 0 {
+		return nil
+	}
+	actual := make(map[[sha256.Size]byte]int)
+	var after int64
+	for {
+		page, err := store.LoadOrderEvents(ctx, corestore.OrderQuery{AfterEventSeq: after, Limit: 10_000})
+		if err != nil {
+			return fmt.Errorf("verify imported order events: %w", err)
+		}
+		for _, record := range page {
+			actual[sha256.Sum256(record.RawJSON)]++
+		}
+		if len(page) < 10_000 {
+			break
+		}
+		after = page[len(page)-1].EventSeq
+	}
+	for digest, count := range expected {
+		if actual[digest] < count {
+			return fmt.Errorf("legacy order event payload parity failed")
+		}
+	}
+	return nil
+}
+
+func legacyOrderRouteFromEvent(ev orderJournalEvent) legacyOrderRoute {
+	return legacyOrderRoute{
+		Endpoint:      strings.TrimSpace(ev.Endpoint),
+		ClientID:      ev.ClientID,
+		ClientIDKnown: ev.clientIDPresent,
+		Account:       strings.ToUpper(strings.TrimSpace(ev.Account)),
+		Mode:          strings.ToLower(strings.TrimSpace(ev.Mode)),
+	}
+}
+
+func (r legacyOrderRoute) complete() bool {
+	return r.Endpoint != "" && r.ClientIDKnown && r.ClientID >= 0 && r.Account != "" && (r.Mode == "paper" || r.Mode == "live")
+}
+
+func (r legacyOrderRoute) key() string {
+	return orderJournalRouteIdentity(r.Endpoint, r.ClientID, r.Account, r.Mode)
+}
+
+func legacyOrderRoutePartitionKey(ev orderJournalEvent) string {
+	route := legacyOrderRouteFromEvent(ev)
+	client := "missing"
+	if route.ClientIDKnown {
+		client = "known:" + strconv.Itoa(route.ClientID)
+	}
+	return route.Endpoint + "\x1f" + client + "\x1f" + route.Account + "\x1f" + route.Mode
+}
+
+// Only an explicit terminal broker callback or an allowlisted typed broker
+// error permits omission. Reconciliation remains retained: an absent-open-order
+// proof closes working authority but does not establish the final fill/cancel
+// outcome needed for a complete audit.
+func legacyOrderChainBrokerProvenTerminal(chain []orderJournalEvent) bool {
+	if len(chain) == 0 {
+		return false
+	}
+	last := chain[len(chain)-1]
+	if last.Type == orderJournalEventReconciledUnknown || last.Type == orderJournalEventReconciledAbsent {
+		return false
+	}
+	if last.Type == orderJournalEventBrokerError {
+		// ErrorCode was not persisted by older binaries. A code-less legacy
+		// broker error is therefore uncertain even when its Status or Message
+		// looks terminal; retaining it is the only fail-closed migration.
+		if last.ErrorCode == 0 {
+			return false
+		}
+		return orderLifecycleStatusIsTerminal(mapBrokerErrorLifecycleStatus(last.ErrorCode, last.Status))
+	}
+	if last.Type != orderJournalEventStatusUpdated && last.Type != orderJournalEventBrokerAcknowledged {
+		return false
+	}
+	return orderLifecycleStatusIsTerminal(mapOrderJournalLifecycleStatus(last))
 }
 
 func (s *orderJournalStore) Summary() (orderJournalSummary, error) {

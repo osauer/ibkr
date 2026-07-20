@@ -1,28 +1,47 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
-// gammaSkewDiagJournal appends one JSON line per computed gamma slice
-// to a private state file. It exists because the skew-fit rankability
-// bars in gamma_quality.go are heuristic with no persisted distribution
-// to calibrate against — the gamma-zero store keeps only the latest
-// result per scope, the daemon log carries no per-compute medians, and
-// the backtest fixtures are ex-gamma. Nothing in the product reads the
-// file; it is offline calibration input only and is safe to delete at
-// any time.
+// gammaSkewDiagJournal appends one immutable daemon.db observation per
+// computed gamma slice. It exists because the skew-fit rankability bars in
+// gamma_quality.go are heuristic and need a retained distribution for offline
+// calibration. Live decisions never read this corpus. The path-backed codec is
+// a legacy import/test seam only; authoritative observations are not a
+// delete-safe cache.
 //
 // Lifecycle mirrors gammaZeroStore.Save: appended only on the
 // successful, non-cancelled persist path in spawnJob, and append
 // failures degrade to warnings — journaling must never fail a compute.
 type gammaSkewDiagJournal struct {
-	path string
+	// path is retained solely for explicit legacy-import and isolated
+	// file-format tests. Production attaches the daemon authority before
+	// the cache can run; once attached, append never reads or writes path.
+	path      string
+	authority *corestore.Store
+}
+
+// UseCoreStore switches the journal to daemon.db. There is deliberately no
+// file fallback after attachment: a database error must remain visible to the
+// daemon's authority-health latch instead of silently splitting history.
+func (j *gammaSkewDiagJournal) UseCoreStore(store *corestore.Store) error {
+	if j == nil {
+		return errors.New("gamma skew diagnostics: nil journal")
+	}
+	if store == nil {
+		return errors.New("gamma skew diagnostics: nil corestore")
+	}
+	j.authority = store
+	return nil
 }
 
 // gammaSkewDiagDefaultPath resolves the journal's on-disk location in
@@ -79,6 +98,57 @@ func (j *gammaSkewDiagJournal) append(now time.Time, scope, sessionKey string, r
 	if len(lines) == 0 {
 		return nil
 	}
+	if j.authority != nil {
+		inputs := make([]corestore.ObservationInput, 0, len(lines))
+		for _, line := range lines {
+			payload, err := json.Marshal(line)
+			if err != nil {
+				return fmt.Errorf("encode skew diagnostics: %w", err)
+			}
+			metadata, err := json.Marshal(struct {
+				Version     int    `json:"version"`
+				Method      string `json:"method"`
+				SessionKey  string `json:"session_key"`
+				Scope       string `json:"scope"`
+				Slice       string `json:"slice"`
+				Rankability string `json:"rankability"`
+			}{
+				Version: gammaSkewDiagVersion, Method: clone.Method,
+				SessionKey: sessionKey, Scope: scope, Slice: line.Slice,
+				Rankability: line.Rankability,
+			})
+			if err != nil {
+				return fmt.Errorf("encode skew diagnostic metadata: %w", err)
+			}
+			inputs = append(inputs, corestore.ObservationInput{
+				ScopeKey:         gammaSkewDiagScopeKey(scope, line.Slice),
+				Source:           "ibkr.gamma.compute",
+				Kind:             gammaSkewDiagObservationKind,
+				ObservedAt:       line.AsOf,
+				ContentType:      "application/json",
+				Payload:          payload,
+				MetadataJSON:     metadata,
+				DecisionEligible: true,
+			})
+		}
+		_, err := j.authority.AppendObservations(context.Background(), inputs)
+		return err
+	}
+	return j.appendLegacy(lines)
+}
+
+const (
+	gammaSkewDiagVersion         = 1
+	gammaSkewDiagObservationKind = "gamma_skew_diagnostic.v1"
+)
+
+func gammaSkewDiagScopeKey(scope, slice string) string {
+	return "market/gamma/skew/" + scope + "/" + slice
+}
+
+// appendLegacy preserves the old JSONL codec for the one-shot cutover
+// importer and format tests. Runtime code must attach corestore first.
+func (j *gammaSkewDiagJournal) appendLegacy(lines []gammaSkewDiagLine) error {
 	var buf []byte
 	for _, line := range lines {
 		b, err := json.Marshal(line)
@@ -117,7 +187,7 @@ func gammaSkewDiagLines(now time.Time, scope, sessionKey string, c *rpc.GammaZer
 
 func gammaSkewDiagLineFor(now time.Time, scope, sessionKey, slice string, c *rpc.GammaZeroComputed) gammaSkewDiagLine {
 	line := gammaSkewDiagLine{
-		V:          1,
+		V:          gammaSkewDiagVersion,
 		TS:         now,
 		SessionKey: sessionKey,
 		Scope:      scope,

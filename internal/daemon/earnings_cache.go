@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 )
 
 // earningsCache serves per-symbol next-earnings dates for the trading
@@ -27,13 +29,17 @@ import (
 // a guessed date: unknown ≠ pass is the rulebook's core invariant.
 
 const (
-	earningsStoreFilename    = "earnings-dates.json"
-	earningsPersistVersion   = 1
-	earningsFreshWindow      = 24 * time.Hour
-	earningsTTL              = 45 * 24 * time.Hour
-	earningsFetchTimeout     = 8 * time.Second
-	earningsFailureRetry     = 15 * time.Minute
-	earningsFetchConcurrency = 4
+	earningsStoreFilename     = "earnings-dates.json"
+	earningsPersistVersion    = 1
+	earningsFreshWindow       = 24 * time.Hour
+	earningsTTL               = 45 * 24 * time.Hour
+	earningsFetchTimeout      = 8 * time.Second
+	earningsFailureRetry      = 15 * time.Minute
+	earningsFetchConcurrency  = 4
+	earningsAuthorityScope    = "market/events/earnings"
+	earningsStateKind         = "earnings_dates.current.v1"
+	earningsObservationKind   = "earnings_dates.snapshot.v1"
+	earningsObservationSource = "nasdaq.earnings_calendar"
 )
 
 type earningsEntry struct {
@@ -65,22 +71,63 @@ type earningsCache struct {
 }
 
 func newEarningsCache(dir string, logf func(string, ...any)) *earningsCache {
-	c := &earningsCache{
-		entries:  map[string]earningsEntry{},
-		failures: map[string]time.Time{},
-		inflight: map[string]bool{},
-		store:    &earningsStore{dir: dir},
-		client:   &http.Client{Timeout: earningsFetchTimeout},
-		logf:     logf,
-		clock:    time.Now,
-		fetchURL: "https://api.nasdaq.com/api/analyst/%s/earnings-date",
-	}
+	c := newEarningsCacheCold(dir, logf)
 	if loaded, err := c.store.load(c.clock()); err != nil {
 		logf("earnings cache load failed (cold start): %v", err)
 	} else if loaded != nil {
 		c.entries = loaded
 	}
 	return c
+}
+
+// newEarningsCacheCold installs the legacy codec without reading it. Server
+// construction runs before the persistence lock, so production uses this and
+// leaves legacy reads exclusively to the unpublished cutover importer.
+func newEarningsCacheCold(dir string, logf func(string, ...any)) *earningsCache {
+	c := newEarningsCacheMemory(logf)
+	c.store = &earningsStore{dir: dir}
+	return c
+}
+
+func newEarningsCacheMemory(logf func(string, ...any)) *earningsCache {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	c := &earningsCache{
+		entries:  map[string]earningsEntry{},
+		failures: map[string]time.Time{},
+		inflight: map[string]bool{},
+		client:   &http.Client{Timeout: earningsFetchTimeout},
+		logf:     logf,
+		clock:    time.Now,
+		fetchURL: "https://api.nasdaq.com/api/analyst/%s/earnings-date",
+	}
+	return c
+}
+
+// UseCoreStore replaces any legacy JSON projection loaded by construction
+// with the current daemon.db document. Missing state starts cold. Failure is
+// returned before the authority pointer or in-memory projection changes.
+func (c *earningsCache) UseCoreStore(store *corestore.Store) error {
+	if c == nil {
+		return errors.New("earnings cache: nil cache")
+	}
+	if store == nil {
+		return errors.New("earnings cache: nil corestore")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.store == nil {
+		c.store = &earningsStore{}
+	}
+	loaded, err := c.store.useCoreStore(store, c.clock())
+	if err != nil {
+		return err
+	}
+	c.entries = loaded
+	c.failures = map[string]time.Time{}
+	c.inflight = map[string]bool{}
+	return nil
 }
 
 // nasdaqSymbol maps IBKR symbols to the provider's spelling: share classes
@@ -250,13 +297,44 @@ func (c *earningsCache) persist() {
 	}
 }
 
-// earningsStore persists entries across restarts; convention mirrors
-// fxRateStore (atomic temp+rename, version mismatch = cold start).
+// earningsStore persists entries across restarts. Production uses atomic
+// daemon.db state + observation writes; the JSON branch remains only as a
+// legacy cutover codec and for isolated tests.
 type earningsStore struct {
-	dir string
+	dir       string // sealed legacy cache; unused after useCoreStore
+	authority *corestore.Store
+}
+
+func (s *earningsStore) useCoreStore(store *corestore.Store, now time.Time) (map[string]earningsEntry, error) {
+	if s == nil {
+		return nil, errors.New("earnings store: nil store")
+	}
+	raw, ok, err := loadMarketState(store, earningsAuthorityScope, earningsStateKind)
+	if err != nil {
+		return nil, fmt.Errorf("read earnings authority: %w", err)
+	}
+	loaded := map[string]earningsEntry{}
+	if ok {
+		loaded, err = decodeEarningsEnvelope(raw, now, true)
+		if err != nil {
+			return nil, fmt.Errorf("decode earnings authority: %w", err)
+		}
+	}
+	s.authority = store
+	return loaded, nil
 }
 
 func (s *earningsStore) load(now time.Time) (map[string]earningsEntry, error) {
+	var data []byte
+	if s.authority != nil {
+		var ok bool
+		var err error
+		data, ok, err = loadMarketState(s.authority, earningsAuthorityScope, earningsStateKind)
+		if err != nil || !ok {
+			return map[string]earningsEntry{}, err
+		}
+		return decodeEarningsEnvelope(data, now, true)
+	}
 	data, err := os.ReadFile(filepath.Join(s.dir, earningsStoreFilename))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -264,16 +342,32 @@ func (s *earningsStore) load(now time.Time) (map[string]earningsEntry, error) {
 		}
 		return nil, fmt.Errorf("read earnings cache: %w", err)
 	}
+	return decodeEarningsEnvelope(data, now, false)
+}
+
+func decodeEarningsEnvelope(data []byte, now time.Time, strict bool) (map[string]earningsEntry, error) {
 	var env earningsPersistEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, fmt.Errorf("decode earnings cache: %w", err)
 	}
 	if env.Version != earningsPersistVersion {
+		if strict {
+			return nil, fmt.Errorf("invalid earnings version %d", env.Version)
+		}
 		return nil, nil
+	}
+	if strict && env.Entries == nil {
+		return nil, errors.New("earnings authority has no entries map")
 	}
 	entries := make(map[string]earningsEntry, len(env.Entries))
 	for sym, e := range env.Entries {
-		if e.Date == "" || now.Sub(e.ObservedAt) > earningsTTL {
+		if err := validateEarningsRow(sym, e, now); err != nil {
+			if strict {
+				return nil, err
+			}
+			continue
+		}
+		if now.Sub(e.ObservedAt) > earningsTTL {
 			continue
 		}
 		entries[strings.ToUpper(sym)] = e
@@ -281,7 +375,62 @@ func (s *earningsStore) load(now time.Time) (map[string]earningsEntry, error) {
 	return entries, nil
 }
 
+func validateEarningsRow(sym string, e earningsEntry, now time.Time) error {
+	if err := validateEarningsRowShape(sym, e); err != nil {
+		return err
+	}
+	if now.Before(e.ObservedAt) {
+		return fmt.Errorf("invalid earnings row %q", sym)
+	}
+	return nil
+}
+
+func validateEarningsRowShape(sym string, e earningsEntry) error {
+	canonical := strings.ToUpper(strings.TrimSpace(sym))
+	if canonical == "" || canonical != sym || nasdaqSymbol(canonical) == "" || e.ObservedAt.IsZero() {
+		return fmt.Errorf("invalid earnings row %q", sym)
+	}
+	parsed, err := time.Parse("2006-01-02", e.Date)
+	if err != nil || parsed.Format("2006-01-02") != e.Date {
+		return fmt.Errorf("invalid earnings date for %q", sym)
+	}
+	switch e.TimeOfDay {
+	case "", "amc", "bmo":
+		return nil
+	default:
+		return fmt.Errorf("invalid earnings session for %q", sym)
+	}
+}
+
 func (s *earningsStore) save(entries map[string]earningsEntry) error {
+	env := earningsPersistEnvelope{Version: earningsPersistVersion, Entries: entries}
+	if s.authority != nil {
+		for symbol, entry := range entries {
+			if err := validateEarningsRowShape(symbol, entry); err != nil {
+				return err
+			}
+		}
+		payload, err := json.Marshal(env)
+		if err != nil {
+			return fmt.Errorf("encode earnings authority: %w", err)
+		}
+		observedAt := latestEarningsObservation(entries)
+		if observedAt.IsZero() {
+			observedAt = time.Now().UTC()
+		}
+		metadata, err := json.Marshal(struct {
+			Version    int    `json:"version"`
+			EntryCount int    `json:"entry_count"`
+			Method     string `json:"method"`
+		}{earningsPersistVersion, len(entries), "Nasdaq earnings calendar"})
+		if err != nil {
+			return fmt.Errorf("encode earnings metadata: %w", err)
+		}
+		return saveMarketState(s.authority, earningsAuthorityScope, earningsStateKind, corestore.ObservationInput{
+			ScopeKey: earningsAuthorityScope, Source: earningsObservationSource, Kind: earningsObservationKind,
+			ObservedAt: observedAt, ContentType: "application/json", Payload: payload, MetadataJSON: metadata, DecisionEligible: true,
+		})
+	}
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", s.dir, err)
 	}
@@ -299,7 +448,7 @@ func (s *earningsStore) save(entries map[string]earningsEntry) error {
 	}()
 	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(earningsPersistEnvelope{Version: earningsPersistVersion, Entries: entries}); err != nil {
+	if err := enc.Encode(env); err != nil {
 		return fmt.Errorf("encode %s: %w", earningsStoreFilename, err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -310,4 +459,14 @@ func (s *earningsStore) save(entries map[string]earningsEntry) error {
 		return fmt.Errorf("rename %s: %w", earningsStoreFilename, err)
 	}
 	return nil
+}
+
+func latestEarningsObservation(entries map[string]earningsEntry) time.Time {
+	var latest time.Time
+	for _, entry := range entries {
+		if entry.ObservedAt.After(latest) {
+			latest = entry.ObservedAt
+		}
+	}
+	return latest
 }

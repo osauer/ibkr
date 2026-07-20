@@ -1,8 +1,8 @@
 # Gamma zero-cache persistence
 
-**Status:** Implemented and live since v1.0.0. Scope-keyed cache files are the current daemon architecture.
+**Status:** Implemented and live since v1.0.0; migrated to the daemon.db authority on 2026-07-20.
 **Created:** 2026-05-22 07:30 CEST
-**Last update:** 2026-05-25 07:43 CEST
+**Last update:** 2026-07-20
 **Owner:** osauer
 **Related:** [internal/daemon/gamma_zero_cache.go](../../internal/daemon/gamma_zero_cache.go), [internal/daemon/gamma_zero_store.go](../../internal/daemon/gamma_zero_store.go), [docs/concepts.md](../concepts.md#gamma)
 
@@ -14,19 +14,30 @@ The result's natural TTL is one New York trading session, so the cache can persi
 
 ## Design
 
-Gamma cache persistence is deliberately per-domain, not a shared generic cache layer. It mirrors the breadth store's conventions where they are useful, but keeps gamma's lifecycle and validation local to the gamma compute:
+Gamma persistence is deliberately per-domain, not a generic cache layer. It
+keeps gamma's lifecycle and validation local while using the daemon's sole
+live SQLite authority:
 
-- Atomic temp-file plus rename writes.
-- Pretty-printed JSON for local debugging.
-- A schema `version` field.
+- One compare-and-swap state document per scope for the currently served
+  result.
+- One immutable typed observation for each successful compute, preserving
+  market/gamma history without making old results decision-eligible by
+  accident during cutover.
+- A schema `version` field inside the typed payload.
 - A `method` token gate tied to the current gamma methodology.
-- Missing, stale, or incompatible cache files collapse to a cold cache, not a daemon startup error.
-- Persistence write failures are warnings; a successful in-memory compute still serves callers.
+- Missing, stale, or incompatible state documents collapse to a cold cache,
+  not a stale-value guess.
+- Once daemon.db is attached there is no JSON-file fallback. A persistence
+  failure is disclosed and participates in storage health; it cannot split
+  authority.
 - Snapshot-time `quality.rankability` separates "served for context" from
   "rankable market evidence" so stale/degraded cache cannot confirm regime or
   canary state.
 
-The default directory is `$XDG_CACHE_HOME/ibkr/gamma-zero`, falling back to `$HOME/.cache/ibkr/gamma-zero`.
+The live location is `$XDG_STATE_HOME/ibkr/daemon.db`, falling back to
+`$HOME/.local/state/ibkr/daemon.db`. Former
+`$XDG_CACHE_HOME/ibkr/gamma-zero/*.json` files are one-time cutover inputs and
+isolated codec-test seams only.
 
 ## Scope Isolation
 
@@ -36,15 +47,17 @@ The daemon supports three cache scopes:
 - `spy` for `ibkr gamma --only=spy`.
 - `spx` for `ibkr gamma --only=spx`.
 
-Each scope has its own file:
+Each scope has its own stable authority key:
 
 ```text
-gamma-zero-spy+spx.json
-gamma-zero-spy.json
-gamma-zero-spx.json
+market/gamma/zero/spy+spx
+market/gamma/zero/spy
+market/gamma/zero/spx
 ```
 
-Scope-keying is load-bearing. Without it, an SPY-only diagnostic call could poison the combined dashboard cache, and persistence would make that wrong-scope value survive a daemon restart.
+Scope-keying is load-bearing. Without it, an SPY-only diagnostic call could
+poison the combined dashboard state, and persistence would make that
+wrong-scope value survive a daemon restart.
 
 ## Persisted Shape
 
@@ -58,11 +71,11 @@ Scope-keying is load-bearing. Without it, an SPY-only diagnostic call could pois
 }
 ```
 
-Four independent gates turn a persisted file into a cold cache:
+Four independent gates turn persisted state into a cold cache:
 
 - `version != 1`
 - `session_key` does not match today's New York session date
-- envelope `scope` does not match the requested scope
+- envelope `scope` does not match the authority key/requested scope
 - `method` does not match the current gamma method token
 
 The store never migrates or coerces old results. A methodology bump should recompute from IBKR data, not reinterpret prior cache contents.
@@ -74,10 +87,16 @@ gates recover.
 
 ## Non-goals
 
-- No append-only historical snapshot log. That belongs in a separate store if the project needs gamma history for backtesting.
-- No background eviction. Stale session files are tiny and are replaced on the next successful write.
+- No second historical file log. Immutable gamma observations live beside the
+  current state in daemon.db and are retained for calibration/replay.
+- No background deletion or automatic repair. Current state is replaced on a
+  successful compute; observation retention follows the authority recovery
+  policy.
 - No cross-domain cache abstraction. The shared logic is small, and gamma's invalidation semantics are easier to audit when they stay local.
 
 ## Test Coverage
 
-The store tests cover round-trip persistence, scope isolation, missing files, version mismatch, session mismatch, scope mismatch, method mismatch, atomic replacement, XDG directory resolution, and constructor seeding from valid persisted scopes.
+The store tests cover daemon.db round-trip persistence, current-state plus
+observation writes, scope isolation, missing state, version/session/scope/method
+mismatches, and constructor seeding from valid persisted scopes. Legacy file
+codec tests remain only to prove deterministic one-time import.

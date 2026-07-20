@@ -256,7 +256,7 @@ function systemArchitecture() {
   <rect x="608" y="452" width="242" height="64" rx="10" fill="${C.terminal2}"/>
   ${icon("fileText", 620, 467, 26, C.yellow)}
   <text x="658" y="477" class="module-title">State Lifecycle</text>
-  <text x="658" y="497" class="module-sub">journals · recon · proposals</text>
+  <text x="658" y="497" class="module-sub">SQLite events · recon · proposals</text>
 
   <rect x="608" y="560" width="242" height="1" fill="${C.terminalLine}"/>
   <text x="608" y="588" class="mono-small" style="fill:${C.textOnDarkDim}">auto-spawned by clients on demand</text>
@@ -264,7 +264,7 @@ function systemArchitecture() {
 
   ${component({ x: 898, y: intRows[0], iconName: "plug", color: C.green, title: "Broker Connectors", subtitle: ["primary + breadth clients"], mono: "pkg/ibkr", width: 226 })}
   ${component({ x: 898, y: intRows[1], iconName: "databaseImport", color: C.blue, title: "Observed-Source Clients", subtitle: ["Flex · market events · rates"], width: 226 })}
-  ${component({ x: 898, y: intRows[2], iconName: "database", color: C.greenDark, title: "Persistence", subtitle: ["XDG state · cache · data dirs"], width: 226 })}
+  ${component({ x: 898, y: intRows[2], iconName: "database", color: C.greenDark, title: "Persistence", subtitle: ["daemon.db · evidence · app/data"], width: 226 })}
   ${component({ x: 898, y: intRows[3], iconName: "calendarCode", color: C.slate, title: "Embedded Calendars", subtitle: ["official sessions 2026-2028", "compiled into the binary"], width: 226 })}
 
   <path d="M874 420H${busX}M${busX} ${intArrowY[0]}V${intArrowY[3]}" fill="none" stroke="${C.slate}" stroke-width="1.5" stroke-linecap="round"/>
@@ -351,20 +351,20 @@ function persistenceArchitecture() {
   const body = `
   ${header("State Ownership and Lifecycle", "Who owns which state, where it lives, and what survives a restart.")}
 
-  ${legendItem(956, 40, "green", "Durable / authoritative")}
-  ${legendItem(1144, 40, "blue", "Rebuildable")}
-  ${legendItem(883, 64, "slate", "Runtime / route")}
-  ${legendItem(1024, 64, "amber", "Optional hosted", { dashed: true })}
-  ${icon("lock", 1171, 55, 15, C.amber, 2)}
-  <text x="1192" y="68" class="legend">Sensitive</text>
+  ${legendItem(890, 40, "green", "Durable authority / evidence")}
+  ${legendItem(1135, 40, "blue", "Refreshable")}
+  ${legendItem(820, 64, "slate", "Runtime / recovery-only")}
+  ${legendItem(1035, 64, "amber", "Optional hosted", { dashed: true })}
+  ${icon("lock", 1175, 55, 15, C.amber, 2)}
+  <text x="1196" y="68" class="legend">Sensitive</text>
 
   <rect x="24" y="124" width="1232" height="766" rx="16" fill="${C.panel}" stroke="${C.line}"/>
   <path d="M24 178h1232v-38a16 16 0 0 0 -16 -16h-1200a16 16 0 0 0 -16 16z" fill="${C.panelAlt}"/>
   <text x="42" y="156" class="boundary">OWNER</text>
-  ${colHead(0, "Authored Authority", "human or policy source of truth")}
-  ${colHead(1, "Durable Evidence & State", "survives process restart")}
-  ${colHead(2, "Rebuildable Observations", "refreshable or memory-only")}
-  ${colHead(3, "Runtime & Route State", "IPC, continuity, delivery")}
+  ${colHead(0, "Authored / External", "human or external authority")}
+  ${colHead(1, "Durable Product Authority", "survives process restart")}
+  ${colHead(2, "Refreshable Runtime", "in-memory or source-refreshed")}
+  ${colHead(3, "Runtime & Recovery", "IPC, logs, recovery-only")}
 
   <line x1="174" y1="124" x2="174" y2="890" stroke="${C.line}"/>
   <line x1="24" y1="330" x2="1256" y2="330" stroke="${C.line}"/>
@@ -379,16 +379,15 @@ function persistenceArchitecture() {
   ${emptyCell(xs[3], tileY(0), colW, 118)}
 
   ${ownerCell(1, "serverCog", C.terminal, "Daemon", "runtime authority")}
-  ${matrixTile({ x: xs[0], y: tileY(1), width: colW, height: 118, iconName: "shieldCheck", color: C.greenDark, accent: C.greenDark, title: "Loaded Policy Authority", lines: ["validated fingerprint", "no embedded default policy"], format: "typed runtime state" })}
-  ${matrixTile({ x: xs[1], y: tileY(1), width: colW, height: 104, iconName: "fileText", color: C.green, accent: C.green, title: "Journals & Statements", lines: ["orders · capital · proposals", "decision journals · Flex XML"], format: "$XDG_STATE_HOME/ibkr · JSONL/XML", sensitive: true })}
-  ${matrixTile({ x: xs[1], y: tileY(1) + 114, width: colW, height: 104, iconName: "databaseImport", color: C.green, accent: C.green, title: "Rotated Archives", lines: ["monthly gzip archives", "immutable · kept forever"], format: "$XDG_STATE_HOME/ibkr/rotated", sensitive: true })}
-  ${matrixTile({ x: xs[2], y: tileY(1), width: colW, height: 104, iconName: "refresh", color: C.blue, accent: C.blue, title: "Market & Contract Caches", lines: ["breadth · regime · FX · gamma", "earnings · S&P membership"], format: "$XDG_CACHE_HOME/ibkr · JSON" })}
-  ${matrixTile({ x: xs[2], y: tileY(1) + 114, width: colW, height: 104, iconName: "database", color: C.blue, accent: C.blue, title: "History Index", lines: ["journals + statements index", "delete-safe · rebuilds at start"], format: "$XDG_STATE_HOME/ibkr/history.db", sensitive: true })}
-  ${matrixTile({ x: xs[3], y: tileY(1), width: colW, height: 118, iconName: "route", color: C.slate, accent: C.slate, title: "Socket, Lock & Logs", lines: ["one daemon per socket scope", "rotated daemon log"], format: "$XDG_RUNTIME_DIR/ibkr" })}
+  ${matrixTile({ x: xs[0], y: tileY(1), width: colW, height: 118, iconName: "fileText", color: C.greenDark, accent: C.greenDark, title: "Evidence & Signer Key", lines: ["Flex XML · broker truth", "private preview signer"], format: "state root · XML/private key", sensitive: true })}
+  ${matrixTile({ x: xs[1], y: tileY(1), width: colW, height: 218, iconName: "database", color: C.green, accent: C.green, title: "daemon.db Authority", lines: ["settings · safety state", "orders · events · tokens", "market · contract · membership"], format: "SQLite WAL · sole live authority", sensitive: true })}
+  ${matrixTile({ x: xs[2], y: tileY(1), width: colW, height: 218, iconName: "refresh", color: C.blue, accent: C.blue, title: "Refreshable Runtime", lines: ["quotes · source fetches", "in-memory derived views", "no JSON cache authority"], format: "memory · refetched/rebuilt" })}
+  ${matrixTile({ x: xs[3], y: tileY(1), width: colW, height: 104, iconName: "route", color: C.slate, accent: C.slate, title: "Socket, Locks & Logs", lines: ["IPC and process locks", "rotated text logs"], format: "runtime/state directories" })}
+  ${matrixTile({ x: xs[3], y: tileY(1) + 114, width: colW, height: 104, iconName: "shieldCheck", color: C.slate, accent: C.slate, title: "Recovery & Rollback", lines: [".head · verified backups", "hashed sealed legacy"], format: "fail-closed · never live fallback", sensitive: true })}
 
   <rect x="551" y="572" width="328" height="24" rx="12" fill="${C.panel}" stroke="${C.line}"/>
   ${icon("exchange", 566, 577, 14, C.slate, 2)}
-  <text x="588" y="588" class="mono">no direct file coupling · typed RPC only</text>
+  <text x="588" y="588" class="mono">typed RPC only · no direct DB/file access</text>
 
   ${ownerCell(2, "mobileCode", C.yellow, "Canary / Device", "separate app authority", C.ink)}
   ${emptyCell(xs[0], tileY(2), colW, 118)}
@@ -409,7 +408,7 @@ function persistenceArchitecture() {
     width: 1280,
     height: 930,
     title: "State Ownership and Lifecycle (ibkr canary)",
-    description: "A matrix maps operator, daemon, Canary or device, and hosted relay ownership across authored authority, durable state, rebuildable observations, and runtime or route state.",
+    description: "A matrix maps operator, daemon, Canary or device, and hosted relay ownership across authored or external authority, durable product authority, refreshable runtime views, and runtime or recovery-only state.",
     body,
   });
 }

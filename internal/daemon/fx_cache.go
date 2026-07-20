@@ -9,9 +9,11 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
@@ -31,12 +33,19 @@ const fxCacheFreshWindow = 15 * time.Minute
 // mid-confirm) whenever one quote times out.
 const fxCacheTTL = 72 * time.Hour
 
-// fxPersistMinInterval throttles best-effort disk flushes of the cache.
+// fxPersistMinInterval throttles best-effort durable flushes of the cache.
 // harvest calls put once per currency on every ~5s app-host poll, and
-// rewriting the file that often buys nothing: a persisted `at` up to a
+// rewriting the projection that often buys nothing: a persisted `at` up to a
 // minute stale merely shifts the fresh/TTL windows by that much after a
 // restart.
 const fxPersistMinInterval = time.Minute
+
+const (
+	fxAuthorityScope    = "market/fx/lkg"
+	fxStateKind         = "fx_rates.current.v1"
+	fxObservationKind   = "fx_rates.snapshot.v1"
+	fxObservationSource = "ibkr.tws.fx_rate"
+)
 
 type fxCachedRate struct {
 	rate float64
@@ -77,10 +86,7 @@ func newFXRateCache() *fxRateCache {
 // nil until the first successful live resolution. Best-effort
 // throughout: a load failure logs and starts cold.
 func newFXRateCacheWithStore(store *fxRateStore, now func() time.Time, logger *Logger) *fxRateCache {
-	c := newFXRateCache()
-	c.now = now
-	c.store = store
-	c.logger = logger
+	c := newFXRateCacheWithStoreCold(store, now, logger)
 	loaded, err := store.load(now())
 	if err != nil && logger != nil {
 		logger.Warnf("fx rate cache: load persisted rates: %v (starting cold)", err)
@@ -90,6 +96,45 @@ func newFXRateCacheWithStore(store *fxRateStore, now func() time.Time, logger *L
 		logger.Infof("fx rate cache: restored %d persisted rate(s)", len(loaded))
 	}
 	return c
+}
+
+// newFXRateCacheWithStoreCold installs the legacy codec path without reading
+// it. Production construction uses this before the persistence lock; the
+// unpublished cutover importer is the only production legacy reader.
+func newFXRateCacheWithStoreCold(store *fxRateStore, now func() time.Time, logger *Logger) *fxRateCache {
+	c := newFXRateCache()
+	if now != nil {
+		c.now = now
+	}
+	c.store = store
+	c.logger = logger
+	return c
+}
+
+// UseCoreStore replaces any eagerly loaded legacy projection with daemon.db.
+// Missing SQLite state is an intentional cold start. Once this succeeds the
+// attached fxRateStore cannot fall back to or mirror fx-rates.json.
+func (f *fxRateCache) UseCoreStore(store *corestore.Store) error {
+	if f == nil {
+		return errors.New("fx rate cache: nil cache")
+	}
+	if store == nil {
+		return errors.New("fx rate cache: nil corestore")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.store == nil {
+		f.store = newFXRateStore("")
+	}
+	loaded, err := f.store.useCoreStore(store, f.now())
+	if err != nil {
+		return err
+	}
+	f.rates = loaded
+	f.degraded = map[string]bool{}
+	f.lastPersist = time.Time{}
+	f.persistFailing = false
+	return nil
 }
 
 func fxPairKey(baseCcy, ccy string) string {
@@ -253,12 +298,12 @@ type fxRatePersistEnvelope struct {
 // restart during IBKR's nightly server-reset window (or a weekend)
 // doesn't start cold and serve nil *_base fields until the first
 // successful live resolution. Rates only — ledger rows carry
-// account-scoped balances and must never reach disk here. Convention
-// mirrors gammaZeroStore: atomic temp+rename, version field with
-// mismatch-is-cold semantics, deliberately not unified into a shared
-// store layer.
+// account-scoped balances and must never be persisted here. Production uses
+// atomic daemon.db state + observation writes; the JSON branch is retained
+// only as a legacy cutover codec and for isolated tests.
 type fxRateStore struct {
-	dir string
+	dir       string // sealed legacy cache; unused after useCoreStore
+	authority *corestore.Store
 }
 
 // newFXRateStore returns a store rooted at dir. The directory is
@@ -268,6 +313,25 @@ func newFXRateStore(dir string) *fxRateStore {
 	return &fxRateStore{dir: dir}
 }
 
+func (s *fxRateStore) useCoreStore(store *corestore.Store, now time.Time) (map[string]fxCachedRate, error) {
+	if s == nil {
+		return nil, errors.New("fx rate store: nil store")
+	}
+	raw, ok, err := loadMarketState(store, fxAuthorityScope, fxStateKind)
+	if err != nil {
+		return nil, fmt.Errorf("read FX authority: %w", err)
+	}
+	loaded := map[string]fxCachedRate{}
+	if ok {
+		loaded, err = decodeFXRateEnvelope(raw, now, true)
+		if err != nil {
+			return nil, fmt.Errorf("decode FX authority: %w", err)
+		}
+	}
+	s.authority = store
+	return loaded, nil
+}
+
 // load returns the persisted rates still within fxCacheTTL of now.
 // Missing file and version mismatch are cold starts (nil, nil); an
 // error surfaces only for I/O problems or JSON corruption. Entries
@@ -275,23 +339,52 @@ func newFXRateStore(dir string) *fxRateStore {
 // would refuse to serve them anyway, and re-seeding them would only
 // keep dead pairs in the file.
 func (s *fxRateStore) load(now time.Time) (map[string]fxCachedRate, error) {
-	data, err := os.ReadFile(filepath.Join(s.dir, fxRateStoreFilename))
+	var data []byte
+	if s.authority != nil {
+		var ok bool
+		var err error
+		data, ok, err = loadMarketState(s.authority, fxAuthorityScope, fxStateKind)
+		if err != nil || !ok {
+			return map[string]fxCachedRate{}, err
+		}
+		return decodeFXRateEnvelope(data, now, true)
+	}
+	var err error
+	data, err = os.ReadFile(filepath.Join(s.dir, fxRateStoreFilename))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read fx rate cache: %w", err)
 	}
+	return decodeFXRateEnvelope(data, now, false)
+}
+
+func decodeFXRateEnvelope(data []byte, now time.Time, strict bool) (map[string]fxCachedRate, error) {
 	var env fxRatePersistEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, fmt.Errorf("decode fx rate cache: %w", err)
 	}
 	if env.Version != fxRatePersistVersion {
+		if strict {
+			return nil, fmt.Errorf("invalid FX rate version %d", env.Version)
+		}
 		return nil, nil
+	}
+	if strict && env.Rates == nil {
+		return nil, errors.New("FX rate authority has no rates map")
 	}
 	rates := make(map[string]fxCachedRate, len(env.Rates))
 	for pair, entry := range env.Rates {
-		if entry.Rate <= 0 || now.Sub(entry.At) > fxCacheTTL {
+		parts := strings.Split(pair, "/")
+		validPair := len(parts) == 2 && fxPairKey(parts[0], parts[1]) == pair
+		if !validPair || entry.Rate <= 0 || entry.At.IsZero() || now.Before(entry.At) {
+			if strict {
+				return nil, fmt.Errorf("invalid FX rate row %q", pair)
+			}
+			continue
+		}
+		if now.Sub(entry.At) > fxCacheTTL {
 			continue
 		}
 		rates[pair] = fxCachedRate{rate: entry.Rate, at: entry.At}
@@ -308,6 +401,34 @@ func (s *fxRateStore) save(rates map[string]fxCachedRate) error {
 	}
 	for pair, entry := range rates {
 		env.Rates[pair] = fxPersistedRate{Rate: entry.rate, At: entry.at}
+	}
+	if s.authority != nil {
+		for pair, entry := range rates {
+			parts := strings.Split(pair, "/")
+			if len(parts) != 2 || fxPairKey(parts[0], parts[1]) != pair || entry.rate <= 0 || entry.at.IsZero() {
+				return fmt.Errorf("invalid FX rate row %q", pair)
+			}
+		}
+		payload, err := json.Marshal(env)
+		if err != nil {
+			return fmt.Errorf("encode FX authority: %w", err)
+		}
+		observedAt := latestFXRateTime(rates)
+		if observedAt.IsZero() {
+			observedAt = time.Now().UTC()
+		}
+		metadata, err := json.Marshal(struct {
+			Version   int    `json:"version"`
+			PairCount int    `json:"pair_count"`
+			Method    string `json:"method"`
+		}{fxRatePersistVersion, len(rates), "IBKR ledger or FX snapshot quote"})
+		if err != nil {
+			return fmt.Errorf("encode FX metadata: %w", err)
+		}
+		return saveMarketState(s.authority, fxAuthorityScope, fxStateKind, corestore.ObservationInput{
+			ScopeKey: fxAuthorityScope, Source: fxObservationSource, Kind: fxObservationKind,
+			ObservedAt: observedAt, ContentType: "application/json", Payload: payload, MetadataJSON: metadata, DecisionEligible: true,
+		})
 	}
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", s.dir, err)
@@ -339,6 +460,16 @@ func (s *fxRateStore) save(rates map[string]fxCachedRate) error {
 		return fmt.Errorf("rename %s: %w", fxRateStoreFilename, err)
 	}
 	return nil
+}
+
+func latestFXRateTime(rates map[string]fxCachedRate) time.Time {
+	var latest time.Time
+	for _, entry := range rates {
+		if entry.at.After(latest) {
+			latest = entry.at
+		}
+	}
+	return latest
 }
 
 // fxRateStoreDefaultDir resolves the shared daemon cache root

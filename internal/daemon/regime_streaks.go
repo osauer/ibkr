@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -51,9 +52,13 @@ type streakStoreFile struct {
 }
 
 const (
-	streakStoreVersion = 1
-	streakStoreFileN   = "regime-streaks.json"
-	streakStoreNotes   = "Per-indicator consecutive-sessions-in-band tally. The daemon classifies bands using the spec's default thresholds (see docs/specs/risk-regime-dashboard.md) — slightly violating the wire-shape posture that derived bands belong in the renderer, accepted because streak persistence requires a stable daemon-side classification. Breadth bands are simplified to value-only (<40=red, 40-55=yellow, >55=green) for streak purposes; the renderer can still apply the spec's 'SPX near highs' modifier for display colour."
+	streakStoreVersion    = 1
+	streakStoreFileN      = "regime-streaks.json"
+	streakStateKind       = "regime_streaks.current.v1"
+	streakObservationKind = "regime_streaks.snapshot.v1"
+	streakAuthorityScope  = "market/regime/streaks"
+	streakSource          = "daemon.regime_classifier"
+	streakStoreNotes      = "Per-indicator consecutive-sessions-in-band tally. The daemon classifies bands using the spec's default thresholds (see docs/specs/risk-regime-dashboard.md) — slightly violating the wire-shape posture that derived bands belong in the renderer, accepted because streak persistence requires a stable daemon-side classification. Breadth bands are simplified to value-only (<40=red, 40-55=yellow, >55=green) for streak purposes; the renderer can still apply the spec's 'SPX near highs' modifier for display colour."
 )
 
 // StreakStore persists the streak counters across daemon restarts.
@@ -68,7 +73,8 @@ const (
 // or reset on a long gap (which the Tick logic handles via session
 // counting).
 type StreakStore struct {
-	dir string
+	dir       string // sealed legacy cache; never used after UseCoreStore
+	authority *corestore.Store
 
 	mu      sync.Mutex
 	entries map[string]StreakEntry
@@ -86,6 +92,23 @@ func NewStreakStore(dir string) *StreakStore {
 	}
 }
 
+// UseCoreStore makes daemon.db the sole runtime persistence authority and
+// discards any legacy state that may have been loaded before attachment.
+func (s *StreakStore) UseCoreStore(store *corestore.Store) error {
+	if s == nil {
+		return fmt.Errorf("regime streaks: nil store")
+	}
+	if store == nil {
+		return fmt.Errorf("regime streaks: nil corestore")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authority = store
+	s.entries = map[string]StreakEntry{}
+	s.loaded = false
+	return nil
+}
+
 // load reads the on-disk file into s.entries. Idempotent — subsequent
 // calls after the first are no-ops. Caller MUST hold s.mu.
 //
@@ -98,15 +121,26 @@ func (s *StreakStore) loadLocked() {
 		return
 	}
 	s.loaded = true // mark loaded even on parse failure, so we don't retry every call
-	path := filepath.Join(s.dir, streakStoreFileN)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			// Surface I/O errors via a logger if one is wired; for now
-			// the entries map stays empty and counters bootstrap fresh.
-			_ = err
+	var data []byte
+	if s.authority != nil {
+		var ok bool
+		var err error
+		data, ok, err = loadMarketState(s.authority, streakAuthorityScope, streakStateKind)
+		if err != nil || !ok {
+			return
 		}
-		return
+	} else {
+		path := filepath.Join(s.dir, streakStoreFileN)
+		var err error
+		data, err = os.ReadFile(path)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				// Legacy import/test mode deliberately degrades corrupt files
+				// to an empty state; runtime authority errors never fall back.
+				_ = err
+			}
+			return
+		}
 	}
 	var f streakStoreFile
 	if err := json.Unmarshal(data, &f); err != nil {
@@ -125,6 +159,36 @@ func (s *StreakStore) loadLocked() {
 // authoritative — a failed write just means the next daemon restart
 // loses the streak counters and they bootstrap fresh.
 func (s *StreakStore) saveLocked() error {
+	now := time.Now().UTC()
+	file := streakStoreFile{
+		Version: streakStoreVersion,
+		AsOf:    now,
+		Notes:   streakStoreNotes,
+		Entries: s.entries,
+	}
+	if s.authority != nil {
+		payload, err := json.Marshal(file)
+		if err != nil {
+			return fmt.Errorf("encode streak state: %w", err)
+		}
+		metadata, err := json.Marshal(struct {
+			Version    int       `json:"version"`
+			AsOf       time.Time `json:"as_of"`
+			EntryCount int       `json:"entry_count"`
+			Method     string    `json:"method"`
+		}{
+			Version: streakStoreVersion, AsOf: now, EntryCount: len(s.entries),
+			Method: "versioned daemon regime-band streak classifier",
+		})
+		if err != nil {
+			return fmt.Errorf("encode streak metadata: %w", err)
+		}
+		return saveMarketState(s.authority, streakAuthorityScope, streakStateKind, corestore.ObservationInput{
+			ScopeKey: streakAuthorityScope, Source: streakSource, Kind: streakObservationKind,
+			ObservedAt: now, ContentType: "application/json",
+			Payload: payload, MetadataJSON: metadata, DecisionEligible: true,
+		})
+	}
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", s.dir, err)
 	}
@@ -142,12 +206,7 @@ func (s *StreakStore) saveLocked() error {
 	}()
 	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(streakStoreFile{
-		Version: streakStoreVersion,
-		AsOf:    time.Now().UTC(),
-		Notes:   streakStoreNotes,
-		Entries: s.entries,
-	}); err != nil {
+	if err := enc.Encode(file); err != nil {
 		return fmt.Errorf("encode streaks: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

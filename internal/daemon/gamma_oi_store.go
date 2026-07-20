@@ -11,11 +11,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 )
 
 const (
-	gammaOIPersistVersion = 1
-	gammaOIStateFilename  = "gamma-open-interest.json"
+	gammaOIPersistVersion  = 1
+	gammaOIStateFilename   = "gamma-open-interest.json"
+	gammaOIStateKind       = "gamma_open_interest.current.v1"
+	gammaOIObservationKind = "gamma_open_interest.snapshot.v1"
+	gammaOIAuthorityScope  = "market/gamma/open-interest"
+	gammaOISource          = "ibkr.tws.generic_tick_101"
 	// OI is published once per trading day and remains useful through the next
 	// pre-market/open, including a normal weekend gap. Older observations are
 	// too stale for an algo signal and must be treated as unknown.
@@ -23,8 +29,9 @@ const (
 )
 
 type gammaOpenInterestStore struct {
-	mu  sync.Mutex
-	dir string
+	mu        sync.Mutex
+	dir       string // sealed legacy cache; never used after UseCoreStore
+	authority *corestore.Store
 }
 
 type gammaOIStateEnvelope struct {
@@ -49,6 +56,19 @@ type gammaOIRecord struct {
 
 func newGammaOpenInterestStore(dir string) *gammaOpenInterestStore {
 	return &gammaOpenInterestStore{dir: dir}
+}
+
+func (s *gammaOpenInterestStore) UseCoreStore(store *corestore.Store) error {
+	if s == nil {
+		return errors.New("gamma OI: nil store")
+	}
+	if store == nil {
+		return errors.New("gamma OI: nil corestore")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authority = store
+	return nil
 }
 
 func gammaOIKey(underlying, tradingClass, expiryYMD string, strike float64, right string) string {
@@ -88,13 +108,27 @@ func (s *gammaOpenInterestStore) Load() (map[string]gammaOIRecord, error) {
 }
 
 func (s *gammaOpenInterestStore) loadLocked() (map[string]gammaOIRecord, error) {
-	path := filepath.Join(s.dir, gammaOIStateFilename)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	var data []byte
+	if s.authority != nil {
+		var ok bool
+		var err error
+		data, ok, err = loadMarketState(s.authority, gammaOIAuthorityScope, gammaOIStateKind)
+		if err != nil {
+			return nil, fmt.Errorf("read gamma OI authority: %w", err)
+		}
+		if !ok {
 			return map[string]gammaOIRecord{}, nil
 		}
-		return nil, fmt.Errorf("read gamma OI state: %w", err)
+	} else {
+		path := filepath.Join(s.dir, gammaOIStateFilename)
+		var err error
+		data, err = os.ReadFile(path)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return map[string]gammaOIRecord{}, nil
+			}
+			return nil, fmt.Errorf("read legacy gamma OI state: %w", err)
+		}
 	}
 	var env gammaOIStateEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
@@ -128,10 +162,36 @@ func (s *gammaOpenInterestStore) SaveMerged(updates map[string]gammaOIRecord) er
 		}
 		current[key] = rec
 	}
+	now := time.Now().UTC()
 	env := gammaOIStateEnvelope{
 		Version:   gammaOIPersistVersion,
-		UpdatedAt: time.Now(),
+		UpdatedAt: now,
 		Contracts: current,
+	}
+	if s.authority != nil {
+		payload, err := json.Marshal(env)
+		if err != nil {
+			return fmt.Errorf("encode gamma OI authority: %w", err)
+		}
+		metadata, err := json.Marshal(struct {
+			Version       int       `json:"version"`
+			UpdatedAt     time.Time `json:"updated_at"`
+			ContractCount int       `json:"contract_count"`
+			UpdateCount   int       `json:"update_count"`
+			Method        string    `json:"method"`
+		}{
+			Version: gammaOIPersistVersion, UpdatedAt: now,
+			ContractCount: len(current), UpdateCount: len(updates),
+			Method: "IBKR generic tick 101 openInterest",
+		})
+		if err != nil {
+			return fmt.Errorf("encode gamma OI metadata: %w", err)
+		}
+		return saveMarketState(s.authority, gammaOIAuthorityScope, gammaOIStateKind, corestore.ObservationInput{
+			ScopeKey: gammaOIAuthorityScope, Source: gammaOISource,
+			Kind: gammaOIObservationKind, ObservedAt: now,
+			ContentType: "application/json", Payload: payload, MetadataJSON: metadata, DecisionEligible: true,
+		})
 	}
 	return writeGammaAtomicJSON(s.dir, gammaOIStateFilename, env)
 }

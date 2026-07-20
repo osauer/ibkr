@@ -84,6 +84,9 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 			Action:  action,
 		})
 	}
+	if blocker, blocked := s.authorityTradingBlocker(); blocked {
+		status.Blockers = appendTradingBlockerOnce(status.Blockers, blocker)
+	}
 	summary, journalErr := s.orderJournalSummary()
 	if journalErr != nil {
 		add("order_journal_unavailable", "order writes require a writable local order journal", "Fix the XDG state directory permissions before enabling trading.")

@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"context"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -111,6 +114,38 @@ func TestStreakStore_PersistAcrossInstances(t *testing.T) {
 	info := s2.Get(StreakKeyVIXTerm)
 	if info == nil || info.Sessions != 2 || info.Since != "2026-05-20" {
 		t.Errorf("reload got %+v, want sessions=2 since=2026-05-20", info)
+	}
+}
+
+func TestStreakStoreUsesSQLiteWithoutLegacyFallback(t *testing.T) {
+	legacyDir := t.TempDir()
+	authority := openMarketTestCoreStore(t)
+	s1 := NewStreakStore(legacyDir)
+	if err := s1.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	day1 := mustParseNY(t, "2026-05-20 10:00 EST")
+	day2 := mustParseNY(t, "2026-05-21 10:00 EST")
+	s1.Tick(StreakKeyVIXTerm, 0.85, "green", day1)
+	s1.Tick(StreakKeyVIXTerm, 0.86, "green", day2)
+	entries, err := os.ReadDir(legacyDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("legacy streak file was written: entries=%v err=%v", entries, err)
+	}
+
+	s2 := NewStreakStore(legacyDir)
+	if err := s2.UseCoreStore(authority); err != nil {
+		t.Fatalf("restart UseCoreStore: %v", err)
+	}
+	info := s2.Get(StreakKeyVIXTerm)
+	if info == nil || info.Sessions != 2 || info.Since != "2026-05-20" {
+		t.Fatalf("SQLite reload got %+v", info)
+	}
+	observations, err := authority.ListObservations(context.Background(), corestore.ObservationQuery{
+		ScopeKey: streakAuthorityScope, Source: streakSource, Kind: streakObservationKind,
+	})
+	if err != nil || len(observations) != 2 {
+		t.Fatalf("observations=%d err=%v", len(observations), err)
 	}
 }
 

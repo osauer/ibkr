@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -58,6 +59,32 @@ func TestGammaSkewDiagJournalAppendsAnnotatedSlices(t *testing.T) {
 	}
 	if got := len(readGammaSkewDiagLines(t, j.path)); got != 6 {
 		t.Fatalf("got %d lines after second append, want 6 (append, not truncate)", got)
+	}
+}
+
+func TestGammaSkewDiagJournalUsesSQLiteWithoutLegacyFallback(t *testing.T) {
+	legacyPath := filepath.Join(t.TempDir(), "diag.jsonl")
+	authority := openMarketTestCoreStore(t)
+	j := &gammaSkewDiagJournal{path: legacyPath}
+	if err := j.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	now := time.Date(2026, 6, 2, 15, 0, 0, 0, time.UTC)
+	combined := rankableCombinedGammaFixture(now.Add(-5 * time.Minute))
+	if err := j.append(now, rpc.GammaZeroScopeCombined, "2026-06-02", combined); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("runtime append touched legacy file: %v", err)
+	}
+	for _, slice := range []string{"SPY+SPX", "SPX", "SPY"} {
+		observations, err := authority.ListObservations(context.Background(), corestore.ObservationQuery{
+			ScopeKey: gammaSkewDiagScopeKey(rpc.GammaZeroScopeCombined, slice),
+			Source:   "ibkr.gamma.compute", Kind: gammaSkewDiagObservationKind,
+		})
+		if err != nil || len(observations) != 1 || len(observations[0].MetadataJSON) == 0 {
+			t.Fatalf("slice %s observations=%d err=%v", slice, len(observations), err)
+		}
 	}
 }
 

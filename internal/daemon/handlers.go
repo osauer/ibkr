@@ -3656,6 +3656,7 @@ func (s *Server) subsystemHealth(connected bool, farms []ibkrlib.DataFarmStatus)
 		gatewayStatus = "unavailable"
 	}
 	out := []rpc.SubsystemHealth{
+		s.authoritySubsystemHealth(),
 		{Name: "watchlist", Status: "ready", Message: "list-only path is local; quote enrichment requires gateway"},
 		statusSubsystemFromReadiness("quote", marketDataFarmReadiness(connected, farms, "quotes may time out")),
 		statusSubsystemFromReadiness("scanner", marketDataFarmReadiness(connected, farms, "scanner requests may time out")),

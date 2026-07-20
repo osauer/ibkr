@@ -2568,6 +2568,10 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 		cacheKey := optionContractKey(contract.Symbol, contract.TradingClass, contract.Expiry, contract.Strike, contract.Right)
 		detail := ContractDetailsLite{
 			Symbol:       contract.Symbol,
+			SecType:      contract.SecType,
+			Expiry:       contract.Expiry,
+			Strike:       contract.Strike,
+			Right:        contract.Right,
 			Exchange:     "",
 			PrimaryExch:  contract.Exchange,
 			ConID:        conID,

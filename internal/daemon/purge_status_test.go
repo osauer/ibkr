@@ -16,8 +16,8 @@ func TestPurgeStatusFiltersJournalBackedPurgeOrders(t *testing.T) {
 
 	now := time.Date(2026, 6, 4, 18, 45, 0, 0, time.UTC)
 	srv := &Server{
-		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
-		endpoint:     discover.Endpoint{Host: "127.0.0.1", Port: 4002, Account: "DU123"},
+		orderJournal: newTestOrderJournalStore(t, filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		endpoint:     discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU123"},
 		now:          func() time.Time { return now },
 	}
 	events := []orderJournalEvent{
@@ -29,7 +29,9 @@ func TestPurgeStatusFiltersJournalBackedPurgeOrders(t *testing.T) {
 			LegID:           "leg_sap",
 			OrderRef:        "purge-order-1",
 			ReservedOrderID: 1001,
+			ClientID:        31,
 			Account:         "DU123",
+			Endpoint:        "127.0.0.1:4002",
 			Mode:            rpc.AccountModePaper,
 			Symbol:          "SAP",
 			SecType:         "STK",
@@ -47,6 +49,10 @@ func TestPurgeStatusFiltersJournalBackedPurgeOrders(t *testing.T) {
 			PurgeID:         "purge_a",
 			OrderRef:        "purge-order-1",
 			ReservedOrderID: 1001,
+			ClientID:        31,
+			Account:         "DU123",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            rpc.AccountModePaper,
 			Status:          "Filled",
 			Filled:          1,
 			Remaining:       0,
@@ -57,7 +63,10 @@ func TestPurgeStatusFiltersJournalBackedPurgeOrders(t *testing.T) {
 			Type:            orderJournalEventStatusUpdated,
 			OrderRef:        "normal-order",
 			ReservedOrderID: 1002,
+			ClientID:        31,
 			Account:         "DU123",
+			Endpoint:        "127.0.0.1:4002",
+			Mode:            rpc.AccountModePaper,
 			Symbol:          "MSFT",
 			SecType:         "STK",
 			Action:          rpc.OrderActionBuy,
@@ -95,8 +104,8 @@ func TestPurgeStatusIncludesRestoreOrders(t *testing.T) {
 
 	now := time.Date(2026, 6, 4, 18, 50, 0, 0, time.UTC)
 	srv := &Server{
-		orderJournal: newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
-		endpoint:     discover.Endpoint{Host: "127.0.0.1", Port: 4002, Account: "DU123"},
+		orderJournal: newTestOrderJournalStore(t, filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		endpoint:     discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU123"},
 		now:          func() time.Time { return now },
 	}
 	if err := srv.orderJournal.Append(orderJournalEvent{
@@ -107,7 +116,9 @@ func TestPurgeStatusIncludesRestoreOrders(t *testing.T) {
 		LegID:           "leg_sap",
 		OrderRef:        "restore-order-1",
 		ReservedOrderID: 1002,
+		ClientID:        31,
 		Account:         "DU123",
+		Endpoint:        "127.0.0.1:4002",
 		Mode:            rpc.AccountModePaper,
 		Symbol:          "SAP",
 		SecType:         "STK",

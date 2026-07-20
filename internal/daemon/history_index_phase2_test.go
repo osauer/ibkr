@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -240,20 +242,20 @@ func TestHistoryIndexProposalOutcomeRoundTrip(t *testing.T) {
 	})
 }
 
-// TestHistoryIndexOrderJournalRoundTrip drives the REAL order journal
-// writer (Append → onAppend kick) into order_events.
-func TestHistoryIndexOrderJournalRoundTrip(t *testing.T) {
+// TestSQLiteOrderJournalRoundTrip drives the real order adapter directly
+// against daemon.db. history.db and JSONL are not freshness or fallback
+// layers after the authority cutover.
+func TestSQLiteOrderJournalRoundTrip(t *testing.T) {
 	s := newHistoryIndexServer(t)
+	authority := attachFreshOrderTestAuthority(t, s)
 	if err := s.orderJournal.Append(orderJournalEvent{
 		At: time.Now().UTC(), Type: orderJournalEventPreviewed,
 		OrderRef: "ord-rt", PreviewTokenID: "tok-rt", ReservedOrderID: 42,
+		Endpoint: "127.0.0.1:4002", ClientID: 31,
 		Account: "UTEST", Mode: "paper", SendState: orderSendStateReserved,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	waitForHistory(t, func() (bool, error) {
-		return s.historyIndex.Load().OrdersFresh(), nil
-	})
 	events, ok := s.indexedOrderEvents("test", nil, nil)
 	if !ok || len(events) != 1 {
 		t.Fatalf("indexed events = %d ok=%v, want 1/true", len(events), ok)
@@ -262,27 +264,21 @@ func TestHistoryIndexOrderJournalRoundTrip(t *testing.T) {
 	if e.OrderRef != "ord-rt" || e.PreviewTokenID != "tok-rt" || e.ReservedOrderID != 42 || e.Account != "UTEST" || e.Mode != "paper" {
 		t.Fatalf("order event did not round-trip: %+v", e)
 	}
+	if _, err := os.Stat(s.orderJournal.Path); !os.IsNotExist(err) {
+		t.Fatalf("SQLite append touched legacy order journal: %v", err)
+	}
+	_ = authority
 }
 
-// TestHistoryRotationSettingsAndMaintenanceGate covers the D11 settings:
-// validation, null clears, snapshot round-trip, and the maintenance pass
-// honoring the runtime disable.
-func TestHistoryRotationSettingsAndMaintenanceGate(t *testing.T) {
+// TestHistoryRotationSettingsRetired pins that the former JSONL rotation
+// controls are no longer writable or active while their response shape stays
+// present as an explicit read-only compatibility disclosure.
+func TestHistoryRotationSettingsRetired(t *testing.T) {
 	next := &platformSettingsData{Version: 1}
-	if err := applySettingsKey(next, "history.rotation.keep_raw_months", json.RawMessage(`0`)); err == nil {
-		t.Fatal("keep_raw_months 0 accepted; must be >= 1")
-	}
-	if err := applySettingsKey(next, "history.rotation.keep_raw_months", json.RawMessage(`3`)); err != nil {
-		t.Fatal(err)
-	}
-	if next.History.Rotation.KeepRawMonths == nil || *next.History.Rotation.KeepRawMonths != 3 {
-		t.Fatalf("keep_raw_months = %v, want 3", next.History.Rotation.KeepRawMonths)
-	}
-	if err := applySettingsKey(next, "history.rotation.keep_raw_months", json.RawMessage(`null`)); err != nil {
-		t.Fatal(err)
-	}
-	if next.History.Rotation.KeepRawMonths != nil {
-		t.Fatal("null did not clear keep_raw_months")
+	for _, key := range []string{"history.rotation.enabled", "history.rotation.keep_raw_months"} {
+		if err := applySettingsKey(next, key, json.RawMessage(`true`)); err == nil {
+			t.Fatalf("retired key %q remained writable", key)
+		}
 	}
 	if err := applySettingsKey(next, "canary.journal.enabled", json.RawMessage(`false`)); err != nil {
 		t.Fatal(err)
@@ -291,79 +287,53 @@ func TestHistoryRotationSettingsAndMaintenanceGate(t *testing.T) {
 		t.Fatal("canary.journal.enabled=false did not apply")
 	}
 
-	// Snapshot round-trip: defaults and overrides render with the
-	// access/source contract.
 	s := newHistoryIndexServer(t)
 	out := s.platformSettingsSnapshot(nil)
-	if !out.History.Rotation.Enabled.Value || out.History.Rotation.KeepRawMonths.Value != 2 {
-		t.Fatalf("default history settings = %+v", out.History)
+	if out.History.Rotation.Enabled.Value || out.History.Rotation.Enabled.Access != rpc.SettingsAccessRead || out.History.Rotation.KeepRawMonths.Value != 0 {
+		t.Fatalf("retired history settings = %+v", out.History)
 	}
 	if !out.Canary.Journal.Enabled.Value {
 		t.Fatalf("default canary settings = %+v", out.Canary)
 	}
-	if err := s.platformSettings.update(func(next *platformSettingsData) error {
-		keep := 5
-		disabled := false
-		next.History.Rotation.KeepRawMonths = &keep
-		next.History.Rotation.Enabled = &disabled
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	out = s.platformSettingsSnapshot(nil)
-	if out.History.Rotation.Enabled.Value || out.History.Rotation.KeepRawMonths.Value != 5 {
-		t.Fatalf("overridden history settings = %+v", out.History)
-	}
-
-	// The maintenance pass honors the runtime disable.
 	if s.historyMaintenancePass(context.Background()) {
-		t.Fatal("maintenance pass ran while rotation is disabled")
-	}
-	if err := s.platformSettings.update(func(next *platformSettingsData) error {
-		enabled := true
-		next.History.Rotation.Enabled = &enabled
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !s.historyMaintenancePass(context.Background()) {
-		t.Fatal("maintenance pass skipped while rotation is enabled")
+		t.Fatal("retired history maintenance pass ran")
 	}
 }
 
-// TestPurgeEvidenceInvariant is D12.2: a journaled purge-shaped flow only
-// ever grows the order journal, and its purge_id-carrying rows land in
-// order_events untouched.
+// TestPurgeEvidenceInvariant is D12.2: a purge-shaped flow grows only the
+// authoritative SQLite event stream, and purge_id rows remain intact.
 func TestPurgeEvidenceInvariant(t *testing.T) {
 	s := newHistoryIndexServer(t)
-	journalPath := s.orderJournal.Path
-	sizeAt := func() int64 {
-		st, err := os.Stat(journalPath)
-		if err != nil {
-			return 0
-		}
-		return st.Size()
-	}
-	var last int64
+	attachFreshOrderTestAuthority(t, s)
+	last := 0
 	appendAndCheck := func(ev orderJournalEvent) {
 		t.Helper()
 		if err := s.orderJournal.Append(ev); err != nil {
 			t.Fatal(err)
 		}
-		if now := sizeAt(); now <= last {
-			t.Fatalf("order journal shrank or stalled: %d -> %d", last, now)
-		} else {
-			last = now
+		rows, err := s.orderJournal.LoadEvents(0)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if len(rows) <= last {
+			t.Fatalf("authoritative order stream stalled: %d -> %d", last, len(rows))
+		}
+		last = len(rows)
 	}
 	now := time.Now().UTC()
-	appendAndCheck(orderJournalEvent{At: now, Type: orderJournalEventPreviewed, OrderRef: "purge-ord-1", PurgeID: "purge-20260720-1", Account: "UTEST", Mode: "paper"})
-	appendAndCheck(orderJournalEvent{At: now.Add(time.Second), Type: orderJournalEventSendAttempted, OrderRef: "purge-ord-1", PurgeID: "purge-20260720-1", ReservedOrderID: 900, Account: "UTEST", Mode: "paper", SendState: orderSendStateSendAttempted})
-	appendAndCheck(orderJournalEvent{At: now.Add(2 * time.Second), Type: orderJournalEventStatusUpdated, OrderRef: "purge-ord-1", PurgeID: "purge-20260720-1", Status: "Filled", SendState: orderSendStateTerminal, Account: "UTEST", Mode: "paper"})
+	route := orderJournalEvent{Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "UTEST", Mode: "paper"}
+	first := route
+	first.At, first.Type, first.OrderRef, first.PurgeID = now, orderJournalEventPreviewed, "purge-ord-1", "purge-20260720-1"
+	appendAndCheck(first)
+	second := route
+	second.At, second.Type, second.OrderRef, second.PurgeID = now.Add(time.Second), orderJournalEventSendAttempted, "purge-ord-1", "purge-20260720-1"
+	second.ReservedOrderID, second.SendState = 900, orderSendStateSendAttempted
+	appendAndCheck(second)
+	third := route
+	third.At, third.Type, third.OrderRef, third.PurgeID = now.Add(2*time.Second), orderJournalEventStatusUpdated, "purge-ord-1", "purge-20260720-1"
+	third.Status, third.SendState = "Filled", orderSendStateTerminal
+	appendAndCheck(third)
 
-	waitForHistory(t, func() (bool, error) {
-		return s.historyIndex.Load().OrdersFresh(), nil
-	})
 	events, ok := s.indexedOrderEvents("test", nil, nil)
 	if !ok {
 		t.Fatal("index not serving after purge-shaped appends")
@@ -377,7 +347,31 @@ func TestPurgeEvidenceInvariant(t *testing.T) {
 	if purgeRows != 3 {
 		t.Fatalf("purge_id rows in order_events = %d, want 3", purgeRows)
 	}
-	if now := sizeAt(); now != last {
-		t.Fatalf("ingest changed the journal: %d != %d", now, last)
+	if _, err := os.Stat(s.orderJournal.Path); !os.IsNotExist(err) {
+		t.Fatalf("SQLite purge evidence touched legacy journal: %v", err)
 	}
+}
+
+func attachFreshOrderTestAuthority(t *testing.T, s *Server) *corestore.Store {
+	t.Helper()
+	authority, err := corestore.Open(t.Context(), corestore.Options{Path: filepath.Join(privateTestDir(t), "daemon.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeFreshTradingAuthority(t.Context(), authority); err != nil {
+		_ = authority.Close()
+		t.Fatal(err)
+	}
+	if err := s.orderJournal.UseCoreStore(authority); err != nil {
+		_ = authority.Close()
+		t.Fatal(err)
+	}
+	if s.purgeLedger != nil {
+		if err := s.purgeLedger.UseCoreStore(authority); err != nil {
+			_ = authority.Close()
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	return authority
 }

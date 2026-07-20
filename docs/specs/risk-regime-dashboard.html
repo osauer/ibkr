@@ -342,11 +342,11 @@ same posture violation as the absent-SPY rule above forbids). The pooled
 numbers stay visible in <code>quality.coverage</code> as diagnostics, and the SPX
 slice's own verdict reaches the combined node through the <code>spx_coverage</code>
 gate. One consequence: a SPY slice ranking inside the disclosed skew window
-votes in the combined band weighting. Every successful compute appends
-per-slice skew diagnostics (per-expiry R² and residual RMS, coverage,
-rankability) to <code>$XDG_STATE_HOME/ibkr/gamma-skew-diagnostics.jsonl</code>, offline
-calibration input for these heuristic bars; nothing reads it at runtime and
-it is safe to delete.</p>
+votes in the combined band weighting. Every successful compute appends an
+immutable typed gamma-skew observation to <code>$XDG_STATE_HOME/ibkr/daemon.db</code>
+(per-expiry R² and residual RMS, coverage, rankability). These retained
+observations are offline calibration input for the heuristic bars; live
+decisions do not read the corpus, and it is not a delete-safe cache.</p>
 <h3 id="breadth">Breadth</h3>
 <p>This cluster watches how many S&amp;P 500 stocks are participating. A rally led by
 many stocks is healthier than a rally carried by a few mega-caps. Weak breadth
@@ -638,17 +638,16 @@ phases; missing SPX OI is unexpected data-quality evidence even pre-market,
 after-hours, overnight, or on closed-session cache reads.</p>
 <p>MOVE/rates-vol is outside the live surface until a verified IBKR contract or
 licensed official connector exists. Do not proxy it with ETFs or futures.</p>
-<h2 id="decisions-journal">Decisions Journal</h2>
-<p>Every decision-relevant regime snapshot appends one line to
-<code>$XDG_STATE_HOME/ibkr/regime-decisions.jsonl</code>: raw values, bands, depth
+<h2 id="decision-events">Decision Events</h2>
+<p>Every decision-relevant regime snapshot appends one typed event to the daemon's
+sole live authority, <code>$XDG_STATE_HOME/ibkr/daemon.db</code>: raw values, bands, depth
 metrics, streaks, freshness, eligibility, cluster tallies, lifecycle decision,
-and governor records. Lines dedupe on the snapshot's semantic fingerprint with
-an hourly heartbeat. The file is append-only, never read at runtime, and safe
-to delete, the same contract as <code>gamma-skew-diagnostics.jsonl</code>. It is the
-forward-collection corpus that makes the <code>pending_backtest</code> thresholds
-calibratable: a threshold set drops <code>pending_backtest</code> only with months of
-journal coverage, measured false-alarm/recall rates against labeled episodes,
-and a version-label bump documented here. Disable via
+and governor records. Events dedupe on the snapshot's semantic fingerprint with
+an hourly heartbeat. The append-only event corpus powers typed history queries
+and makes the <code>pending_backtest</code> thresholds calibratable; it is not a separate
+file or a delete-safe cache. A threshold set drops <code>pending_backtest</code> only with
+months of coverage, measured false-alarm/recall rates against labeled episodes,
+and a version-label bump documented here. Disable collection via
 <code>ibkr settings set regime.journal.enabled=false</code>.</p>
 <h2 id="backtesting">Backtesting</h2>
 <p>The active backtest sequence, tuning gates, and source-data backlog live in

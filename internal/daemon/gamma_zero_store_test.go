@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -71,6 +72,44 @@ func TestGammaZeroStore_RoundTrip(t *testing.T) {
 	}
 	if got.Method != want.Method {
 		t.Errorf("Method: got %q want %q", got.Method, want.Method)
+	}
+}
+
+func TestGammaZeroStore_CoreStoreIsSoleRuntimeAuthority(t *testing.T) {
+	legacyDir := t.TempDir()
+	authority := openMarketTestCoreStore(t)
+	store := newGammaZeroStore(legacyDir)
+	if err := store.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	loc, _ := time.LoadLocation("America/New_York")
+	now := time.Date(2026, 5, 22, 10, 0, 0, 0, loc)
+	want := helperGammaResult(now)
+	want.LegCount = 4321
+	if err := store.Save(rpc.GammaZeroScopeCombined, nySessionKey(now), want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyDir, gammaZeroStoreFilename(rpc.GammaZeroScopeCombined))); !os.IsNotExist(err) {
+		t.Fatalf("runtime save touched legacy file: %v", err)
+	}
+
+	restarted := newGammaZeroStore(legacyDir)
+	if err := restarted.UseCoreStore(authority); err != nil {
+		t.Fatalf("restart UseCoreStore: %v", err)
+	}
+	got, err := restarted.Load(rpc.GammaZeroScopeCombined, now)
+	if err != nil || got == nil || got.LegCount != want.LegCount {
+		t.Fatalf("SQLite round trip: got=%+v err=%v", got, err)
+	}
+	observations, err := authority.ListObservations(context.Background(), corestore.ObservationQuery{
+		ScopeKey: gammaZeroAuthorityScope(rpc.GammaZeroScopeCombined),
+		Source:   gammaZeroSource, Kind: gammaZeroObservationKind,
+	})
+	if err != nil {
+		t.Fatalf("ListObservations: %v", err)
+	}
+	if len(observations) != 1 || len(observations[0].Payload) == 0 || len(observations[0].MetadataJSON) == 0 {
+		t.Fatalf("persisted observation = %+v", observations)
 	}
 }
 

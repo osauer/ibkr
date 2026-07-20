@@ -61,8 +61,8 @@ retry/backoff stays code-owned engineering constants.
 |---|---|---|---|---|
 | External cash flows, dividends, interest, fees, transfers, corporate actions | Flex statement line items | `internal/flexstmt` typed records | Final per report date; later restatements supersede by (account-day, line id) | statement source `unavailable`; recon report not producible |
 | Daily equity curve (EUR base) | Flex `EquitySummaryInBase` | equity-series store | Same restatement rule | runtime observations remain, divergence metric marked unknown |
-| Declared flows | `capital-events.jsonl` | existing v1 events | Provisional until matched | n/a (local) |
-| Order intent and lifecycle | `order-journal.jsonl` | existing v1 events | Never broker truth | n/a (local) |
+| Declared flows | daemon.db `capital_events` / append-only event log | existing v1 typed events | Provisional until matched | storage unavailable; no file fallback |
+| Order intent and lifecycle | daemon.db order events and projections | existing typed order lifecycle | Never broker truth | storage unavailable; broker writes fail closed |
 | Recon verdict | daemon recon engine | `rpc` recon report (id, fingerprint, coverage window, exceptions) | Regenerated per ingest; report id pins content | absent → reconcile refuses, clock runs out, tier degrades as today |
 | Reconcile sign-off | human, via gated verb | journal entry referencing report id + resolutions | Final once journaled | one-shot override on `capital.max_unreconciled_days` extends the clock during outages (journaled, expiring, human-only) |
 

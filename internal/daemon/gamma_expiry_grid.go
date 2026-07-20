@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
@@ -32,7 +33,8 @@ import (
 // matters because the June 9 daemon restarted mid-outage; a memory-only
 // grid would not have survived to help.
 type expiryGridStore struct {
-	dir string
+	dir       string // sealed legacy cache; never used after UseCoreStore
+	authority *corestore.Store
 
 	mu  sync.Mutex
 	mem map[string]expiryGridEntry
@@ -59,6 +61,16 @@ type expiryGridPersistEnvelope struct {
 
 const currentExpiryGridPersistVersion = 1
 
+const (
+	expiryGridStateKind       = "gamma_expiry_grid.current.v1"
+	expiryGridObservationKind = "gamma_expiry_grid.snapshot.v1"
+	expiryGridSource          = "ibkr.tws.secdef_opt_params"
+)
+
+func expiryGridAuthorityScope(sym string) string {
+	return "market/gamma/expiry-grid/" + normSym(sym)
+}
+
 // gammaExpiryGridMaxAge bounds how old a fallback grid may be. Five
 // calendar days covers a long weekend plus a full-day outage; CBOE
 // lists SPX dailies weeks out, so even the oldest acceptable grid
@@ -71,6 +83,23 @@ func newExpiryGridStore(dir string) *expiryGridStore {
 		mem:         map[string]expiryGridEntry{},
 		diskChecked: map[string]bool{},
 	}
+}
+
+func (g *expiryGridStore) UseCoreStore(store *corestore.Store) error {
+	if g == nil {
+		return fmt.Errorf("expiry grid: nil store")
+	}
+	if store == nil {
+		return fmt.Errorf("expiry grid: nil corestore")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.authority = store
+	// An attachment is an authority boundary: discard anything that may have
+	// been hydrated from legacy files before the daemon acquired its lock.
+	g.mem = map[string]expiryGridEntry{}
+	g.diskChecked = map[string]bool{}
+	return nil
 }
 
 // noteFetched records a successful live fetch, in memory and on disk.
@@ -130,16 +159,27 @@ func (g *expiryGridStore) heldLocked(sym string) (expiryGridEntry, bool) {
 	if entry, ok := g.mem[sym]; ok {
 		return entry, true
 	}
-	if g.diskChecked[sym] || g.dir == "" {
+	if g.diskChecked[sym] || (g.authority == nil && g.dir == "") {
 		return expiryGridEntry{}, false
 	}
 	g.diskChecked[sym] = true
-	data, err := os.ReadFile(filepath.Join(g.dir, expiryGridFilename(sym)))
-	if err != nil {
-		// Missing file is the normal cold case; read errors degrade to
-		// "no fallback available" — the caller already holds the live
-		// fetch error, which is the one worth surfacing.
-		return expiryGridEntry{}, false
+	var data []byte
+	if g.authority != nil {
+		var ok bool
+		var err error
+		data, ok, err = loadMarketState(g.authority, expiryGridAuthorityScope(sym), expiryGridStateKind)
+		if err != nil || !ok {
+			return expiryGridEntry{}, false
+		}
+	} else {
+		var err error
+		data, err = os.ReadFile(filepath.Join(g.dir, expiryGridFilename(sym)))
+		if err != nil {
+			// Missing file is the normal cold case; read errors degrade to
+			// "no fallback available" — the caller already holds the live
+			// fetch error, which is the one worth surfacing.
+			return expiryGridEntry{}, false
+		}
 	}
 	var env expiryGridPersistEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
@@ -157,6 +197,30 @@ func (g *expiryGridStore) heldLocked(sym string) (expiryGridEntry, bool) {
 // convention there, the small duplication is preferred over a generic
 // shared store layer. Caller holds g.mu.
 func (g *expiryGridStore) writeAtomicLocked(sym string, env expiryGridPersistEnvelope) error {
+	if g.authority != nil {
+		payload, err := json.Marshal(env)
+		if err != nil {
+			return fmt.Errorf("encode expiry grid authority for %s: %w", sym, err)
+		}
+		metadata, err := json.Marshal(struct {
+			Version    int       `json:"version"`
+			Symbol     string    `json:"symbol"`
+			AsOf       time.Time `json:"as_of"`
+			Method     string    `json:"method"`
+			ExpiryDays int       `json:"expiry_days"`
+		}{
+			Version: currentExpiryGridPersistVersion, Symbol: sym, AsOf: env.AsOf,
+			Method: "IBKR security-definition option parameters", ExpiryDays: len(env.Classed),
+		})
+		if err != nil {
+			return fmt.Errorf("encode expiry grid metadata for %s: %w", sym, err)
+		}
+		return saveMarketState(g.authority, expiryGridAuthorityScope(sym), expiryGridStateKind, corestore.ObservationInput{
+			ScopeKey: expiryGridAuthorityScope(sym), Source: expiryGridSource,
+			Kind: expiryGridObservationKind, ObservedAt: env.AsOf,
+			ContentType: "application/json", Payload: payload, MetadataJSON: metadata, DecisionEligible: true,
+		})
+	}
 	if g.dir == "" {
 		return nil
 	}

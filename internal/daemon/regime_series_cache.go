@@ -10,11 +10,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 )
 
 const (
 	regimeSeriesCacheFreshFor       = 12 * time.Hour
 	regimeSeriesCacheMaxFallbackAge = 14 * 24 * time.Hour
+	regimeSeriesStateKind           = "regime_official_series.current.v1"
+	regimeSeriesObservationKind     = "regime_official_series.snapshot.v1"
 )
 
 // regimeSeriesCache keeps official daily public-rate series from flapping on
@@ -23,7 +27,8 @@ const (
 // because one HTTP request timed out.
 type regimeSeriesCache struct {
 	mu             sync.Mutex
-	dir            string
+	dir            string // sealed legacy cache; never used after UseCoreStore
+	authority      *corestore.Store
 	mem            map[string]regimeSeriesCacheEntry
 	freshFor       time.Duration
 	maxFallbackAge time.Duration
@@ -42,6 +47,20 @@ func newRegimeSeriesCache(dir string) *regimeSeriesCache {
 		freshFor:       regimeSeriesCacheFreshFor,
 		maxFallbackAge: regimeSeriesCacheMaxFallbackAge,
 	}
+}
+
+func (c *regimeSeriesCache) UseCoreStore(store *corestore.Store) error {
+	if c == nil {
+		return fmt.Errorf("regime series cache: nil store")
+	}
+	if store == nil {
+		return fmt.Errorf("regime series cache: nil corestore")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authority = store
+	c.mem = map[string]regimeSeriesCacheEntry{}
+	return nil
 }
 
 func regimeSeriesCacheDefaultDir() (string, error) {
@@ -118,9 +137,23 @@ func (c *regimeSeriesCache) put(seriesID string, points []regimeSeriesPoint, fet
 }
 
 func (c *regimeSeriesCache) loadLocked(seriesID string) (regimeSeriesCacheEntry, error) {
-	data, err := os.ReadFile(c.path(seriesID))
-	if err != nil {
-		return regimeSeriesCacheEntry{}, err
+	var data []byte
+	if c.authority != nil {
+		var ok bool
+		var err error
+		data, ok, err = loadMarketState(c.authority, regimeSeriesAuthorityScope(seriesID), regimeSeriesStateKind)
+		if err != nil {
+			return regimeSeriesCacheEntry{}, fmt.Errorf("read official series authority for %s: %w", seriesID, err)
+		}
+		if !ok {
+			return regimeSeriesCacheEntry{}, os.ErrNotExist
+		}
+	} else {
+		var err error
+		data, err = os.ReadFile(c.path(seriesID))
+		if err != nil {
+			return regimeSeriesCacheEntry{}, err
+		}
 	}
 	var entry regimeSeriesCacheEntry
 	if err := json.Unmarshal(data, &entry); err != nil {
@@ -133,6 +166,33 @@ func (c *regimeSeriesCache) loadLocked(seriesID string) (regimeSeriesCacheEntry,
 }
 
 func (c *regimeSeriesCache) saveLocked(entry regimeSeriesCacheEntry) error {
+	if c.authority != nil {
+		payload, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		latest, _ := latestSeriesPoint(entry.Points)
+		metadata, err := json.Marshal(struct {
+			Version    int       `json:"version"`
+			SeriesID   string    `json:"series_id"`
+			FetchedAt  time.Time `json:"fetched_at"`
+			LatestDate time.Time `json:"latest_date"`
+			PointCount int       `json:"point_count"`
+			Method     string    `json:"method"`
+		}{
+			Version: 1, SeriesID: entry.SeriesID, FetchedAt: entry.FetchedAt,
+			LatestDate: latest.Date, PointCount: len(entry.Points), Method: "official published daily series",
+		})
+		if err != nil {
+			return err
+		}
+		scope := regimeSeriesAuthorityScope(entry.SeriesID)
+		return saveMarketState(c.authority, scope, regimeSeriesStateKind, corestore.ObservationInput{
+			ScopeKey: scope, Source: regimeSeriesObservationSource(entry.SeriesID),
+			Kind: regimeSeriesObservationKind, ObservedAt: entry.FetchedAt,
+			ContentType: "application/json", Payload: payload, MetadataJSON: metadata, DecisionEligible: true,
+		})
+	}
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		return err
 	}
@@ -146,6 +206,21 @@ func (c *regimeSeriesCache) saveLocked(entry regimeSeriesCacheEntry) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func regimeSeriesAuthorityScope(seriesID string) string {
+	return "market/regime/official-series/" + strings.TrimSpace(seriesID)
+}
+
+func regimeSeriesObservationSource(seriesID string) string {
+	switch seriesID {
+	case fredSeriesCP3M:
+		return "federal_reserve"
+	case fredSeriesTBill3M:
+		return "us_treasury"
+	default:
+		return "fred"
+	}
 }
 
 func (c *regimeSeriesCache) path(seriesID string) string {

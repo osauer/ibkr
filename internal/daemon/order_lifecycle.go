@@ -40,21 +40,9 @@ func (s *Server) appendOrderLifecycleEvent(ev ibkrlib.OrderLifecycleEvent) {
 	if !ok {
 		return
 	}
-	matched, viewsLoaded := s.enrichOrderLifecycleEventFromJournal(&journalEvent)
-	if viewsLoaded && !matched &&
-		(ev.Type == ibkrlib.OrderLifecycleEventOpenOrder || ev.Type == ibkrlib.OrderLifecycleEventStatus) {
-		// reqAllOpenOrders snapshots surface ALL of the account's open
-		// orders, including manual TWS orders this journal has never
-		// tracked. The journal's contract is daemon-placed orders only
-		// ("may miss manual orders"), so unmatched openOrder/orderStatus
-		// callbacks are observed, not adopted — journaling them would mint
-		// phantom rows. Keyed on the broker event type: execDetails and
-		// error events keep their existing pass-through behavior.
-		s.debugf("order lifecycle: dropping unmatched %s callback for broker order %d (perm %d)", ev.Type, ev.OrderID, ev.PermID)
-		return
-	}
-	normalizeOrderLifecycleJournalEvent(&journalEvent)
-
+	// Bind broker callbacks to the currently connected write route before any
+	// journal lookup. Broker order IDs and permanent IDs can legitimately recur
+	// on another endpoint/client/account/mode and must never select that row.
 	s.mu.Lock()
 	ep := s.endpoint
 	s.mu.Unlock()
@@ -71,13 +59,30 @@ func (s *Server) appendOrderLifecycleEvent(ev ibkrlib.OrderLifecycleEvent) {
 	if journalEvent.ClientID == 0 {
 		journalEvent.ClientID = status.ClientID
 	}
-
-	if err := s.orderJournal.Append(journalEvent); err != nil {
-		s.warnf("append order lifecycle event: %v", err)
+	matched, viewsLoaded := s.enrichOrderLifecycleEventFromJournal(&journalEvent)
+	if viewsLoaded && !matched &&
+		(ev.Type == ibkrlib.OrderLifecycleEventOpenOrder || ev.Type == ibkrlib.OrderLifecycleEventStatus) {
+		// reqAllOpenOrders snapshots surface ALL of the account's open
+		// orders, including manual TWS orders this journal has never
+		// tracked. The journal's contract is daemon-placed orders only
+		// ("may miss manual orders"), so unmatched openOrder/orderStatus
+		// callbacks are observed, not adopted — journaling them would mint
+		// phantom rows. Keyed on the broker event type: execDetails and
+		// error events keep their existing pass-through behavior.
+		s.debugf("order lifecycle: dropping unmatched %s callback for broker order %d (perm %d)", ev.Type, ev.OrderID, ev.PermID)
 		return
 	}
-	if err := s.purgeLedger.ApplyOrderFill(journalEvent); err != nil {
-		s.warnf("apply purge ledger fill: %v", err)
+	normalizeOrderLifecycleJournalEvent(&journalEvent)
+
+	var persistErr error
+	if s.purgeLedger != nil {
+		persistErr = s.purgeLedger.CommitOrderLifecycle(s.orderJournal, journalEvent)
+	} else {
+		persistErr = s.orderJournal.Append(journalEvent)
+	}
+	if persistErr != nil {
+		s.warnf("append order lifecycle event: %v", persistErr)
+		return
 	}
 	if journalEvent.Source == proposalOrderSource && s.proposalOutcomes != nil && journalEvent.Filled > 0 {
 		var submitted proposalEvent
@@ -138,14 +143,14 @@ func (s *Server) enrichOrderLifecycleEventFromJournal(ev *orderJournalEvent) (ma
 func orderJournalViewForLifecycleEvent(ev orderJournalEvent, views []rpc.OrderView) (rpc.OrderView, bool) {
 	if ev.OrderRef != "" {
 		for _, view := range views {
-			if view.OrderRef == ev.OrderRef {
+			if view.OrderRef == ev.OrderRef && orderJournalEventRouteMatchesView(ev, view) {
 				return view, true
 			}
 		}
 	}
 	if ev.PermID != 0 {
 		for _, view := range views {
-			if view.PermID == ev.PermID {
+			if view.PermID == ev.PermID && orderJournalEventRouteMatchesView(ev, view) {
 				return view, true
 			}
 		}
@@ -156,7 +161,7 @@ func orderJournalViewForLifecycleEvent(ev orderJournalEvent, views []rpc.OrderVi
 	matches := make([]rpc.OrderView, 0, 1)
 	openMatches := make([]rpc.OrderView, 0, 1)
 	for _, view := range views {
-		if view.ReservedOrderID != ev.ReservedOrderID {
+		if view.ReservedOrderID != ev.ReservedOrderID || !orderJournalEventRouteMatchesView(ev, view) {
 			continue
 		}
 		matches = append(matches, view)
@@ -171,6 +176,13 @@ func orderJournalViewForLifecycleEvent(ev orderJournalEvent, views []rpc.OrderVi
 		return matches[0], true
 	}
 	return rpc.OrderView{}, false
+}
+
+func orderJournalEventRouteMatchesView(ev orderJournalEvent, view rpc.OrderView) bool {
+	return strings.TrimSpace(ev.Endpoint) == strings.TrimSpace(view.Endpoint) &&
+		ev.ClientID == view.ClientID &&
+		strings.EqualFold(strings.TrimSpace(ev.Account), strings.TrimSpace(view.Account)) &&
+		strings.EqualFold(strings.TrimSpace(ev.Mode), strings.TrimSpace(view.Mode))
 }
 
 func copyOrderJournalIdentityFromView(ev *orderJournalEvent, view rpc.OrderView) {

@@ -1,15 +1,19 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -21,12 +25,16 @@ const (
 	purgeLedgerStatusRestored = "restored"
 
 	purgeRestoreSource = "purge_restore"
+
+	purgeLedgerStateScope = "daemon"
+	purgeLedgerStateKind  = "purge_ledger_v2"
 )
 
 type purgeLedgerStore struct {
-	Path string
-	mu   sync.Mutex
-	now  func() time.Time
+	Path      string
+	mu        sync.Mutex
+	now       func() time.Time
+	authority *corestore.Store
 }
 
 type purgeLedgerFile struct {
@@ -42,6 +50,8 @@ type purgeLedgerRow struct {
 	Symbol              string                          `json:"symbol"`
 	SecType             string                          `json:"sec_type"`
 	Contract            rpc.ContractParams              `json:"contract"`
+	Endpoint            string                          `json:"endpoint,omitempty"`
+	ClientID            int                             `json:"client_id,omitempty"`
 	Account             string                          `json:"account,omitempty"`
 	Mode                string                          `json:"mode,omitempty"`
 	Currency            string                          `json:"currency,omitempty"`
@@ -72,6 +82,11 @@ type purgeLedgerOrderFill struct {
 	AvgFillPrice float64 `json:"avg_fill_price,omitempty"`
 }
 
+type legacyPurgeImportParity struct {
+	ActiveRows  int
+	FillCursors int
+}
+
 func defaultPurgeLedgerPath() (string, error) {
 	return defaultTradingStatePath("purge-ledger.json")
 }
@@ -80,13 +95,36 @@ func newPurgeLedgerStore(path string, now func() time.Time) *purgeLedgerStore {
 	return &purgeLedgerStore{Path: path, now: now}
 }
 
+func (s *purgeLedgerStore) UseCoreStore(store *corestore.Store) error {
+	if s == nil || store == nil {
+		return fmt.Errorf("purge ledger authority is unavailable")
+	}
+	if !store.Health().Ready {
+		return fmt.Errorf("purge ledger authority is blocked")
+	}
+	s.mu.Lock()
+	s.authority = store
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *purgeLedgerStore) coreStore() (*corestore.Store, error) {
+	if s == nil || s.authority == nil {
+		return nil, fmt.Errorf("purge ledger authority is unavailable")
+	}
+	if !s.authority.Health().Ready {
+		return nil, fmt.Errorf("purge ledger authority is blocked")
+	}
+	return s.authority, nil
+}
+
 func (s *purgeLedgerStore) Snapshot(scope brokerStateScope, purgeID string) ([]rpc.PurgeLedgerRow, rpc.PurgeLedgerTotals, error) {
 	if s == nil {
 		return nil, rpc.PurgeLedgerTotals{}, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ledger, err := s.loadLocked()
+	ledger, _, err := s.loadLocked()
 	if err != nil {
 		return nil, rpc.PurgeLedgerTotals{}, err
 	}
@@ -110,7 +148,7 @@ func (s *purgeLedgerStore) AllRows() ([]purgeLedgerRow, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ledger, err := s.loadLocked()
+	ledger, _, err := s.loadLocked()
 	if err != nil {
 		return nil, err
 	}
@@ -131,17 +169,82 @@ func (s *purgeLedgerStore) ApplyOrderFill(ev orderJournalEvent) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ledger, err := s.loadLocked()
+	for range 3 {
+		ledger, revision, err := s.loadLocked()
+		if err != nil {
+			return err
+		}
+		now := s.currentTime()
+		changed := applyPurgeLedgerFill(&ledger, ev, now)
+		if !changed {
+			return nil
+		}
+		ledger.UpdatedAt = now
+		if err := s.saveLocked(ledger, revision); err != nil {
+			if errors.Is(err, corestore.ErrRevisionConflict) {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("purge ledger revision changed repeatedly")
+}
+
+// CommitOrderLifecycle makes the append-only lifecycle event and the purge
+// cumulative-fill cursor one SQLite transaction. A duplicate cumulative fill
+// still records its legitimate lifecycle event but carries no state CAS.
+func (s *purgeLedgerStore) CommitOrderLifecycle(orderStore *orderJournalStore, ev orderJournalEvent) error {
+	if s == nil || orderStore == nil {
+		return fmt.Errorf("order lifecycle authority is unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	store, err := s.coreStore()
 	if err != nil {
 		return err
 	}
-	now := s.currentTime()
-	changed := applyPurgeLedgerFill(&ledger, ev, now)
-	if !changed {
+	orderAuthority, err := orderStore.coreStore()
+	if err != nil {
+		return err
+	}
+	if store != orderAuthority {
+		return fmt.Errorf("order and purge state use different authorities")
+	}
+
+	for range 3 {
+		record, normalized, err := coreOrderEventRecord(ev, "", "")
+		if err != nil {
+			return err
+		}
+		ev = normalized
+		commit := corestore.LifecycleCommit{Scope: record.Scope, Events: []corestore.OrderEventRecord{record}}
+		if ev.Filled > 0 && ev.OrderRef != "" && (ev.Source == purgeExecuteSource || ev.Source == purgeRestoreSource) {
+			ledger, revision, err := s.loadLocked()
+			if err != nil {
+				return err
+			}
+			if applyPurgeLedgerFill(&ledger, ev, s.currentTime()) {
+				ledger.UpdatedAt = s.currentTime()
+				raw, err := marshalPurgeLedger(ledger)
+				if err != nil {
+					return err
+				}
+				commit.State = &corestore.StateDocumentCAS{
+					ScopeKey: purgeLedgerStateScope, Kind: purgeLedgerStateKind,
+					ExpectedRevision: revision, JSON: raw,
+				}
+			}
+		}
+		if _, err := store.CommitLifecycle(context.Background(), commit); err != nil {
+			if errors.Is(err, corestore.ErrRevisionConflict) {
+				continue
+			}
+			return fmt.Errorf("commit authoritative order lifecycle: %w", err)
+		}
 		return nil
 	}
-	ledger.UpdatedAt = now
-	return s.saveLocked(ledger)
+	return fmt.Errorf("purge ledger revision changed repeatedly")
 }
 
 func applyPurgeLedgerFill(ledger *purgeLedgerFile, ev orderJournalEvent, now time.Time) bool {
@@ -154,6 +257,8 @@ func applyPurgeLedgerFill(ledger *purgeLedgerFile, ev orderJournalEvent, now tim
 	}
 	idx := slices.IndexFunc(ledger.Rows, func(row purgeLedgerRow) bool {
 		return row.LegID == legID &&
+			strings.TrimSpace(row.Endpoint) == strings.TrimSpace(ev.Endpoint) &&
+			row.ClientID == ev.ClientID &&
 			strings.EqualFold(row.Account, ev.Account) &&
 			strings.EqualFold(row.Mode, ev.Mode)
 	})
@@ -209,6 +314,8 @@ func purgeLedgerRowFromPurgeFill(ev orderJournalEvent, legID string, now time.Ti
 		Symbol:            contract.Symbol,
 		SecType:           contract.SecType,
 		Contract:          contract,
+		Endpoint:          strings.TrimSpace(ev.Endpoint),
+		ClientID:          ev.ClientID,
 		Account:           ev.Account,
 		Mode:              ev.Mode,
 		Currency:          contract.Currency,
@@ -421,51 +528,209 @@ func sortPurgeLedgerRows(rows []rpc.PurgeLedgerRow) {
 	})
 }
 
-func (s *purgeLedgerStore) loadLocked() (purgeLedgerFile, error) {
-	if s == nil || s.Path == "" {
-		return purgeLedgerFile{}, fmt.Errorf("purge ledger path is empty")
+// loadLegacyPurgeImportSelection keeps only active restore authority and every
+// cumulative per-order fill cursor belonging to those rows. Old schema
+// mismatches fail cutover; they are never reset or deleted.
+func loadLegacyPurgeImportSelection(path string, orders legacyOrderImportSelection) (purgeLedgerFile, error) {
+	empty := purgeLedgerFile{Kind: purgeLedgerKind, SchemaVersion: purgeLedgerSchemaVersion}
+	if strings.TrimSpace(path) == "" {
+		return purgeLedgerFile{}, fmt.Errorf("legacy purge ledger path is empty")
 	}
-	raw, err := os.ReadFile(s.Path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return purgeLedgerFile{
-				Kind:          purgeLedgerKind,
-				SchemaVersion: purgeLedgerSchemaVersion,
-				UpdatedAt:     s.currentTime(),
-			}, nil
+			return empty, nil
 		}
-		return purgeLedgerFile{}, fmt.Errorf("read purge ledger: %w", err)
+		return purgeLedgerFile{}, fmt.Errorf("read legacy purge ledger: %w", err)
 	}
-	var ledger purgeLedgerFile
-	if err := json.Unmarshal(raw, &ledger); err != nil {
-		return purgeLedgerFile{}, fmt.Errorf("decode purge ledger: %w", err)
+	var legacy purgeLedgerFile
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		return purgeLedgerFile{}, fmt.Errorf("decode legacy purge ledger: %w", err)
 	}
-	if ledger.Kind != purgeLedgerKind || ledger.SchemaVersion != purgeLedgerSchemaVersion {
-		if ledger.Kind == purgeLedgerKind {
-			_ = os.Remove(s.Path)
-			return purgeLedgerFile{
-				Kind:          purgeLedgerKind,
-				SchemaVersion: purgeLedgerSchemaVersion,
-				UpdatedAt:     s.currentTime(),
-			}, nil
+	if legacy.Kind != purgeLedgerKind || legacy.SchemaVersion != purgeLedgerSchemaVersion {
+		return purgeLedgerFile{}, fmt.Errorf("purge ledger is %q/%q, want %q/%q", legacy.Kind, legacy.SchemaVersion, purgeLedgerKind, purgeLedgerSchemaVersion)
+	}
+
+	routesByRef := map[string]legacyOrderRoute{}
+	ambiguousRef := map[string]bool{}
+	for _, ev := range orders.SourceEvents {
+		if ev.OrderRef == "" {
+			continue
 		}
-		return purgeLedgerFile{}, fmt.Errorf("purge ledger is %q/%q, want %q/%q", ledger.Kind, ledger.SchemaVersion, purgeLedgerKind, purgeLedgerSchemaVersion)
+		route := legacyOrderRouteFromEvent(ev)
+		if !route.complete() {
+			continue
+		}
+		if prior, ok := routesByRef[ev.OrderRef]; ok && prior.key() != route.key() {
+			ambiguousRef[ev.OrderRef] = true
+			continue
+		}
+		routesByRef[ev.OrderRef] = route
 	}
-	return ledger, nil
+	out := empty
+	out.UpdatedAt = legacy.UpdatedAt
+	for _, row := range legacy.Rows {
+		normalizePurgeLedgerRow(&row)
+		if row.Status != purgeLedgerStatusActive || row.RemainingQuantity <= 0 {
+			continue
+		}
+		refs := []string{row.LastPurgeOrderRef, row.LastRestoreOrderRef}
+		for ref := range row.OrderFills {
+			refs = append(refs, ref)
+		}
+		var route legacyOrderRoute
+		for _, ref := range refs {
+			ref = strings.TrimSpace(ref)
+			if ref == "" {
+				continue
+			}
+			if ambiguousRef[ref] {
+				return purgeLedgerFile{}, fmt.Errorf("active purge row %q references order %q in multiple broker routes", row.LegID, ref)
+			}
+			candidate, ok := routesByRef[ref]
+			if !ok {
+				continue
+			}
+			if route.complete() && route.key() != candidate.key() {
+				return purgeLedgerFile{}, fmt.Errorf("active purge row %q spans multiple broker routes", row.LegID)
+			}
+			route = candidate
+		}
+		if !route.complete() {
+			return purgeLedgerFile{}, fmt.Errorf("active purge row %q cannot be bound to endpoint/client/account/mode", row.LegID)
+		}
+		if row.Account != "" && !strings.EqualFold(row.Account, route.Account) {
+			return purgeLedgerFile{}, fmt.Errorf("active purge row %q account conflicts with order evidence", row.LegID)
+		}
+		if row.Mode != "" && !strings.EqualFold(row.Mode, route.Mode) {
+			return purgeLedgerFile{}, fmt.Errorf("active purge row %q mode conflicts with order evidence", row.LegID)
+		}
+		row.Endpoint, row.ClientID, row.Account, row.Mode = route.Endpoint, route.ClientID, route.Account, route.Mode
+		out.Rows = append(out.Rows, row)
+	}
+	return out, nil
 }
 
-func (s *purgeLedgerStore) saveLocked(ledger purgeLedgerFile) error {
+func importLegacyPurgeAuthority(ctx context.Context, store *corestore.Store, path string, orders legacyOrderImportSelection) (legacyPurgeImportParity, error) {
+	var parity legacyPurgeImportParity
+	if store == nil {
+		return parity, fmt.Errorf("purge authority is unavailable")
+	}
+	ledger, err := loadLegacyPurgeImportSelection(path, orders)
+	if err != nil {
+		return parity, err
+	}
+	if ledger.UpdatedAt.IsZero() {
+		// Keep the first-cutover document deterministic so a restart can
+		// idempotently verify the same legacy selection. Missing legacy purge
+		// state uses the newest order-source timestamp, or Unix epoch when the
+		// entire legacy authority is empty.
+		ledger.UpdatedAt = time.Unix(0, 0).UTC()
+		for _, ev := range orders.SourceEvents {
+			if ev.At.After(ledger.UpdatedAt) {
+				ledger.UpdatedAt = ev.At.UTC()
+			}
+		}
+	}
+	raw, err := marshalPurgeLedger(ledger)
+	if err != nil {
+		return parity, err
+	}
+	_, err = store.CompareAndSwapStateDocument(ctx, corestore.StateDocumentCAS{
+		ScopeKey: purgeLedgerStateScope, Kind: purgeLedgerStateKind, ExpectedRevision: 0, JSON: raw,
+	})
+	if errors.Is(err, corestore.ErrRevisionConflict) {
+		doc, ok, readErr := store.GetStateDocument(ctx, purgeLedgerStateScope, purgeLedgerStateKind)
+		if readErr != nil {
+			return parity, fmt.Errorf("read existing purge import: %w", readErr)
+		}
+		if !ok || !jsonEqual(doc.JSON, raw) {
+			return parity, fmt.Errorf("existing purge authority conflicts with legacy import")
+		}
+		err = nil
+	}
+	if err != nil {
+		return parity, fmt.Errorf("import legacy purge authority: %w", err)
+	}
+	doc, ok, err := store.GetStateDocument(ctx, purgeLedgerStateScope, purgeLedgerStateKind)
+	if err != nil || !ok {
+		return parity, fmt.Errorf("verify legacy purge authority: found=%v error=%w", ok, err)
+	}
+	var got purgeLedgerFile
+	if err := json.Unmarshal(doc.JSON, &got); err != nil {
+		return parity, fmt.Errorf("verify legacy purge authority payload: %w", err)
+	}
+	if !jsonEqual(doc.JSON, raw) {
+		return parity, fmt.Errorf("legacy purge row and fill-cursor parity failed")
+	}
+	parity.ActiveRows = len(ledger.Rows)
+	for _, row := range ledger.Rows {
+		parity.FillCursors += len(row.OrderFills)
+	}
+	return parity, nil
+}
+
+func jsonEqual(a, b []byte) bool {
+	var left, right any
+	return json.Unmarshal(a, &left) == nil && json.Unmarshal(b, &right) == nil && reflect.DeepEqual(left, right)
+}
+
+func (s *purgeLedgerStore) loadLocked() (purgeLedgerFile, int64, error) {
+	store, err := s.coreStore()
+	if err != nil {
+		return purgeLedgerFile{}, 0, err
+	}
+	doc, ok, err := store.GetStateDocument(context.Background(), purgeLedgerStateScope, purgeLedgerStateKind)
+	if err != nil {
+		return purgeLedgerFile{}, 0, fmt.Errorf("read authoritative purge ledger: %w", err)
+	}
+	if !ok {
+		return purgeLedgerFile{
+			Kind: purgeLedgerKind, SchemaVersion: purgeLedgerSchemaVersion, UpdatedAt: s.currentTime(),
+		}, 0, nil
+	}
+	var ledger purgeLedgerFile
+	if err := json.Unmarshal(doc.JSON, &ledger); err != nil {
+		return purgeLedgerFile{}, 0, fmt.Errorf("decode authoritative purge ledger: %w", err)
+	}
+	if ledger.Kind != purgeLedgerKind || ledger.SchemaVersion != purgeLedgerSchemaVersion {
+		return purgeLedgerFile{}, 0, fmt.Errorf("purge ledger is %q/%q, want %q/%q", ledger.Kind, ledger.SchemaVersion, purgeLedgerKind, purgeLedgerSchemaVersion)
+	}
+	return ledger, doc.Revision, nil
+}
+
+func (s *purgeLedgerStore) saveLocked(ledger purgeLedgerFile, expectedRevision int64) error {
+	store, err := s.coreStore()
+	if err != nil {
+		return err
+	}
 	ledger.Kind = purgeLedgerKind
 	ledger.SchemaVersion = purgeLedgerSchemaVersion
 	if ledger.UpdatedAt.IsZero() {
 		ledger.UpdatedAt = s.currentTime()
 	}
-	raw, err := json.MarshalIndent(ledger, "", "  ")
+	raw, err := marshalPurgeLedger(ledger)
 	if err != nil {
-		return fmt.Errorf("marshal purge ledger: %w", err)
+		return err
 	}
-	raw = append(raw, '\n')
-	return writePrivateStateAtomic(s.Path, raw)
+	_, err = store.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
+		ScopeKey: purgeLedgerStateScope, Kind: purgeLedgerStateKind,
+		ExpectedRevision: expectedRevision, JSON: raw,
+	})
+	if err != nil {
+		return fmt.Errorf("write authoritative purge ledger: %w", err)
+	}
+	return nil
+}
+
+func marshalPurgeLedger(ledger purgeLedgerFile) ([]byte, error) {
+	ledger.Kind = purgeLedgerKind
+	ledger.SchemaVersion = purgeLedgerSchemaVersion
+	raw, err := json.Marshal(ledger)
+	if err != nil {
+		return nil, fmt.Errorf("marshal purge ledger: %w", err)
+	}
+	return raw, nil
 }
 
 func (s *purgeLedgerStore) currentTime() time.Time {

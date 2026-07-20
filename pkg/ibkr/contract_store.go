@@ -7,38 +7,54 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 // ContractStore persists the connector's contractCache (symbol → conID
-// + routing fields) to disk so daemon restarts don't pay IBKR's
+// + routing fields) so daemon restarts don't pay IBKR's
 // per-account reqContractDetails rate-limit tax for every known
 // member of the watchlist. The cache is a one-way win: each successful
 // resolution is a fact about the world (conID is globally unique and
 // stable for years), and re-fetching it on every restart costs ~50
 // resolutions per 10-minute IBKR bucket per restart.
 //
-// Storage shape: a single JSON file at dir/contracts.json with a
-// version field, the as-of timestamp, an SPX-members hash for
-// reconstitution detection, and the symbol→details map. Atomic writes
-// via temp+rename so a daemon crash mid-write can't corrupt the file.
+// Production attaches a daemon-owned ContractCacheAuthority before the first
+// load. The JSON file at dir/contracts.json is now only a legacy cutover codec
+// and an isolated-test fixture. Both representations carry a version, as-of
+// timestamp, SPX-members hash, and symbol→details map.
 //
 // Stock + index + cash entries (long-lived, ConID stable across years)
 // live under the top-level "contracts" key. Option entries live under
 // "options" — same ContractDetailsLite shape but keyed by the OPRA-style
 // optionContractKey (symbol|expiry|strike|right). Options are garbage-
 // collected on save: any entry whose Expiry has passed is dropped, so
-// the file stabilises around ~1-3K live entries even though gamma
+// the projection stabilises around ~1-3K live entries even though gamma
 // computes touch ~1600 strikes per session.
 type ContractStore struct {
 	dir string
 
-	mu sync.Mutex
+	mu        sync.Mutex
+	authority ContractCacheAuthority
+}
+
+// ContractCacheAuthority is the daemon-owned persistence boundary for the
+// connector cache. The ibkr package deliberately knows nothing about the
+// daemon's database: the daemon supplies an adapter that publishes the state
+// document and its immutable observation in one transaction.
+//
+// Once UseAuthority succeeds, ContractStore never reads or writes its legacy
+// JSON path. An empty authority is a deliberate cold start; legacy contract
+// details are acceleration data and must not seed the clean-slate epoch.
+type ContractCacheAuthority interface {
+	LoadContractCache() (payload []byte, ok bool, err error)
+	SaveContractCache(payload []byte, observedAt time.Time) error
 }
 
 // NewContractStore returns a store rooted at dir. Lazy mkdir on first
@@ -48,7 +64,33 @@ func NewContractStore(dir string) *ContractStore {
 	return &ContractStore{dir: dir}
 }
 
-// contractStoreVersion is the on-disk schema version. A future
+// UseAuthority switches all subsequent loads and saves to authority. Any
+// existing SQLite document is validated before the switch is published so a
+// malformed row fails daemon startup rather than partially seeding a live
+// connector. Missing state is valid and starts cold.
+func (s *ContractStore) UseAuthority(authority ContractCacheAuthority) error {
+	if s == nil {
+		return errors.New("contract cache: nil store")
+	}
+	if authority == nil {
+		return errors.New("contract cache: nil authority")
+	}
+	raw, ok, err := authority.LoadContractCache()
+	if err != nil {
+		return fmt.Errorf("load contract authority: %w", err)
+	}
+	if ok {
+		if _, err := decodeContractCache(raw, true); err != nil {
+			return fmt.Errorf("validate contract authority: %w", err)
+		}
+	}
+	s.mu.Lock()
+	s.authority = authority
+	s.mu.Unlock()
+	return nil
+}
+
+// contractStoreVersion is the persisted payload schema version. A future
 // incompatible format bump increments this; Load returns a cold result
 // for files at any other version so the daemon cold-starts cleanly
 // rather than mis-interpreting an unknown schema. Matches the pattern
@@ -75,8 +117,7 @@ const contractStoreVersion = 3
 // contractStoreFile is the filename inside ContractStore.dir.
 const contractStoreFile = "contracts.json"
 
-// contractCacheFile is the on-disk shape. Field ordering is chosen so
-// a human running `cat` reads the metadata header first.
+// contractCacheFile is the shared SQLite/legacy-codec payload shape.
 type contractCacheFile struct {
 	Version     int                            `json:"version"`
 	AsOf        time.Time                      `json:"as_of"`
@@ -98,17 +139,14 @@ type contractCacheFile struct {
 // I/O errors and JSON corruption surface as non-nil error — callers
 // log and proceed with an empty cache rather than aborting the daemon.
 func (s *ContractStore) Load() (map[string]ContractDetailsLite, string, error) {
-	path := filepath.Join(s.dir, contractStoreFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, "", nil
-		}
-		return nil, "", fmt.Errorf("read contracts: %w", err)
+	if s == nil {
+		return nil, "", nil
 	}
-	var f contractCacheFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, "", fmt.Errorf("decode contracts: %w", err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, ok, err := s.loadEnvelopeLocked()
+	if err != nil || !ok {
+		return nil, "", err
 	}
 	// Accept any version ≤ contractStoreVersion. v1 files have no
 	// "options" key; they load cleanly because the field is optional.
@@ -136,17 +174,17 @@ func (s *ContractStore) Load() (map[string]ContractDetailsLite, string, error) {
 // Same return convention as Load: missing file or future-version
 // mismatch yields an empty map without error.
 func (s *ContractStore) LoadOptions() (map[string]ContractDetailsLite, error) {
-	path := filepath.Join(s.dir, contractStoreFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return map[string]ContractDetailsLite{}, nil
-		}
-		return nil, fmt.Errorf("read contracts: %w", err)
+	if s == nil {
+		return map[string]ContractDetailsLite{}, nil
 	}
-	var f contractCacheFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("decode contracts: %w", err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, ok, err := s.loadEnvelopeLocked()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return map[string]ContractDetailsLite{}, nil
 	}
 	if f.Version > contractStoreVersion {
 		return map[string]ContractDetailsLite{}, nil
@@ -173,6 +211,109 @@ func (s *ContractStore) LoadOptions() (map[string]ContractDetailsLite, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+func (s *ContractStore) loadEnvelopeLocked() (contractCacheFile, bool, error) {
+	var raw []byte
+	if s.authority != nil {
+		payload, ok, err := s.authority.LoadContractCache()
+		if err != nil || !ok {
+			return contractCacheFile{}, ok, err
+		}
+		raw = payload
+	} else {
+		payload, err := os.ReadFile(filepath.Join(s.dir, contractStoreFile))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return contractCacheFile{}, false, nil
+			}
+			return contractCacheFile{}, false, fmt.Errorf("read contracts: %w", err)
+		}
+		raw = payload
+	}
+	f, err := decodeContractCache(raw, s.authority != nil)
+	if err != nil {
+		return contractCacheFile{}, false, err
+	}
+	return f, true, nil
+}
+
+func decodeContractCache(raw []byte, strictCurrent bool) (contractCacheFile, error) {
+	var f contractCacheFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return contractCacheFile{}, fmt.Errorf("decode contracts: %w", err)
+	}
+	if !strictCurrent {
+		return f, nil
+	}
+	if f.Version != contractStoreVersion || f.AsOf.IsZero() || f.Contracts == nil {
+		return contractCacheFile{}, fmt.Errorf("invalid contract cache envelope: version=%d as_of=%s", f.Version, f.AsOf)
+	}
+	for key, detail := range f.Contracts {
+		if strings.TrimSpace(key) == "" || detail.ConID == 0 {
+			return contractCacheFile{}, fmt.Errorf("invalid contract cache row %q", key)
+		}
+	}
+	for key, detail := range f.Options {
+		normalized, err := normalizeCurrentOptionDetail(key, detail)
+		if err != nil {
+			return contractCacheFile{}, err
+		}
+		f.Options[key] = normalized
+	}
+	return f, nil
+}
+
+// normalizeCurrentOptionDetail makes the canonical v3 cache key the source of
+// truth for tuple fields that an older portfolio-seed writer omitted from the
+// value. This is a deterministic payload migration, not a permissive repair:
+// malformed keys, zero ConIDs, and any value field that contradicts the key
+// still fail authority attachment.
+func normalizeCurrentOptionDetail(key string, detail ContractDetailsLite) (ContractDetailsLite, error) {
+	parts := strings.Split(key, "|")
+	if len(parts) != 5 {
+		return ContractDetailsLite{}, fmt.Errorf("invalid option contract cache row %q", key)
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(parts[0]))
+	tradingClass := strings.ToUpper(strings.TrimSpace(parts[1]))
+	expiry := strings.TrimSpace(parts[2])
+	right := strings.ToUpper(strings.TrimSpace(parts[4]))
+	strike, err := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
+	parsedExpiry, expiryErr := time.Parse("20060102", expiry)
+	if err != nil || expiryErr != nil || parsedExpiry.Format("20060102") != expiry || symbol == "" || tradingClass == "" || strike <= 0 || math.IsNaN(strike) || math.IsInf(strike, 0) || (right != "C" && right != "P") || detail.ConID <= 0 || optionContractKey(symbol, tradingClass, expiry, strike, right) != key {
+		return ContractDetailsLite{}, fmt.Errorf("invalid option contract cache row %q", key)
+	}
+	if detail.Symbol == "" {
+		detail.Symbol = symbol
+	} else if strings.ToUpper(strings.TrimSpace(detail.Symbol)) != symbol {
+		return ContractDetailsLite{}, fmt.Errorf("option contract cache row %q symbol contradicts key", key)
+	}
+	if detail.SecType == "" {
+		detail.SecType = "OPT"
+	} else if !strings.EqualFold(strings.TrimSpace(detail.SecType), "OPT") {
+		return ContractDetailsLite{}, fmt.Errorf("option contract cache row %q security type contradicts key", key)
+	}
+	if detail.TradingClass == "" {
+		detail.TradingClass = tradingClass
+	} else if tradingClass != "" && strings.ToUpper(strings.TrimSpace(detail.TradingClass)) != tradingClass {
+		return ContractDetailsLite{}, fmt.Errorf("option contract cache row %q trading class contradicts key", key)
+	}
+	if detail.Expiry == "" {
+		detail.Expiry = expiry
+	} else if strings.TrimSpace(detail.Expiry) != expiry {
+		return ContractDetailsLite{}, fmt.Errorf("option contract cache row %q expiry contradicts key", key)
+	}
+	if detail.Strike == 0 {
+		detail.Strike = strike
+	} else if detail.Strike != strike {
+		return ContractDetailsLite{}, fmt.Errorf("option contract cache row %q strike contradicts key", key)
+	}
+	if detail.Right == "" {
+		detail.Right = right
+	} else if strings.ToUpper(strings.TrimSpace(detail.Right)) != right {
+		return ContractDetailsLite{}, fmt.Errorf("option contract cache row %q right contradicts key", key)
+	}
+	return detail, nil
 }
 
 // nyDateString returns the New York trading-session date as YYYYMMDD.
@@ -207,20 +348,35 @@ func (s *ContractStore) Save(contracts map[string]ContractDetailsLite, options m
 		}
 	}
 
-	// Option GC: drop entries whose Expiry has already passed in NY
-	// time. Keeps the file size bounded — a session's worth of
-	// strikes (~1700) replaces yesterday's strikes rather than
-	// accumulating forever.
+	// Validate and normalize every option before publication so a bad producer
+	// cannot poison durable state and defer the failure until the next restart.
+	// Option GC then drops entries whose expiry has already passed in NY time.
 	filteredOptions := make(map[string]ContractDetailsLite, len(options))
 	today := nyDateString(time.Now())
 	for k, detail := range options {
-		if detail.ConID == 0 {
+		normalized, err := normalizeCurrentOptionDetail(k, detail)
+		if err != nil {
+			return fmt.Errorf("refuse invalid option contract cache save: %w", err)
+		}
+		if normalized.Expiry < today {
 			continue
 		}
-		if detail.Expiry != "" && detail.Expiry < today {
-			continue
+		filteredOptions[k] = normalized
+	}
+
+	env := contractCacheFile{
+		Version:     contractStoreVersion,
+		AsOf:        time.Now().UTC(),
+		MembersHash: membersHash,
+		Contracts:   filtered,
+		Options:     filteredOptions,
+	}
+	if s.authority != nil {
+		payload, err := json.Marshal(env)
+		if err != nil {
+			return fmt.Errorf("encode contracts: %w", err)
 		}
-		filteredOptions[k] = detail
+		return s.authority.SaveContractCache(payload, env.AsOf)
 	}
 
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
@@ -244,13 +400,7 @@ func (s *ContractStore) Save(contracts map[string]ContractDetailsLite, options m
 
 	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(contractCacheFile{
-		Version:     contractStoreVersion,
-		AsOf:        time.Now().UTC(),
-		MembersHash: membersHash,
-		Contracts:   filtered,
-		Options:     filteredOptions,
-	}); err != nil {
+	if err := enc.Encode(env); err != nil {
 		return fmt.Errorf("encode contracts: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -315,11 +465,10 @@ func MembersHash(members []string) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// DefaultContractStoreDir returns the on-disk cache root for the
-// connector contract store: $XDG_CACHE_HOME/ibkr/, falling back to
-// $HOME/.cache/ibkr/. Matches the layout used by the breadth-spx
-// store (which lives at $XDG_CACHE_HOME/ibkr/breadth-spx/) so a
-// single `ls ~/.cache/ibkr/` shows all daemon caches together.
+// DefaultContractStoreDir returns the retired file-codec root:
+// $XDG_CACHE_HOME/ibkr/, falling back to $HOME/.cache/ibkr/. The daemon uses
+// this only to locate cutover input; runtime persistence attaches
+// ContractCacheAuthority.
 //
 // Returns an error only if neither XDG_CACHE_HOME nor HOME is set —
 // on a real OS user account that doesn't happen. Tests should
@@ -354,8 +503,8 @@ func (c *Connector) SnapshotContracts() map[string]ContractDetailsLite {
 
 // SnapshotOptionContracts returns a defensive copy of the connection's
 // in-memory optionContractCache (keyed by optionContractKey), filtered
-// to entries with ConID != 0. Used by the daemon's periodic save tick
-// to persist resolved option contracts to disk so a daemon restart
+// to entries with ConID != 0. Used by the daemon's periodic save tick to
+// persist resolved option contracts through its authority so a daemon restart
 // within the same trading session skips the prewarm cost.
 func (c *Connector) SnapshotOptionContracts() map[string]ContractDetailsLite {
 	c.mu.RLock()

@@ -17,17 +17,24 @@ func (s *Server) openOrderViewForWrite(id string, status rpc.TradingStatus) (rpc
 	if err != nil {
 		return rpc.OrderView{}, err
 	}
+	var scopeErr error
 	for _, view := range views {
 		if !orderViewMatchesID(view, id) {
+			continue
+		}
+		if err := validateOrderViewMatchesGate(view, status); err != nil {
+			// An identical local ref or broker ID in another route is not the
+			// requested order. Keep looking for the exact route before failing.
+			scopeErr = err
 			continue
 		}
 		if !view.Open {
 			return rpc.OrderView{}, errBadRequest("order is not open")
 		}
-		if err := validateOrderViewMatchesGate(view, status); err != nil {
-			return rpc.OrderView{}, err
-		}
 		return view, nil
+	}
+	if scopeErr != nil {
+		return rpc.OrderView{}, scopeErr
 	}
 	return rpc.OrderView{}, errBadRequest("order not found")
 }

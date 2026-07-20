@@ -1,10 +1,14 @@
 package daemon
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -62,6 +66,38 @@ func TestExpiryGridStoreRoundTrip(t *testing.T) {
 	}
 	if _, _, ok := nilStore.fallback("SPY", now); ok {
 		t.Fatal("nil store should have no fallback")
+	}
+}
+
+func TestExpiryGridStoreUsesSQLiteWithoutLegacyFallback(t *testing.T) {
+	legacyDir := t.TempDir()
+	authority := openMarketTestCoreStore(t)
+	now := time.Date(2026, 6, 9, 14, 0, 0, 0, time.UTC)
+	grid := testClassedGrid("2026-06-10", "2026-06-11", "2026-06-12", "2026-06-19")
+	g := newExpiryGridStore(legacyDir)
+	if err := g.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	if err := g.noteFetched("SPY", grid, now); err != nil {
+		t.Fatalf("noteFetched: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyDir, expiryGridFilename("SPY"))); !os.IsNotExist(err) {
+		t.Fatalf("runtime save touched legacy file: %v", err)
+	}
+
+	restarted := newExpiryGridStore(legacyDir)
+	if err := restarted.UseCoreStore(authority); err != nil {
+		t.Fatalf("restart UseCoreStore: %v", err)
+	}
+	got, asOf, ok := restarted.fallback("SPY", now.Add(24*time.Hour))
+	if !ok || !asOf.Equal(now) || len(got) != len(grid) {
+		t.Fatalf("SQLite fallback: ok=%v asOf=%s len=%d", ok, asOf, len(got))
+	}
+	observations, err := authority.ListObservations(context.Background(), corestore.ObservationQuery{
+		ScopeKey: expiryGridAuthorityScope("SPY"), Source: expiryGridSource, Kind: expiryGridObservationKind,
+	})
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("observations=%d err=%v", len(observations), err)
 	}
 }
 

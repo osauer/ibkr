@@ -10,12 +10,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 const (
 	regimeHistoryCacheFreshFor       = 12 * time.Hour
 	regimeHistoryCacheMaxFallbackAge = 14 * 24 * time.Hour
+	regimeHistoryStateKind           = "regime_hmds.current.v1"
+	regimeHistoryObservationKind     = "regime_hmds.snapshot.v1"
+	regimeHistorySource              = "ibkr.tws.hmds"
 )
 
 // regimeHistoryCache keeps daily HMDS baselines from flapping on routine
@@ -24,7 +28,8 @@ const (
 // history.
 type regimeHistoryCache struct {
 	mu             sync.Mutex
-	dir            string
+	dir            string // sealed legacy cache; never used after UseCoreStore
+	authority      *corestore.Store
 	mem            map[string]regimeHistoryCacheEntry
 	freshFor       time.Duration
 	maxFallbackAge time.Duration
@@ -45,6 +50,20 @@ func newRegimeHistoryCache(dir string) *regimeHistoryCache {
 		freshFor:       regimeHistoryCacheFreshFor,
 		maxFallbackAge: regimeHistoryCacheMaxFallbackAge,
 	}
+}
+
+func (c *regimeHistoryCache) UseCoreStore(store *corestore.Store) error {
+	if c == nil {
+		return fmt.Errorf("regime history cache: nil store")
+	}
+	if store == nil {
+		return fmt.Errorf("regime history cache: nil corestore")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authority = store
+	c.mem = map[string]regimeHistoryCacheEntry{}
+	return nil
 }
 
 func regimeHistoryCacheDefaultDir() (string, error) {
@@ -125,9 +144,23 @@ func (c *regimeHistoryCache) put(sym string, days int, bars []ibkrlib.Historical
 
 func (c *regimeHistoryCache) loadLocked(sym string, days int) (regimeHistoryCacheEntry, error) {
 	key := regimeHistoryCacheKey(sym, days)
-	data, err := os.ReadFile(c.path(sym, days))
-	if err != nil {
-		return regimeHistoryCacheEntry{}, err
+	var data []byte
+	if c.authority != nil {
+		var ok bool
+		var err error
+		data, ok, err = loadMarketState(c.authority, regimeHistoryAuthorityScope(sym, days), regimeHistoryStateKind)
+		if err != nil {
+			return regimeHistoryCacheEntry{}, fmt.Errorf("read regime HMDS authority for %s: %w", key, err)
+		}
+		if !ok {
+			return regimeHistoryCacheEntry{}, os.ErrNotExist
+		}
+	} else {
+		var err error
+		data, err = os.ReadFile(c.path(sym, days))
+		if err != nil {
+			return regimeHistoryCacheEntry{}, err
+		}
 	}
 	var entry regimeHistoryCacheEntry
 	if err := json.Unmarshal(data, &entry); err != nil {
@@ -140,6 +173,32 @@ func (c *regimeHistoryCache) loadLocked(sym string, days int) (regimeHistoryCach
 }
 
 func (c *regimeHistoryCache) saveLocked(entry regimeHistoryCacheEntry) error {
+	if c.authority != nil {
+		payload, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		metadata, err := json.Marshal(struct {
+			Version   int       `json:"version"`
+			Symbol    string    `json:"symbol"`
+			Days      int       `json:"days"`
+			FetchedAt time.Time `json:"fetched_at"`
+			BarCount  int       `json:"bar_count"`
+			Method    string    `json:"method"`
+		}{
+			Version: 1, Symbol: entry.Symbol, Days: entry.Days,
+			FetchedAt: entry.FetchedAt, BarCount: len(entry.Bars), Method: "IBKR HMDS daily bars",
+		})
+		if err != nil {
+			return err
+		}
+		scope := regimeHistoryAuthorityScope(entry.Symbol, entry.Days)
+		return saveMarketState(c.authority, scope, regimeHistoryStateKind, corestore.ObservationInput{
+			ScopeKey: scope, Source: regimeHistorySource, Kind: regimeHistoryObservationKind,
+			ObservedAt: entry.FetchedAt, ContentType: "application/json",
+			Payload: payload, MetadataJSON: metadata, DecisionEligible: true,
+		})
+	}
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		return err
 	}
@@ -153,6 +212,10 @@ func (c *regimeHistoryCache) saveLocked(entry regimeHistoryCacheEntry) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func regimeHistoryAuthorityScope(sym string, days int) string {
+	return "market/regime/hmds/" + regimeHistoryCacheKey(sym, days)
 }
 
 func (c *regimeHistoryCache) path(sym string, days int) string {

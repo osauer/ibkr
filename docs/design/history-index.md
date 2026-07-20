@@ -1,367 +1,153 @@
-# History index (history.db)
+# History surfaces (`daemon.db`)
 
-**Status:** Implemented (Phase 2): all evidence journals + retained statements indexed; rotation/retention engine for the three decision journals; RPCs `regime.history` / `rules.history` / `canary.history` / `recon.equity`; indexed order reads with automatic journal-scan fallback.
-**Created:** 2026-07-20 15:41 CEST · **Updated:** 2026-07-20 18:38 CEST
+**Status:** Implemented; legacy `history.db` design retired
+
+**Created:** 2026-07-20 · **Updated:** 2026-07-20
+
 **Owner:** osauer
-**Related:** [internal/daemon/history](../../internal/daemon/history), [internal/daemon/history_index.go](../../internal/daemon/history_index.go), [internal/daemon/order_index_read.go](../../internal/daemon/order_index_read.go), [internal/rpc/history_index.go](../../internal/rpc/history_index.go), [docs/design/regime-calibration.md](regime-calibration.md), [docs/design/post-trade-truth.md](post-trade-truth.md)
 
-## Why this exists
+**Related:** [Daemon SQLite authority](daemon-sqlite-authority.md),
+[regime calibration](regime-calibration.md),
+[post-trade truth](post-trade-truth.md), and
+[RPC history contracts](../../internal/rpc/history_index.go)
 
-The append-only evidence journals (regime/rules/canary decisions, capital
-events, risk-policy governance, proposal outcomes, the order journal) are the
-record of truth: tens of megabytes of JSONL that, before this index, could
-only be queried with `jq` full-file scans — and the regime journal alone grew
-55 MB in two months with no retention story. Operator questions ("when did
-the stage last change?", "plot statement equity against capital flows"),
-calibration questions ("canary time-in-action per week"), and the order
-read model's O(file) hot paths all need indexed access — without ever
-moving, rewriting, or reinterpreting the evidence itself.
+## Decision
 
-`history.db` is a **derived, always-rebuildable SQLite index** over those
-journals plus the retained Flex statements. The journals stay the record of
-truth; the index is a read model. Phase 2 adds the rotation engine that
-bounds raw-journal growth by compressing fully-indexed history into
-immutable archives — rotation relocates evidence, it never deletes it.
+The daemon history RPCs read the authoritative event and statement tables in
+`$XDG_STATE_HOME/ibkr/daemon.db`. The former `history.db` tail-ingest index,
+JSONL journals, byte/genesis watermarks, rotation engine, gzip archives, and
+journal-scan fallbacks are not part of normal runtime after the SQLite
+authority cutover.
+
+`daemon.db` is not a disposable index. It is the sole live daemon authority and
+must never be deleted to trigger a rebuild. Legacy `history.db*`, journal, and
+rotation artifacts are sealed or discarded according to the cutover manifest;
+they may support explicit recovery or importer/test verification, but no
+runtime producer or consumer opens them.
 
 ## Ownership
 
-- **The daemon is the sole writer and the sole runtime opener.** It opens
-  `$XDG_STATE_HOME/ibkr/history.db` (default
-  `~/.local/state/ibkr/history.db`) only after winning the single-instance
-  flock — autospawn race losers construct a Server but never touch the DB.
-- **The CLI and the app never open the DB.** `ibkr regime history`,
-  `ibkr rules history`, `ibkr canary history`, and `ibkr recon equity` are
-  RPC clients of the daemon; the paired app has no history surface.
-- The only sanctioned second reader is a human (or offline analysis script)
-  using `sqlite3` in read-only mode — see "Offline analysis" below. The
-  daemon's connection sets `busy_timeout` so such readers never wedge ingest.
-- Pure Go driver (`modernc.org/sqlite`): no CGO, no release-matrix impact.
+- The daemon is the sole writer and opens `daemon.db` only after winning its
+  instance and persistence locks.
+- CLI, MCP, app, and SPA code consume typed daemon contracts. They do not open
+  the database or reconstruct history from files.
+- Human/offline inspection may use a read-only database connection, but the
+  schema is internal. Typed RPC is the stable product contract.
+- Append-only evidence uses the SQLite event log and typed projection tables.
+  Mutable current documents use compare-and-swap revisions. Coupled state and
+  event updates commit in one transaction where required.
+- A critical database error fails the authoritative operation and never
+  activates a file fallback or mirror write.
 
-## Derived and rebuildable — delete-safety
+## Clean semantic epoch
 
-The DB is not evidence. Every evidence row mirrors a journal line and
-carries the line verbatim in `raw_json`, so:
+Current regime/streak state, regime decisions, rule transitions, canary
+decisions, proposals, proposal outcomes, and opportunities begin empty at
+cutover. Their history surfaces contain only decisions produced by the current
+implementation after the new authority became live.
 
-- **`rm ~/.local/state/ibkr/history.db*` is always safe.** The next daemon
-  start re-ingests everything from byte 0 — rotated archives first (in file
-  name order), then the live journals, then the retained statements.
-  Backfill is simply "first ingest"; there is no backfill command.
-- A corrupt or future-versioned DB file is deleted and recreated
-  automatically (one retry; a second failure disables the index for the run,
-  leaving the history RPCs returning a classified error, every order read on
-  the journal-scan path, and journaling untouched).
-- Older binaries: a phase-1 binary reopening a post-rotation state dir sees
-  a genesis mismatch on the rotated journals and rebuilds its v1 index
-  cleanly from the (shorter) live files.
+Before reading retired decision journals and archives, cutover completes the
+legacy rotation crash-recovery protocol. This prevents a published archive
+prefix from also being imported out of the unchanged live journal after a
+pre-swap crash.
 
-Evidence-mirroring tables (`regime_decisions`, `regime_indicators`,
-`rule_transitions`, `canary_transitions`, `capital_events`,
-`risk_policy_events`, `proposal_outcomes`, `order_events`) carry `BEFORE
-UPDATE` / `BEFORE DELETE` ABORT triggers: append-only at the SQL layer too.
-Bookkeeping tables (`ingest_sources`, `rotation_log`, `archive_files`,
-`statement_files`) and the derived `statement_equity_days` are updated in
-place.
+Historic regime, breadth, and gamma measurements that are expensive or
+impossible to regenerate are preserved separately as immutable observation
+rows. Every imported row records its legacy epoch and typed
+`decision_eligible=false` (also repeated in provenance metadata). Those
+observations are research evidence only: they do not populate current-state
+documents, prime runtime caches, create decision-history rows, or seed a
+current verdict.
 
-Schema is `PRAGMA user_version` 3. A v1 file migrates in place with a
-single-transaction delta (`ALTER TABLE ingest_sources ADD COLUMN base`,
-create the new tables) and zero evidence-row rewrites. A v2 file adds the
-statement-file content fingerprint used to detect same-size restatements.
+Policy-critical continuity is different from analytical decision history.
+Allowlisted capital and governance events needed to reproduce current
+risk-capital safeguards remain authoritative events. Active/uncertain order
+chains, consumed-token tombstones, conservative order-ID floors, and purge
+rows/fill cursors are also retained because dropping them could weaken
+broker-write safety. Trading-readiness proof is reset.
 
-## Ingest and offset mechanics
+## Typed history APIs
 
-One code path serves backfill, tail-ingest, and crash reconcile; they differ
-only in the stored offset.
+The public request/result shapes remain stable:
 
-- **Offsets are logical-stream offsets.** `src_offset` is a line's position
-  in the journal's complete append stream: (bytes rotated into archives) +
-  (physical offset in the live file). `ingest_sources.base` records the
-  rotated byte count; the stored `offset` is the logical high-water mark
-  (never decreases) and `offset - base` is the physical resume point.
-  Archives-in-name-order ++ live file reconstruct the original stream
-  byte-for-byte, so rotation needs zero row updates and a full rebuild
-  reproduces identical rows including ids.
-- **Idempotency is the per-source offset**, advanced in the same SQLite
-  transaction as the rows it covers (batches of 2000 lines). A crash replays
-  from the last committed boundary; `UNIQUE(src_offset)` is a loud backstop
-  (archive backfill uses `INSERT OR IGNORE` for idempotent resume; live
-  ingest keeps the plain-INSERT backstop). No content-hash dedupe:
-  byte-identical heartbeat lines are legitimate evidence.
-- **Evidence-before-index by construction:** journal writers append to the
-  JSONL file, then send a data-free kick; the ingester reads only the file.
-  Every writer now kicks: regime/rules/canary decisions, capital events,
-  risk-policy governance, proposal outcomes, order-journal appends
-  (`onAppend` hook), and the Flex fetch success path.
-- **Complete lines only.** A trailing line without `\n` is left for the next
-  pass. A complete but unparseable line is logged, counted, and skipped —
-  except in `order_events`, where it is **stored verbatim with
-  `parse_ok = 0`** so the indexed order-read path refuses to serve exactly
-  when the legacy scan would hard-fail (see "Order read model").
-- **Truncation/replacement detection:** physical shrinkage
-  (`size < offset - base`) or a changed first-line SHA-256 (`genesis`)
-  triggers a loud per-source rebuild: drop the source's tables, clear its
-  `archive_files` rows, re-stream archives, re-ingest the live file from 0.
-- **Time is stored twice:** `at` verbatim (evidence), `at_unix_ms` canonical.
-- Ingest failures are warned and swallowed. Nothing in journaling,
-  snapshots, or any trading path waits on — or can be failed by — the index.
-
-Every history result carries an `index` health block (`last_ingest_at`,
-`ingested_bytes`, `journal_bytes`). `ingested_bytes` reports **physical**
-live-file bytes (`offset - base`), so the catching-up comparison against the
-on-disk size stays exact after rotation.
-
-## Rotation and retention (phase 2)
-
-Only three journals are rotatable — `regime-decisions.jsonl`,
-`rules-decisions.jsonl`, `canary-decisions.jsonl` — nothing else, ever,
-without a new spec. A daily maintenance pass (plus one pass at startup)
-moves each journal's fully-ingested prefix older than the keep window into
-`$XDG_STATE_HOME/ibkr/rotated/<journal>-YYYY-MM.jsonl.gz` (dir 0700, files
-0600, one gzip member per file, exact original bytes). **Archives are
-immutable evidence, kept forever: rotation compresses and relocates, it
-never deletes.** The keep window is `history.rotation.keep_raw_months`
-calendar months (current month counts as month 1; default 2, minimum 1);
-`history.rotation.enabled=false` turns the pass off.
-
-Mechanics and guarantees:
-
-- **Only ingested bytes rotate.** The precondition (`offset - base == size`,
-  after at most one synchronous inline catch-up) guarantees every archived
-  byte is already mirrored in history.db and the cut lands on a complete
-  line. The maintenance goroutine may block on that inline ingest; hot
-  paths never do.
-- **Cut rule.** The cut is the byte offset of the first line whose
-  timestamp (`ts` for regime/canary, `at` for rules) falls inside the keep
-  window; the prefix partitions into contiguous same-month runs, one
-  archive per run. A line with an unparseable timestamp inherits the
-  previous line's month; an unparseable first line aborts the source's
-  rotation (safe direction). `cut == 0` is a quiet no-op.
-- **Name order is stream order.** Every new archive's name must sort
-  lexically after every existing archive of its source — that is what makes
-  name-order concatenation reproduce the stream. A re-touched month takes
-  `.part2` … `.part9` (a month beyond part9 is skipped with a warning); a
-  stray out-of-order month that cannot satisfy the order rule truncates the
-  rotation at its start with a warning and stays raw.
-- **Writer quiescence.** All three writers are open-per-append and hold a
-  writer lock across the whole append (regime/canary journal mutexes,
-  `Server.rulesJournalMu` for rules); rotation holds the same lock across
-  the swap, so a live-file rename is invisible to writers and needs no fd
-  repair. The live file's mode is preserved (rules stays 0644; regime and
-  canary stay 0600). Rotation also holds the store's ingest lock so the
-  tail ingester can never misread the swap as a truncation.
-- **Crash-recovery contract.** The sequence is: write archives as temps →
-  fsync → intent row (`rotation_log`, `state='pending'`, with per-archive
-  sizes and raw-content SHA-256) → publish and directory-fsync an
-  evidence-adjacent `.rotation-intent-<source>.json` manifest → rename temps
-  to finals and directory-fsync → rewrite the live tail atomically and
-  directory-fsync → compare-and-swap finalize (`base = base_before + cut`,
-  genesis reset to the tail's first-line hash, `archive_files` rows,
-  `state='done'`) → verify a full WAL checkpoint → durably remove the
-  manifest. The checkpoint is the power-loss boundary required before the
-  file-side recovery record can disappear while SQLite uses
-  `synchronous=NORMAL`. The manifest carries full pre-swap and tail SHA-256
-  values and survives
-  deletion of `history.db*`, so recovery still knows whether a final archive
-  duplicates the untouched live prefix or is its only surviving copy. On the
-  next start, before writer traffic, recovery resolves manifests first and
-  then any older DB-only pending rows: pre-rotation journal ⇒ **roll back**
-  (each archive is verified byte-equal to the untouched journal prefix and
-  then deleted — the only sanctioned archive deletion anywhere; a
-  verification mismatch is quarantined instead); post-rotation journal ⇒
-  **roll forward** (every archive or its temp is verified before idempotent
-  DB finalization, or before a fresh DB rebuild). Ingest and new rotations
-  fail closed while either intent remains. Cleanup deletes only temps that no
-  unresolved intent references. The evidence multiset is invariant through
-  every crash state.
-- Each completed rotation logs one info line: source, months, bytes,
-  archive names, new live size.
-
-### Per-file retention policy
-
-| File | Policy | Rationale / trigger |
+| Method | Authoritative data | Notes |
 |---|---|---|
-| `regime-decisions.jsonl` | Rotate monthly → `rotated/regime-decisions-YYYY-MM.jsonl.gz`; keep `history.rotation.keep_raw_months` (default 2) months raw; archives kept forever | 55 MB in 2 months; only rotated over fully-ingested bytes |
-| `rules-decisions.jsonl` | Same rotation | Same engine; small today, same policy for uniformity |
-| `canary-decisions.jsonl` (new) | Same rotation | Born with a retention policy |
-| `order-journal.jsonl` | **NEVER rotated or deleted** | Trading evidence; token-redemption and order-ID floors read it; phase 2 indexes it in place |
-| `statements/flex-*.xml` | **NEVER rotated or deleted** | Broker-statement truth; `statement_equity_days` is derived from them |
-| `capital-events.jsonl` | **NEVER rotated or deleted** | Capital ledger truth |
-| `risk-policy-journal.jsonl` | **NEVER rotated or deleted** | Governance audit trail |
-| `trade-proposals.jsonl` | **NEVER rotated or deleted** | Proposal evidence (19 MB; revisit only via a new spec) |
-| `trade-proposal-outcomes.jsonl` | **NEVER rotated or deleted** | Outcome marks feed calibration |
-| `gamma-skew-diagnostics.jsonl` | **NEVER rotated or deleted**; documented revisit trigger at 100 MB (1.1 MB today) | Diagnostics corpus |
-| `purge-ledger.json` | Never touched by this feature | Restore authority for purge |
-| `history.db` (+`-wal`/`-shm`) | Derived; delete-safe at any time | Rebuilds from journals + archives + statements |
-| `rotated/*.jsonl.gz` | Immutable evidence archives, kept forever, 0600/0700 | Created only by rotation; only deletion ever permitted is recovery's verified-duplicate rollback |
+| `regime.history` | Post-cutover regime decision events | Seven-day default window; optional stage filter; newest first. |
+| `rules.history` | Post-cutover rule transition events | Optional rule filter; advisory/read-only. |
+| `canary.history` | Post-cutover canary decision events | Optional severity/action filters; advisory/read-only. |
+| `recon.equity` | Current statement-equity projection plus retained capital events | Ninety-day default window; newest first; Flex XML remains original broker evidence. |
+| Order open/history/status reads | Authoritative order events and projections | No journal freshness proof or scan fallback exists after attach. |
 
-## Statement equity derivation (recon.equity)
+Free-text evidence, verdict, and summary fields are display/audit data. No
+consumer parses them into submit eligibility, freeze state, policy, or
+broker-write authority.
 
-Retained Flex statements are a **file-set ingest** (not offset-based). Name,
-size, and SHA-256 identify the exact current `*.xml` set, including same-size
-corrections and removed files. When that set changes, every file first parses
-through `internal/flexstmt`; one transaction then replaces the statement-file
-inventory and all derived `(account_id, day)` rows. This retracts stale days
-and restores an older retained value when a newer file disappears. The
-restatement rule is **the statement with the newest `whenGenerated` wins a
-day**; descending filename/XML order is the deterministic equal-generation
-tie-break. Statements are never modified or pruned. A read or parse failure
-warns, preserves the last complete derived snapshot, and retries next pass.
-The first pass backfills all retained statements, so the
-runtime 45-day `DailyEquity` prune (untouched) stops being the only
-intraday-equity memory. `recon.equity` / `ibkr recon equity` serves the
-day series (default 90-day lookback, limit 200, max 1000) joined with the
-declared capital-event ledger (newest 500, disclosed truncation) and two
-health blocks: the capital journal and the statement file set (bytes =
-summed retained XML sizes). `recon.backtest`, `recon.snapshot`, and every
-other existing RPC keep reading raw statements/journals unchanged.
+`HistoryIndexHealth` and the `index`/`statements` result fields remain in the
+wire structs for compatibility. Their legacy byte-ingest interpretation is
+retired: there is no live journal byte count to compare and no asynchronous
+index catching up behind the authoritative query. Callers must use RPC success
+or the daemon's typed storage-health status, not those byte counters, to judge
+availability.
 
-## Canary evidence journal (canary-decisions.jsonl)
+## Statement projection (`recon.equity`)
 
-The daemon owns `canary-decisions.jsonl` (0600, `canary.journal.enabled`
-default true), mirroring the regime journal exactly: append-only, deduped
-on the canary fingerprint with an hourly heartbeat, never read at runtime,
-safe to delete. Two producers journal through one writer:
+Retained `statements/flex-*.xml` files are immutable original broker evidence.
+The daemon fingerprints the complete current file set by name, size, and
+SHA-256. When it changes, the daemon parses every candidate source before
+publishing anything and then transactionally replaces:
 
-1. **Brief hook** — every brief render journals the exact canary the brief
-   row displayed.
-2. **Cadence loop** — every **5 minutes** while the gateway is connected,
-   the daemon composes the canary exactly as the brief does (account
-   snapshot without capital observation, positions, the cached regime
-   snapshot, held-symbol market events) and journals it. Five minutes is a
-   deliberate cadence: each tick includes a broker round-trip, so matching
-   the app's 1-minute poll would add gateway load whenever the app is not
-   attached. Consequence: a sub-5-minute canary flap can be alerted by the
-   app but may not appear as a daemon journal line; dedupe plus the hourly
-   heartbeat make the journal calibration-sufficient, not tick-complete.
+- the complete current statement-file inventory; and
+- the complete current `(account_id, day)` equity winners.
 
-`canary.history` / `ibkr canary history` serves the indexed timeline with
-severity/action filters (7-day default lookback, limit 50, max 500).
+Immutable file and equity-day version tables retain restatement evidence. A
+same-name/same-size correction is detected by content hash. Removing a file
+retracts current rows supplied only by that file and can reveal the next valid
+retained winner. The newest `whenGenerated` statement wins a day, with a
+deterministic source-order tie-break. A read or parse failure preserves the
+last complete projection and is retried; it never publishes a partial file set.
 
-## Order read model (phase 2, workstream D)
+## Event and order guarantees
 
-`order_events` mirrors `order-journal.jsonl` in place — the journal itself
-is **never rotated, truncated, or rewritten**. Three read paths may serve
-from the index: `orders.open`/`order.status` view folds, `orders.history`
-range loads, preview-token redemption, plus the
-`maxReservedBrokerOrderID` floor.
+Event rows and their typed projections are append-only at the SQL layer. Order
+events, consumed preview tokens, and order-ID floors share the same database
+authority and route scope. A write-eligible lookup is never served from stale
+file-derived state, and a failed critical transaction cannot transmit a broker
+order.
 
-**The uniform safety rule: an indexed order read is served only when the
-index is provably complete for the journal at that instant** — the on-disk
-journal size equals the committed in-memory ingest watermark, its validated
-file generation and first-line genesis still match, and no `parse_ok = 0`
-rows exist (checked again inside each serving transaction). Every order line
-passes the daemon's canonical full-event decoder and 1 MiB scanner limit;
-projecting only the indexed columns is not treated as successful parsing.
-Anything else — staleness, parse markers, any query or decode error — falls
-back automatically to the unchanged legacy journal scan with a rate-limited
-(1/min/surface) log disclosure. There is deliberately **no settings escape
-hatch**: the fallback is automatic, disclosed, exercised on every cold
-start (the watermark is process-local and unseeded at open), and the
-fallback path IS the unmodified legacy code. **The journal scan remains the
-semantics-defining reference implementation**; a permanent dual-read parity
-harness in `make test` deep-compares both paths' folds, and the SQL layer
-only prunes (`ORDER BY id`, range widened 1 ms both ends) while the
-existing Go predicates decide.
+Purge is position liquidation, not history deletion. It appends order evidence
+and updates purge authority transactionally; it does not erase or redact event
+history.
 
-Token redemption keeps its exact locking and behavior: the check runs
-inside the same `orderJournalStore.mu` critical section (appends serialize
-on it, so the journal cannot grow mid-check), both paths share one
-consumption predicate and one error format (byte-identical accept/reject
-and messages), and the index query carries a 500 ms timeout so an
-in-flight backfill can only cause a fallback, never a stall. Unparseable
-journal lines reproduce the legacy hard-fail: the index refuses
-(`parse_ok = 0` present) and the scan fails loudly on the same line.
-Nothing in broker-write behavior, submit eligibility, freeze, journaling
-semantics, or `trading.status`'s own journal summary changed.
+## Rotation and legacy settings
 
-## Purge invariant
+Automatic decision-journal rotation is retired because there are no live
+decision JSONL files. `history.rotation.enabled` and
+`history.rotation.keep_raw_months` are retired settings. Compatibility fields
+may remain in typed responses during the API transition, but they do not start
+a maintenance worker, relocate evidence, or authorize writes to `rotated/`.
 
-Verified 2026-07-20: "purge" is position liquidation — it **appends**
-order-journal evidence (with `purge_id`) and maintains `purge-ledger.json`;
-no flow in the daemon or app deletes or redacts journal content, so
-history.db needs no purge handling today. Binding invariant for the
-future: **any flow that ever deletes or redacts journal content MUST, in
-the same operation, delete `history.db` + `-wal` + `-shm` and every
-`rotated/` archive of the affected journal; over-deletion is always safe.**
-A regression test pins that a journaled purge flow only grows the order
-journal and that its `purge_id` rows land in `order_events` untouched.
+The `regime.journal.enabled` and `canary.journal.enabled` names remain for API
+compatibility; they control forward collection of typed SQLite decision events,
+not JSONL files.
 
-## Settings
+## Recovery and offline inspection
 
-Three runtime keys (registry-documented, `ibkr settings set`):
-`history.rotation.enabled` (default true),
-`history.rotation.keep_raw_months` (default 2, min 1),
-`canary.journal.enabled` (default true). Remediation for a broken index
-remains `rm history.db*` + restart, not a toggle.
+Verified `backups/*.db`, hashed `legacy-sealed/<cutover-id>/` artifacts, and the
+external `daemon.db.head` watermark are recovery/anti-rollback material. They
+are never alternate query sources. The watermark is established before initial
+database publication and advanced after every committed mutation. An existing
+database with no watermark, changed or missing application schema objects,
+stale application payload hashes, later corruption, or rollback detection
+fails closed. No runtime repair or automatic restore path exists; verified
+offline restore and head/signer/order/floor reconciliation are a deliberately
+separate operational procedure. Rows from different epochs are never merged.
 
-## Offline analysis
-
-Open read-only so the daemon's ingest is never blocked:
+For ad-hoc inspection, prefer a verified backup or stop the daemon and open the
+database read-only:
 
 ```sh
-sqlite3 "file:$HOME/.local/state/ibkr/history.db?mode=ro"
+sqlite3 "file:$HOME/.local/state/ibkr/daemon.db?mode=ro"
 ```
 
-Rotated archives are plain gzip — the offline path needs no tooling beyond
-`zcat` / `gunzip -c`:
-
-```sh
-zcat ~/.local/state/ibkr/rotated/regime-decisions-2026-05.jsonl.gz | jq .stage | sort | uniq -c
-# the complete original stream, byte-for-byte:
-cat <(zcat ~/.local/state/ibkr/rotated/regime-decisions-*.jsonl.gz) \
-    ~/.local/state/ibkr/regime-decisions.jsonl
-```
-
-Statement equity joined with declared capital flows (timeline):
-
-```sql
-SELECT d.day, d.equity_base,
-       (SELECT COALESCE(SUM(CASE e.type WHEN 'withdrawal' THEN -e.amount_base ELSE e.amount_base END), 0)
-        FROM capital_events e
-        WHERE e.type IN ('deposit','withdrawal') AND substr(e.at, 1, 10) <= d.day) AS declared_flows_to_date
-FROM statement_equity_days d
-ORDER BY d.day DESC
-LIMIT 30;
-```
-
-Canary time-in-action (sessions × actions, most recent two weeks):
-
-```sql
-SELECT session_key, action, COUNT(*) AS decisions
-FROM canary_transitions
-WHERE at_unix_ms >= (strftime('%s','now','-14 days') * 1000)
-GROUP BY session_key, action
-ORDER BY session_key DESC, decisions DESC;
-```
-
-Preview-token lifecycle lookup (audit; the daemon's own redemption check
-uses the same rows only under its freshness proof):
-
-```sql
-SELECT at, type, order_ref, status, send_state
-FROM order_events
-WHERE preview_token_id = 'tok-…'
-ORDER BY id;
-```
-
-Time in stage (regime, unchanged from phase 1):
-
-```sql
-SELECT session_key, stage, COUNT(*) AS decisions
-FROM regime_decisions
-WHERE at_unix_ms >= (strftime('%s','now','-14 days') * 1000)
-GROUP BY session_key, stage
-ORDER BY session_key DESC, decisions DESC;
-```
-
-Anything the schema does not project is still queryable from the verbatim
-line via `json_extract` — future calibration questions are queries, not
-schema migrations:
-
-```sql
-SELECT at,
-       json_extract(raw_json, '$.market.eligible_red_clusters') AS eligible_reds,
-       json_extract(raw_json, '$.policy.fingerprint.key') AS policy_key
-FROM canary_transitions
-ORDER BY at_unix_ms DESC
-LIMIT 20;
-```
+Do not mutate the schema, copy only the main file while WAL frames exist, or
+delete `daemon.db*`. Offline queries are implementation aids, not stable API.

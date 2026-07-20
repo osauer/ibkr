@@ -56,45 +56,43 @@ type PlatformSettings struct {
 // PlatformRegimeSettings holds the regime engine's runtime preferences.
 // Deliberately one knob: the confirmation-gate values (depth, streaks,
 // co-sign, max ages) are code-owned pending_backtest policy — user-tunable
-// gates would fork the decisions journal's comparability
+// gates would fork the decision corpus's comparability
 // (docs/design/regime-calibration.md Part 6).
 type PlatformRegimeSettings struct {
 	Journal RegimeJournalSettings `json:"journal"`
 }
 
-// RegimeJournalSettings controls the regime-decisions forward-collection
-// journal ($XDG_STATE_HOME/ibkr/regime-decisions.jsonl).
+// RegimeJournalSettings retains its public name while controlling
+// forward collection of typed regime-decision events in daemon.db.
 type RegimeJournalSettings struct {
 	Enabled SettingsBool `json:"enabled"`
 }
 
 // PlatformCanarySettings holds the canary evidence-collection runtime
-// preferences (docs/design/history-index.md).
+// preference (docs/design/history-index.md).
 type PlatformCanarySettings struct {
 	Journal CanaryJournalSettings `json:"journal"`
 }
 
-// CanaryJournalSettings controls the canary-decisions forward-collection
-// journal ($XDG_STATE_HOME/ibkr/canary-decisions.jsonl), mirroring
+// CanaryJournalSettings retains its public name while controlling typed
+// canary-decision event collection in daemon.db, mirroring
 // RegimeJournalSettings.
 type CanaryJournalSettings struct {
 	Enabled SettingsBool `json:"enabled"`
 }
 
-// PlatformHistorySettings holds the derived-history-index runtime
-// preferences (docs/design/history-index.md).
+// PlatformHistorySettings is retained to preserve the settings response wire
+// shape. Decision-journal rotation is retired under daemon.db authority.
 type PlatformHistorySettings struct {
 	Rotation HistoryRotationSettings `json:"rotation"`
 }
 
-// HistoryRotationSettings controls automatic decision-journal rotation:
-// fully-indexed month prefixes of the regime/rules/canary journals move
-// into immutable gzip archives under rotated/. Rotation never deletes
-// evidence.
+// HistoryRotationSettings is a retired compatibility shape. Its fields do not
+// enable a rotation worker or authorize writes to legacy journals/archives.
 type HistoryRotationSettings struct {
 	Enabled SettingsBool `json:"enabled"`
-	// KeepRawMonths is how many most-recent calendar months stay raw in
-	// the live journals (current month counts as month 1); minimum 1.
+	// KeepRawMonths is retained for wire compatibility and has no live
+	// journal-retention effect.
 	KeepRawMonths SettingsInt `json:"keep_raw_months"`
 }
 

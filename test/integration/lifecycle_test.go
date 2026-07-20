@@ -26,9 +26,9 @@ import (
 // mode when its handshake fails, which is exactly the state these tests
 // want to drive against.
 //
-// Each test gets its own socket/log/lock via env vars so they can run in
-// parallel and against the same dev install without colliding with the
-// user's own ibkrd or with each other.
+// Each test gets its own socket/log and complete XDG persistence roots via env
+// vars so it can run in parallel without sharing daemon.db, recovery artifacts,
+// caches, or user data with the developer's daemon or another test.
 
 // lifecycleEnv returns the env slice + paths a CLI invocation should use
 // to keep its daemon isolated from the rest of the system. The directory
@@ -51,6 +51,10 @@ func lifecycleEnv(t *testing.T) (env []string, socketPath, logPath string) {
 	env = append(os.Environ(),
 		"IBKR_SOCKET="+socketPath,
 		"IBKR_LOG="+logPath,
+		"XDG_STATE_HOME="+filepath.Join(dir, "state"),
+		"XDG_CACHE_HOME="+filepath.Join(dir, "cache"),
+		"XDG_CONFIG_HOME="+filepath.Join(dir, "config"),
+		"XDG_DATA_HOME="+filepath.Join(dir, "data"),
 	)
 	t.Cleanup(func() {
 		if pid := dial.LockHolderPID(dial.LockPath(socketPath)); pid > 0 {

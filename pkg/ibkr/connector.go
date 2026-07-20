@@ -5338,7 +5338,7 @@ func (c *Connector) notifyOrderErrorLifecycle(orderID, code int, message, advanc
 		Type:      OrderLifecycleEventError,
 		OrderID:   orderID,
 		ErrorCode: code,
-		Status:    orderBrokerErrorStatus(code, message),
+		Status:    orderBrokerErrorStatus(code),
 		Message:   message,
 	}
 	c.dispatchOrderLifecycle(ev)
@@ -5353,13 +5353,12 @@ func (c *Connector) dispatchOrderLifecycle(ev OrderLifecycleEvent) {
 	}
 }
 
-func orderBrokerErrorStatus(code int, message string) string {
-	msg := strings.ToLower(message)
-	switch {
-	case code == 201 || code == 321 || code == 103 || code == 110:
+func orderBrokerErrorStatus(code int) string {
+	switch code {
+	case 103, 110, 201:
 		return "Rejected"
-	case strings.Contains(msg, "reject") || strings.Contains(msg, "duplicate order id"):
-		return "Rejected"
+	case 202:
+		return "Cancelled"
 	default:
 		return ""
 	}

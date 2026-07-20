@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
@@ -94,7 +95,7 @@ func (s *Server) placeOrder(ctx context.Context, p rpc.OrderPlaceParams) (*rpc.O
 	attempt.SendState = orderSendStateSendAttempted
 	attempt.Origin = normalizedWriteOrigin(p.Origin)
 	attempt.Message = fmt.Sprintf("%s broker placeOrder transmit attempted", auth.Route)
-	if err := s.orderJournal.ConfirmPreviewTokenUseAndAppend(confirm, attempt); err != nil {
+	if err := s.orderJournal.StagePreTransmit(payload.TokenID, payload.AuthorityEpoch, payload.SignerGeneration, reservedOrderID, corestore.ActionPlace, coreOrderOrigin(p.Origin), []orderJournalEvent{confirm, attempt}); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTradingDisabled, err)
 	}
 
@@ -173,8 +174,9 @@ func (s *Server) modifyOrder(ctx context.Context, p rpc.OrderModifyParams) (*rpc
 	confirm.OrderRef = view.OrderRef
 	modify := orderJournalEventForDraft(modifiedDraft, orderJournalEventModifyRequested, status, payload.TokenID, view.ReservedOrderID, now)
 	modify.SendState = orderSendStateSendAttempted
+	modify.Origin = normalizedWriteOrigin(p.Origin)
 	modify.Message = fmt.Sprintf("%s broker modify attempted", auth.Route)
-	if err := s.orderJournal.ConfirmPreviewTokenUseAndAppend(confirm, modify); err != nil {
+	if err := s.orderJournal.StagePreTransmit(payload.TokenID, payload.AuthorityEpoch, payload.SignerGeneration, view.ReservedOrderID, corestore.ActionModify, coreOrderOrigin(p.Origin), []orderJournalEvent{confirm, modify}); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTradingDisabled, err)
 	}
 
@@ -232,7 +234,7 @@ func (s *Server) cancelOrder(ctx context.Context, p rpc.OrderCancelParams) (*rpc
 	cancelEvent.SendState = ""
 	cancelEvent.Origin = normalizedWriteOrigin(p.Origin)
 	cancelEvent.Message = fmt.Sprintf("%s broker cancel attempted", auth.Route)
-	if err := s.orderJournal.Append(cancelEvent); err != nil {
+	if err := s.orderJournal.StagePreTransmit("", "", 0, view.ReservedOrderID, corestore.ActionCancel, coreOrderOrigin(p.Origin), []orderJournalEvent{cancelEvent}); err != nil {
 		return nil, fmt.Errorf("%w: append cancel journal: %v", ErrTradingDisabled, err)
 	}
 	if err := s.cancelConfiguredOrder(ctx, status, view.ReservedOrderID); err != nil {

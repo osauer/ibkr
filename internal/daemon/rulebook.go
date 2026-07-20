@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -544,8 +545,9 @@ func filterOffenders(list []risk.RuleOffender, sym string) []risk.RuleOffender {
 	return out
 }
 
-// journalRuleTransitions appends status changes to rules-decisions.jsonl so
-// week-one threshold calibration has data (regime-decisions precedent).
+// journalRuleTransitions appends status changes as typed SQLite events so
+// threshold calibration has a direct authoritative history. The JSONL branch
+// remains only for legacy unit/import oracles.
 func (s *Server) journalRuleTransitions(res *rpc.RulesResult) {
 	s.rulesMu.Lock()
 	prev := s.lastRules
@@ -569,16 +571,52 @@ func (s *Server) journalRuleTransitions(res *rpc.RulesResult) {
 	// (json.Encoder emits each map with a trailing newline).
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
+	var coreEvents []corestore.EventInput
+	coreEventOrdinal := 0
+	if s.coreStore != nil {
+		head, err := s.coreStore.AuthorityHead(context.Background())
+		if err != nil {
+			s.warnf("rules transitions: SQLite authority head unavailable: %v", err)
+			return
+		}
+		coreEventOrdinal = int(head.LastEventSeq) + 1
+	}
 	for _, r := range res.Rules {
 		if was, seen := prevStatus[r.ID]; seen && was == r.Status {
 			continue
 		}
-		_ = enc.Encode(map[string]any{
+		entry := map[string]any{
 			"version": 1, "at": res.AsOf, "rule": r.ID, "status": r.Status,
 			"was": prevStatus[r.ID], "evidence": r.Evidence,
 			"policy_id": res.PolicyID, "policy_version": res.PolicyVersion,
 			"policy_fingerprint": policyFingerprint,
-		})
+		}
+		_ = enc.Encode(entry)
+		if s.coreStore != nil {
+			raw, err := json.Marshal(entry)
+			if err != nil {
+				continue
+			}
+			version := int64(res.PolicyVersion)
+			key := coreEventKey(coreEventRuleTransition, res.AsOf, raw, coreEventOrdinal+len(coreEvents))
+			coreEvents = append(coreEvents, corestore.EventInput{
+				ScopeKey: daemonStateScope, EventKey: key, Type: coreEventRuleTransition,
+				Action: coreEventActionRecord, Origin: coreEventOriginDaemon,
+				OccurredAt: res.AsOf, PayloadJSON: raw,
+				Projection: corestore.EventProjection{RuleTransition: &corestore.RuleTransitionProjection{
+					RuleID: r.ID, Status: r.Status, PreviousStatus: prevStatus[r.ID],
+					PolicyID: res.PolicyID, PolicyVersion: &version, PolicyFingerprint: policyFingerprint,
+				}},
+			})
+		}
+	}
+	if s.coreStore != nil {
+		if len(coreEvents) > 0 {
+			if _, err := s.coreStore.AppendEvents(context.Background(), coreEvents); err != nil {
+				s.warnf("rules transitions: SQLite append failed: %v", err)
+			}
+		}
+		return
 	}
 	// rulesJournalMu is the writer-quiescence lock journal rotation
 	// excludes: held across path resolve, open, write, and close so a

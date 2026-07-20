@@ -5,7 +5,7 @@ Gateway session. It adapts that session for humans, AI hosts, and the Canary
 app, and it adds a risk harness. One ownership rule shapes the design:
 
 > The daemon owns all broker-connected and runtime-state capability: the
-> connection, observed state, schedulers, journals, and policy execution.
+> connection, observed state, schedulers, durable authority, and policy execution.
 > Every other process adapts typed contracts for its audience, and none of
 > them owns broker state.
 
@@ -39,15 +39,16 @@ and authority.
 | Process or Surface | Lifetime | Responsibility |
 |---|---|---|
 | CLI / TUI | One command | Validates input, calls the daemon for broker and runtime work, and renders human or JSON output. A few local-only workflows run without the daemon. |
-| `ibkr daemon` | Demand-driven background process or foreground service | Owns the broker connections and all runtime state: caches, schedulers, journals, source ingestion, risk-policy execution, proposals, opportunities, and reconciliation. |
+| `ibkr daemon` | Demand-driven background process or foreground service | Owns the broker connections and all runtime state: `daemon.db`, refreshable in-memory views, schedulers, source ingestion, risk-policy execution, proposals, opportunities, and reconciliation. |
 | `ibkr mcp` | Long-lived child of each MCP host | Speaks MCP JSON-RPC 2.0 over stdio and translates tools and resources into short daemon calls. The surface serves read, research, and preview work; it exposes no broker-write tools. |
 | `ibkr app` | Independently run or supervised HTTP process | Serves the embedded Canary PWA and owns pairing, auth, and app state. Maintains the live snapshot and quote streams, emits SSE, and can connect to the remote relay and Web Push. |
 | Canary Paired PWA | Browser or iOS Home Screen app | Renders authenticated snapshots, receives SSE and push notifications, and keeps device-side credentials and recovery state. It is a plain PWA, not an Android Trusted Web Activity. |
 | TWS / IB Gateway | Interactive Brokers process outside this repo | Terminates the local TWS API socket and maintains the broker-managed session. |
 
 Clients auto-spawn the daemon when the socket is absent, and it exits after
-15 idle minutes unless foreground mode disables the timeout. Durable caches
-and journals survive the process.
+15 idle minutes unless foreground mode disables the timeout. `daemon.db` and
+the separately listed configuration, evidence, and app files survive;
+refreshable in-memory views do not.
 
 ## Code Ownership Layers
 
@@ -55,9 +56,9 @@ and journals survive the process.
   TLS, request IDs, broker callbacks, contract resolution, and order-wire
   details live here.
 - `internal/daemon` is the long-running authority. It owns both broker
-  connectors, the external-source clients, caches, schedulers, journals, XDG
-  state, risk-capital runtime state, daily Flex ingestion, and post-trade
-  reconciliation.
+  connectors, the external-source clients, refreshable views, schedulers,
+  `daemon.db`, risk-capital runtime state, daily Flex ingestion, and
+  post-trade reconciliation.
 - `internal/risk` is the pure evaluation library behind advisory verdicts:
   thresholds and fingerprints, canary signal types, option math, the daily
   trading rulebook, and risk-constitution evaluation. It does no I/O and owns
@@ -113,11 +114,12 @@ Not all market context arrives through TWS or Gateway.
 | IBKR short-stock availability | FTP | Borrow availability and fee-rate evidence. |
 | Nasdaq | HTTPS JSON, pipe-delimited text, and RSS/XML | Earnings dates, Reg SHO threshold securities, LULD/trade-halt context. |
 | FRED, CBOE, Federal Reserve, US Treasury | HTTPS CSV/XML | Public regime and rates series. |
-| Wikipedia S&P 500 list | Scheduled HTTPS refresh | Breadth constituent membership, with a validated cache and embedded fallback. |
+| Wikipedia S&P 500 list | Scheduled HTTPS refresh | Breadth constituent membership, with a validated SQLite projection and embedded fallback. |
 | Official exchange calendars | Embedded Go data | Handwritten build-time tables for US equities, US options, and Xetra, covering 2026 through 2028; a date outside coverage reports an explicit unknown state. There is no runtime calendar network call. |
 
-The market-event source cache is memory-only today; the other source families
-have the disk caches described below.
+Market-event, contract-resolution, and membership projections plus retained
+observations live in `daemon.db`. Retry/backoff controls and other refreshable
+views stay in memory or use disposable scratch only.
 
 ## Data and Persistence
 
@@ -128,33 +130,52 @@ have the disk caches described below.
 [Tabler Icons license](diagrams/ICON-LICENSE.txt)
 
 Configuration is operator-owned, and daemon state and app state are separate
-authorities. Caches are rebuildable observations; journals and broker
-statements are durable evidence and can contain sensitive account or trading
-data. The journals and raw statements are the evidence of record; the history
-index below is only a derived view of them.
+authorities. `daemon.db` is the daemon's sole live authority for mutable state,
+append-only events, orders, and retained market observations. Retained Flex XML
+remains original broker evidence; the daemon transactionally refreshes its
+typed statement inventory and equity projection in `daemon.db` from the
+complete XML set.
 
 | Class | Default Location | Owner and Representative Contents |
 |---|---|---|
 | Operator configuration | `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`; policy defaults under `~/.config/ibkr/policies/` | Gateway/account/client pins, daemon/trading settings, protection/opportunity policy, the operator-authored `risk-policy.toml`, and the separate `flex-token` secret. The risk policy has no embedded default: missing approval stays unapproved. |
-| Daemon durable state | `$XDG_STATE_HOME/ibkr`, falling back to `~/.local/state/ibkr` | `platform-settings.json`, order preview/readiness material, `order-journal.jsonl`, purge ledger, proposal/opportunity snapshots and journals, risk-capital state and event journals, governance/brief/rule/regime/canary journals, and `statements/flex-*.xml`. |
-| Rotated evidence archives | `$XDG_STATE_HOME/ibkr/rotated/` | Monthly gzip archives of the regime, rules, and canary decision journals, written only after the bytes are fully absorbed into the history index. Immutable evidence, kept forever: rotation compresses and relocates, it never deletes. The raw keep window is `history.rotation.keep_raw_months` (default 2). |
-| Derived history index | `$XDG_STATE_HOME/ibkr/history.db` (SQLite, WAL) | The daemon is the only product writer and runtime opener. This rebuildable query index over the evidence journals and retained statements stays current through automatic backfill and tail ingest. Deleting the file is safe; it rebuilds from archives, journals, and statements at daemon start. Humans and offline analysis scripts may also open it directly in read-only mode. |
+| Daemon durable authority | `$XDG_STATE_HOME/ibkr/daemon.db` (SQLite, WAL), falling back to `~/.local/state/ibkr/daemon.db` | Sole live daemon authority for platform settings, risk-capital and governance state, trading readiness, purge state, orders and token tombstones, proposals and opportunities, decision/event history, retained observations, and statement projections. It is not delete-safe and never falls back to legacy files. |
+| Original broker evidence | `$XDG_STATE_HOME/ibkr/statements/flex-*.xml` | Immutable retained Flex statements. SQLite stores a complete current inventory, immutable file/equity versions, and current per-day winners derived transactionally from this set; it does not replace the XML evidence claim. |
+| Recovery artifacts | `$XDG_STATE_HOME/ibkr/backups/`, `$XDG_STATE_HOME/ibkr/legacy-sealed/<cutover-id>/`, and `$XDG_STATE_HOME/ibkr/daemon.db.head` | Verified database backups, hashed pre-cutover artifacts, and the external monotonic-head watermark. They are recovery and anti-rollback material only, never normal read fallbacks or dual-write targets. |
+| Private signer key | `$XDG_STATE_HOME/ibkr/order-preview-key-v2` | Private token-signing material bound to the current authority generation. It is deliberately outside ordinary database state. |
 | App durable state | `$XDG_STATE_HOME/ibkr/app`, falling back to `~/.local/state/ibkr/app` | Private `state.json` with device grants, push subscriptions, VAPID material, alerts, governance evidence, and relay credentials; `app.lock` enforces one app process per state directory. |
-| Rebuildable cache | `$XDG_CACHE_HOME/ibkr`, falling back to `~/.cache/ibkr` | Contract cache, FX and earnings caches, breadth state and S&P membership, regime series/history/streaks, gamma results/OI/expiry grids, and updater scratch space. |
+| Disposable scratch | `$XDG_CACHE_HOME/ibkr`, falling back to `~/.cache/ibkr` | Updater and transport scratch only; it is never daemon business-state authority. Contract, membership, regime, breadth, gamma, and decision data are SQLite projections/observations or refreshable in-memory views, not live files here. |
 | User data | `$XDG_DATA_HOME/ibkr`, falling back to `~/.local/share/ibkr` | `watchlist.json`; explicit research exports are separate operator-created files. |
 | Runtime IPC and logs | `$XDG_RUNTIME_DIR/ibkr/ibkr.sock`, falling back to `~/.cache/ibkr/ibkr.sock`; daemon log defaults to `~/.local/state/ibkr/ibkr-daemon.log` | Unix socket, sibling lock/PID file, rotated daemon text log, and optional macOS LaunchAgent/app logs under `~/Library`. |
 | Browser / PWA state | Browser cookie jar, IndexedDB, and `localStorage` | Short-lived session, durable HttpOnly device continuity, P-256 device key, local recovery material, preferences, and a non-authorizing relay route identifier. |
 | Hosted relay state | Cloudflare Durable Object | Connector token and expiry for the optional route. It stores no device grants or broker state. |
 
-During normal product operation, the daemon is the history index's only
-writer and only opener. The four history commands — `ibkr regime history`,
-`ibkr rules history`, `ibkr canary history`, and `ibkr recon equity` — reach
-it through typed daemon RPC; MCP and the app currently expose no history
-surface. Humans and offline analysis scripts may open the file directly in
-read-only mode. Archives plus the live journal always reconstruct the original
-byte stream, so nothing is ever lost to rotation. Order reads serve from the
-index only while it provably matches the journal; anything else falls back to
-the journal scan automatically, and the journal stays authoritative.
+The four history commands — `ibkr regime history`, `ibkr rules history`,
+`ibkr canary history`, and `ibkr recon equity` — query `daemon.db` through
+typed daemon RPC; MCP and the app currently expose no history surface. Order
+reads use the same database authority. There is no `history.db` ingest path,
+journal scan fallback, rotation job, or dual write after cutover. The legacy
+decision histories deliberately start empty. Imported historic market and
+gamma measurements are immutable observations stamped
+`decision_eligible=false` in a typed, non-null column (and provenance
+metadata); they support research but never seed current
+state or a current verdict.
+
+Cutover preserves safety-critical settings, capital/governance continuity,
+active or uncertain order chains, consumed-token tombstones, conservative
+order-ID floors, and purge rows and fill cursors. Trading readiness resets;
+current regime state and regime/rules/canary/proposal/opportunity decision
+history start clean, as do brief comparison baselines and proposal/opportunity
+snapshots.
+
+The daemon writes and fsyncs `daemon.db.head` before publishing the initial
+database and after every committed mutation. An existing database without
+that watermark fails closed and requires explicit verified recovery. The
+runtime verifies the actual application schema objects and recomputes stored
+content hashes for safety state and append-only evidence; it does not trust the
+migration ledger or SQLite's structural check alone. It does not automatically
+repair corruption or restore a backup; recovery and broker/order reconciliation
+are a separate operational procedure.
 
 Never persist broker market-data entitlements. Expose observed data type,
 quality, freshness, and warnings on typed read surfaces instead.
@@ -194,7 +215,7 @@ through the Worker.
 ## Observability
 
 The observability layer is thin on purpose: text logs, one health surface,
-and evidence journals. There are no metrics and no tracing.
+and typed database evidence. There are no metrics and no tracing.
 
 - The daemon writes structured text logs through `log/slog`. The `log_level`
   config key sets the level; the default is `info`. The log lives at
@@ -207,20 +228,17 @@ and evidence journals. There are no metrics and no tracing.
 - Typed read surfaces carry their own source health. Regime clusters, gamma,
   the market calendar, and governance report stale, partial, degraded, or
   unknown instead of guessing.
-- Append-only JSONL journals are the evidence trail for orders, regime, rule,
-  and canary decisions, proposal outcomes, risk-capital events, and risk-policy
-  governance. The purge ledger is different: it is mutable JSON rewritten
-  atomically as purge and restore authority changes. `ibkr brief` composes
-  current typed daemon authority rather than aggregating journals. The CLI
-  history commands — `ibkr regime history`, `ibkr rules history`,
-  `ibkr canary history`, and `ibkr recon equity` — query journal and statement
-  evidence through the derived index.
+- Append-only SQLite events are the evidence trail for orders, regime, rule,
+  and canary decisions, proposal outcomes, capital events, and risk-policy
+  governance. Mutable documents use compare-and-swap revisions, while coupled
+  state/event changes share one transaction. `ibkr brief` and the CLI history
+  commands compose or query this typed daemon authority directly.
 
 ## Change Flow
 
 Start every new capability with an ownership decision: operator config,
-daemon runtime state, app-local state, observed snapshot, cache, derived
-history index, or build flag. Then work outward in order: typed contract, owning behavior, tests,
+daemon database state/event/observation, app-local state, non-authoritative
+cache, original external evidence, or build flag. Then work outward in order: typed contract, owning behavior, tests,
 adapters, rendered surfaces, and generated references. Adapters never refetch
 daemon-owned sources and never recreate risk or trading verdicts.
 

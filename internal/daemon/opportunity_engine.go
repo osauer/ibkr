@@ -5,9 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,6 +67,7 @@ type opportunityEvent struct {
 	Key                string                            `json:"key,omitempty"`
 	Revision           string                            `json:"revision,omitempty"`
 	AccountID          string                            `json:"account_id,omitempty"`
+	AccountMode        string                            `json:"account_mode,omitempty"`
 	PolicyID           string                            `json:"policy_id,omitempty"`
 	PolicyVersion      int                               `json:"policy_version,omitempty"`
 	PolicyFingerprint  rpc.Fingerprint                   `json:"policy_fingerprint,omitzero"`
@@ -77,37 +78,13 @@ type opportunityEvent struct {
 	SourceFingerprints rpc.OpportunitySourceFingerprints `json:"source_fingerprints,omitzero"`
 }
 
-type opportunityStore struct {
-	currentPath string
-	eventsPath  string
-	mu          sync.Mutex
-}
-
 func (s *Server) installOpportunityEngine() {
-	current, err := defaultTradingStatePath("opportunities-current.json")
-	if err != nil {
-		s.warnf("opportunities: resolve current path: %v", err)
-		return
-	}
-	events, err := defaultTradingStatePath("opportunities.jsonl")
-	if err != nil {
-		s.warnf("opportunities: resolve events path: %v", err)
-		return
-	}
 	e := &opportunityEngine{
 		server:  s,
-		store:   &opportunityStore{currentPath: current, eventsPath: events},
+		store:   &opportunityStore{},
 		cadence: s.cfg.Opportunities.WithDefaults().RefreshCadenceDuration(),
 		now:     s.now,
 		ignored: map[string]struct{}{},
-	}
-	if snap, err := e.store.LoadCurrent(); err == nil && snap.Kind != "" {
-		if opportunitySnapshotAdoptable(snap) {
-			snap.LoadedFromState = true
-			e.snapshot = snap
-		} else {
-			s.warnf("opportunities: ignoring persisted snapshot without a concrete account/mode scope (account %q mode %q); regenerating on first refresh", snap.AccountID, snap.AccountMode)
-		}
 	}
 	s.opportunities = e
 }
@@ -292,7 +269,9 @@ func (e *opportunityEngine) refresh(ctx context.Context, show bool) (rpc.Opportu
 		snap.PolicyStatus = status.Policy
 		snap.Trading = status.Trading
 		snap.Blockers = []rpc.TradingBlocker{{Code: "opportunities_disabled", Message: "opportunities are disabled by config"}}
-		e.installSnapshot(snap, show)
+		if err := e.installSnapshot(snap, show); err != nil {
+			return e.Snapshot(false), err
+		}
 		return snap, nil
 	}
 	policy, policyStatus := e.server.opportunityPolicies.Active()
@@ -302,8 +281,12 @@ func (e *opportunityEngine) refresh(ctx context.Context, show bool) (rpc.Opportu
 		snap.PolicyStatus = policyStatus
 		snap.Trading = status.Trading
 		snap.Blockers = append([]rpc.TradingBlocker(nil), policyStatus.Blockers...)
-		e.installSnapshot(snap, show)
-		e.appendEvent(opportunityEvent{At: now, Type: "policy-" + policyStatus.Status, PolicyID: policyStatus.PolicyID, PolicyVersion: policyStatus.PolicyVersion, PolicyFingerprint: policyStatus.Fingerprint, Message: policyStatus.Message})
+		if err := e.installSnapshot(snap, show); err != nil {
+			return e.Snapshot(false), err
+		}
+		if err := e.appendEvent(opportunityEvent{At: now, Type: "policy-" + policyStatus.Status, PolicyID: policyStatus.PolicyID, PolicyVersion: policyStatus.PolicyVersion, PolicyFingerprint: policyStatus.Fingerprint, Message: policyStatus.Message}); err != nil {
+			return snap, err
+		}
 		return snap, nil
 	}
 	scope := e.currentScope()
@@ -313,7 +296,9 @@ func (e *opportunityEngine) refresh(ctx context.Context, show bool) (rpc.Opportu
 		snap.PolicyStatus = policyStatus
 		snap.Trading = status.Trading
 		snap.Blockers = []rpc.TradingBlocker{opportunityScopeUnscopedBlocker(scope)}
-		e.installSnapshot(snap, show)
+		if err := e.installSnapshot(snap, show); err != nil {
+			return e.Snapshot(false), err
+		}
 		return snap, nil
 	}
 	acct, err := e.server.handleAccountSummary(ctx)
@@ -329,7 +314,9 @@ func (e *opportunityEngine) refresh(ctx context.Context, show bool) (rpc.Opportu
 		snap.AccountID = scope.Account
 		snap.AccountMode = scope.Mode
 		snap.Blockers = blockers
-		e.installSnapshot(snap, show)
+		if installErr := e.installSnapshot(snap, show); installErr != nil {
+			return e.Snapshot(false), installErr
+		}
 		return snap, err
 	}
 	pos, err := e.server.handlePositionsList(ctx, &rpc.Request{})
@@ -345,7 +332,9 @@ func (e *opportunityEngine) refresh(ctx context.Context, show bool) (rpc.Opportu
 		snap.AccountID = scope.Account
 		snap.AccountMode = scope.Mode
 		snap.Blockers = blockers
-		e.installSnapshot(snap, show)
+		if installErr := e.installSnapshot(snap, show); installErr != nil {
+			return e.Snapshot(false), installErr
+		}
 		return snap, err
 	}
 	if proposalPositionsUnprimed(pos, acct) {
@@ -360,7 +349,9 @@ func (e *opportunityEngine) refresh(ctx context.Context, show bool) (rpc.Opportu
 		snap.AccountID = scope.Account
 		snap.AccountMode = scope.Mode
 		snap.Blockers = blockers
-		e.installSnapshot(snap, show)
+		if err := e.installSnapshot(snap, show); err != nil {
+			return e.Snapshot(false), err
+		}
 		return snap, nil
 	}
 	accountFP := rpc.BuildAccountFingerprint(acct)
@@ -398,21 +389,25 @@ func (e *opportunityEngine) refresh(ctx context.Context, show bool) (rpc.Opportu
 		Opportunities:      opportunities,
 		Counts:             opportunityCounts(opportunities),
 	}
-	return e.installScoped(snap, scope, show), nil
+	return e.installScoped(snap, scope, show)
 }
 
-func (e *opportunityEngine) installScoped(snap rpc.OpportunitySnapshot, scope brokerStateScope, show bool) rpc.OpportunitySnapshot {
+func (e *opportunityEngine) installScoped(snap rpc.OpportunitySnapshot, scope brokerStateScope, show bool) (rpc.OpportunitySnapshot, error) {
 	if current := e.currentScope(); !sameBrokerScope(current, scope) {
 		shell := emptyOpportunitySnapshot(snap.AsOf)
 		shell.Status = snap.Status
 		shell.PolicyStatus = snap.PolicyStatus
 		shell.Trading = snap.Trading
 		shell.Blockers = opportunityScopeBlockers(scope.Account, scope.Mode, current)
-		e.installSnapshot(shell, show)
-		return shell
+		if err := e.installSnapshot(shell, show); err != nil {
+			return e.Snapshot(false), err
+		}
+		return shell, nil
 	}
-	e.installSnapshot(snap, show)
-	return snap
+	if err := e.installSnapshot(snap, show); err != nil {
+		return e.Snapshot(false), err
+	}
+	return snap, nil
 }
 
 func (e *opportunityEngine) generate(policy opportunityPolicy, status rpc.OpportunityPolicyStatus, pos *rpc.PositionsResult, sources rpc.OpportunitySourceFingerprints, scope brokerStateScope, now time.Time) []rpc.Opportunity {
@@ -779,17 +774,21 @@ func (e *opportunityEngine) Ignore(p rpc.OpportunityIgnoreParams) rpc.Opportunit
 		return rpc.OpportunityIgnoreResult{Accepted: false, Message: "opportunity key is required", AsOf: now}
 	}
 	scope := e.currentScope()
+	if !brokerScopeConcrete(scope) {
+		return rpc.OpportunityIgnoreResult{Accepted: false, Key: key, Revision: strings.TrimSpace(p.Revision), Message: "opportunity ignore requires a concrete account and paper/live mode", AsOf: now}
+	}
+	ev := opportunityEvent{At: now, Type: "ignored", Key: key, Revision: strings.TrimSpace(p.Revision), Reason: strings.TrimSpace(p.Reason), Message: "opportunity ignored"}
+	ev.AccountID = scope.Account
+	ev.AccountMode = scope.Mode
+	if err := e.appendEvent(ev); err != nil {
+		return rpc.OpportunityIgnoreResult{Accepted: false, Key: key, Revision: strings.TrimSpace(p.Revision), Message: "opportunity ignore was not persisted", AsOf: now}
+	}
 	e.mu.Lock()
 	if e.ignored == nil {
 		e.ignored = map[string]struct{}{}
 	}
 	e.ignored[opportunityIgnoreKey(scope, key)] = struct{}{}
 	e.mu.Unlock()
-	ev := opportunityEvent{At: now, Type: "ignored", Key: key, Revision: strings.TrimSpace(p.Revision), Reason: strings.TrimSpace(p.Reason), Message: "opportunity ignored"}
-	if brokerScopeConcrete(scope) {
-		ev.AccountID = scope.Account
-	}
-	e.appendEvent(ev)
 	return rpc.OpportunityIgnoreResult{Accepted: true, Key: key, Revision: strings.TrimSpace(p.Revision), Message: "opportunity ignored", AsOf: now}
 }
 
@@ -835,16 +834,20 @@ func (e *opportunityEngine) exerciseAuthorization(origin string) brokerWriteAuth
 	return auth
 }
 
-func (e *opportunityEngine) installSnapshot(snap rpc.OpportunitySnapshot, show bool) {
-	e.replaceSnapshot(snap)
+func (e *opportunityEngine) installSnapshot(snap rpc.OpportunitySnapshot, show bool) error {
 	if opportunitySnapshotPersistable(snap) {
+		if e.store == nil {
+			return errors.New("opportunity store is not attached")
+		}
 		if err := e.store.SaveCurrent(snap); err != nil {
-			e.server.warnf("opportunities: save current snapshot: %v", err)
+			return fmt.Errorf("persist opportunity snapshot: %w", err)
 		}
 	}
+	e.replaceSnapshot(snap)
 	if show {
 		e.appendShownEvents(snap)
 	}
+	return nil
 }
 
 // preserveSnapshotOnRefreshFailure keeps serving the last-good snapshot
@@ -929,13 +932,27 @@ func (e *opportunityEngine) appendShownEvents(snap rpc.OpportunitySnapshot) {
 	}
 }
 
-func (e *opportunityEngine) appendEvent(ev opportunityEvent) {
+func (e *opportunityEngine) appendEvent(ev opportunityEvent) error {
 	if e == nil || e.store == nil {
-		return
+		return errors.New("opportunity store is not attached")
+	}
+	if ev.AccountID == "" || ev.AccountMode == "" {
+		e.mu.Lock()
+		if ev.AccountID == "" {
+			ev.AccountID = e.snapshot.AccountID
+		}
+		if ev.AccountMode == "" {
+			ev.AccountMode = e.snapshot.AccountMode
+		}
+		e.mu.Unlock()
 	}
 	if err := e.store.AppendEvent(ev); err != nil {
-		e.server.warnf("opportunities: append event: %v", err)
+		if e.server != nil {
+			e.server.warnf("opportunities: append event: %v", err)
+		}
+		return err
 	}
+	return nil
 }
 
 func (e *opportunityEngine) isIgnored(scope brokerStateScope, key string) bool {
@@ -1023,12 +1040,6 @@ func opportunityIgnoreKey(scope brokerStateScope, key string) string {
 	return strings.ToUpper(strings.TrimSpace(scope.Account)) + "|" + strings.ToLower(strings.TrimSpace(scope.Mode)) + "|" + strings.TrimSpace(key)
 }
 
-func opportunitySnapshotAdoptable(snap rpc.OpportunitySnapshot) bool {
-	return snap.Kind == rpc.OpportunitySnapshotKind &&
-		snap.Revision != "" &&
-		brokerScopeConcrete(brokerStateScope{Account: snap.AccountID, Mode: snap.AccountMode})
-}
-
 func opportunityScopeBlockers(snapAccount, snapMode string, scope brokerStateScope) []rpc.TradingBlocker {
 	if !brokerScopeConcrete(scope) {
 		return []rpc.TradingBlocker{opportunityScopeUnscopedBlocker(scope)}
@@ -1060,68 +1071,6 @@ func cloneOpportunitySnapshot(in rpc.OpportunitySnapshot) rpc.OpportunitySnapsho
 		out.Opportunities[i].Blockers = append([]rpc.TradingBlocker(nil), in.Opportunities[i].Blockers...)
 	}
 	return out
-}
-
-func (s *opportunityStore) SaveCurrent(snap rpc.OpportunitySnapshot) error {
-	if s == nil || s.currentPath == "" {
-		return fmt.Errorf("opportunity current path is empty")
-	}
-	raw, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal opportunity snapshot: %w", err)
-	}
-	return writePrivateStateAtomic(s.currentPath, append(raw, '\n'))
-}
-
-func (s *opportunityStore) LoadCurrent() (rpc.OpportunitySnapshot, error) {
-	if s == nil || s.currentPath == "" {
-		return rpc.OpportunitySnapshot{}, fmt.Errorf("opportunity current path is empty")
-	}
-	raw, err := os.ReadFile(s.currentPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return rpc.OpportunitySnapshot{}, nil
-		}
-		return rpc.OpportunitySnapshot{}, err
-	}
-	var snap rpc.OpportunitySnapshot
-	if err := json.Unmarshal(raw, &snap); err != nil {
-		return rpc.OpportunitySnapshot{}, err
-	}
-	return snap, nil
-}
-
-func (s *opportunityStore) AppendEvent(ev opportunityEvent) error {
-	if s == nil || s.eventsPath == "" {
-		return fmt.Errorf("opportunity events path is empty")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if ev.At.IsZero() {
-		ev.At = time.Now().UTC()
-	}
-	if ev.Version == 0 {
-		ev.Version = 1
-	}
-	if err := ensurePrivateStateDir(s.eventsPath); err != nil {
-		return err
-	}
-	raw, err := json.Marshal(ev)
-	if err != nil {
-		return fmt.Errorf("marshal opportunity event: %w", err)
-	}
-	f, err := os.OpenFile(s.eventsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open opportunity events %s: %w", s.eventsPath, err)
-	}
-	defer func() { _ = f.Close() }()
-	if err := f.Chmod(0o600); err != nil {
-		return fmt.Errorf("chmod opportunity events: %w", err)
-	}
-	if _, err := f.Write(append(raw, '\n')); err != nil {
-		return fmt.Errorf("append opportunity event: %w", err)
-	}
-	return nil
 }
 
 func shortStableHash(raw string) string {

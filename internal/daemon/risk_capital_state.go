@@ -1,14 +1,17 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -20,12 +23,12 @@ import (
 //
 // Authority split: risk-policy.toml owns the numbers, internal/risk owns the
 // evaluation, this store owns observed/derived runtime facts. Aggregates that
-// can be re-derived from the capital-events journal (declared flows, reconcile
-// evidence) are re-derived on every load — the journal is the source of truth,
-// while statement facts are rebuilt from retained statements. The state file
-// caches what those sources cannot rebuild (peak, latch, applied statement
-// correction ids, daily equity samples, overrides; regime-latch
-// never-trust-stored-bytes precedent).
+// can be re-derived from SQLite capital events (declared flows, reconcile
+// evidence) are replayed on every bind; statement facts come from retained
+// broker evidence. A versioned CAS document owns what those sources cannot
+// rebuild: peak, latch, applied statement corrections, daily equity samples,
+// overrides, and artefact completions. Legacy files below are importer/test
+// oracles only after cutover.
 //
 // Nothing in this file may influence submit eligibility, blockers, freeze,
 // pins, or tokens: v1 is advisory/shadow end to end.
@@ -35,6 +38,7 @@ const (
 	capitalEventsJournalFile = "capital-events.jsonl"
 	riskPolicyJournalFile    = "risk-policy-journal.jsonl"
 	riskCapitalStateVer      = 1
+	riskCapitalSQLiteDocVer  = 2
 	// riskCapitalDailySampleKeep bounds the per-day equity sample cache
 	// feeding the same-day recon equity check and the backtest replay.
 	riskCapitalDailySampleKeep = 45 * 24 * time.Hour
@@ -104,11 +108,27 @@ type capitalEventReplay struct {
 	reconciledReportIDs    map[string]struct{}
 }
 
+// riskCapitalSQLiteDocument is the complete authoritative capital state.
+// Capital declarations and governance evidence live with the current facts
+// so a state transition and the evidence explaining it commit under one CAS.
+// The old JSONL files are read only by the explicit cutover importer.
+type riskCapitalSQLiteDocument struct {
+	Version     int                    `json:"version"`
+	State       riskCapitalStateFileV1 `json:"state"`
+	OverrideSeq int                    `json:"override_seq,omitempty"`
+}
+
 type riskCapitalStore struct {
-	mu                    sync.Mutex
-	now                   func() time.Time
-	nudges                *nudgeStateStore
-	observeConfirmedFlows func(nudgeConfirmedFlowSnapshot)
+	mu                     sync.Mutex
+	now                    func() time.Time
+	core                   *corestore.Store
+	revision               int64
+	committed              riskCapitalSQLiteDocument
+	committedCapitalEvents []capitalEventV1
+	pendingEvents          []corestore.EventInput
+	capitalEvents          []capitalEventV1
+	nudges                 *nudgeStateStore
+	observeConfirmedFlows  func(nudgeConfirmedFlowSnapshot)
 	// nudgeCaptureHook is a test-only barrier invoked while mu is held before
 	// the atomic capital-report/latch capture.
 	nudgeCaptureHook func()
@@ -129,9 +149,8 @@ type riskCapitalStore struct {
 	// scopeRejectionsJournaled throttles equity_observation_rejected journal
 	// rows to one per (reason, account) per process.
 	scopeRejectionsJournaled map[string]bool
-	// kick nudges the history-index ingester after a capital or
-	// risk-policy journal append (data-free; the file is the input).
-	// Nil-safe; set at install to Server.kickHistoryIndex.
+	// kick is retained as a nil-safe legacy test hook. Production readers query
+	// the committed event log directly.
 	kick func()
 }
 
@@ -142,9 +161,107 @@ func (s *Server) installRiskCapitalStore() {
 	s.riskCapital = &riskCapitalStore{now: s.now, kick: s.kickHistoryIndex}
 }
 
+func (st *riskCapitalStore) bindCore(ctx context.Context, core *corestore.Store) error {
+	if st == nil || core == nil {
+		return fmt.Errorf("risk capital SQLite authority is unavailable")
+	}
+	doc, ok, err := core.GetStateDocument(ctx, daemonStateScope, stateKindRiskCapital)
+	if err != nil {
+		return fmt.Errorf("load risk capital state from SQLite: %w", err)
+	}
+	persisted := riskCapitalSQLiteDocument{
+		Version: riskCapitalSQLiteDocVer,
+		State:   riskCapitalStateFileV1{Version: riskCapitalStateVer},
+	}
+	revision := int64(0)
+	if ok {
+		if err := json.Unmarshal(doc.JSON, &persisted); err != nil || persisted.Version != riskCapitalSQLiteDocVer || persisted.State.Version != riskCapitalStateVer {
+			if err == nil {
+				err = fmt.Errorf("unsupported capital document version %d/state version %d", persisted.Version, persisted.State.Version)
+			}
+			return fmt.Errorf("decode risk capital state from SQLite: %w", err)
+		}
+		revision = doc.Revision
+	} else {
+		return fmt.Errorf("risk capital state is missing from SQLite; cutover bootstrap was not completed")
+	}
+	events, err := loadAllCoreEvents(ctx, core, coreEventCapital)
+	if err != nil {
+		return fmt.Errorf("load capital events from SQLite: %w", err)
+	}
+	capitalEvents := make([]capitalEventV1, 0, len(events))
+	for _, event := range events {
+		var capital capitalEventV1
+		if err := json.Unmarshal(event.PayloadJSON, &capital); err != nil || capital.Version != 1 {
+			return fmt.Errorf("decode capital event %d from SQLite", event.EventSeq)
+		}
+		capitalEvents = append(capitalEvents, capital)
+	}
+	st.mu.Lock()
+	st.core, st.revision, st.loaded = core, revision, true
+	st.capitalEvents = append([]capitalEventV1(nil), capitalEvents...)
+	st.installSQLiteDocumentLocked(persisted)
+	st.committed = cloneRiskCapitalDocument(persisted)
+	st.committedCapitalEvents = append([]capitalEventV1(nil), capitalEvents...)
+	st.mu.Unlock()
+	return nil
+}
+
+func cloneRiskCapitalDocument(in riskCapitalSQLiteDocument) riskCapitalSQLiteDocument {
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return riskCapitalSQLiteDocument{Version: riskCapitalSQLiteDocVer, State: riskCapitalStateFileV1{Version: riskCapitalStateVer}}
+	}
+	var out riskCapitalSQLiteDocument
+	if json.Unmarshal(raw, &out) != nil {
+		return riskCapitalSQLiteDocument{Version: riskCapitalSQLiteDocVer, State: riskCapitalStateFileV1{Version: riskCapitalStateVer}}
+	}
+	return out
+}
+
+func (st *riskCapitalStore) sqliteDocumentLocked() riskCapitalSQLiteDocument {
+	return riskCapitalSQLiteDocument{
+		Version: riskCapitalSQLiteDocVer, State: st.state,
+		OverrideSeq: st.overrideSeq,
+	}
+}
+
+func (st *riskCapitalStore) installSQLiteDocumentLocked(doc riskCapitalSQLiteDocument) {
+	st.state = doc.State
+	st.state.Version = riskCapitalStateVer
+	st.overrideSeq = doc.OverrideSeq
+	replayed := replayCapitalEventSlice(st.capitalEvents)
+	st.cumFlowsBase = replayed.declaredFlowsBase
+	st.declaredEvents = replayed.declaredEvents
+	st.lastReconciledAt = replayed.lastReconciledAt
+	st.lastReconcileReportID = replayed.lastReconcileReportID
+	st.lastReconcileSource = replayed.lastReconcileSource
+	st.lastAutoExtendedAt = replayed.lastAutoExtendedAt
+	st.lastAutoExtendReportID = replayed.lastAutoExtendReportID
+	st.reconciledReportIDs = replayed.reconciledReportIDs
+}
+
 // appendCapitalEvent journals one declared capital event and nudges the
 // history index. Evidence first, kick second — the kick carries no data.
 func (st *riskCapitalStore) appendCapitalEvent(ev capitalEventV1) error {
+	if st != nil && st.core != nil {
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			return err
+		}
+		st.capitalEvents = append(st.capitalEvents, ev)
+		st.pendingEvents = append(st.pendingEvents, corestore.EventInput{
+			ScopeKey: daemonStateScope,
+			EventKey: coreEventKey(coreEventCapital, ev.At, raw, len(st.capitalEvents)),
+			Type:     coreEventCapital, Action: coreEventActionRecord, Origin: coreEventOriginDaemon,
+			OccurredAt: ev.At, PayloadJSON: raw,
+			Projection: corestore.EventProjection{CapitalEvent: &corestore.CapitalEventProjection{
+				Kind: ev.Type, AmountBaseText: strconv.FormatFloat(ev.AmountBase, 'g', -1, 64),
+				EffectiveAt: ev.EffectiveAt.UTC().Format(time.RFC3339Nano), ReportID: ev.ReportID,
+			}},
+		})
+		return nil
+	}
 	err := appendCapitalEvent(ev)
 	st.kickIndex()
 	return err
@@ -153,8 +270,52 @@ func (st *riskCapitalStore) appendCapitalEvent(ev capitalEventV1) error {
 // appendRiskPolicyJournal journals one governance event and nudges the
 // history index.
 func (st *riskCapitalStore) appendRiskPolicyJournal(entry map[string]any) {
+	if st != nil && st.core != nil {
+		raw, err := json.Marshal(entry)
+		if err == nil {
+			at := st.now().UTC()
+			if value, ok := entry["at"].(time.Time); ok && !value.IsZero() {
+				at = value.UTC()
+			}
+			kind := strings.TrimSpace(fmt.Sprint(entry["kind"]))
+			if kind == "" {
+				kind = "governance_event"
+			}
+			projection := corestore.RiskPolicyEventProjection{
+				Kind: kind, PolicyID: strings.TrimSpace(fmt.Sprint(entry["policy_id"])),
+				PolicyFingerprint: strings.TrimSpace(fmt.Sprint(entry["policy_fingerprint"])),
+			}
+			if version, ok := integerAny(entry["policy_version"]); ok {
+				projection.PolicyVersion = &version
+			}
+			st.pendingEvents = append(st.pendingEvents, corestore.EventInput{
+				ScopeKey: daemonStateScope,
+				EventKey: coreEventKey(coreEventRiskPolicy, at, raw, int(st.revision)+len(st.pendingEvents)+1),
+				Type:     coreEventRiskPolicy, Action: coreEventActionRecord, Origin: coreEventOriginDaemon,
+				OccurredAt: at, PayloadJSON: raw,
+				Projection: corestore.EventProjection{RiskPolicyEvent: &projection},
+			})
+		}
+		return
+	}
 	appendRiskPolicyJournal(entry)
 	st.kickIndex()
+}
+
+func integerAny(value any) (int64, bool) {
+	switch v := value.(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case float64:
+		return int64(v), v == float64(int64(v))
+	case json.Number:
+		n, err := v.Int64()
+		return n, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func (st *riskCapitalStore) kickIndex() {
@@ -195,15 +356,15 @@ func (st *riskCapitalStore) loadLocked() {
 }
 
 func replayCapitalEvents() capitalEventReplay {
-	out := capitalEventReplay{reconciledReportIDs: make(map[string]struct{})}
 	path, err := defaultTradingStatePath(capitalEventsJournalFile)
 	if err != nil {
-		return out
+		return capitalEventReplay{reconciledReportIDs: make(map[string]struct{})}
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return out
+		return capitalEventReplay{reconciledReportIDs: make(map[string]struct{})}
 	}
+	var events []capitalEventV1
 	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -213,6 +374,14 @@ func replayCapitalEvents() capitalEventReplay {
 		if json.Unmarshal([]byte(line), &ev) != nil || ev.Version != 1 {
 			continue
 		}
+		events = append(events, ev)
+	}
+	return replayCapitalEventSlice(events)
+}
+
+func replayCapitalEventSlice(events []capitalEventV1) capitalEventReplay {
+	out := capitalEventReplay{reconciledReportIDs: make(map[string]struct{})}
+	for _, ev := range events {
 		switch ev.Type {
 		case "deposit":
 			out.declaredFlowsBase += ev.AmountBase
@@ -241,10 +410,49 @@ func replayCapitalEvents() capitalEventReplay {
 	return out
 }
 
-func (st *riskCapitalStore) persistLocked(force bool) {
+func (st *riskCapitalStore) persistLocked(force bool) error {
+	if st.core != nil {
+		doc := st.sqliteDocumentLocked()
+		raw, err := json.Marshal(doc)
+		if err == nil {
+			var saved corestore.StateDocument
+			update := corestore.StateDocumentCAS{ScopeKey: daemonStateScope, Kind: stateKindRiskCapital, ExpectedRevision: st.revision, JSON: raw}
+			if len(st.pendingEvents) > 0 {
+				saved, _, err = st.core.CompareAndSwapStateDocumentWithEvents(context.Background(), update, st.pendingEvents)
+			} else {
+				saved, err = st.core.CompareAndSwapStateDocument(context.Background(), update)
+			}
+			if err == nil {
+				st.revision = saved.Revision
+				st.committed = cloneRiskCapitalDocument(doc)
+				st.committedCapitalEvents = append([]capitalEventV1(nil), st.capitalEvents...)
+				st.pendingEvents = nil
+				st.lastPersistAt = st.now()
+				return nil
+			}
+		}
+		// The mutex keeps the uncommitted state private; restore the last
+		// committed generation before any caller can observe it.
+		st.installSQLiteDocumentLocked(cloneRiskCapitalDocument(st.committed))
+		st.capitalEvents = append([]capitalEventV1(nil), st.committedCapitalEvents...)
+		replayed := replayCapitalEventSlice(st.capitalEvents)
+		st.cumFlowsBase = replayed.declaredFlowsBase
+		st.declaredEvents = replayed.declaredEvents
+		st.lastReconciledAt = replayed.lastReconciledAt
+		st.lastReconcileReportID = replayed.lastReconcileReportID
+		st.lastReconcileSource = replayed.lastReconcileSource
+		st.lastAutoExtendedAt = replayed.lastAutoExtendedAt
+		st.lastAutoExtendReportID = replayed.lastAutoExtendReportID
+		st.reconciledReportIDs = replayed.reconciledReportIDs
+		st.pendingEvents = nil
+		if err == nil {
+			err = fmt.Errorf("encode risk capital SQLite document")
+		}
+		return fmt.Errorf("persist risk capital state in SQLite: %w", err)
+	}
 	now := st.now()
 	if !force && now.Sub(st.lastPersistAt) < riskCapitalPersistEvery {
-		return
+		return nil
 	}
 	st.lastPersistAt = now
 	if path, err := defaultTradingStatePath(riskCapitalStateFile); err == nil {
@@ -252,6 +460,7 @@ func (st *riskCapitalStore) persistLocked(force bool) {
 			_ = writePrivateStateAtomic(path, data) // best-effort, never fails the hot path
 		}
 	}
+	return nil
 }
 
 // runtimeLocked builds the evaluator's view of the state.
@@ -430,6 +639,7 @@ func (st *riskCapitalStore) journalScopeRejectionLocked(scope brokerStateScope, 
 		"bound_account": st.state.AccountID, "equity_base": equityBase, "equity_as_of": asOf.UTC(),
 		"policy_fingerprint": constitutionFingerprint(c),
 	})
+	_ = st.persistLocked(true)
 }
 
 // CorrectPeak lowers a corrupted adjusted peak to an evidence-anchored value.
@@ -468,7 +678,9 @@ func (st *riskCapitalStore) CorrectPeak(peakBase float64, peakAsOf time.Time, so
 		"peak_as_of": st.state.PeakAsOf, "latch_untouched": st.state.BlockLatched,
 		"policy_fingerprint": constitutionFingerprint(c),
 	})
-	st.persistLocked(true)
+	if err := st.persistLocked(true); err != nil {
+		return 0, err
+	}
 	return from, nil
 }
 
@@ -545,7 +757,9 @@ func (st *riskCapitalStore) ApplyCapitalEventForPolicy(p rpc.CapitalEventParams,
 			st.lastAutoExtendReportID = ev.ReportID
 		}
 	}
-	st.persistLocked(true)
+	if err := st.persistLocked(true); err != nil {
+		return capitalEventV1{}, err
+	}
 	return ev, nil
 }
 
@@ -581,7 +795,9 @@ func (st *riskCapitalStore) ApplyAutomaticReconcile(reportID string, coverageTo 
 	st.lastReconcileSource = rpc.ReconcileSourceAutomatic
 	st.lastAutoExtendedAt = ev.At
 	st.lastAutoExtendReportID = reportID
-	st.persistLocked(true)
+	if err := st.persistLocked(true); err != nil {
+		return capitalEventV1{}, false, err
+	}
 	return ev, true, nil
 }
 
@@ -627,12 +843,12 @@ func (st *riskCapitalStore) IncorporateStatementSnapshot(snap statementCapitalSn
 	st.state.StatementAuthorityActive = true
 	st.state.StatementFlowsBase = snap.FlowsBase
 	st.state.StatementCoverageTo = snap.CoverageTo
-	st.persistLocked(true)
+	persisted := st.persistLocked(true) == nil
 	st.mu.Unlock()
 	// The nudge store has its own lock and persistence boundary. Observe only
 	// after capital state is installed so neither store is held while writing
 	// the other, and never let advisory nudge persistence alter capital truth.
-	if st.observeConfirmedFlows != nil {
+	if persisted && st.observeConfirmedFlows != nil {
 		st.observeConfirmedFlows(snap.NudgeConfirmedFlows)
 	}
 }
@@ -645,7 +861,7 @@ func (st *riskCapitalStore) ActivateStatementAuthorityWithoutStatements() {
 		return
 	}
 	st.state.StatementAuthorityActive = true
-	st.persistLocked(true)
+	_ = st.persistLocked(true)
 }
 
 // GrantOverride records a one-shot, expiring exception against one named
@@ -697,7 +913,9 @@ func (st *riskCapitalStore) GrantOverride(p rpc.OverrideParams, c *risk.Constitu
 		"control": rec.Control, "reason": rec.Reason, "expires_at": rec.ExpiresAt,
 		"policy_fingerprint": rec.PolicyFingerprint,
 	})
-	st.persistLocked(true)
+	if err := st.persistLocked(true); err != nil {
+		return rpc.OverrideRecord{}, err
+	}
 	return rec, nil
 }
 
@@ -726,8 +944,7 @@ func (st *riskCapitalStore) ResetDrawdown(reason string, c *risk.Constitution) e
 		"version": 1, "at": now, "kind": "drawdown_reset", "reason": reason,
 		"was_latched": wasLatched, "policy_fingerprint": constitutionFingerprint(c),
 	})
-	st.persistLocked(true)
-	return nil
+	return st.persistLocked(true)
 }
 
 // RecordArtefact journals completion of one declared cadence artefact.
@@ -773,7 +990,9 @@ func (st *riskCapitalStore) RecordArtefact(p rpc.ArtefactParams, c *risk.Constit
 		journal["brief_fingerprint"] = rec.BriefFingerprint
 	}
 	st.appendRiskPolicyJournal(journal)
-	st.persistLocked(true)
+	if err := st.persistLocked(true); err != nil {
+		return rpc.ArtefactRecord{}, err
+	}
 	return rec, nil
 }
 
@@ -1016,6 +1235,52 @@ func (st *riskCapitalStore) ReplayContext() capitalReplayContext {
 	return ctx
 }
 
+func (st *riskCapitalStore) CapitalFlowEventsContext(ctx context.Context, checkpoint func(string) error) ([]capitalEventV1, error) {
+	if checkpoint != nil {
+		if err := checkpoint("capital_events_start"); err != nil {
+			return nil, err
+		}
+	} else if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, fmt.Errorf("risk capital store is unavailable")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	out := make([]capitalEventV1, 0, len(st.capitalEvents))
+	if st.core == nil {
+		// Explicit legacy unit/import helper; a started daemon is core-bound.
+		out = append(out, replayCapitalEvents().declaredEvents...)
+		return out, nil
+	}
+	for _, event := range st.capitalEvents {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if event.Type == "deposit" || event.Type == "withdrawal" {
+			out = append(out, event)
+		}
+	}
+	return out, nil
+}
+
+func (st *riskCapitalStore) GovernanceEventPayloads(ctx context.Context) ([][]byte, error) {
+	if st == nil || st.core == nil {
+		return nil, fmt.Errorf("risk governance SQLite authority is unavailable")
+	}
+	events, err := loadAllCoreEvents(ctx, st.core, coreEventRiskPolicy)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]byte, 0, len(events))
+	for _, event := range events {
+		out = append(out, append([]byte(nil), event.PayloadJSON...))
+	}
+	return out, nil
+}
+
 func (st *riskCapitalStore) LastAutoExtend() (string, time.Time) {
 	if st == nil {
 		return "", time.Time{}
@@ -1087,10 +1352,10 @@ func appendCapitalEvent(ev capitalEventV1) error {
 	return json.NewEncoder(f).Encode(ev)
 }
 
-// appendRiskPolicyJournal records one governance event. Unlike
-// rules-decisions.jsonl this journal always carries the policy fingerprint
-// key, so calibration replay can prove which exact policy produced a
-// transition. Best-effort: journaling never fails the caller.
+// appendRiskPolicyJournal is the legacy file-backed test/import seam. Runtime
+// governance events use the riskCapitalStore method and daemon.db. The payload
+// always carries the policy fingerprint so replay can prove which exact policy
+// produced a transition. Best-effort: journaling never fails the caller.
 func appendRiskPolicyJournal(entry map[string]any) {
 	path, err := defaultTradingStatePath(riskPolicyJournalFile)
 	if err != nil {
@@ -1107,6 +1372,17 @@ func appendRiskPolicyJournal(entry map[string]any) {
 	_ = json.NewEncoder(f).Encode(entry)
 }
 
+func (st *riskCapitalStore) RecordGovernanceEvent(entry map[string]any) error {
+	if st == nil {
+		return fmt.Errorf("risk capital persistence is unavailable")
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.loadLocked()
+	st.appendRiskPolicyJournal(entry)
+	return st.persistLocked(true)
+}
+
 // journalRiskPolicyTransition records manager status transitions
 // (active/absent/drift/error) with full policy identity.
 func (s *Server) journalRiskPolicyTransition(prev, next string, c *risk.Constitution) {
@@ -1119,6 +1395,12 @@ func (s *Server) journalRiskPolicyTransition(prev, next string, c *risk.Constitu
 		entry["fingerprint_version"] = rpc.RiskConstitutionFingerprintVersion
 		entry["policy_fingerprint"] = c.FingerprintKey()
 	}
-	appendRiskPolicyJournal(entry)
+	if s.riskCapital != nil {
+		_ = s.riskCapital.RecordGovernanceEvent(entry)
+	} else {
+		// Legacy unit/import helper only. A started daemon always binds the
+		// risk capital store before policy reload can emit transitions.
+		appendRiskPolicyJournal(entry)
+	}
 	s.kickHistoryIndex()
 }

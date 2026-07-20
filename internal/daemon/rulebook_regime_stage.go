@@ -3,9 +3,11 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -30,6 +32,38 @@ type rulesRegimeStageState struct {
 	Bucket  string    `json:"bucket"`
 	Stage   string    `json:"stage"`
 	AsOf    time.Time `json:"as_of"`
+}
+
+func (s *Server) bindRulesRegimeStage(ctx context.Context, core *corestore.Store) error {
+	if s == nil || core == nil {
+		return fmt.Errorf("rules regime stage SQLite authority is unavailable")
+	}
+	doc, ok, err := core.GetStateDocument(ctx, daemonStateScope, stateKindRulesRegimeStage)
+	if err != nil {
+		return fmt.Errorf("load rules regime stage from SQLite: %w", err)
+	}
+	state := rulesRegimeStageState{Version: rulesRegimeStageStateVer}
+	if ok {
+		if err := json.Unmarshal(doc.JSON, &state); err != nil || state.Version != rulesRegimeStageStateVer {
+			if err == nil {
+				err = fmt.Errorf("unsupported version %d", state.Version)
+			}
+			return fmt.Errorf("decode rules regime stage from SQLite: %w", err)
+		}
+		if state.Stage != "" {
+			state.Bucket = bucketRegimeStage(state.Stage)
+			if state.Bucket == "" {
+				return fmt.Errorf("decode rules regime stage from SQLite: invalid stage %q", state.Stage)
+			}
+		}
+	} else {
+		return fmt.Errorf("rules regime stage is missing from SQLite; cutover bootstrap was not completed")
+	}
+	s.rulesRegimeStageMu.Lock()
+	s.rulesRegimeStage = state
+	s.rulesRegimeStageLoaded = true
+	s.rulesRegimeStageMu.Unlock()
+	return nil
 }
 
 // bucketRegimeStage maps a lifecycle stage onto the rulebook's three
@@ -75,6 +109,31 @@ func (s *Server) latchRulesRegimeStage(res *rpc.RegimeSnapshotResult) {
 	}
 	st := rulesRegimeStageState{Version: rulesRegimeStageStateVer, Bucket: bucket, Stage: res.Lifecycle.Stage, AsOf: time.Now()}
 	s.rulesRegimeStageMu.Lock()
+	if s.coreStore != nil {
+		doc, ok, err := s.coreStore.GetStateDocument(context.Background(), daemonStateScope, stateKindRulesRegimeStage)
+		if err != nil || !ok {
+			s.rulesRegimeStageMu.Unlock()
+			s.warnf("rules regime stage: SQLite authority read failed: %v", err)
+			return
+		}
+		raw, err := json.Marshal(st)
+		if err == nil {
+			_, err = s.coreStore.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
+				ScopeKey: daemonStateScope, Kind: stateKindRulesRegimeStage,
+				ExpectedRevision: doc.Revision, JSON: raw,
+			})
+		}
+		if err != nil {
+			s.rulesRegimeStageMu.Unlock()
+			s.warnf("rules regime stage: SQLite authority write failed: %v", err)
+			return
+		}
+		s.rulesRegimeStage = st
+		s.rulesRegimeStageLoaded = true
+		s.rulesRegimeStageMu.Unlock()
+		return
+	}
+	// Legacy unit/import helper only.
 	s.rulesRegimeStage = st
 	s.rulesRegimeStageLoaded = true
 	s.rulesRegimeStageMu.Unlock()
@@ -92,6 +151,8 @@ func (s *Server) rulesRegimeStageSnapshot() rulesRegimeStageState {
 	defer s.rulesRegimeStageMu.Unlock()
 	if !s.rulesRegimeStageLoaded {
 		s.rulesRegimeStageLoaded = true
+		// A started daemon binds this latch eagerly from SQLite. Reaching the
+		// lazy path is confined to legacy unit/import helpers.
 		if path, err := defaultTradingStatePath(rulesRegimeStageFile); err == nil {
 			if data, err := os.ReadFile(path); err == nil {
 				var st rulesRegimeStageState

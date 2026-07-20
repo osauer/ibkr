@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/canary"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -54,10 +55,42 @@ type briefStateFileV1 struct {
 }
 
 type briefStateStore struct {
-	mu     sync.Mutex
-	path   string
-	loaded bool
-	state  briefStateFileV1
+	mu       sync.Mutex
+	path     string // legacy importer/test helper only
+	core     *corestore.Store
+	revision int64
+	loaded   bool
+	state    briefStateFileV1
+}
+
+func (st *briefStateStore) bindCore(ctx context.Context, core *corestore.Store) error {
+	if st == nil || core == nil {
+		return fmt.Errorf("brief state SQLite authority is unavailable")
+	}
+	doc, ok, err := core.GetStateDocument(ctx, daemonStateScope, stateKindBrief)
+	if err != nil {
+		return fmt.Errorf("load brief state from SQLite: %w", err)
+	}
+	state := briefStateFileV1{Version: briefStateVersion, Stamps: map[string]briefStampState{}}
+	revision := int64(0)
+	if ok {
+		if err := json.Unmarshal(doc.JSON, &state); err != nil || state.Version != briefStateVersion {
+			if err == nil {
+				err = fmt.Errorf("unsupported version %d", state.Version)
+			}
+			return fmt.Errorf("decode brief state from SQLite: %w", err)
+		}
+		if state.Stamps == nil {
+			state.Stamps = map[string]briefStampState{}
+		}
+		revision = doc.Revision
+	} else {
+		return fmt.Errorf("brief state is missing from SQLite; cutover bootstrap was not completed")
+	}
+	st.mu.Lock()
+	st.core, st.revision, st.loaded, st.state = core, revision, true, state
+	st.mu.Unlock()
+	return nil
 }
 
 func (s *Server) installBriefStateStore() {
@@ -116,7 +149,7 @@ func (st *briefStateStore) latestBaseline() (briefStampState, bool) {
 }
 
 func (st *briefStateStore) stamp(kind, fingerprint string, at time.Time, rules *rpc.RulesResult) error {
-	if st == nil || st.path == "" {
+	if st == nil || (st.core == nil && st.path == "") {
 		return fmt.Errorf("brief state persistence is unavailable")
 	}
 	st.mu.Lock()
@@ -132,12 +165,30 @@ func (st *briefStateStore) stamp(kind, fingerprint string, at time.Time, rules *
 			stamp.Rules = append(stamp.Rules, briefRuleState{ID: row.ID, Status: row.Status})
 		}
 	}
-	st.state.Stamps[kind] = stamp
-	data, err := json.Marshal(st.state)
+	next := st.state
+	next.Stamps = maps.Clone(st.state.Stamps)
+	next.Stamps[kind] = stamp
+	data, err := json.Marshal(next)
 	if err != nil {
 		return err
 	}
-	return writePrivateStateAtomic(st.path, data)
+	if st.core != nil {
+		saved, err := st.core.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
+			ScopeKey: daemonStateScope, Kind: stateKindBrief,
+			ExpectedRevision: st.revision, JSON: data,
+		})
+		if err != nil {
+			return err
+		}
+		st.revision = saved.Revision
+		st.state = next
+		return nil
+	}
+	if err := writePrivateStateAtomic(st.path, data); err != nil {
+		return err
+	}
+	st.state = next
+	return nil
 }
 
 func (st *briefStateStore) stampedToday(kind string, now time.Time) (briefStampState, bool) {

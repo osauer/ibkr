@@ -1,11 +1,15 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/discover"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
@@ -15,7 +19,7 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 4, 19, 0, 0, 0, time.UTC)
-	store := newPurgeLedgerStore(filepath.Join(t.TempDir(), "purge-ledger.json"), func() time.Time { return now })
+	store := newTestPurgeLedgerStore(t, filepath.Join(t.TempDir(), "purge-ledger.json"), func() time.Time { return now })
 	contract := purgeLedgerTestStockContract()
 
 	if err := store.ApplyOrderFill(purgeLedgerEventWithContract(orderJournalEvent{
@@ -104,7 +108,7 @@ func TestPurgeLedgerShadowPnLForShortRows(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 4, 19, 5, 0, 0, time.UTC)
-	store := newPurgeLedgerStore(filepath.Join(t.TempDir(), "purge-ledger.json"), func() time.Time { return now })
+	store := newTestPurgeLedgerStore(t, filepath.Join(t.TempDir(), "purge-ledger.json"), func() time.Time { return now })
 	contract := purgeLedgerTestStockContract()
 
 	purgeFill := purgeLedgerFillEvent(purgeExecuteSource, "purge-short", "purge-test", "leg-aapl-short", contract, rpc.OrderActionBuy, 2, 2, 50)
@@ -128,7 +132,7 @@ func TestPurgeLedgerSnapshotFiltersByBrokerScopeMode(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 8, 18, 45, 0, 0, time.UTC)
-	store := newPurgeLedgerStore(filepath.Join(t.TempDir(), "purge-ledger.json"), func() time.Time { return now })
+	store := newTestPurgeLedgerStore(t, filepath.Join(t.TempDir(), "purge-ledger.json"), func() time.Time { return now })
 	contract := purgeLedgerTestStockContract()
 
 	paper := purgeLedgerFillEvent(purgeExecuteSource, "paper-purge", "purge-paper", "leg-aapl", contract, rpc.OrderActionSell, 1, 1, 100)
@@ -167,23 +171,22 @@ func TestPurgeLedgerSnapshotFiltersByBrokerScopeMode(t *testing.T) {
 	}
 }
 
-func TestPurgeLedgerOldSchemaIsReset(t *testing.T) {
+func TestLegacyPurgeLedgerUnknownSchemaFailsWithoutDeletingSource(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "purge-ledger.json")
 	if err := os.WriteFile(path, []byte(`{"kind":"ibkr.purge_ledger","schema_version":"purge-ledger-v1","rows":[{"leg_id":"old","symbol":"SAP"}]}`+"\n"), 0o600); err != nil {
 		t.Fatalf("write old ledger: %v", err)
 	}
-	store := newPurgeLedgerStore(path, func() time.Time { return time.Date(2026, 6, 8, 18, 50, 0, 0, time.UTC) })
-	rows, totals, err := store.Snapshot(brokerStateScope{}, "")
+	if _, err := loadLegacyPurgeImportSelection(path, legacyOrderImportSelection{}); err == nil {
+		t.Fatal("unknown purge schema must fail cutover")
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("snapshot old schema: %v", err)
+		t.Fatalf("legacy purge source was deleted: %v", err)
 	}
-	if len(rows) != 0 || totals.ActiveRows != 0 {
-		t.Fatalf("old schema rows=%+v totals=%+v, want reset empty ledger", rows, totals)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("old ledger file still exists or stat failed err=%v", err)
+	if !strings.Contains(string(raw), `"schema_version":"purge-ledger-v1"`) {
+		t.Fatalf("legacy purge source was mutated: %s", raw)
 	}
 }
 
@@ -192,9 +195,23 @@ func TestOrderLifecycleFillUpdatesPurgeLedgerFromJournalIdentity(t *testing.T) {
 
 	now := time.Date(2026, 6, 4, 19, 10, 0, 0, time.UTC)
 	dir := t.TempDir()
+	journal := newTestOrderJournalStore(t, filepath.Join(dir, "order-journal.jsonl"))
+	authority, err := journal.coreStore()
+	if err != nil {
+		t.Fatalf("order authority: %v", err)
+	}
+	ledger := newPurgeLedgerStore(filepath.Join(dir, "purge-ledger.json"), func() time.Time { return now })
+	if err := ledger.UseCoreStore(authority); err != nil {
+		t.Fatalf("attach purge authority: %v", err)
+	}
 	srv := &Server{
-		orderJournal: newOrderJournalStore(filepath.Join(dir, "order-journal.jsonl")),
-		purgeLedger:  newPurgeLedgerStore(filepath.Join(dir, "purge-ledger.json"), func() time.Time { return now }),
+		cfg: &config.Resolved{
+			Gateway: config.Gateway{Host: "127.0.0.1", Port: new(4002), ClientID: new(31), Account: "DU123"},
+			Trading: config.Trading{Mode: config.TradingModePaper}.WithDefaults(),
+		},
+		orderJournal: journal,
+		purgeLedger:  ledger,
+		coreStore:    authority,
 		endpoint:     discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU123"},
 		now:          func() time.Time { return now },
 	}
@@ -286,6 +303,69 @@ func TestOrderLifecycleFillUpdatesPurgeLedgerFromJournalIdentity(t *testing.T) {
 	}
 	if totals.ActiveRows != 0 || totals.RestoredRows != 1 || totals.ShadowPnL != 20 {
 		t.Fatalf("restore lifecycle totals = %+v", totals)
+	}
+}
+
+func TestAtomicPurgeLifecycleCursorSurvivesRestartAndDeduplicates(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	dbPath := filepath.Join(t.TempDir(), "authority", "daemon.db")
+	authority, err := corestore.Open(ctx, corestore.Options{Path: dbPath})
+	if err != nil {
+		t.Fatalf("open authority: %v", err)
+	}
+	journal := newOrderJournalStore("")
+	ledger := newPurgeLedgerStore("", func() time.Time { return now })
+	if err := journal.UseCoreStore(authority); err != nil {
+		t.Fatalf("attach order authority: %v", err)
+	}
+	if err := ledger.UseCoreStore(authority); err != nil {
+		t.Fatalf("attach purge authority: %v", err)
+	}
+	fill := purgeLedgerEventWithContract(orderJournalEvent{
+		At: now, Type: orderJournalEventStatusUpdated, Source: purgeExecuteSource,
+		PurgeID: "purge-restart", LegID: "leg-aapl", OrderRef: "purge-order",
+		ReservedOrderID: 1001, ClientID: 31, Account: "DU123", Endpoint: "127.0.0.1:4002", Mode: "paper",
+		Action: rpc.OrderActionSell, Quantity: 2, Filled: 2, AvgFillPrice: 100, Status: "Filled", SendState: orderSendStateTerminal,
+	}, purgeLedgerTestStockContract())
+	if err := ledger.CommitOrderLifecycle(journal, fill); err != nil {
+		t.Fatalf("commit lifecycle and cursor: %v", err)
+	}
+	if err := authority.Close(); err != nil {
+		t.Fatalf("close authority: %v", err)
+	}
+
+	authority, err = corestore.Open(ctx, corestore.Options{Path: dbPath})
+	if err != nil {
+		t.Fatalf("reopen authority: %v", err)
+	}
+	defer authority.Close()
+	journal = newOrderJournalStore("")
+	ledger = newPurgeLedgerStore("", func() time.Time { return now.Add(time.Minute) })
+	if err := journal.UseCoreStore(authority); err != nil {
+		t.Fatalf("reattach order authority: %v", err)
+	}
+	if err := ledger.UseCoreStore(authority); err != nil {
+		t.Fatalf("reattach purge authority: %v", err)
+	}
+	fill.At = now.Add(time.Minute)
+	if err := ledger.CommitOrderLifecycle(journal, fill); err != nil {
+		t.Fatalf("commit duplicate cumulative lifecycle: %v", err)
+	}
+	rows, err := ledger.AllRows()
+	if err != nil {
+		t.Fatalf("load restarted purge ledger: %v", err)
+	}
+	if len(rows) != 1 || rows[0].PurgedQuantity != 2 || rows[0].OrderFills[fill.OrderRef].Filled != 2 {
+		t.Fatalf("restarted cumulative cursor = %+v", rows)
+	}
+	events, err := journal.LoadEvents(0)
+	if err != nil {
+		t.Fatalf("load restarted lifecycle events: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("lifecycle event count = %d, want both callbacks while cursor stays idempotent", len(events))
 	}
 }
 

@@ -48,8 +48,8 @@ must not duplicate numbers.
 | Capital numbers, ladder, override cap, cadence declarations, sibling pins | `risk-policy.toml` (no embedded default) | `risk.Constitution` | `ibkr policy show [--explain]` | missing file/key ⇒ `unapproved`, never a code value |
 | Schema, validation, evaluation, explain text | code | `internal/risk/constitution*.go` | all | n/a |
 | Policy identity | manager | `rpc.RiskPolicyResult.PolicyFingerprint` (`risk-constitution-fp-v1`) | policy show, journals | absent |
-| Adjusted peak, drawdown tier, latch, flows, overrides, artefacts | daemon runtime state | `risk-capital-state.json` + `capital-events.jsonl` (replayed) | policy show | unseeded ⇒ tier `unknown` |
-| Governance journal | daemon | `risk-policy-journal.jsonl` (always carries fingerprint key) | phase-3 replay | best-effort append |
+| Adjusted peak, drawdown tier, latch, flows, overrides, artefacts | daemon runtime state | daemon.db `risk_capital` state document plus `capital_events` | policy show | unseeded ⇒ tier `unknown`; storage failure ⇒ unavailable |
+| Governance evidence | daemon | daemon.db `risk_policy_events` plus append-only event payload carrying the fingerprint | phase-3 replay | storage failure is disclosed; no file fallback |
 | Equity observation | account summary success path (`handleAccountSummary`) | `AccountResult.NetLiquidation/AsOf` | policy show `input_health` | persisted last reading, disclosed stale |
 | Preview cause | `riskPolicyPreviewWarnings` | `DataWarning{Code:"capital_drawdown", Scope:"risk_policy"}` | order preview | absent when policy nil or tier ok/unknown |
 
@@ -111,8 +111,9 @@ internal/cli/policy.go                 ibkr policy show/capital-event/override/r
 examples/risk-policy.toml              operator template (all material keys commented out)
 ```
 
-Runtime state: `~/.local/state/ibkr/risk-capital-state.json`,
-`capital-events.jsonl`, `risk-policy-journal.jsonl`.
+Runtime state and governance evidence live in
+`~/.local/state/ibkr/daemon.db`. The former JSON/JSONL artifacts are sealed
+cutover inputs, not live fallbacks.
 
 ## Deferred (explicitly not in phase 1)
 
@@ -124,8 +125,9 @@ unambiguous; fingerprint keys are unchanged.
 
 ## Rollback
 
-Revert the files above. Orphaned state (`risk-capital-state.json`, the two
-journals, the operator's TOML) is inert once nothing reads it. User-visible
-change on rollback: `ibkr policy` disappears and previews lose the
-advisory `capital_drawdown` cause; no trading-path behavior changes either
-way.
+Revert the files above. The risk-capital document and governance events remain
+inside daemon.db and may be ignored by older feature code, but daemon.db must
+not be deleted or replaced; the operator's TOML remains separate policy
+authority. User-visible change on rollback: `ibkr policy` disappears and
+previews lose the advisory `capital_drawdown` cause; no trading-path behavior
+changes either way.

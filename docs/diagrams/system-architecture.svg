@@ -133,7 +133,7 @@
   <rect x="608" y="452" width="242" height="64" rx="10" fill="#1b2a45"/>
   <svg x="620" y="467" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#f5c542" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-fileText"/></svg>
   <text x="658" y="477" class="module-title">State Lifecycle</text>
-  <text x="658" y="497" class="module-sub">journals · recon · proposals</text>
+  <text x="658" y="497" class="module-sub">SQLite events · recon · proposals</text>
 
   <rect x="608" y="560" width="242" height="1" fill="#26364c"/>
   <text x="608" y="588" class="mono-small" style="fill:#8fa3c2">auto-spawned by clients on demand</text>
@@ -153,10 +153,10 @@
     
     <rect x="898" y="392" width="226" height="1" fill="#d8d2c4"/>
   </g>
-  <g role="group" aria-label="Persistence. XDG state · cache · data dirs">
+  <g role="group" aria-label="Persistence. daemon.db · evidence · app/data">
     <rect x="898" y="436" width="44" height="44" rx="11" fill="#055f52"/><svg x="908" y="446" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-database"/></svg>
     <text x="954" y="453" class="node-title">Persistence</text>
-    <text x="954" y="472" class="node-sub"><tspan x="954" dy="0">XDG state · cache · data dirs</tspan></text>
+    <text x="954" y="472" class="node-sub"><tspan x="954" dy="0">daemon.db · evidence · app/data</tspan></text>
     
     <rect x="898" y="504" width="226" height="1" fill="#d8d2c4"/>
   </g>

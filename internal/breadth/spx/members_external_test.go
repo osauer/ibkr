@@ -1,11 +1,15 @@
 package spx
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 )
 
 // TestLoadExternalRoundTrip pins SaveExternal → LoadExternal:
@@ -99,5 +103,65 @@ func TestMembersDefaultPath(t *testing.T) {
 	want := filepath.Join("/tmp/xdg", "ibkr", "spx-members", MembersFilename)
 	if got != want {
 		t.Errorf("MembersDefaultPath:\n  want %s\n  got  %s", want, got)
+	}
+}
+
+func TestExternalMembersSQLiteColdStartContinuityAndNoLegacyWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), MembersFilename)
+	legacyMembers := makeMembers(503)
+	legacyAsOf := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	if err := SaveExternal(path, legacyMembers, legacyAsOf); err != nil {
+		t.Fatalf("seed legacy members: %v", err)
+	}
+	legacyBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read legacy members: %v", err)
+	}
+
+	authority := openBreadthTestCoreStore(t)
+	if err := UseCoreMembersStore(path, authority); err != nil {
+		t.Fatalf("UseCoreMembersStore: %v", err)
+	}
+	if got, _, ok := LoadExternal(path); ok || got != nil {
+		t.Fatalf("empty SQLite authority hydrated legacy membership: ok=%v members=%d", ok, len(got))
+	}
+	want := makeMembers(504)
+	asOf := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	if err := SaveExternal(path, want, asOf); err != nil {
+		t.Fatalf("save SQLite members: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, legacyBytes) {
+		t.Fatalf("legacy sp500-members.json changed after attachment: err=%v", err)
+	}
+	got, gotAsOf, ok := LoadExternal(path)
+	if !ok || !slices.Equal(got, want) || !gotAsOf.Equal(asOf) {
+		t.Fatalf("SQLite members load: count=%d as_of=%v ok=%v", len(got), gotAsOf, ok)
+	}
+	observations, err := authority.ListObservations(context.Background(), corestore.ObservationQuery{
+		ScopeKey: membersAuthorityScope, Source: membersObservationSource, Kind: membersObservationKind,
+	})
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("atomic members observations=%d err=%v", len(observations), err)
+	}
+	if !observations[0].DecisionEligible {
+		t.Fatal("current members observation is not decision-eligible")
+	}
+	if _, ok, err := authority.GetStateDocument(context.Background(), membersAuthorityScope, membersStateKind); err != nil || !ok {
+		t.Fatalf("members state missing: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestExternalMembersSQLiteRejectsMalformedRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), MembersFilename)
+	authority := openBreadthTestCoreStore(t)
+	payload := []byte(`{"version":1,"as_of":"2026-07-20T12:00:00Z","source":"wikipedia","url":"https://en.wikipedia.org/wiki/List_of_S%26P_500_companies","count":500,"members":["AAPL"]}`)
+	if _, err := authority.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
+		ScopeKey: membersAuthorityScope, Kind: membersStateKind, JSON: payload,
+	}); err != nil {
+		t.Fatalf("seed malformed members authority: %v", err)
+	}
+	if err := UseCoreMembersStore(path, authority); err == nil {
+		t.Fatal("malformed members authority attached")
 	}
 }

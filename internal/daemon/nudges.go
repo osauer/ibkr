@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -78,9 +79,11 @@ type nudgeMonthlyCompletion struct {
 }
 
 type nudgeStateStore struct {
-	mu   sync.Mutex
-	path string
-	now  func() time.Time
+	mu       sync.Mutex
+	path     string // legacy importer/test helper only
+	core     *corestore.Store
+	revision int64
+	now      func() time.Time
 	// writeState is a test seam for atomic-write/rename failures. Production
 	// uses writePrivateStateAtomic.
 	writeState func(string, []byte) error
@@ -88,6 +91,7 @@ type nudgeStateStore struct {
 	loadErr    bool
 	fault      bool
 	state      nudgeStateFileV1
+	committed  nudgeStateFileV1
 }
 
 type nudgeConfirmedFlowSnapshot struct {
@@ -127,12 +131,62 @@ func (s *Server) installNudgeStateStore() {
 	}
 }
 
+func (st *nudgeStateStore) bindCore(ctx context.Context, core *corestore.Store) error {
+	if st == nil || core == nil {
+		return fmt.Errorf("governance nudge SQLite authority is unavailable")
+	}
+	doc, ok, err := core.GetStateDocument(ctx, daemonStateScope, stateKindNudges)
+	if err != nil {
+		return fmt.Errorf("load governance nudge state from SQLite: %w", err)
+	}
+	state := nudgeStateFileV1{Version: governanceNudgeStateVersion}
+	revision := int64(0)
+	if ok {
+		if err := json.Unmarshal(doc.JSON, &state); err != nil || state.Version != governanceNudgeStateVersion {
+			if err == nil {
+				err = fmt.Errorf("unsupported version %d", state.Version)
+			}
+			return fmt.Errorf("decode governance nudge state from SQLite: %w", err)
+		}
+		normalizeNudgeState(&state)
+		revision = doc.Revision
+	} else {
+		return fmt.Errorf("governance nudge state is missing from SQLite; cutover bootstrap was not completed")
+	}
+	st.mu.Lock()
+	st.core, st.revision, st.loaded = core, revision, true
+	st.loadErr, st.fault = false, false
+	st.state = cloneNudgeState(state)
+	st.committed = cloneNudgeState(state)
+	st.mu.Unlock()
+	return nil
+}
+
+func normalizeNudgeState(persisted *nudgeStateFileV1) {
+	if persisted == nil || persisted.ConfirmedCoverage == nil {
+		return
+	}
+	if persisted.ConfirmedCoverage.CurrentReportIdentity == "" {
+		persisted.ConfirmedCoverage.CurrentReportIdentity = persisted.ConfirmedCoverage.ReportIdentity
+	}
+	if !persisted.ConfirmedCoverage.CurrentRowsObserved {
+		if persisted.ConfirmedCoverage.CurrentRowCount == 0 && persisted.ConfirmedCoverage.CoveredRowCount > 0 {
+			persisted.ConfirmedCoverage.CurrentRowCount = persisted.ConfirmedCoverage.CoveredRowCount
+		}
+		if len(persisted.ConfirmedCoverage.CurrentRows) == 0 {
+			persisted.ConfirmedCoverage.CurrentRows = normalizeOpaqueIdentities(persisted.ConfirmedCoverage.KnownRows)
+		}
+		persisted.ConfirmedCoverage.CurrentRowsObserved = true
+	}
+}
+
 func (st *nudgeStateStore) loadLocked() {
 	if st.loaded {
 		return
 	}
 	st.loaded = true
 	st.state = nudgeStateFileV1{Version: governanceNudgeStateVersion}
+	st.committed = cloneNudgeState(st.state)
 	if strings.TrimSpace(st.path) == "" {
 		st.loadErr = true
 		return
@@ -150,35 +204,38 @@ func (st *nudgeStateStore) loadLocked() {
 		st.loadErr = true
 		return
 	}
-	if persisted.ConfirmedCoverage != nil {
-		if persisted.ConfirmedCoverage.CurrentReportIdentity == "" {
-			persisted.ConfirmedCoverage.CurrentReportIdentity = persisted.ConfirmedCoverage.ReportIdentity
-		}
-		if !persisted.ConfirmedCoverage.CurrentRowsObserved {
-			if persisted.ConfirmedCoverage.CurrentRowCount == 0 && persisted.ConfirmedCoverage.CoveredRowCount > 0 {
-				persisted.ConfirmedCoverage.CurrentRowCount = persisted.ConfirmedCoverage.CoveredRowCount
-			}
-			if len(persisted.ConfirmedCoverage.CurrentRows) == 0 {
-				persisted.ConfirmedCoverage.CurrentRows = normalizeOpaqueIdentities(persisted.ConfirmedCoverage.KnownRows)
-			}
-			// Mark the in-memory migration complete. The next authorized write
-			// persists the marker; snapshot reads remain side-effect free.
-			persisted.ConfirmedCoverage.CurrentRowsObserved = true
-		}
-	}
+	normalizeNudgeState(&persisted)
 	st.state = persisted
+	st.committed = cloneNudgeState(persisted)
 }
 
 func (st *nudgeStateStore) persistLocked() error {
-	if st.loadErr || strings.TrimSpace(st.path) == "" {
+	if st.loadErr || (st.core == nil && strings.TrimSpace(st.path) == "") {
 		st.fault = true
+		st.state = cloneNudgeState(st.committed)
 		return fmt.Errorf("governance nudge persistence is unavailable")
 	}
 	st.state.Version = governanceNudgeStateVersion
 	raw, err := json.Marshal(st.state)
 	if err != nil {
 		st.fault = true
+		st.state = cloneNudgeState(st.committed)
 		return err
+	}
+	if st.core != nil {
+		saved, err := st.core.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
+			ScopeKey: daemonStateScope, Kind: stateKindNudges,
+			ExpectedRevision: st.revision, JSON: raw,
+		})
+		if err != nil {
+			st.fault = true
+			st.state = cloneNudgeState(st.committed)
+			return err
+		}
+		st.revision = saved.Revision
+		st.committed = cloneNudgeState(st.state)
+		st.fault = false
+		return nil
 	}
 	writeState := st.writeState
 	if writeState == nil {
@@ -186,8 +243,10 @@ func (st *nudgeStateStore) persistLocked() error {
 	}
 	if err := writeState(st.path, raw); err != nil {
 		st.fault = true
+		st.state = cloneNudgeState(st.committed)
 		return err
 	}
+	st.committed = cloneNudgeState(st.state)
 	st.fault = false
 	return nil
 }
@@ -199,7 +258,7 @@ func (st *nudgeStateStore) healthOK() bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.loadLocked()
-	return !st.loadErr && !st.fault
+	return !st.loadErr && !st.fault && (st.core == nil || st.core.Health().Ready)
 }
 
 // writeReady permits an authorized mutation to retry after a transient atomic
@@ -213,7 +272,7 @@ func (st *nudgeStateStore) writeReady() bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.loadLocked()
-	return !st.loadErr && strings.TrimSpace(st.path) != ""
+	return !st.loadErr && (st.core != nil || strings.TrimSpace(st.path) != "")
 }
 
 func (st *nudgeStateStore) transientWriteFault() bool {
@@ -223,7 +282,7 @@ func (st *nudgeStateStore) transientWriteFault() bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.loadLocked()
-	return !st.loadErr && st.fault && strings.TrimSpace(st.path) != ""
+	return !st.loadErr && st.fault && (st.core != nil || strings.TrimSpace(st.path) != "")
 }
 
 func (st *nudgeStateStore) recordShadow(policyIdentity, latchEpisode string, riskIncreasing, exempt, wouldBlock bool) error {
@@ -672,7 +731,6 @@ func (st *nudgeStateStore) recordMonthlyCompletion(month, policyIdentity, briefF
 	}
 	st.state.MonthlyCompletions = append(st.state.MonthlyCompletions, rec)
 	if err := st.persistLocked(); err != nil {
-		st.state.MonthlyCompletions = st.state.MonthlyCompletions[:len(st.state.MonthlyCompletions)-1]
 		return nudgeMonthlyCompletion{}, false, err
 	}
 	return rec, false, nil

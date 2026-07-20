@@ -1,9 +1,13 @@
 package daemon
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 )
 
 func TestGammaOpenInterestStoreRoundTripAndMergeRules(t *testing.T) {
@@ -49,6 +53,39 @@ func TestGammaOpenInterestStoreRoundTripAndMergeRules(t *testing.T) {
 	}
 	if got[key].OpenInterest != 0 || !got[key].ObservedAt.Equal(zero.ObservedAt) {
 		t.Fatalf("newer observed zero did not replace positive OI: %+v", got[key])
+	}
+}
+
+func TestGammaOpenInterestStoreUsesSQLiteWithoutFileFallback(t *testing.T) {
+	legacyDir := t.TempDir()
+	authority := openMarketTestCoreStore(t)
+	store := newGammaOpenInterestStore(legacyDir)
+	if err := store.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	observedAt := time.Date(2026, 6, 2, 14, 35, 0, 0, time.UTC)
+	key := gammaOIKey("SPX", "SPXW", "20260605", 7600, "P")
+	rec := gammaOIRecordForLeg("SPX", "SPXW", "20260605", 7600, "P", 12_345, observedAt)
+	if err := store.SaveMerged(map[string]gammaOIRecord{key: rec}); err != nil {
+		t.Fatalf("SaveMerged: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyDir, gammaOIStateFilename)); !os.IsNotExist(err) {
+		t.Fatalf("runtime save touched legacy file: %v", err)
+	}
+
+	restarted := newGammaOpenInterestStore(legacyDir)
+	if err := restarted.UseCoreStore(authority); err != nil {
+		t.Fatalf("restart UseCoreStore: %v", err)
+	}
+	got, err := restarted.Load()
+	if err != nil || got[key].OpenInterest != rec.OpenInterest {
+		t.Fatalf("SQLite round trip: got=%+v err=%v", got[key], err)
+	}
+	observations, err := authority.ListObservations(context.Background(), corestore.ObservationQuery{
+		ScopeKey: gammaOIAuthorityScope, Source: gammaOISource, Kind: gammaOIObservationKind,
+	})
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("observations=%d err=%v", len(observations), err)
 	}
 }
 

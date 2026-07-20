@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -23,7 +24,7 @@ func (s *Server) confirmPreviewTokenForPlaceWithOrderID(token string, reservedOr
 	if s.now != nil {
 		now = s.now().UTC()
 	}
-	if err := s.orderJournal.ConfirmPreviewTokenUse(previewTokenConfirmedEvent(payload, reservedOrderID, now, message)); err != nil {
+	if err := s.orderJournal.StagePreTransmit(payload.TokenID, payload.AuthorityEpoch, payload.SignerGeneration, reservedOrderID, corestore.ActionPlace, corestore.OriginDaemon, []orderJournalEvent{previewTokenConfirmedEvent(payload, reservedOrderID, now, message)}); err != nil {
 		return orderPreviewTokenPayload{}, fmt.Errorf("%w: %w", ErrTradingDisabled, err)
 	}
 	return payload, nil

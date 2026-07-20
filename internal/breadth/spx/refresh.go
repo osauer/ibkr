@@ -239,8 +239,8 @@ func (r *Refresher) triggerAsync(ctx context.Context, reason string) {
 	}()
 }
 
-// fetchAndSwap performs the fetch, validates the result, writes it
-// to disk, and pushes it into the engine. State transitions:
+// fetchAndSwap performs the fetch, validates the result, persists it, and
+// pushes it into the engine. State transitions:
 //
 //   - Network/transport error → RefreshNetworkFailed.
 //   - Parse error (table missing, regex broke) → RefreshParseFailed.
@@ -248,7 +248,7 @@ func (r *Refresher) triggerAsync(ctx context.Context, reason string) {
 //     "the page parsed but the count is wrong" is the same class
 //     of problem as "the page didn't parse" from the user's POV —
 //     both mean the result isn't trustworthy).
-//   - Success → RefreshHealthy + cache file + engine.SetMembers.
+//   - Success → RefreshHealthy + daemon.db state/observation + engine.SetMembers.
 //
 // On any failure the engine's current members list is untouched —
 // breadth keeps computing against whatever was last successfully

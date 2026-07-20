@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
@@ -68,6 +69,7 @@ func (s *Server) executePurgeRestore(ctx context.Context, p rpc.PurgeRestorePara
 	}
 	submissions := make([]purgeRestoreSubmission, 0, len(res.Legs))
 	attempts := make([]orderJournalEvent, 0, len(res.Legs))
+	maxOrderID := 0
 	for _, leg := range res.Legs {
 		orderID, err := s.reserveBrokerOrderID(ctx)
 		if err != nil {
@@ -88,9 +90,12 @@ func (s *Server) executePurgeRestore(ctx context.Context, p rpc.PurgeRestorePara
 			OpenClose:  orderOpenCloseForEffect(leg.Position.Effect),
 		}
 		submissions = append(submissions, purgeRestoreSubmission{leg: leg, draft: draft, orderID: orderID})
-		attempts = append(attempts, restoreJournalEventForDraft(draft, status, res.PurgeID, leg.LegID, orderID, s.orderNow()))
+		attempt := restoreJournalEventForDraft(draft, status, res.PurgeID, leg.LegID, orderID, s.orderNow())
+		attempt.Origin = normalizedWriteOrigin(p.Origin)
+		attempts = append(attempts, attempt)
+		maxOrderID = max(maxOrderID, orderID)
 	}
-	if err := s.orderJournal.AppendAll(attempts); err != nil {
+	if err := s.orderJournal.StagePreTransmit("", "", 0, maxOrderID, corestore.ActionRestore, coreOrderOrigin(p.Origin), attempts); err != nil {
 		res.Status = purgeRestoreStatusError
 		res.ErrorLegs = len(submissions)
 		res.Message = "append restore send journal: " + err.Error()

@@ -3483,6 +3483,7 @@ type OrderEvent struct {
 	MktCapPrice     float64         `json:"mkt_cap_price,omitempty"`
 	ExecID          string          `json:"exec_id,omitempty"`
 	ExecTime        string          `json:"exec_time,omitempty"`
+	ErrorCode       int             `json:"error_code,omitempty"`
 	SendState       string          `json:"send_state,omitempty"`
 	Message         string          `json:"message,omitempty"`
 }
@@ -3491,51 +3492,54 @@ type OrderEvent struct {
 // order intent. It is reduced from the append-only journal; broker callbacks
 // remain authoritative for acknowledgement/fill/cancel status.
 type OrderView struct {
-	OrderRef            string          `json:"order_ref,omitempty"`
-	PreviewTokenID      string          `json:"preview_token_id,omitempty"`
-	ReservedOrderID     int             `json:"reserved_order_id,omitempty"`
-	ClientID            int             `json:"client_id,omitempty"`
-	PermID              int             `json:"perm_id,omitempty"`
-	Account             string          `json:"account,omitempty"`
-	Endpoint            string          `json:"endpoint,omitempty"`
-	Mode                string          `json:"mode,omitempty"`
-	Source              string          `json:"source,omitempty"`
-	PurgeID             string          `json:"purge_id,omitempty"`
-	LegID               string          `json:"leg_id,omitempty"`
-	BypassPreview       bool            `json:"bypass_preview,omitempty"`
-	Symbol              string          `json:"symbol,omitempty"`
-	SecType             string          `json:"sec_type,omitempty"`
-	ConID               int             `json:"con_id,omitempty"`
-	Exchange            string          `json:"exchange,omitempty"`
-	PrimaryExch         string          `json:"primary_exch,omitempty"`
-	Currency            string          `json:"currency,omitempty"`
-	LocalSymbol         string          `json:"local_symbol,omitempty"`
-	TradingClass        string          `json:"trading_class,omitempty"`
-	Expiry              string          `json:"expiry,omitempty"`
-	Strike              float64         `json:"strike,omitempty"`
-	Right               string          `json:"right,omitempty"`
-	Multiplier          int             `json:"multiplier,omitempty"`
-	Action              string          `json:"action,omitempty"`
-	OrderType           string          `json:"order_type,omitempty"`
-	TIF                 string          `json:"tif,omitempty"`
-	TriggerMethod       int             `json:"trigger_method,omitempty"`
-	OutsideRTH          bool            `json:"outside_rth,omitempty"`
-	Quantity            float64         `json:"quantity,omitempty"`
-	LimitPrice          float64         `json:"limit_price,omitempty"`
-	Trail               *OrderTrailSpec `json:"trail,omitempty"`
-	OpenClose           string          `json:"open_close,omitempty"`
-	Status              string          `json:"status,omitempty"`
-	LifecycleStatus     string          `json:"lifecycle_status"`
-	Filled              float64         `json:"filled,omitempty"`
-	Remaining           float64         `json:"remaining,omitempty"`
-	AvgFillPrice        float64         `json:"avg_fill_price,omitempty"`
-	LastFillPrice       float64         `json:"last_fill_price,omitempty"`
-	WhyHeld             string          `json:"why_held,omitempty"`
-	MktCapPrice         float64         `json:"mkt_cap_price,omitempty"`
-	SendState           string          `json:"send_state,omitempty"`
-	LastEvent           string          `json:"last_event,omitempty"`
-	LastMessage         string          `json:"last_message,omitempty"`
-	ReconciliationState string          `json:"reconciliation_state,omitempty"`
+	OrderRef        string          `json:"order_ref,omitempty"`
+	PreviewTokenID  string          `json:"preview_token_id,omitempty"`
+	ReservedOrderID int             `json:"reserved_order_id,omitempty"`
+	ClientID        int             `json:"client_id,omitempty"`
+	PermID          int             `json:"perm_id,omitempty"`
+	Account         string          `json:"account,omitempty"`
+	Endpoint        string          `json:"endpoint,omitempty"`
+	Mode            string          `json:"mode,omitempty"`
+	Source          string          `json:"source,omitempty"`
+	PurgeID         string          `json:"purge_id,omitempty"`
+	LegID           string          `json:"leg_id,omitempty"`
+	BypassPreview   bool            `json:"bypass_preview,omitempty"`
+	Symbol          string          `json:"symbol,omitempty"`
+	SecType         string          `json:"sec_type,omitempty"`
+	ConID           int             `json:"con_id,omitempty"`
+	Exchange        string          `json:"exchange,omitempty"`
+	PrimaryExch     string          `json:"primary_exch,omitempty"`
+	Currency        string          `json:"currency,omitempty"`
+	LocalSymbol     string          `json:"local_symbol,omitempty"`
+	TradingClass    string          `json:"trading_class,omitempty"`
+	Expiry          string          `json:"expiry,omitempty"`
+	Strike          float64         `json:"strike,omitempty"`
+	Right           string          `json:"right,omitempty"`
+	Multiplier      int             `json:"multiplier,omitempty"`
+	Action          string          `json:"action,omitempty"`
+	OrderType       string          `json:"order_type,omitempty"`
+	TIF             string          `json:"tif,omitempty"`
+	TriggerMethod   int             `json:"trigger_method,omitempty"`
+	OutsideRTH      bool            `json:"outside_rth,omitempty"`
+	Quantity        float64         `json:"quantity,omitempty"`
+	LimitPrice      float64         `json:"limit_price,omitempty"`
+	Trail           *OrderTrailSpec `json:"trail,omitempty"`
+	OpenClose       string          `json:"open_close,omitempty"`
+	Status          string          `json:"status,omitempty"`
+	LifecycleStatus string          `json:"lifecycle_status"`
+	Filled          float64         `json:"filled,omitempty"`
+	Remaining       float64         `json:"remaining,omitempty"`
+	AvgFillPrice    float64         `json:"avg_fill_price,omitempty"`
+	LastFillPrice   float64         `json:"last_fill_price,omitempty"`
+	WhyHeld         string          `json:"why_held,omitempty"`
+	MktCapPrice     float64         `json:"mkt_cap_price,omitempty"`
+	SendState       string          `json:"send_state,omitempty"`
+	LastEvent       string          `json:"last_event,omitempty"`
+	// LastErrorCode is populated only when LastEvent is broker-error. It is
+	// typed audit evidence; LastMessage remains untrusted display text.
+	LastErrorCode       int    `json:"last_error_code,omitempty"`
+	LastMessage         string `json:"last_message,omitempty"`
+	ReconciliationState string `json:"reconciliation_state,omitempty"`
 	// ReconciliationKind classifies a position_mismatch by consequence:
 	// short_entry_full (no coverage left; triggering opens a fresh
 	// opposite-direction position of the full remaining quantity) or

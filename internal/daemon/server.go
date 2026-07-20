@@ -25,6 +25,7 @@ import (
 
 	"github.com/osauer/ibkr/v2/internal/breadth/spx"
 	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/daemon/history"
 	"github.com/osauer/ibkr/v2/internal/discover"
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -299,53 +300,58 @@ type Server struct {
 	// spawn a duplicate save goroutine racing the first.
 	contractCacheSaveStarted sync.Once
 
-	// streaks persists each regime indicator's consecutive-sessions-in-
-	// band tally across daemon restarts. Loaded lazily on first Tick;
-	// written atomically (temp+rename) on every band change. Same shape
-	// as contractStore — own persistence file at
-	// $XDG_CACHE_HOME/ibkr/regime-streaks.json, own version field, own
-	// invalidation rules (entries persist across days; counters change
-	// only on band transitions). Nil only on the rare XDG/HOME-unset
-	// path; the daemon then runs without streak persistence (every
-	// restart resets the counters).
+	// streaks persists each regime indicator's consecutive-sessions-in-band
+	// tally in daemon.db. It is loaded lazily on first Tick and keeps its own
+	// invalidation rules: entries persist across days and counters change only
+	// on band transitions. The path-backed form exists only for legacy import
+	// and isolated unit tests.
 	streaks *StreakStore
 
-	// regimeDecisions is the append-only forward-collection journal for
-	// regime lifecycle decisions ($XDG_STATE_HOME/ibkr/regime-decisions.jsonl)
-	// — the calibration corpus for the pending_backtest thresholds. Nil on
-	// the rare XDG/HOME-unset path; journaling is best-effort and never
-	// fails a snapshot.
+	// regimeDecisions appends typed regime lifecycle events to daemon.db for
+	// threshold calibration. Its path-backed form exists only for legacy import
+	// and isolated unit tests; journaling remains best-effort and never fails a
+	// snapshot.
 	regimeDecisions *regimeDecisionJournal
 
-	// canaryDecisions is the canary counterpart
-	// ($XDG_STATE_HOME/ibkr/canary-decisions.jsonl): the portfolio-canary
-	// evidence corpus written by the brief hook and the 5-minute cadence
-	// loop. Same nil semantics as regimeDecisions.
+	// canaryDecisions is the daemon.db-backed portfolio-canary evidence corpus
+	// written by the brief hook and the five-minute cadence loop. Its path-backed
+	// form has the same legacy import/test-only contract as regimeDecisions.
 	canaryDecisions *canaryDecisionJournal
 
-	// rulesJournalMu is the rules-decisions.jsonl writer-quiescence lock:
-	// journalRuleTransitions holds it across path-resolve + open + write +
-	// close, and journal rotation holds it across the live-file swap.
+	// rulesJournalMu serializes the legacy file-backed rule-transition seam;
+	// daemon.db writes bypass it and commit transactionally in coreStore.
 	rulesJournalMu sync.Mutex
 
-	// orderIndexWarns rate-limits the indexed-order-read fallback
-	// disclosures to one line per surface per minute.
-	orderIndexWarns orderIndexWarnLimiter
-
-	// historyIndex is the derived, always-rebuildable SQLite index
-	// (history.db) over the regime/rules decision journals, serving
-	// regime.history and rules.history (docs/design/history-index.md).
+	// historyIndex is the legacy history adapter serving regime.history and
+	// rules.history. Runtime reads use coreStore; the history.db/file branches
+	// remain only for explicit legacy import and isolated tests
+	// (docs/design/history-index.md).
 	// Deliberately NOT named history: regimeHistory below already names
 	// the unrelated HMDS daily-bars cache. Opened by the flock winner in
 	// Start, published before the accept loop so handlers read it without
-	// synchronization; nil means unavailable (classified error) and the
-	// journals are unaffected. historyIndexOpts carries the paths resolved
+	// synchronization; nil means the legacy adapter is unavailable.
+	// historyIndexOpts carries the paths resolved
 	// at construction time — New must not touch the DB because every
 	// autospawn race loser runs it before the flock decides.
 	// The store is published once at Start and read by the ingest and
 	// maintenance goroutines, so the pointer itself is atomic.
 	historyIndex     atomic.Pointer[history.Store]
 	historyIndexOpts *history.Options
+
+	// coreStore is the daemon's sole live persistence authority. New resolves
+	// its path but never opens it: only the Start winner may touch daemon.db,
+	// after both the socket-specific instance lock and state-root persistence
+	// lock have been acquired.
+	coreStore        *corestore.Store
+	coreStorePath    string
+	coreStorePathErr error
+	// importLegacyAuthority is true only for the production XDG database.
+	// A custom database path is isolated and always starts as a fresh epoch;
+	// it must never inspect the user's live legacy files.
+	importLegacyAuthority bool
+	persistenceLock       *persistenceLock
+	authorityCloseOnce    sync.Once
+	authorityCloseErr     error
 
 	// tradingReadiness persists daemon-owned evidence for local write
 	// gates, starting with the recent paper-smoke proof required before
@@ -522,6 +528,9 @@ type Options struct {
 	SocketPath string
 	Version    string
 	Logger     *Logger
+	// StateDatabasePath overrides daemon.db for isolated tests and offline
+	// verification. Production leaves it empty and uses the XDG state root.
+	StateDatabasePath string
 }
 
 // New constructs a Server with the supplied options.
@@ -544,6 +553,12 @@ func New(opts Options) *Server {
 		zeroGamma:      newGammaZeroCache(),
 		fxRates:        newFXRateCache(),
 	}
+	if opts.StateDatabasePath != "" {
+		s.coreStorePath = opts.StateDatabasePath
+	} else {
+		s.coreStorePath, s.coreStorePathErr = defaultDaemonDatabasePath()
+		s.importLegacyAuthority = true
+	}
 	s.attempterFactory = s.buildAttempter
 	s.installSubs()
 	s.installBreadthEngine()
@@ -551,11 +566,6 @@ func New(opts Options) *Server {
 	s.installContractStore()
 	s.installStreakStore()
 	s.installCanaryDecisionJournal()
-	s.installHistoryIndex()
-	// The token signer must exist before the readiness store: paper-smoke
-	// evidence is MAC'd with the order-token key.
-	s.installOrderTokenSigner()
-	s.installTradingReadinessStore()
 	s.installOrderJournalStore()
 	s.installPurgeLedgerStore()
 	s.installProposalOutcomeStore()
@@ -577,32 +587,28 @@ func New(opts Options) *Server {
 	return s
 }
 
-// installFXRateCache replaces the bootstrap in-memory FX-rate cache
-// with a store-backed one so last-known-good rates survive a daemon
-// restart (IBKR's nightly server-reset window, weekends). Best-effort:
-// a missing XDG_CACHE_HOME / HOME pair leaves the in-memory cache in
-// place — every restart starts cold and *_base fields stay nil until
-// the first successful live resolution, but the daemon itself starts
-// fine.
+// installFXRateCache installs the legacy codec path without reading it.
+// Server.New runs before the persistence lock; only the unpublished cutover
+// importer may read legacy JSON. Start later attaches daemon.db and loads its
+// current FX projection.
 func (s *Server) installFXRateCache() {
 	dir, err := fxRateStoreDefaultDir()
 	if err != nil {
 		s.logger.Warnf("fx rate cache: resolve dir: %v (persistence disabled)", err)
 		return
 	}
-	s.fxRates = newFXRateCacheWithStore(newFXRateStore(dir), time.Now, s.logger)
+	s.fxRates = newFXRateCacheWithStoreCold(newFXRateStore(dir), time.Now, s.logger)
 }
 
-// installEarningsCache wires the rulebook's earnings LKG cache. Best-effort
-// like the fx cache: an unresolvable cache dir means fetches still work but
-// nothing survives a restart.
+// installEarningsCache installs the legacy codec path cold for the same
+// pre-lock reason as installFXRateCache. Start replaces it with daemon.db.
 func (s *Server) installEarningsCache() {
 	dir, err := fxRateStoreDefaultDir()
 	if err != nil {
 		s.logger.Warnf("earnings cache: resolve dir: %v (persistence disabled)", err)
 		dir = ""
 	}
-	s.earnings = newEarningsCache(dir, s.logger.Warnf)
+	s.earnings = newEarningsCacheCold(dir, s.logger.Warnf)
 }
 
 // installGammaZeroCache replaces the bootstrap in-memory gamma cache
@@ -650,15 +656,6 @@ func (s *Server) installStreakStore() {
 	}
 }
 
-func (s *Server) installTradingReadinessStore() {
-	path, err := defaultTradingReadinessPath()
-	if err != nil {
-		s.warnf("trading readiness: resolve state path: %v (live smoke gate will stay blocked)", err)
-		return
-	}
-	s.tradingReadiness = newTradingReadinessStore(path, s.orderTokens)
-}
-
 func (s *Server) installOrderJournalStore() {
 	path, err := defaultOrderJournalPath()
 	if err != nil {
@@ -684,26 +681,11 @@ func (s *Server) installPlatformSettingsStore() {
 		s.warnf("platform settings: resolve state path: %v (runtime settings disabled)", err)
 		return
 	}
-	store, err := newPlatformSettingsStore(path)
-	if err != nil {
-		s.warnf("platform settings: %v (runtime settings disabled)", err)
-		return
-	}
-	s.platformSettings = store
-}
-
-func (s *Server) installOrderTokenSigner() {
-	path, err := defaultOrderTokenKeyPath()
-	if err != nil {
-		s.warnf("order preview tokens: resolve state path: %v (preview tokens disabled)", err)
-		return
-	}
-	signer, err := newOrderTokenSigner(path, s.now)
-	if err != nil {
-		s.warnf("order preview tokens: %v (preview tokens disabled)", err)
-		return
-	}
-	s.orderTokens = signer
+	// New runs before the instance/persistence locks are won. Resolve the
+	// legacy path for the explicit cutover only; never read it here. The Start
+	// winner imports it into an unpublished daemon.db, then bindCore publishes
+	// the authoritative value.
+	s.platformSettings = &platformSettingsStore{path: path, data: platformSettingsData{Version: 1}}
 }
 
 func (s *Server) installRegimeSeriesCache() {
@@ -747,12 +729,10 @@ func (s *Server) debugf(format string, args ...any) {
 	}
 }
 
-// installContractStore constructs the on-disk contract-cache store and
-// attaches it to s. Best-effort: if XDG_CACHE_HOME and HOME are both
-// unset (effectively never on a real OS user account), the field stays
-// nil and the daemon runs without contract-cache persistence — every
-// restart pays the full IBKR rate-limit tax to re-resolve, but the
-// daemon itself starts fine.
+// installContractStore constructs the legacy contract-cache codec used to
+// locate cutover input. Runtime attachment switches it to daemon.db before any
+// load; if legacy path resolution fails, attachCoreMarketAuthority installs a
+// cold codec directly against SQLite.
 func (s *Server) installContractStore() {
 	dir, err := ibkrlib.DefaultContractStoreDir()
 	if err != nil {
@@ -794,17 +774,18 @@ func (s *Server) installBreadthEngine() {
 		return
 	}
 	fetcher := newBreadthFetcher(s.breadthGatewayConnector)
-	s.breadth = spx.New(spx.NewStore(dir), fetcher, spx.Options{Logger: s.logger, MembersFn: s.resolveBreadthMembers})
+	s.breadth = spx.New(spx.NewStore(dir), fetcher, spx.Options{
+		Logger: s.logger, MembersFn: s.resolveBreadthMembers, DeferStoreLoad: true,
+	})
 }
 
 // resolveBreadthMembers is the deferred members source for the breadth
 // engine (see installBreadthEngine for why it must not run at
-// construction). Prefers the runtime-refreshed cache file
-// (`~/.cache/ibkr/spx-members/sp500-members.json`) over the embedded
-// list, so a daemon installed from a months-old release that has
-// since cached a fresher list serves current membership immediately.
-// Falls back to the embedded list on missing/corrupt/sanity-failed
-// file. Logs the chosen source — the engine's sync.Once gate
+// construction). Prefers the runtime-refreshed daemon.db membership
+// projection over the embedded list, so a daemon installed from a months-old
+// release that has since persisted a fresher list serves current membership
+// immediately. Falls back to the embedded list when no valid projection is
+// available. Logs the chosen source — the engine's sync.Once gate
 // guarantees at most one line per process lifetime.
 func (s *Server) resolveBreadthMembers() []string {
 	if path, perr := spx.MembersDefaultPath(); perr == nil {
@@ -819,9 +800,9 @@ func (s *Server) resolveBreadthMembers() []string {
 }
 
 // installMembersRefresher stands up the runtime SPX-members refresher.
-// The refresher fetches Wikipedia's constituent list daily at 02:30 ET
-// plus on startup catch-up, writes the result to the XDG cache file,
-// and pushes new lists into the breadth engine.
+// The refresher fetches Wikipedia's constituent list daily at 02:30 ET plus on
+// startup catch-up, commits current state and an observation to daemon.db, and
+// pushes new lists into the breadth engine.
 //
 // Construction is best-effort:
 //   - breadth engine missing (cache-dir failure) → no refresher.
@@ -985,14 +966,12 @@ const breadthClientStartBudget = 12 * time.Second
 
 // contractCacheSaveInterval is how often the background loop reads
 // both connectors' contractCache, merges the entries, and writes the
-// result to ContractStore. 60s balances I/O cost against the
-// "how much recent work would we lose on a crash?" risk — at one
-// full file write (~50 KB) per minute the disk cost is invisible,
-// and the worst-case loss is a minute of resolutions which the next
-// daemon restart re-fetches transparently.
+// result to ContractStore. 60s balances transaction cost against the "how much
+// recent work would we lose on a crash?" risk; the worst case is one minute of
+// resolutions which the next daemon restart re-fetches transparently.
 const contractCacheSaveInterval = 60 * time.Second
 
-// seedFromContractStore loads the persisted contract cache from disk
+// seedFromContractStore loads the persisted contract cache from daemon.db
 // and seeds the supplied connector with each non-stale entry. Stale
 // is defined relative to the current SPX members list (entries whose
 // symbol isn't in the current sp500Members AND isn't one of the
@@ -1000,9 +979,8 @@ const contractCacheSaveInterval = 60 * time.Second
 // or simply replaced by reconstitution).
 //
 // Also caches the loaded map in s.contractCacheLoaded for
-// startBreadthConnector to seed the bulk lane from without a second
-// disk read. No-op when contractStore is nil (XDG/HOME unresolved at
-// New() time) or when the disk file doesn't exist (cold install).
+// startBreadthConnector to seed the bulk lane without a second authority read.
+// No-op when contractStore is nil or the SQLite document does not exist.
 func (s *Server) seedFromContractStore(c *ibkrlib.Connector) {
 	if s.contractStore == nil || c == nil {
 		return
@@ -1013,7 +991,7 @@ func (s *Server) seedFromContractStore(c *ibkrlib.Connector) {
 		return
 	}
 	if loaded == nil {
-		s.logger.Infof("contract cache: no on-disk file yet, starting cold")
+		s.logger.Infof("contract cache: no daemon.db state yet, starting cold")
 		s.contractCacheLoaded = map[string]ibkrlib.ContractDetailsLite{}
 		return
 	}
@@ -1034,7 +1012,7 @@ func (s *Server) seedFromContractStore(c *ibkrlib.Connector) {
 			seeded++
 		}
 	}
-	s.logger.Infof("contract cache: seeded %d entries from disk", seeded)
+	s.logger.Infof("contract cache: seeded %d entries from daemon.db", seeded)
 
 	// Option contracts (added in store v2). Expired entries are GC'd
 	// at the store layer; whatever remains is still valid for at least
@@ -1044,7 +1022,7 @@ func (s *Server) seedFromContractStore(c *ibkrlib.Connector) {
 	if opts, err := s.contractStore.LoadOptions(); err != nil {
 		s.logger.Warnf("contract cache: load options: %v", err)
 	} else if seededOpts := c.SeedOptionContracts(opts); seededOpts > 0 {
-		s.logger.Infof("contract cache: seeded %d option entries from disk", seededOpts)
+		s.logger.Infof("contract cache: seeded %d option entries from daemon.db", seededOpts)
 	}
 }
 
@@ -1176,6 +1154,16 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	s.lock = lock
+	if err := s.openCoreStore(ctx); err != nil {
+		s.lock.Release()
+		s.lock = nil
+		return err
+	}
+	defer func() {
+		if err := s.closeCoreStore(); err != nil {
+			s.warnf("close daemon authority: %v", err)
+		}
+	}()
 
 	// Discovery is fast: no probe at all when port+tls are pinned, and
 	// 200ms-per-port TCP probes when not. We do this synchronously before
@@ -1231,12 +1219,6 @@ func (s *Server) Start(ctx context.Context) error {
 	s.logger.Infof("ibkr daemon %s listening on %s (gateway=%s:%d, clientID=%d)",
 		s.version, s.socketPath, ep.Host, ep.Port, ep.ClientID)
 	s.evaluateRiskPolicyV3Reconciliation()
-	// Open the derived history index only here — after the instance flock
-	// is won — and before the accept loop, so handlers observe the
-	// published pointer without synchronization. Backfill/tail ingest runs
-	// on its own goroutine off the snapshot path.
-	s.startHistoryIndex(serverCtx)
-
 	// Skip the connect goroutine when discovery already failed — there's
 	// nothing to connect to. The socket is still up so `ibkr status`
 	// renders the discovery error, and the next request will trigger a
@@ -1339,11 +1321,8 @@ func (s *Server) Stop() {
 
 	s.stopConnector()
 	s.stopBreadthConnector()
-	// The history index closes after listener teardown (no new queries can
-	// arrive) and before the flock release; Close is idempotent and the
-	// ingest goroutine's errors are swallowed by design.
-	if store := s.historyIndex.Load(); store != nil {
-		_ = store.Close()
+	if err := s.closeCoreStore(); err != nil {
+		s.warnf("close daemon authority: %v", err)
 	}
 	if s.lock != nil {
 		s.lock.Release()

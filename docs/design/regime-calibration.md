@@ -1,8 +1,8 @@
 # Regime calibration: confirmation eligibility, staleness honesty, and severity governance
 
-**Status:** Reviewed — adversarial review + re-review passed 2026-06-12; gates implementation
+**Status:** Implemented; persistence contract updated for `daemon.db`
 **Created:** 2026-06-12 13:09 CEST
-**Last update:** 2026-06-12 13:39 CEST
+**Last update:** 2026-07-20
 **Owner:** osauer
 **Related:** `docs/specs/risk-regime-dashboard.md`, `docs/specs/regime-backtest-plan.md`,
 `internal/rpc/lifecycle.go`, `internal/daemon/regime*.go`, `internal/cli/canary.go`,
@@ -103,8 +103,8 @@ evidence escalate to the strongest non-panic posture against a green tape.
   outputs are additive fields.
 - **Every governor action is observable.** When policy downgrades or caps
   something, the payload says what was capped, from what, and why.
-- **Calibration is forward-data-driven.** Persist decision history now
-  (skew-R² JSONL precedent), backtest against it later, and only then promote
+- **Calibration is forward-data-driven.** Persist typed decision events in
+  `daemon.db`, backtest against them later, and only then promote
   thresholds out of `pending_backtest`. No threshold value in this document is
   claimed to be calibrated; they are defensible noise floors. The fast-path
   depths are the most invented numbers here and are flagged as such.
@@ -121,8 +121,8 @@ A red is *eligible* when all three hold:
    indicator's minimum depth (noise floor), OR clears a deeper "fast-path"
    level that overrides persistence (so genuine day-one crashes still
    escalate same-day).
-2. **Persistence** — the indicator's red streak (already persisted in
-   `regime-streaks.json`) has reached the indicator's minimum sessions, OR
+2. **Persistence** — the indicator's red streak (persisted as current state in
+   `daemon.db`) has reached the indicator's minimum sessions, OR
    the fast-path depth is met. A missing streak entry (fresh install, deleted
    store) counts as sessions = 1.
 3. **Freshness** — the data is *cadence-fresh*: no newer observation should
@@ -195,17 +195,20 @@ Rationale highlights:
   red consuming the streak reset each time). It is applied **once, in the
   daemon fetch/annotate path**, so the served `Band` is post-hysteresis;
   every downstream reader (CLI, canary, SPA, MCP) consumes served bands and
-  needs no store access. The previous band comes from the streak store
-  (`StreakStore.Get`), which lives daemon-side where banding happens.
+  needs no store access. The previous band comes from the daemon-owned streak
+  state (`StreakStore.Get`), which is backed by `daemon.db` where banding
+  happens.
 - **Panic is untouched.** SPY −4%/−7% tape triggers stay as they are; tape is
   never depth/streak-gated. Real crashes escalate immediately through the
   panic path and through fast-path depths regardless of streaks. (The
   2026-07-19 closed-date pass adds a session gate, not a depth/streak gate:
   frozen closed-date prints cannot fire the tape branches, live trading-date
   prints keep immediate escalation — see Part 2.)
-- Deleting `regime-streaks.json` mid-stress demotes an ongoing confirmation
-  to provisional until fast-path depth or two fresh sessions re-establish it.
-  Accepted: the store is daemon-owned runtime state, not user-facing.
+- A missing current streak document starts counters from session 1 and demotes
+  an ongoing confirmation to provisional until fast-path depth or fresh
+  sessions re-establish it. Cutover seals legacy `regime-streaks.json` without
+  importing it into current state; only allowlisted historical market/gamma
+  measurements become immutable `decision_eligible=false` observations.
 
 ### Trading-day streak fix
 
@@ -234,7 +237,7 @@ without any red:
 **Closed-date tape gating (added 2026-07-19).** Every tape term above reads
 the direct SPY/VIX day-change prints, which freeze at last-session values on
 official non-trading dates and can even reset independently while closed (the
-2026-07-18/19 weekend journal held `early_warning`/watch on a half-reset
+2026-07-18/19 weekend evidence held `early_warning`/watch on a half-reset
 Saturday print: SPY change collapsed to 0.00 while VIX kept Friday's +12%).
 The stage arms, the governor's SPY/VIX co-sign arms, and the pure-tape panic
 exemption therefore require a confirmable session — `tape_session_state !=
@@ -246,7 +249,7 @@ terms and the status-gated term-inversion co-sign are untouched. The isolated
 equity-vol corroboration inside cluster combination deliberately stays
 session-blind (decision 2026-07-19: bounded residual — it can only preserve a
 red that live-session banding produced, and its worst weekend effect is
-cluster-grade early warning; revisit with journal evidence). The rulebook's
+cluster-grade early warning; revisit with decision-event evidence). The rulebook's
 regime-stage latch skips closed-date snapshots so the last trading-date stage
 ages into the carried worse-of(carried, calm) path instead of a weekend stage
 re-latching fresh.
@@ -276,7 +279,7 @@ posture: "something worth watching, not confirmed, data partly stale."
    > A threshold set is promoted out of `pending_backtest` per versioned
    > label (e.g. `hyg_spy_credit_proxy_v1` → `_v2`) only through the backtest
    > plan, with documented precision/recall on the forward-collected
-   > decisions journal (Part 4).
+   > decision-event corpus (Part 4).
 
    The `PendingBacktest` flag on `RegimeThresholds` finally becomes
    load-bearing: the governor reads it from the snapshot's own metadata, so
@@ -367,9 +370,9 @@ session before de-escalating). Review killed it for v1: no flap incident has
 been observed, eligibility latching + exit hysteresis already dampen the
 plausible flap sources, dwell-on-stale-evidence contradicts staleness honesty
 (a confirming feed going stale would *hold* the stress headline on evidence
-the snapshot itself reports stale), and the decisions journal is precisely
+the snapshot itself reports stale), and the decision-event corpus is precisely
 the instrument that will measure whether stage flap exists. Revisit with
-journal data; if added later it must re-verify the held stage's confirming
+event data; if added later it must re-verify the held stage's confirming
 evidence is still eligible.
 
 ## Part 3 — Staleness model: cadence-relative freshness, served on the wire
@@ -448,43 +451,38 @@ Fingerprints feed alert dedupe, so new fields need an explicit stance:
 
 ### What exists today
 
-- `regime-streaks.json` (XDG cache): current band + sessions per indicator —
-  current state only, no history.
-- `regime-history/` (XDG cache): HMDS daily-bar cache — *inputs*, not
-  decisions.
-- `gamma-skew-diagnostics.jsonl` (XDG state): the skew-R² precedent —
-  append-only single file, never read at runtime, safe to delete.
+- Post-cutover `daemon.db` current documents: active band/streak state and
+  current regime/gamma/breadth material needed by runtime decisions.
+- `daemon.db` immutable observations: HMDS/official series, breadth windows,
+  gamma results/OI/expiry grids, and skew diagnostics with source,
+  method/version, as-of, quality, and original payload.
+- `daemon.db` append-only decision events: the forward regime and canary
+  calibration corpora, deduped by semantic fingerprint with an hourly
+  heartbeat.
 - `ibkr regime --log <path>`: manual, opt-in JSONL of full snapshots.
 - `docs/specs/regime-backtest-plan.md`: PIT-panel methodology, with gamma and
   breadth explicitly *unavailable* in its historical tiers.
 
-Conclusion: **no automatic persisted history of indicator values, bands, or
-lifecycle decisions exists.** The 2026-06-12 incident cannot be fully
-reconstructed from disk today, and the `pending_backtest` thresholds for
-gamma/breadth can never be calibrated from historical data — forward
-collection is the only path (same finding as the skew-R² analysis).
+The 2026-06-12 incident still cannot be reconstructed completely from data
+that did not exist then, so promotion remains forward-data-driven. The SQLite
+cutover deliberately starts current regime/streak state and the
+regime/rules/canary/proposal/opportunity decision histories clean. Imported
+historic market and gamma measurements are immutable observations stamped
+`decision_eligible=false`, never current state or retrospective decisions.
 
-**Update 2026-07-20:** the decisions journal below is now also queryable. The
-daemon maintains a derived SQLite index (`$XDG_STATE_HOME/ibkr/history.db`,
-see `docs/design/history-index.md`) with automatic backfill and tail ingest.
-`ibkr regime history` serves timelines over typed RPC, and offline
-calibration reads use read-only `sqlite3` (including `json_extract` over the
-verbatim journal lines) instead of `jq`. The JSONL journal stays the evidence
-of record. Since the same day's phase-2 build, monthly rotation bounds the
-raw journal (`history.rotation.keep_raw_months`, default 2); older months
-live as immutable gzip archives that, together with the index, preserve the
-full corpus. A sibling canary-decisions journal now collects the portfolio
-side under the same mechanics.
+`ibkr regime history` and `ibkr canary history` query the post-cutover event
+corpus directly through typed daemon RPC. There is no derived `history.db`,
+JSONL backfill/tail ingest, raw-month rotation, archive query, file fallback,
+or dual write. See `docs/design/history-index.md`.
 
-### Decisions journal (new)
+### Decision event corpus
 
-`$XDG_STATE_HOME/ibkr/regime-decisions.jsonl` — one line per
-*decision-relevant* snapshot:
+`daemon.db` records one typed event per *decision-relevant* snapshot:
 
 - **When:** every assembled snapshot whose semantic fingerprint differs from
-  the last persisted line, plus one heartbeat line per hour while snapshots
+  the last persisted event, plus one heartbeat event per hour while snapshots
   are being served (the app polls regime at 1-minute cadence
-  (`internal/app/live/service.go:86`); fingerprint dedupe keeps the journal
+  (`internal/app/live/service.go:86`); fingerprint dedupe keeps the corpus
   small and the heartbeat keeps a baseline for time-in-state statistics).
 - **Schema (versioned `v: 1`):** `ts`, `session_key`; per indicator: raw
   value(s), band, status, freshness class, age at evaluation, streak
@@ -492,21 +490,20 @@ side under the same mechanics.
   `gamma_gap_pct`), thresholds label; cluster bands raw/confirmed/eligible;
   composite tallies; lifecycle `{stage, severity, readiness, confidence}`;
   posture label; governor records; data-quality statuses.
-- **File contract:** single append-only file, exactly the skew-diagnostics
-  contract — never read at runtime, safe to delete. No rotation in v1
-  (~hundreds of bytes per line, tens of lines per active day; revisit if size
-  is ever a demonstrated problem).
+- **Store contract:** append-only event and typed projection rows; never parsed
+  back into current decision authority. The database is not delete-safe and
+  has no rotation setting.
 - **Consumers:** the backtest plan's forward passes (false-alarm and recall
   measurement against labeled episodes), threshold promotion evidence, and
-  incident forensics.
+  incident forensics through typed RPC or read-only database analysis.
 
 ### Promotion criteria (binding for leaving `pending_backtest`)
 
 A threshold set may drop `pending_backtest` only with: ≥ 6 months of
-decisions-journal coverage including at least one labeled stress episode or
+decision-event coverage including at least one labeled stress episode or
 documented near-miss set; measured false-alarm rate and recall against the
 backtest plan's labels; and a written delta in the spec doc bumping the set's
-version label. The journal exists precisely so this stops being aspirational.
+version label. The event corpus exists precisely so this stops being aspirational.
 
 ## Part 5 — Front-to-back change list (Q3)
 
@@ -523,7 +520,7 @@ contract template.
 | Lifecycle stage/severity + governors | shared rpc lifecycle builder | `LifecycleState` + new `governors[]` | CLI summary, MCP, SPA headline |
 | Headline wording + tone | single shared function in `internal/rpc` | `composite.verdict` == `posture.label` | all (CLI renders served verdict) |
 | Canary market-stress confirmation | served eligible tallies / lifecycle | existing canary contract fields | canary CLI, SPA, alerts |
-| Decision history | daemon journal (XDG state) | n/a (offline file) | backtest tooling |
+| Decision history | append-only events in `daemon.db` | typed history RPC | CLI, backtest tooling, read-only analysis |
 
 ### Daemon (`internal/daemon`)
 
@@ -538,7 +535,7 @@ contract template.
   cadence-freshness computation per row.
 - `regime_metadata.go` — populate eligibility + freshness in row meta; serve
   `MaxAgeSeconds`.
-- New: `regime_decisions.go` (journal writer + fingerprint dedupe + hourly
+- New: `regime_decisions.go` (typed event writer + fingerprint dedupe + hourly
   heartbeat).
 
 ### Contract (`internal/rpc`)
@@ -597,7 +594,7 @@ red rows. Then `make docs-regen`; `make check` enforces no drift.
 - `docs/specs/risk-regime-dashboard.md`: new "Confirmation eligibility and
   severity governance" section; per-indicator tables gain
   depth/streak/freshness columns; promotion criteria section.
-- `docs/specs/regime-backtest-plan.md`: decisions journal becomes the
+- `docs/specs/regime-backtest-plan.md`: decision-event corpus becomes the
   forward-collection corpus; promotion criteria cross-referenced.
 - Both specs have generated `.html` derivatives → run
   `make docs-html-regen` after editing their Markdown sources.
@@ -622,7 +619,8 @@ red rows. Then `make docs-regen`; `make check` enforces no drift.
   co-sign ⇒ confirmed_stress day 1), gap-crash (panic unaffected), slow-bleed
   2007-style (OAS+funding eligible, act gated on co-sign or promotion —
   asserting the documented trade-off, not hiding it).
-- Journal: fingerprint dedupe, heartbeat, valid JSONL.
+- Decision events: fingerprint dedupe, heartbeat, valid typed payload and
+  projection.
 - Contract: compact + monitor views keep new fields; **monitor-hash
   stability** (two consecutive snapshots with identical semantics hash
   identically — no ticking fields); verdict == posture.label property test
@@ -638,22 +636,23 @@ red rows. Then `make docs-regen`; `make check` enforces no drift.
 Review position, adopted: the eligibility gates (min depth, streaks, co-sign)
 are the *same class* of pending-backtest confirmation policy as the band
 values themselves — code/spec-owned until promotion. User-tunable gates would
-also fork the decisions journal's comparability, undermining Part 4. So:
+also fork the decision corpus's comparability, undermining Part 4. So:
 
-- **Becomes a setting now:** `regime.journal.enabled` (default true) — runtime
-  preference, daemon XDG state per `docs/design/platform-settings.md`.
+- **Runtime collection setting:** `regime.journal.enabled` (default true) keeps
+  its public compatibility name but controls typed regime decision events in
+  `daemon.db`; the preference itself is a versioned document in that database.
 - **Stays a code constant until promotion:** every gate value in Part 1's
   table, the co-sign thresholds, the cadence max ages. They are named
   constants in one place with the threshold-set version labels, so a future
-  settings task can expose any of them *after* the journal gives promotion
+  settings task can expose any of them *after* the event corpus gives promotion
   evidence — but the recommendation to that task is: don't, until then.
 
 ## Non-goals
 
-- No backtest execution or threshold re-derivation here — there is no data
-  yet; that is what the journal enables.
+- No backtest execution or threshold re-derivation here — there was no data
+  at design time; the decision-event corpus supplies it going forward.
 - No settings mechanism build (Part 6 names the one knob).
-- No stage dwell / lifecycle persistence (deferred; journal will measure).
+- No stage dwell / lifecycle persistence (deferred; decision events will measure).
 - No changes to gamma compute methodology, breadth fan-out, data sources, or
   MOVE/rates-vol addition.
 - No change to row-band boundaries or to the panic tape triggers.
@@ -668,7 +667,7 @@ also fork the decisions journal's comparability, undermining Part 4. So:
   loudly:** a slow, deep, multi-cluster credit bleed (2007-style) that moves
   no tape will sit at stage `confirmed_stress` / severity `watch` until a
   tape co-sign day or threshold promotion — "act" arrives later than today.
-  That is the deliberate price of the provenance gate, and the journal will
+  That is the deliberate price of the provenance gate, and the event corpus will
   measure whether it was ever paid in practice.
 - **Tone follows governed severity by design:** deep fresh confirmed evidence
   keeps the "Confirmed stress regime" label, but renders amber/watch when the
@@ -683,8 +682,9 @@ also fork the decisions journal's comparability, undermining Part 4. So:
   changelog-noted.
 - **Rollback:** policy sits behind typed additive fields and a handful of
   shared functions; reverting the lifecycle builder and composite to raw-red
-  tallies restores today's behavior without contract breakage. Journal and
-  streak-store changes are delete-safe.
+  tallies restores today's behavior without contract breakage. Persisted
+  decision events and current streak state remain authoritative database data;
+  rollback does not delete or replace them.
 
 ## Review log
 
@@ -701,7 +701,8 @@ also fork the decisions journal's comparability, undermining Part 4. So:
   churn; specified fingerprint policy + v2 bump; de-ticked monitor fields for
   SSE-hash stability; enumerated all four headline copies; defined gamma's
   three red paths. Cuts adopted: stage dwell, per-gate settings knobs (one
-  journal knob remains), top-level policy block, journal rotation. Factual
+  event-collection knob remains), top-level policy block, the then-proposed
+  journal rotation. Factual
   fixes: SPA regime stale badge is 60m (not 15) at `app.js:3159`; app polls
   regime at 1-minute cadence.
 - **2026-06-12 — re-review (fresh subagent, citation spot-checks):
@@ -723,5 +724,5 @@ also fork the decisions journal's comparability, undermining Part 4. So:
    explainability?
 2. Label wording at 2 eligible reds: "Confirmed stress regime" (proposed) vs
    keeping "Broad stress regime" and accepting 2-cluster breadth.
-3. Should the decisions journal also capture `ibkr canary` lifecycle
-   decisions in the same file or a sibling (`canary-decisions.jsonl`)?
+3. **Resolved:** regime and canary lifecycle decisions use sibling typed event
+   kinds in the same `daemon.db`; neither uses a decision file.

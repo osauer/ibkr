@@ -573,7 +573,7 @@
 </table>
 </div>
 <h2 id="runtime-platform-settings">Runtime platform settings</h2>
-<p>Daemon-owned preferences stored in <code>$XDG_STATE_HOME/ibkr/platform-settings.json</code> and changed at runtime — no restart — via <code>ibkr settings set &lt;key&gt;=&lt;value&gt;</code>, the SPA Settings tab, or <code>PATCH /api/settings</code>. Setting a key to <code>null</code> clears the runtime override, and every response field carries access/source/reason metadata. Keys in the trading-limit class are writable only on experimental trading builds with <code>[trading].mode</code> set, and live routes reject agent-origin writes. Ownership and semantics: <code>docs/design/platform-settings.md</code>.</p>
+<p>Daemon-owned preferences persisted in <code>$XDG_STATE_HOME/ibkr/daemon.db</code> and changed at runtime — no restart — via <code>ibkr settings set &lt;key&gt;=&lt;value&gt;</code>, the SPA Settings tab, or <code>PATCH /api/settings</code>. Setting a key to <code>null</code> clears the runtime override, and every response field carries access/source/reason metadata. Keys in the trading-limit class are writable only on experimental trading builds with <code>[trading].mode</code> set, and live routes reject agent-origin writes. Ownership and semantics: <code>docs/design/platform-settings.md</code>.</p>
 <div class="tblwrap">
 <table>
 <thead>
@@ -643,25 +643,13 @@
 <td><code>regime.journal.enabled</code></td>
 <td><code>true/false/null</code></td>
 <td>runtime</td>
-<td>Turns the regime-decisions forward-collection journal on ($XDG_STATE_HOME/ibkr/regime-decisions.jsonl).</td>
+<td>Turns forward regime decision-event collection in daemon.db on (default true).</td>
 </tr>
 <tr>
 <td><code>canary.journal.enabled</code></td>
 <td><code>true/false/null</code></td>
 <td>runtime</td>
-<td>Turns the canary-decisions forward-collection journal on ($XDG_STATE_HOME/ibkr/canary-decisions.jsonl), mirroring regime.journal.enabled.</td>
-</tr>
-<tr>
-<td><code>history.rotation.enabled</code></td>
-<td><code>true/false/null</code></td>
-<td>runtime</td>
-<td>Turns automatic monthly journal rotation (regime/rules/canary decision journals → gzip archives under rotated/) on; rotation only compresses fully-indexed evidence and never deletes it (default true).</td>
-</tr>
-<tr>
-<td><code>history.rotation.keep_raw_months</code></td>
-<td><code>integer/null</code></td>
-<td>runtime</td>
-<td>How many most-recent calendar months of decision-journal lines stay raw in the live files before rotating to gzip archives; minimum 1, null restores the default 2.</td>
+<td>Turns forward canary decision-event collection in daemon.db on, mirroring regime.journal.enabled (default true).</td>
 </tr>
 </tbody>
 </table>

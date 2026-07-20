@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -224,7 +225,7 @@ func (s *Server) cancelSmokeOrder(ctx context.Context, status rpc.TradingStatus,
 	ev.SendState = orderSendStateSendAttempted
 	ev.Origin = normalizedWriteOrigin(origin)
 	ev.Message = "paper-smoke cleanup: broker cancel attempted before acknowledgement"
-	if err := s.orderJournal.Append(ev); err != nil {
+	if err := s.orderJournal.StagePreTransmit("", "", 0, place.ReservedOrderID, corestore.ActionSmokeCleanup, coreOrderOrigin(origin), []orderJournalEvent{ev}); err != nil {
 		return fmt.Errorf("append cancel journal: %w", err)
 	}
 	return s.cancelConfiguredOrder(ctx, status, place.ReservedOrderID)

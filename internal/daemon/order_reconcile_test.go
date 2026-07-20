@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/config"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
@@ -16,7 +17,8 @@ func newOrderReconcileTestServer(t *testing.T, now time.Time) *Server {
 	t.Helper()
 	srv := newTestServer(t)
 	srv.cfg.Gateway.Account = "DU1234567"
-	srv.orderJournal = newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl"))
+	srv.cfg.Trading.Mode = config.TradingModePaper
+	srv.orderJournal = newTestOrderJournalStore(t, filepath.Join(t.TempDir(), "order-journal.jsonl"))
 	srv.now = func() time.Time { return now }
 	return srv
 }
@@ -47,6 +49,18 @@ func seedReconcileGhostRow(t *testing.T, srv *Server, ref string, permID int, at
 		t.Fatalf("seed journal: %v", err)
 	}
 	for _, ev := range extra {
+		if ev.Endpoint == "" {
+			ev.Endpoint = base.Endpoint
+		}
+		if ev.ClientID == 0 {
+			ev.ClientID = base.ClientID
+		}
+		if ev.Account == "" {
+			ev.Account = base.Account
+		}
+		if ev.Mode == "" {
+			ev.Mode = base.Mode
+		}
 		if err := srv.orderJournal.Append(ev); err != nil {
 			t.Fatalf("seed extra journal event: %v", err)
 		}
@@ -178,6 +192,7 @@ func TestReconcileLeavesPresentYoungUnackedAndOffScopeRows(t *testing.T) {
 		ClientID:        15,
 		PermID:          702,
 		Account:         "U1234567",
+		Endpoint:        "127.0.0.1:4001",
 		Mode:            "live",
 		Symbol:          "IBM",
 		SecType:         "STK",

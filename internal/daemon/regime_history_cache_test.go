@@ -3,8 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
@@ -66,5 +68,44 @@ func TestRegimeHistoryCachePersistsFallbackAcrossInstances(t *testing.T) {
 	}
 	if len(got) != len(good) {
 		t.Fatalf("bars=%d, want persisted cached %d", len(got), len(good))
+	}
+}
+
+func TestRegimeHistoryCacheUsesSQLiteWithoutLegacyFallback(t *testing.T) {
+	legacyDir := t.TempDir()
+	authority := openMarketTestCoreStore(t)
+	ctx := context.Background()
+	good := makeBars(10, 150)
+
+	first := newRegimeHistoryCache(legacyDir)
+	if err := first.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	if _, err := first.fetch(ctx, "USD.JPY", USDJPYLookbackDays, func(context.Context, string, int) ([]ibkrlib.HistoricalBar, error) {
+		return good, nil
+	}); err != nil {
+		t.Fatalf("seed fetch: %v", err)
+	}
+	entries, err := os.ReadDir(legacyDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("legacy cache was written: entries=%v err=%v", entries, err)
+	}
+
+	restarted := newRegimeHistoryCache(legacyDir)
+	if err := restarted.UseCoreStore(authority); err != nil {
+		t.Fatalf("restart UseCoreStore: %v", err)
+	}
+	got, err := restarted.fetch(ctx, "USD.JPY", USDJPYLookbackDays, func(context.Context, string, int) ([]ibkrlib.HistoricalBar, error) {
+		return nil, errors.New("hmds unavailable")
+	})
+	if err != nil || len(got) != len(good) {
+		t.Fatalf("SQLite fallback bars=%d err=%v", len(got), err)
+	}
+	observations, err := authority.ListObservations(ctx, corestore.ObservationQuery{
+		ScopeKey: regimeHistoryAuthorityScope("USD.JPY", USDJPYLookbackDays),
+		Source:   regimeHistorySource, Kind: regimeHistoryObservationKind,
+	})
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("observations=%d err=%v", len(observations), err)
 	}
 }

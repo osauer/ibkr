@@ -20,7 +20,9 @@ func TestOrderPlaceConsumesAcceptedTokenAndJournalsSendAttempt(t *testing.T) {
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	srv.orderReserveBrokerID = func(context.Context) (int, error) { return 1001, nil }
 	var sentOrder *ibkrlib.RawOrder
+	brokerCalls := 0
 	srv.orderPlaceBroker = func(_ context.Context, _ *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
+		brokerCalls++
 		copy := *order
 		sentOrder = &copy
 		return nil
@@ -54,6 +56,39 @@ func TestOrderPlaceConsumesAcceptedTokenAndJournalsSendAttempt(t *testing.T) {
 	_, err = srv.placeOrder(context.Background(), rpc.OrderPlaceParams{PreviewToken: token})
 	if !errors.Is(err, ErrTradingDisabled) || !errors.Is(err, errOrderPreviewTokenAlreadyUsed) {
 		t.Fatalf("second place err = %v, want token-used trading refusal", err)
+	}
+	if brokerCalls != 1 {
+		t.Fatalf("broker calls = %d, want no second transmit after failed token transaction", brokerCalls)
+	}
+}
+
+func TestOrderPlacePersistenceFailureMakesZeroBrokerCalls(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	authority, err := srv.orderJournal.coreStore()
+	if err != nil {
+		t.Fatalf("order authority: %v", err)
+	}
+	srv.orderReserveBrokerID = func(context.Context) (int, error) {
+		// Authorization has already read healthy state. Closing here forces the
+		// pre-transmit SQLite transaction itself to fail.
+		if err := authority.Close(); err != nil {
+			t.Fatalf("close order authority: %v", err)
+		}
+		return 1001, nil
+	}
+	brokerCalls := 0
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		brokerCalls++
+		return nil
+	}
+	token := mintPreviewTokenForConfirmTest(t, srv, rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusAccepted, Available: true})
+	_, err = srv.placeOrder(context.Background(), rpc.OrderPlaceParams{PreviewToken: token})
+	if !errors.Is(err, ErrTradingDisabled) {
+		t.Fatalf("place persistence err = %v, want trading-disabled refusal", err)
+	}
+	if brokerCalls != 0 {
+		t.Fatalf("broker calls = %d, want zero when pre-transmit commit fails", brokerCalls)
 	}
 }
 
@@ -258,6 +293,51 @@ func TestOrderCancelAppendsPendingCancelWithoutTerminalState(t *testing.T) {
 	}
 }
 
+func TestOrderCancelPersistenceFailureMakesZeroBrokerCalls(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	now := time.Date(2026, 5, 28, 9, 0, 0, 0, time.UTC)
+	if err := srv.orderJournal.Append(orderJournalEvent{
+		At: now.Add(-time.Minute), Type: orderJournalEventBrokerAcknowledged,
+		OrderRef: "ord-cancel-fail", ReservedOrderID: 1001,
+		Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU1234567", Mode: "paper",
+		Symbol: "AAPL", SecType: "STK", Action: rpc.OrderActionBuy,
+		OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay, Quantity: 1, Remaining: 1,
+		Status: "Submitted", SendState: orderSendStateBrokerAcknowledged,
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+	authority, err := srv.orderJournal.coreStore()
+	if err != nil {
+		t.Fatalf("order authority: %v", err)
+	}
+	nowCalls := 0
+	srv.now = func() time.Time {
+		nowCalls++
+		// loadOrderViews uses the first clock read. The cancel path uses the
+		// second immediately before StagePreTransmit.
+		if nowCalls == 2 {
+			if err := authority.Close(); err != nil {
+				t.Fatalf("close order authority: %v", err)
+			}
+		}
+		return now
+	}
+	brokerCalls := 0
+	srv.orderCancelBroker = func(context.Context, int) error {
+		brokerCalls++
+		return nil
+	}
+
+	_, err = srv.cancelOrder(context.Background(), rpc.OrderCancelParams{ID: "ord-cancel-fail"})
+	if !errors.Is(err, ErrTradingDisabled) {
+		t.Fatalf("cancel persistence err = %v, want trading-disabled refusal", err)
+	}
+	if brokerCalls != 0 {
+		t.Fatalf("broker calls = %d, want zero when cancel pre-transmit commit fails", brokerCalls)
+	}
+}
+
 func TestOrderModifyRejectsSymbolChange(t *testing.T) {
 	t.Parallel()
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
@@ -453,6 +533,43 @@ func TestOrderModifyTrailGTCAmendsInPlace(t *testing.T) {
 	}
 	if last.Trail == nil || last.Trail.TrailingPercent == nil || *last.Trail.TrailingPercent != 2 {
 		t.Fatalf("modify event trail = %+v, want re-priced trail journaled", last.Trail)
+	}
+}
+
+func TestOrderModifyPersistenceFailureMakesZeroBrokerCalls(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	seedTrailGTCOrderJournal(t, srv, now)
+	token := mintModifyPreviewTokenForWriteTest(t, srv, trailGTCOrderViewForToken(), trailGTCModifyDraft())
+	authority, err := srv.orderJournal.coreStore()
+	if err != nil {
+		t.Fatalf("order authority: %v", err)
+	}
+	nowCalls := 0
+	srv.now = func() time.Time {
+		nowCalls++
+		// loadOrderViews uses the first clock read. The modify path uses the
+		// second immediately before StagePreTransmit.
+		if nowCalls == 2 {
+			if err := authority.Close(); err != nil {
+				t.Fatalf("close order authority: %v", err)
+			}
+		}
+		return now
+	}
+	brokerCalls := 0
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		brokerCalls++
+		return nil
+	}
+
+	_, err = srv.modifyOrder(context.Background(), rpc.OrderModifyParams{ID: "ord-trail", PreviewToken: token})
+	if !errors.Is(err, ErrTradingDisabled) {
+		t.Fatalf("modify persistence err = %v, want trading-disabled refusal", err)
+	}
+	if brokerCalls != 0 {
+		t.Fatalf("broker calls = %d, want zero when modify pre-transmit commit fails", brokerCalls)
 	}
 }
 

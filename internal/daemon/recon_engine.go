@@ -118,7 +118,7 @@ func (s *Server) buildReconReportWithSnapshotContext(ctx context.Context) (*rpc.
 	replayCtx := s.riskCapital.ReplayContext()
 	res.GenesisAt = replayCtx.GenesisAt
 	matchableFlows, baseline := partitionReconBaselineFlows(merged.flows, replayCtx)
-	events, err := replayCapitalFlowEventsContext(ctx, func(stage string) error { return s.nudgeScanCheck(ctx, stage) })
+	events, err := s.riskCapital.CapitalFlowEventsContext(ctx, func(stage string) error { return s.nudgeScanCheck(ctx, stage) })
 	if err != nil {
 		return nil, nil, err
 	}
@@ -143,7 +143,7 @@ func (s *Server) buildReconReportWithSnapshotContext(ctx context.Context) (*rpc.
 		matchedExceptions = kept
 	}
 	exceptions := append(merged.exceptions, matchedExceptions...)
-	if err := applyReconDismissalsContext(ctx, exceptions, func(stage string) error { return s.nudgeScanCheck(ctx, stage) }); err != nil {
+	if err := s.applyReconDismissalsContext(ctx, exceptions, func(stage string) error { return s.nudgeScanCheck(ctx, stage) }); err != nil {
 		return nil, nil, err
 	}
 
@@ -474,53 +474,45 @@ func businessDaysApart(a, b time.Time) int {
 	return n
 }
 
-// replayCapitalFlowEvents returns the declared deposit/withdrawal events
-// (journal order). Reconcile attestations are not flows.
-func replayCapitalFlowEvents() []capitalEventV1 {
-	out, _ := replayCapitalFlowEventsContext(context.Background(), nil)
-	return out
-}
-
-func replayCapitalFlowEventsContext(ctx context.Context, checkpoint func(string) error) ([]capitalEventV1, error) {
-	if checkpoint != nil {
-		if err := checkpoint("capital_events_start"); err != nil {
-			return nil, err
-		}
-	} else if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	path, err := defaultTradingStatePath(capitalEventsJournalFile)
-	if err != nil {
-		return nil, nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil
-	}
-	var out []capitalEventV1
-	for line := range strings.SplitSeq(string(data), "\n") {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var ev capitalEventV1
-		if json.Unmarshal([]byte(line), &ev) != nil || ev.Version != 1 {
-			continue
-		}
-		if ev.Type == "deposit" || ev.Type == "withdrawal" {
-			out = append(out, ev)
-		}
-	}
-	return out, nil
-}
-
 // applyReconDismissals folds journaled human dismissals into the exception
 // list. The journal is the source of truth; nothing else stores them.
-func applyReconDismissals(exceptions []rpc.ReconException) {
-	_ = applyReconDismissalsContext(context.Background(), exceptions, nil)
+func (s *Server) applyReconDismissalsContext(ctx context.Context, exceptions []rpc.ReconException, checkpoint func(string) error) error {
+	if s == nil || s.riskCapital == nil || s.riskCapital.core == nil {
+		// Legacy unit/import helper only; Start binds core before runtime.
+		return applyReconDismissalsContext(ctx, exceptions, checkpoint)
+	}
+	if checkpoint != nil {
+		if err := checkpoint("recon_dismissals_start"); err != nil {
+			return err
+		}
+	} else if err := ctx.Err(); err != nil {
+		return err
+	}
+	payloads, err := s.riskCapital.GovernanceEventPayloads(ctx)
+	if err != nil {
+		return err
+	}
+	reasons := map[string]string{}
+	for _, payload := range payloads {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var entry struct {
+			Kind   string `json:"kind"`
+			LineID string `json:"line_id"`
+			Reason string `json:"reason"`
+		}
+		if json.Unmarshal(payload, &entry) == nil && entry.Kind == "recon_dismiss" && entry.LineID != "" {
+			reasons[entry.LineID] = entry.Reason
+		}
+	}
+	for i := range exceptions {
+		if reason, ok := reasons[exceptions[i].LineID]; ok {
+			exceptions[i].Dismissed = true
+			exceptions[i].DismissReason = reason
+		}
+	}
+	return nil
 }
 
 func applyReconDismissalsContext(ctx context.Context, exceptions []rpc.ReconException, checkpoint func(string) error) error {

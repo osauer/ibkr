@@ -50,17 +50,22 @@ type Options struct {
 	// calls it exactly once — behind a sync.Once, from the first
 	// operation that touches the list (Refresh, Members, SetMembers) —
 	// instead of resolving at construction. The daemon uses this to
-	// keep the members-cache disk read and its INFO log line out of
+	// keep the persisted-members read and its INFO log line out of
 	// daemon.New, which runs before Server.Start acquires the
 	// single-instance lock: autospawn race losers build a full Server
 	// but never serve a call, so a deferred load keeps them off the
-	// cache file and out of the shared log. An empty return falls back
+	// persistence authority and out of the shared log. An empty return falls back
 	// to MemberList()'s embedded list. Ignored when Members is set.
 	MembersFn func() []string
+	// DeferStoreLoad constructs the engine cold without reading Store. The
+	// daemon uses this before it owns the persistence lock, then calls
+	// Engine.UseCoreStore to attach and load daemon.db before serving. Legacy
+	// and isolated callers keep the historical eager-load default.
+	DeferStoreLoad bool
 }
 
-// Engine is the breadth-spx state machine: it loads the on-disk
-// cache, drives a background refresh against a BarFetcher when
+// Engine is the breadth-spx state machine: it loads persisted state, drives a
+// background refresh against a BarFetcher when
 // asked, and serves the most recent Snapshot to callers. Safe for
 // concurrent use.
 //
@@ -72,11 +77,9 @@ type Options struct {
 //   - Get() / Status() are fast read-only views; safe to call during
 //     a Refresh in progress.
 //
-// State is held in memory and persisted after every successful
-// refresh. A crash mid-refresh just means the next refresh
-// re-fetches from the last persisted point — no transactional
-// guarantees beyond "either the file is the new state or it's the
-// old state".
+// State is held in memory and persisted transactionally after every successful
+// refresh. A crash mid-refresh means the next refresh continues from the last
+// committed daemon.db projection.
 type Engine struct {
 	store   *Store
 	fetcher BarFetcher
@@ -182,22 +185,24 @@ func New(store *Store, fetcher BarFetcher, opts Options) *Engine {
 		e.warmLookback = 2
 	}
 
-	// Best-effort load. Errors are logged but never propagated —
-	// the engine remains useful on cold start.
-	if snap, err := store.LoadSnapshot(); err != nil {
-		e.warnf("breadth: load snapshot: %v", err)
-	} else if snap != nil {
-		e.snapshot = snap
-	}
-	if windows, err := store.LoadWindows(); err != nil {
-		e.warnf("breadth: load windows: %v", err)
-	} else if windows != nil {
-		e.windows = windows
-	}
-	if hist, err := store.LoadHistory(); err != nil {
-		e.warnf("breadth: load history: %v", err)
-	} else {
-		e.history = hist
+	if !opts.DeferStoreLoad {
+		// Best-effort legacy/standalone load. Errors are logged but never
+		// propagated — the engine remains useful on cold start.
+		if snap, err := store.LoadSnapshot(); err != nil {
+			e.warnf("breadth: load snapshot: %v", err)
+		} else if snap != nil {
+			e.snapshot = snap
+		}
+		if windows, err := store.LoadWindows(); err != nil {
+			e.warnf("breadth: load windows: %v", err)
+		} else if windows != nil {
+			e.windows = windows
+		}
+		if hist, err := store.LoadHistory(); err != nil {
+			e.warnf("breadth: load history: %v", err)
+		} else {
+			e.history = hist
+		}
 	}
 	return e
 }

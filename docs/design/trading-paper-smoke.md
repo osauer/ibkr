@@ -8,6 +8,12 @@ Status: shipped, then re-gated same day by owner decision (see Revision below)
 > keys referenced throughout this document no longer exist. This doc is kept
 > as the historical design record of the paper-smoke itself, which is
 > unchanged: a release-pipeline gate, informational in trading status.
+>
+> **Storage revision 2026-07-20:** current evidence is a versioned state
+> document in `$XDG_STATE_HOME/ibkr/daemon.db`; its MAC key is the separate
+> private `order-preview-key-v2`. References below to
+> `trading-readiness.json` and `order-preview-key` describe the retired
+> pre-cutover implementation only and are not runtime fallbacks.
 
 ## Revision 2026-06-10 — release-time gate, no human ceremony
 
@@ -75,8 +81,8 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
 
 | Concept | Authoritative source | Typed field/contract | Renderer/tool | Fallback or unavailable state |
 |---|---|---|---|---|
-| Paper-smoke evidence | daemon `trading.paper_smoke` run (place→ack→cancel→confirm observed in-daemon) | `trading-readiness.json` v1: `paper_smoke{…}` + new `mac` | `ibkr trading status` (`PaperSmoke*` fields), live blockers | missing/stale/mismatch → live blocked (unchanged) |
-| Evidence integrity | HMAC-SHA256 with the order-token key (`order-preview-key`), domain-separated prefix `ibkr-paper-smoke-v1\|` | `paper_smoke.mac` (base64url) | new status `unsigned`, blocker `paper_smoke_unsigned` | missing/invalid MAC → live blocked; hand-written JSON era ends |
+| Paper-smoke evidence | daemon `trading.paper_smoke` run (place→ack→cancel→confirm observed in-daemon) | daemon.db `trading_readiness_v1` state document with `paper_smoke{…}` + `mac` | `ibkr trading status` (`PaperSmoke*` fields) | missing/stale/mismatch stays informational; release smoke remains binding |
+| Evidence integrity | HMAC-SHA256 with the private `order-preview-key-v2`, domain-separated prefix `ibkr-paper-smoke-v1\|` | `paper_smoke.mac` (base64url) plus daemon.db signer generation | status `unsigned` when invalid | missing/invalid MAC is disclosed; there is no JSON file fallback |
 | Smoke invocation origin | invoking adapter (CLI `DetectWriteOrigin`) | `origin` on `TradingPaperSmokeParams` | order journal origin | automated origins allowed; smoke transmits only on paper |
 | Live human confirmation (SPA) — **removed in v1.10.0** | ~~typed input in the PWA, verbatim `live/<account>`~~ the typed phrase, `live_confirmation` field, and `live_confirmation_required` blocker were removed end-to-end in v1.10.0; the app HTTP layer now rejects the field as an unknown field on every broker-write route | server-validated `confirm_account`/`confirm_mode` on every HTTP write (unchanged) | single-click after preview; purge keeps its typed confirm | mismatched confirm fields → write refused |
 | Smoke order lifecycle | broker callbacks via order journal read model | `SendState=broker_acknowledged`, `LifecycleStatus ∈ {pre_submitted, submitted}` then `cancelled` | result fields `ack_lifecycle_status`, `cancel_lifecycle_status` | timeout → `result=failed` evidence (fail closed) |
@@ -261,9 +267,10 @@ completion message.
   edits to `trading_readiness.go`, `order_preview.go` (signer methods),
   `trading_status.go` (unsigned status), rpc params/result + method, CLI
   `trading.go`/catalog/main.go, HTTP request structs, `app.js`, docs.
-- Runtime state touched: `trading-readiness.json` gains `mac`; old binaries
-  ignore the field (accept evidence as before), so binary rollback is safe;
-  rolling forward again requires one `ibkr trading paper-smoke` rerun.
+- Runtime state touched: daemon.db `trading_readiness_v1`; the SQLite cutover
+  deliberately resets prior smoke evidence and rotates the token/MAC key.
+  Rolling forward requires a new paper smoke only when release evidence is
+  needed; never restore the retired JSON file as a fallback.
 - User-facing behavior that changes: live blockers' instruction finally
   works; hand-written evidence stops being accepted (deliberate); SPA live
   writes become possible via typed confirmation (previously impossible).

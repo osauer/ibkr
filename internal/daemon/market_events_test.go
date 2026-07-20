@@ -456,3 +456,77 @@ func TestRegSHODatedWalkSkipsRedirect(t *testing.T) {
 		t.Fatalf("expected the 2026-06-09 file's symbols, got %+v", entry.Symbols)
 	}
 }
+
+func TestMarketEventSQLitePersistsNormalizedSnapshotsAndRestarts(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	authority := openMarketTestCoreStore(t)
+	cache := newMarketEventCache(func() time.Time { return now })
+	if err := cache.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	regSHO := marketEventRegSHOEntry{
+		FetchedAt: now, AsOf: now.Add(-time.Hour), SourceURL: "https://example.test/regsho.txt",
+		Symbols: map[string]marketEventRegSHORecord{
+			"CRWV": {Symbol: "CRWV", SecurityName: "CoreWeave"},
+		},
+	}
+	halts := marketEventHaltsEntry{
+		FetchedAt: now, AsOf: now, SourceURL: "https://example.test/halts.xml",
+		Records: []marketEventHaltRecord{{Symbol: "CRWV", ReasonCode: "T1", HaltedAt: now.Add(-time.Minute)}},
+	}
+	fees := marketEventBorrowFeeEntry{
+		FetchedAt: now, AsOf: now.Add(-time.Minute), SourceURL: "ftp://example.test/usa.txt",
+		Symbols: map[string]marketEventBorrowFeeRecord{
+			"CRWV": {Symbol: "CRWV", Currency: "USD", FeeRate: 55, Available: 1000},
+		},
+	}
+	inventory := map[string]marketEventBorrowInventoryRecord{
+		"CRWV": {Symbol: "CRWV", ShortableShares: 500, AsOf: now, DataType: "live"},
+	}
+	if err := cache.persistRegSHO(context.Background(), regSHO); err != nil {
+		t.Fatalf("persist Reg SHO: %v", err)
+	}
+	if err := cache.persistHalts(context.Background(), halts); err != nil {
+		t.Fatalf("persist halts: %v", err)
+	}
+	if err := cache.persistBorrowFees(context.Background(), fees); err != nil {
+		t.Fatalf("persist borrow fees: %v", err)
+	}
+	if err := cache.persistBorrowInventory(context.Background(), now, inventory); err != nil {
+		t.Fatalf("persist borrow inventory: %v", err)
+	}
+	assertStateAndObservation(t, authority, marketEventRegSHOScope, marketEventRegSHOStateKind, marketEventRegSHOSource, marketEventRegSHOObservationKind)
+	assertStateAndObservation(t, authority, marketEventHaltsScope, marketEventHaltsStateKind, marketEventHaltsSource, marketEventHaltsObservationKind)
+	assertStateAndObservation(t, authority, marketEventBorrowFeesScope, marketEventBorrowFeesStateKind, marketEventBorrowFeesSource, marketEventBorrowFeesObservationKind)
+	assertStateAndObservation(t, authority, marketEventBorrowInventoryScope, marketEventBorrowInventoryStateKind, marketEventBorrowInventorySource, marketEventBorrowInventoryObservationKind)
+
+	restarted := newMarketEventCache(func() time.Time { return now.Add(time.Hour) })
+	if err := restarted.UseCoreStore(authority); err != nil {
+		t.Fatalf("restart UseCoreStore: %v", err)
+	}
+	if _, ok := restarted.regSHO.Symbols["CRWV"]; !ok {
+		t.Fatalf("Reg SHO state did not survive restart: %+v", restarted.regSHO)
+	}
+	if len(restarted.halts.Records) != 1 || restarted.halts.Records[0].Symbol != "CRWV" {
+		t.Fatalf("halts state did not survive restart: %+v", restarted.halts)
+	}
+	if _, ok := restarted.borrowFees.Symbols["CRWV"]; !ok {
+		t.Fatalf("borrow-fee state did not survive restart: %+v", restarted.borrowFees)
+	}
+	if restarted.shortableAbsent != nil || !restarted.regSHOFailedAt.IsZero() || !restarted.haltsFailedAt.IsZero() || !restarted.borrowFeesFailedAt.IsZero() {
+		t.Fatal("ephemeral retry/absence state should not persist")
+	}
+}
+
+func TestMarketEventSQLiteRejectsMalformedRowWithoutReplacingCache(t *testing.T) {
+	authority := openMarketTestCoreStore(t)
+	writeMalformedMarketState(t, authority, marketEventRegSHOScope, marketEventRegSHOStateKind, []byte(`{"version":1,"entry":{"fetched_at":"2026-07-20T12:00:00Z","as_of":"2026-07-20T11:00:00Z","source_url":"https://example.test","symbols":{"CRWV":{"symbol":"WRONG"}}}}`))
+	cache := newMarketEventCache(nil)
+	cache.regSHO = marketEventRegSHOEntry{Symbols: map[string]marketEventRegSHORecord{"KEEP": {Symbol: "KEEP"}}}
+	if err := cache.UseCoreStore(authority); err == nil {
+		t.Fatal("malformed market-event row attached")
+	}
+	if _, ok := cache.regSHO.Symbols["KEEP"]; !ok {
+		t.Fatal("failed attachment mutated existing cache projection")
+	}
+}

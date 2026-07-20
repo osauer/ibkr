@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
@@ -21,8 +23,8 @@ import (
 )
 
 const (
-	orderPreviewTokenVersion = 1
-	orderPreviewTokenPrefix  = "ibkrp1"
+	orderPreviewTokenVersion = 2
+	orderPreviewTokenPrefix  = "ibkrp2"
 	orderPreviewTokenTTL     = 10 * time.Minute
 	orderPreviewKeyBytes     = 32
 	orderPreviewDefaultWait  = 5 * time.Second
@@ -30,22 +32,24 @@ const (
 )
 
 type orderPreviewTokenPayload struct {
-	Version      int                       `json:"version"`
-	TokenID      string                    `json:"token_id"`
-	Scope        string                    `json:"scope"`
-	IssuedAt     time.Time                 `json:"issued_at"`
-	ExpiresAt    time.Time                 `json:"expires_at"`
-	Mode         string                    `json:"mode"`
-	Account      string                    `json:"account"`
-	Endpoint     string                    `json:"endpoint"`
-	ClientID     int                       `json:"client_id"`
-	Draft        rpc.OrderDraft            `json:"draft"`
-	Quote        rpc.OrderQuoteSnapshot    `json:"quote"`
-	Position     rpc.OrderPositionImpact   `json:"position"`
-	Notional     float64                   `json:"notional"`
-	WhatIf       rpc.OrderWhatIfResult     `json:"what_if"`
-	WhatIfStatus string                    `json:"what_if_status,omitempty"`
-	Replace      orderPreviewReplaceTarget `json:"replace"`
+	Version          int                       `json:"version"`
+	AuthorityEpoch   string                    `json:"authority_epoch"`
+	SignerGeneration int64                     `json:"signer_generation"`
+	TokenID          string                    `json:"token_id"`
+	Scope            string                    `json:"scope"`
+	IssuedAt         time.Time                 `json:"issued_at"`
+	ExpiresAt        time.Time                 `json:"expires_at"`
+	Mode             string                    `json:"mode"`
+	Account          string                    `json:"account"`
+	Endpoint         string                    `json:"endpoint"`
+	ClientID         int                       `json:"client_id"`
+	Draft            rpc.OrderDraft            `json:"draft"`
+	Quote            rpc.OrderQuoteSnapshot    `json:"quote"`
+	Position         rpc.OrderPositionImpact   `json:"position"`
+	Notional         float64                   `json:"notional"`
+	WhatIf           rpc.OrderWhatIfResult     `json:"what_if"`
+	WhatIfStatus     string                    `json:"what_if_status,omitempty"`
+	Replace          orderPreviewReplaceTarget `json:"replace"`
 }
 
 type orderPreviewReplaceTarget struct {
@@ -70,12 +74,22 @@ type orderPreviewReplaceTarget struct {
 }
 
 type orderTokenSigner struct {
-	key []byte
-	now func() time.Time
+	key              []byte
+	now              func() time.Time
+	mu               sync.RWMutex
+	authorityEpoch   string
+	signerGeneration int64
 }
 
-func defaultOrderTokenKeyPath() (string, error) {
-	return defaultTradingStatePath("order-preview-key")
+// orderTokenKeyPathForDatabase keeps test/offline authorities self-contained:
+// a custom daemon.db can never create or read the production state-root key.
+// The production default database naturally resolves to the same XDG sibling.
+func orderTokenKeyPathForDatabase(databasePath string) (string, error) {
+	databasePath = strings.TrimSpace(databasePath)
+	if databasePath == "" {
+		return "", fmt.Errorf("daemon authority database path is empty")
+	}
+	return filepath.Join(filepath.Dir(databasePath), "order-preview-key-v2"), nil
 }
 
 func newOrderTokenSigner(path string, now func() time.Time) (*orderTokenSigner, error) {
@@ -83,7 +97,33 @@ func newOrderTokenSigner(path string, now func() time.Time) (*orderTokenSigner, 
 	if err != nil {
 		return nil, err
 	}
-	return &orderTokenSigner{key: key, now: now}, nil
+	// Standalone construction is used by focused unit tests. The daemon binds
+	// these fields to daemon.db's head before it serves any preview request.
+	return &orderTokenSigner{key: key, now: now, authorityEpoch: "standalone", signerGeneration: 1}, nil
+}
+
+func (s *orderTokenSigner) bindAuthority(authorityEpoch string, signerGeneration int64) error {
+	if s == nil || len(s.key) == 0 {
+		return fmt.Errorf("order preview token signer is not configured")
+	}
+	authorityEpoch = strings.TrimSpace(authorityEpoch)
+	if authorityEpoch == "" || signerGeneration < 1 {
+		return fmt.Errorf("order preview token authority identity is invalid")
+	}
+	s.mu.Lock()
+	s.authorityEpoch = authorityEpoch
+	s.signerGeneration = signerGeneration
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *orderTokenSigner) authorityIdentity() (string, int64) {
+	if s == nil {
+		return "", 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.authorityEpoch, s.signerGeneration
 }
 
 func loadOrCreateOrderTokenKey(path string) ([]byte, error) {
@@ -131,6 +171,10 @@ func (s *orderTokenSigner) mint(payload orderPreviewTokenPayload) (token string,
 		}
 	}
 	payload.Version = orderPreviewTokenVersion
+	payload.AuthorityEpoch, payload.SignerGeneration = s.authorityIdentity()
+	if payload.AuthorityEpoch == "" || payload.SignerGeneration < 1 {
+		return "", "", time.Time{}, fmt.Errorf("order preview token authority identity is unavailable")
+	}
 	payload.TokenID = tokenID
 	if payload.Scope == "" {
 		payload.Scope = rpc.OrderTokenScopePlace
@@ -185,6 +229,10 @@ func (s *orderTokenSigner) verify(token string) (orderPreviewTokenPayload, error
 	}
 	if payload.Version != orderPreviewTokenVersion {
 		return orderPreviewTokenPayload{}, fmt.Errorf("unsupported order preview token version %d", payload.Version)
+	}
+	authorityEpoch, signerGeneration := s.authorityIdentity()
+	if payload.AuthorityEpoch != authorityEpoch || payload.SignerGeneration != signerGeneration {
+		return orderPreviewTokenPayload{}, fmt.Errorf("order preview token belongs to signer generation %d in a different authority epoch", payload.SignerGeneration)
 	}
 	switch payload.Scope {
 	case rpc.OrderTokenScopePlace, rpc.OrderTokenScopeModify:

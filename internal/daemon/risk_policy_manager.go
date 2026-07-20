@@ -49,7 +49,9 @@ func (s *Server) installRiskPolicyManager() {
 	}
 	m := newRiskPolicyManager(riskPolicyDefaultPath, 30*time.Second, s.now)
 	m.onTransition = s.journalRiskPolicyTransition
-	m.reload()
+	// First reload is deferred until Start has bound SQLite authority. This
+	// prevents construction-time policy transitions from leaking into the
+	// sealed legacy JSONL journal before the daemon owns its state lock.
 	s.riskPolicies = m
 }
 

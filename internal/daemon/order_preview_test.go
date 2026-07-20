@@ -407,6 +407,37 @@ func TestOrderTokenSignerBindsDraft(t *testing.T) {
 	}
 }
 
+func TestOrderTokenSignerGenerationRotationInvalidatesMintedToken(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	token, _, _, err := srv.orderTokens.mint(orderPreviewTokenPayload{
+		Mode: "paper", Account: "DU1234567", Endpoint: "127.0.0.1:4002", ClientID: 31,
+		Draft:  rpc.OrderDraft{Action: rpc.OrderActionBuy, Contract: rpc.ContractParams{Symbol: "AAPL", SecType: "STK"}, Quantity: 1, OrderType: rpc.OrderTypeLMT, LimitPrice: 100, TIF: rpc.OrderTIFDay},
+		WhatIf: previewWhatIfUnavailable(),
+	})
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	authority, err := srv.orderJournal.coreStore()
+	if err != nil {
+		t.Fatalf("order authority: %v", err)
+	}
+	head, err := authority.AuthorityHead(t.Context())
+	if err != nil {
+		t.Fatalf("authority head: %v", err)
+	}
+	rotated, err := authority.AdvanceSignerGeneration(t.Context(), head.SignerGeneration, head.SignerGeneration+1)
+	if err != nil {
+		t.Fatalf("advance signer generation: %v", err)
+	}
+	if err := srv.orderTokens.bindAuthority(rotated.AuthorityEpoch, rotated.SignerGeneration); err != nil {
+		t.Fatalf("bind rotated signer generation: %v", err)
+	}
+	if _, err := srv.orderTokens.verify(token); err == nil || !strings.Contains(err.Error(), "different authority epoch") {
+		t.Fatalf("old-generation verify err = %v, want authority mismatch", err)
+	}
+}
+
 func TestOrderTokenSignerRejectsTamperedAndExpired(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 28, 8, 30, 0, 0, time.UTC)
@@ -818,14 +849,14 @@ func TestConfirmPreviewTokenForPlaceIsSingleUse(t *testing.T) {
 		RequiredForSubmit: false,
 	})
 
-	payload, err := srv.confirmPreviewTokenForPlace(token)
+	payload, err := srv.confirmPreviewTokenForPlaceWithOrderID(token, 1001, "test broker transmit")
 	if err != nil {
 		t.Fatalf("confirmPreviewTokenForPlace first use: %v", err)
 	}
 	if payload.TokenID == "" || payload.Draft.Contract.Symbol == "" {
 		t.Fatalf("confirmed payload missing token/draft: %+v", payload)
 	}
-	_, err = srv.confirmPreviewTokenForPlace(token)
+	_, err = srv.confirmPreviewTokenForPlaceWithOrderID(token, 1001, "test broker transmit")
 	if !errors.Is(err, ErrTradingDisabled) || !errors.Is(err, errOrderPreviewTokenAlreadyUsed) {
 		t.Fatalf("confirmPreviewTokenForPlace second use err = %v, want token-used blocker", err)
 	}
@@ -1098,6 +1129,18 @@ func newOrderPreviewTestServer(t *testing.T, trading config.Trading) *Server {
 	if err != nil {
 		t.Fatalf("newOrderTokenSigner: %v", err)
 	}
+	journal := newTestOrderJournalStore(t, filepath.Join(t.TempDir(), "order-journal.jsonl"))
+	authority, err := journal.coreStore()
+	if err != nil {
+		t.Fatalf("test order authority: %v", err)
+	}
+	head, err := authority.AuthorityHead(t.Context())
+	if err != nil {
+		t.Fatalf("test order authority head: %v", err)
+	}
+	if err := signer.bindAuthority(head.AuthorityEpoch, head.SignerGeneration); err != nil {
+		t.Fatalf("bind test signer: %v", err)
+	}
 	trading = trading.WithDefaults()
 	return &Server{
 		cfg: &config.Resolved{
@@ -1106,8 +1149,9 @@ func newOrderPreviewTestServer(t *testing.T, trading config.Trading) *Server {
 		},
 		endpoint:               discover.Endpoint{Host: "127.0.0.1", Port: 4002, ClientID: 31, Account: "DU1234567", PortOrigin: discover.OriginPinned},
 		now:                    func() time.Time { return now },
-		orderJournal:           newOrderJournalStore(filepath.Join(t.TempDir(), "order-journal.jsonl")),
+		orderJournal:           journal,
 		orderTokens:            signer,
+		coreStore:              authority,
 		gatewayReadyForTrading: func() bool { return true },
 	}
 }

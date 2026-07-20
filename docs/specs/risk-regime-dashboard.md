@@ -195,11 +195,11 @@ same posture violation as the absent-SPY rule above forbids). The pooled
 numbers stay visible in `quality.coverage` as diagnostics, and the SPX
 slice's own verdict reaches the combined node through the `spx_coverage`
 gate. One consequence: a SPY slice ranking inside the disclosed skew window
-votes in the combined band weighting. Every successful compute appends
-per-slice skew diagnostics (per-expiry R² and residual RMS, coverage,
-rankability) to `$XDG_STATE_HOME/ibkr/gamma-skew-diagnostics.jsonl`, offline
-calibration input for these heuristic bars; nothing reads it at runtime and
-it is safe to delete.
+votes in the combined band weighting. Every successful compute appends an
+immutable typed gamma-skew observation to `$XDG_STATE_HOME/ibkr/daemon.db`
+(per-expiry R² and residual RMS, coverage, rankability). These retained
+observations are offline calibration input for the heuristic bars; live
+decisions do not read the corpus, and it is not a delete-safe cache.
 
 ### Breadth
 
@@ -372,18 +372,17 @@ after-hours, overnight, or on closed-session cache reads.
 MOVE/rates-vol is outside the live surface until a verified IBKR contract or
 licensed official connector exists. Do not proxy it with ETFs or futures.
 
-## Decisions Journal
+## Decision Events
 
-Every decision-relevant regime snapshot appends one line to
-`$XDG_STATE_HOME/ibkr/regime-decisions.jsonl`: raw values, bands, depth
+Every decision-relevant regime snapshot appends one typed event to the daemon's
+sole live authority, `$XDG_STATE_HOME/ibkr/daemon.db`: raw values, bands, depth
 metrics, streaks, freshness, eligibility, cluster tallies, lifecycle decision,
-and governor records. Lines dedupe on the snapshot's semantic fingerprint with
-an hourly heartbeat. The file is append-only, never read at runtime, and safe
-to delete, the same contract as `gamma-skew-diagnostics.jsonl`. It is the
-forward-collection corpus that makes the `pending_backtest` thresholds
-calibratable: a threshold set drops `pending_backtest` only with months of
-journal coverage, measured false-alarm/recall rates against labeled episodes,
-and a version-label bump documented here. Disable via
+and governor records. Events dedupe on the snapshot's semantic fingerprint with
+an hourly heartbeat. The append-only event corpus powers typed history queries
+and makes the `pending_backtest` thresholds calibratable; it is not a separate
+file or a delete-safe cache. A threshold set drops `pending_backtest` only with
+months of coverage, measured false-alarm/recall rates against labeled episodes,
+and a version-label bump documented here. Disable collection via
 `ibkr settings set regime.journal.enabled=false`.
 
 ## Backtesting

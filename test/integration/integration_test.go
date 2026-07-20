@@ -273,6 +273,16 @@ func launchSharedDaemon(cliBin string) (string, func(), error) {
 		"--foreground",
 		"--log", logPath,
 	)
+	// A private socket is not a complete daemon isolation boundary: the sole
+	// authority and its persistence lock are XDG-state scoped. Keep the live
+	// integration daemon away from the installed daemon and from lifecycle
+	// tests, and prevent any test run from cutting over the developer's state.
+	cmd.Env = append(os.Environ(),
+		"XDG_STATE_HOME="+filepath.Join(dir, "state"),
+		"XDG_CACHE_HOME="+filepath.Join(dir, "cache"),
+		"XDG_CONFIG_HOME="+filepath.Join(dir, "config"),
+		"XDG_DATA_HOME="+filepath.Join(dir, "data"),
+	)
 	// Place the daemon in its own process group so stop() can signal the
 	// whole group via kill(-pid). Without this, a daemon that ever spawned
 	// helpers (or any future grandchild) would survive a test panic that

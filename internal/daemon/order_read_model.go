@@ -245,19 +245,11 @@ func (s *Server) loadScopedOrderHistoryEvents(since, until time.Time, scope brok
 	if s == nil || s.orderJournal == nil {
 		return nil, fmt.Errorf("%w: order journal is unavailable", ErrTradingDisabled)
 	}
-	// Index first when provably fresh: SQL prunes on at_unix_ms with the
-	// range widened by 1 ms at both ends, then the exact existing Go
-	// predicates below re-decide scope and range — results are identical
-	// to the journal scan by construction.
-	sinceMS := since.UnixMilli() - 1
-	untilMS := until.UnixMilli()
-	events, ok := s.indexedOrderEvents("orders.history", &sinceMS, &untilMS)
-	if !ok {
-		var err error
-		events, err = s.orderJournal.LoadEvents(0)
-		if err != nil {
-			return nil, err
-		}
+	// daemon.db is the sole authority. The exact Go predicates remain the
+	// semantics-defining range/scope filter over event_seq-ordered rows.
+	events, err := s.orderJournal.LoadEvents(0)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]orderJournalEvent, 0, len(events))
 	for _, ev := range events {
@@ -347,8 +339,8 @@ func (s *Server) loadOrderViews() ([]rpc.OrderView, map[string][]rpc.OrderEvent,
 	if s == nil || s.orderJournal == nil {
 		return nil, nil, fmt.Errorf("%w: order journal is unavailable", ErrTradingDisabled)
 	}
-	// Indexed when provably fresh, journal scan otherwise; the fold below
-	// is the unchanged reference implementation either way.
+	// Rows arrive in authoritative event_seq order; the fold below remains
+	// the single semantics implementation shared by reads and import parity.
 	events, err := s.loadOrderJournalEventsForRead("orders.open")
 	if err != nil {
 		return nil, nil, err
@@ -571,6 +563,7 @@ func dayOrderSessionDeadline(cal *marketcal.Calendar, view rpc.OrderView, placed
 func buildOrderViews(events []orderJournalEvent) []rpc.OrderView {
 	aliases := orderJournalKeyAliases(events)
 	viewsByKey := map[string]rpc.OrderView{}
+	lastEventsByKey := map[string]orderJournalEvent{}
 	for _, ev := range events {
 		key := orderJournalCanonicalKey(ev, aliases)
 		if key == "" {
@@ -579,10 +572,11 @@ func buildOrderViews(events []orderJournalEvent) []rpc.OrderView {
 		view := viewsByKey[key]
 		mergeOrderJournalEventIntoView(&view, ev)
 		viewsByKey[key] = view
+		lastEventsByKey[key] = ev
 	}
 	views := make([]rpc.OrderView, 0, len(viewsByKey))
-	for _, view := range viewsByKey {
-		view.LifecycleStatus = mapOrderViewLifecycleStatus(view)
+	for key, view := range viewsByKey {
+		view.LifecycleStatus = mapOrderViewLifecycleStatus(view, lastEventsByKey[key])
 		view.Open = orderViewIsOpen(view)
 		view.ModifyEligible = orderViewModifyEligible(view)
 		view.CancelEligible = orderViewCancelEligible(view)
@@ -602,11 +596,9 @@ func buildOrderEventsByKey(events []orderJournalEvent) map[string][]rpc.OrderEve
 		}
 		out[key] = append(out[key], orderEventFromJournal(ev))
 	}
-	for key := range out {
-		slices.SortStableFunc(out[key], func(a, b rpc.OrderEvent) int {
-			return a.At.Compare(b.At)
-		})
-	}
+	// Input is authoritative event_seq order. Do not reorder callbacks by
+	// their untrusted broker timestamp: clock regressions must not rewrite the
+	// append-only lifecycle sequence.
 	return out
 }
 
@@ -661,6 +653,10 @@ func orderJournalEventFromView(view rpc.OrderView, eventType string, at time.Tim
 
 func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	preserveWorkingOrderOnBrokerError := brokerErrorShouldPreserveWorkingOrder(*view, ev)
+	brokerErrorLifecycleStatus := ""
+	if ev.Type == orderJournalEventBrokerError {
+		brokerErrorLifecycleStatus = mapBrokerErrorLifecycleStatus(ev.ErrorCode, ev.Status)
+	}
 	if view.OrderRef == "" {
 		view.OrderRef = ev.OrderRef
 	}
@@ -760,7 +756,8 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	if ev.OpenClose != "" {
 		view.OpenClose = ev.OpenClose
 	}
-	if ev.Status != "" && !preserveWorkingOrderOnBrokerError {
+	if ev.Status != "" && !preserveWorkingOrderOnBrokerError &&
+		(ev.Type != orderJournalEventBrokerError || orderLifecycleStatusIsTerminal(brokerErrorLifecycleStatus)) {
 		view.Status = ev.Status
 	}
 	if ev.Filled != 0 {
@@ -781,19 +778,35 @@ func mergeOrderJournalEventIntoView(view *rpc.OrderView, ev orderJournalEvent) {
 	if ev.MktCapPrice != 0 {
 		view.MktCapPrice = ev.MktCapPrice
 	}
-	if ev.SendState != "" {
-		if preserveWorkingOrderOnBrokerError && ev.SendState == orderSendStateTerminal {
+	if ev.Type == orderJournalEventBrokerError {
+		view.LastErrorCode = ev.ErrorCode
+		switch {
+		case preserveWorkingOrderOnBrokerError &&
+			brokerErrorLifecycleStatus == rpc.OrderLifecycleUnknownReconcileRequired &&
+			view.SendState == orderSendStateBrokerAcknowledged:
+			// Nonterminal noise after a modify/cancel attempt does not erase
+			// the last broker-confirmed state of the working order.
+		case preserveWorkingOrderOnBrokerError:
 			view.SendState = orderSendStateUncertainSend
-		} else {
+		case orderLifecycleStatusIsTerminal(brokerErrorLifecycleStatus):
+			view.SendState = orderSendStateTerminal
+		default:
+			view.SendState = orderSendStateUncertainSend
+		}
+	} else {
+		view.LastErrorCode = 0
+		if ev.SendState != "" {
 			view.SendState = ev.SendState
 		}
 	}
 	if ev.Message != "" {
 		view.LastMessage = ev.Message
 	}
-	if !ev.At.IsZero() && (view.UpdatedAt.IsZero() || ev.At.After(view.UpdatedAt)) {
+	// buildOrderViews receives authoritative event_seq order. The last
+	// inserted event wins even when its broker timestamp moves backwards.
+	view.LastEvent = ev.Type
+	if !ev.At.IsZero() {
 		view.UpdatedAt = ev.At
-		view.LastEvent = ev.Type
 	}
 }
 
@@ -807,6 +820,10 @@ func orderJournalEventCarriesZeroRemaining(ev orderJournalEvent) bool {
 
 func brokerErrorShouldPreserveWorkingOrder(view rpc.OrderView, ev orderJournalEvent) bool {
 	if ev.Type != orderJournalEventBrokerError {
+		return false
+	}
+	switch mapBrokerErrorLifecycleStatus(ev.ErrorCode, ev.Status) {
+	case rpc.OrderLifecycleFilled, rpc.OrderLifecycleCancelled, rpc.OrderLifecycleInactive:
 		return false
 	}
 	switch view.LastEvent {
@@ -864,6 +881,7 @@ func orderEventFromJournal(ev orderJournalEvent) rpc.OrderEvent {
 		MktCapPrice:     ev.MktCapPrice,
 		ExecID:          ev.ExecID,
 		ExecTime:        ev.ExecTime,
+		ErrorCode:       ev.ErrorCode,
 		SendState:       ev.SendState,
 		Message:         ev.Message,
 	}
@@ -904,6 +922,7 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		MktCapPrice:     ev.MktCapPrice,
 		ExecID:          ev.ExecID,
 		ExecTime:        ev.ExecTime,
+		ErrorCode:       ev.ErrorCode,
 		Message:         ev.Message,
 	}
 	switch ev.Type {
@@ -935,10 +954,10 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		}
 	case ibkrlib.OrderLifecycleEventError:
 		out.Type = orderJournalEventBrokerError
-		if out.Status == "" {
-			out.SendState = orderSendStateUncertainSend
-		} else if orderLifecycleStatusIsTerminal(mapBrokerOrderLifecycleStatus(out.Status, out.Filled, out.Remaining)) {
+		if orderLifecycleStatusIsTerminal(mapBrokerErrorLifecycleStatus(out.ErrorCode, out.Status)) {
 			out.SendState = orderSendStateTerminal
+		} else {
+			out.SendState = orderSendStateUncertainSend
 		}
 	default:
 		return orderJournalEvent{}, false
@@ -973,6 +992,9 @@ func trailSpecFromLifecycle(ev ibkrlib.OrderLifecycleEvent) *rpc.OrderTrailSpec 
 }
 
 func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
+	if ev.Type == orderJournalEventBrokerError {
+		return mapBrokerErrorLifecycleStatus(ev.ErrorCode, ev.Status)
+	}
 	if ev.Status != "" {
 		return mapBrokerOrderLifecycleStatus(ev.Status, ev.Filled, ev.Remaining)
 	}
@@ -987,11 +1009,6 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 		return rpc.OrderLifecycleSubmitted
 	case orderJournalEventCancelRequested:
 		return rpc.OrderLifecyclePendingCancel
-	case orderJournalEventBrokerError:
-		if brokerErrorIsTerminalReject(ev.Message) {
-			return rpc.OrderLifecycleRejected
-		}
-		return rpc.OrderLifecycleUnknownReconcileRequired
 	case orderJournalEventReconciledUnknown:
 		return rpc.OrderLifecycleUnknownReconcileRequired
 	case orderJournalEventReconciledAbsent:
@@ -1004,30 +1021,32 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 	}
 }
 
-func mapOrderViewLifecycleStatus(view rpc.OrderView) string {
-	if view.LastEvent == orderJournalEventReconciledAbsent {
+func mapOrderViewLifecycleStatus(view rpc.OrderView, last orderJournalEvent) string {
+	if last.Type == orderJournalEventReconciledAbsent {
 		// A complete broker open-order snapshot did not include this order:
-		// like the error-135 heal below, broker truth overrides any sticky
+		// like the typed error-135 heal below, broker truth overrides any sticky
 		// earlier Status (a stale "PreSubmitted" must not resurrect the row).
 		return rpc.OrderLifecycleClosedReconciled
 	}
-	if view.LastEvent == orderJournalEventBrokerError && brokerErrorProvesOrderGone(view.LastMessage) {
-		// The broker answered a write aimed at this order ID with "can't
-		// find order": whatever happened while the daemon was not
-		// listening — fill, broker-side cancel, expiry — the order is not
-		// working now, and that overrides any sticky earlier Status. This
-		// is the only self-heal a stale GTC row has (GTC is deliberately
-		// excluded from calendar expiry inference); without it the row
-		// stays open forever and permanently blocks re-protecting the
-		// symbol.
-		return rpc.OrderLifecycleInactive
-	}
-	if view.LastEvent == orderJournalEventBrokerError && view.SendState == orderSendStateUncertainSend {
-		if view.Status != "" {
+	if last.Type == orderJournalEventBrokerError {
+		status := mapBrokerErrorLifecycleStatus(last.ErrorCode, last.Status)
+		if status == rpc.OrderLifecycleInactive {
+			// Error 135 says the targeted order is not on the broker's books.
+			// The fill-vs-cancelled outcome remains unknown, but a stale GTC
+			// row must not remain locally open forever.
+			return status
+		}
+		// A rejected modify/cancel request does not prove the already-working
+		// order terminal. mergeOrderJournalEventIntoView marks that case
+		// uncertain even when the request error itself is allowlisted.
+		if view.SendState == orderSendStateUncertainSend {
 			return rpc.OrderLifecycleUnknownReconcileRequired
 		}
-		if brokerErrorIsTerminalReject(view.LastMessage) {
-			return rpc.OrderLifecycleRejected
+		if orderLifecycleStatusIsTerminal(status) {
+			return status
+		}
+		if view.Status != "" && view.SendState == orderSendStateBrokerAcknowledged {
+			return mapBrokerOrderLifecycleStatus(view.Status, view.Filled, view.Remaining)
 		}
 		return rpc.OrderLifecycleUnknownReconcileRequired
 	}
@@ -1057,22 +1076,43 @@ func mapOrderViewLifecycleStatus(view rpc.OrderView) string {
 	}
 }
 
-// brokerErrorProvesOrderGone matches IBKR error 135 ("Can't find order
-// with id …"), the broker's statement that the targeted order does not
-// exist on its books. The journaled message keeps the raw broker text, so
-// the fill-vs-cancelled ambiguity stays visible in the audit trail.
-func brokerErrorProvesOrderGone(message string) bool {
-	msg := strings.ToLower(strings.TrimSpace(message))
-	return strings.Contains(msg, "broker error 135:") ||
-		strings.Contains(msg, "can't find order")
-}
-
-func brokerErrorIsTerminalReject(message string) bool {
-	msg := strings.ToLower(strings.TrimSpace(message))
-	return strings.Contains(msg, "broker error 110:") ||
-		strings.Contains(msg, "price does not conform to the minimum price variation") ||
-		strings.Contains(msg, "duplicate order id") ||
-		strings.Contains(msg, "reject")
+// mapBrokerErrorLifecycleStatus is the only broker-error terminal classifier.
+// ErrorCode and Status are durable typed fields; Message is untrusted audit
+// text and deliberately has no path into lifecycle state.
+func mapBrokerErrorLifecycleStatus(errorCode int, status string) string {
+	// Older journals did not persist ErrorCode. Even an apparently terminal
+	// status on such a row may have been derived from free text, so it stays
+	// uncertain and is retained through migration.
+	if errorCode == 0 {
+		return rpc.OrderLifecycleUnknownReconcileRequired
+	}
+	switch errorCode {
+	case 103, 110, 201:
+		return rpc.OrderLifecycleRejected
+	case 202:
+		return rpc.OrderLifecycleCancelled
+	case 135:
+		return rpc.OrderLifecycleInactive
+	case 321:
+		// 321 is a generic API-request validation error. Request IDs and
+		// broker order IDs can collide, so it cannot prove order terminality.
+		return rpc.OrderLifecycleUnknownReconcileRequired
+	}
+	// Unknown future codes may still carry an explicit broker lifecycle
+	// status. Only exact terminal statuses are accepted; pending/unknown
+	// values remain reconcile-required.
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "filled":
+		return rpc.OrderLifecycleFilled
+	case "cancelled", "apicancelled":
+		return rpc.OrderLifecycleCancelled
+	case "inactive":
+		return rpc.OrderLifecycleInactive
+	case "rejected":
+		return rpc.OrderLifecycleRejected
+	default:
+		return rpc.OrderLifecycleUnknownReconcileRequired
+	}
 }
 
 func mapBrokerOrderLifecycleStatus(status string, filled, remaining float64) string {
@@ -1183,16 +1223,32 @@ func orderViewBrokerConfirmedForWrite(view rpc.OrderView) bool {
 }
 
 func orderJournalKey(ev orderJournalEvent) string {
+	scope := orderJournalRouteIdentity(ev.Endpoint, ev.ClientID, ev.Account, ev.Mode)
 	if ev.OrderRef != "" {
-		return "ref:" + ev.OrderRef
+		return scope + "|ref:" + ev.OrderRef
 	}
 	if ev.ReservedOrderID != 0 {
-		return "order:" + strconv.Itoa(ev.ReservedOrderID)
+		return scope + "|order:" + strconv.Itoa(ev.ReservedOrderID)
 	}
 	if ev.PermID != 0 {
-		return "perm:" + strconv.Itoa(ev.PermID)
+		return scope + "|perm:" + strconv.Itoa(ev.PermID)
 	}
 	return ""
+}
+
+// orderJournalRouteIdentity keeps otherwise identical local references,
+// broker order IDs, and permanent IDs isolated by the complete write route.
+// Account and mode already compare case-insensitively throughout the order
+// model, while endpoint intentionally keeps its exact configured spelling.
+func orderJournalRouteIdentity(endpoint string, clientID int, account, mode string) string {
+	return strings.TrimSpace(endpoint) + "\x1f" +
+		strconv.Itoa(clientID) + "\x1f" +
+		strings.ToUpper(strings.TrimSpace(account)) + "\x1f" +
+		strings.ToLower(strings.TrimSpace(mode))
+}
+
+func orderJournalScopedOrderIDKey(ev orderJournalEvent) string {
+	return orderJournalRouteIdentity(ev.Endpoint, ev.ClientID, ev.Account, ev.Mode) + "\x1f" + strconv.Itoa(ev.ReservedOrderID)
 }
 
 func orderJournalCanonicalKey(ev orderJournalEvent, aliases map[string]string) string {
@@ -1217,7 +1273,7 @@ func orderJournalKeyAliases(events []orderJournalEvent) map[string]string {
 			}
 		}
 		if ev.OrderRef != "" {
-			canonical = "ref:" + ev.OrderRef
+			canonical = orderJournalRouteIdentity(ev.Endpoint, ev.ClientID, ev.Account, ev.Mode) + "|ref:" + ev.OrderRef
 		}
 		if canonical == "" {
 			canonical = keys[0]
@@ -1240,61 +1296,66 @@ func orderJournalKeyAliases(events []orderJournalEvent) map[string]string {
 	return aliases
 }
 
-func ambiguousReservedOrderIDs(events []orderJournalEvent) map[int]bool {
-	refsByOrderID := map[int]map[string]bool{}
+func ambiguousReservedOrderIDs(events []orderJournalEvent) map[string]bool {
+	refsByOrderID := map[string]map[string]bool{}
 	for _, ev := range events {
 		if ev.ReservedOrderID == 0 || ev.OrderRef == "" {
 			continue
 		}
-		refs := refsByOrderID[ev.ReservedOrderID]
+		orderIDKey := orderJournalScopedOrderIDKey(ev)
+		refs := refsByOrderID[orderIDKey]
 		if refs == nil {
 			refs = map[string]bool{}
-			refsByOrderID[ev.ReservedOrderID] = refs
+			refsByOrderID[orderIDKey] = refs
 		}
 		refs[ev.OrderRef] = true
 	}
-	out := map[int]bool{}
-	for orderID, refs := range refsByOrderID {
+	out := map[string]bool{}
+	for orderIDKey, refs := range refsByOrderID {
 		if len(refs) > 1 {
-			out[orderID] = true
+			out[orderIDKey] = true
 		}
 	}
 	return out
 }
 
-func reservedOrderIDsWithPrelinkedBrokerOnlyEvents(events []orderJournalEvent) map[int]bool {
-	firstRefIndex := map[int]int{}
+func reservedOrderIDsWithPrelinkedBrokerOnlyEvents(events []orderJournalEvent) map[string]bool {
+	firstRefIndex := map[string]int{}
 	for i, ev := range events {
 		if ev.ReservedOrderID == 0 || ev.OrderRef == "" {
 			continue
 		}
-		if _, exists := firstRefIndex[ev.ReservedOrderID]; !exists {
-			firstRefIndex[ev.ReservedOrderID] = i
+		orderIDKey := orderJournalScopedOrderIDKey(ev)
+		if _, exists := firstRefIndex[orderIDKey]; !exists {
+			firstRefIndex[orderIDKey] = i
 		}
 	}
-	out := map[int]bool{}
+	out := map[string]bool{}
 	for i, ev := range events {
 		if ev.ReservedOrderID == 0 || ev.OrderRef != "" {
 			continue
 		}
-		refIndex, exists := firstRefIndex[ev.ReservedOrderID]
+		orderIDKey := orderJournalScopedOrderIDKey(ev)
+		refIndex, exists := firstRefIndex[orderIDKey]
 		if exists && i < refIndex {
-			out[ev.ReservedOrderID] = true
+			out[orderIDKey] = true
 		}
 	}
 	return out
 }
 
-func orderJournalIdentityKeysForAliases(ev orderJournalEvent, ambiguousOrderIDs, prelinkedOrderIDs map[int]bool) []string {
+func orderJournalIdentityKeysForAliases(ev orderJournalEvent, ambiguousOrderIDs, prelinkedOrderIDs map[string]bool) []string {
 	keys := make([]string, 0, 3)
+	scope := orderJournalRouteIdentity(ev.Endpoint, ev.ClientID, ev.Account, ev.Mode)
 	if ev.OrderRef != "" {
-		keys = append(keys, "ref:"+ev.OrderRef)
+		keys = append(keys, scope+"|ref:"+ev.OrderRef)
 	}
-	if ev.ReservedOrderID != 0 && !(ev.OrderRef != "" && (ambiguousOrderIDs[ev.ReservedOrderID] || prelinkedOrderIDs[ev.ReservedOrderID])) {
-		keys = append(keys, "order:"+strconv.Itoa(ev.ReservedOrderID))
+	orderIDKey := orderJournalScopedOrderIDKey(ev)
+	if ev.ReservedOrderID != 0 && !(ev.OrderRef != "" && (ambiguousOrderIDs[orderIDKey] || prelinkedOrderIDs[orderIDKey])) {
+		keys = append(keys, scope+"|order:"+strconv.Itoa(ev.ReservedOrderID))
 	}
 	if ev.PermID != 0 {
-		keys = append(keys, "perm:"+strconv.Itoa(ev.PermID))
+		keys = append(keys, scope+"|perm:"+strconv.Itoa(ev.PermID))
 	}
 	return keys
 }
@@ -1315,14 +1376,15 @@ func resolveOrderJournalAlias(key string, aliases map[string]string) string {
 }
 
 func orderViewKey(view rpc.OrderView) string {
+	scope := orderJournalRouteIdentity(view.Endpoint, view.ClientID, view.Account, view.Mode)
 	if view.OrderRef != "" {
-		return "ref:" + view.OrderRef
+		return scope + "|ref:" + view.OrderRef
 	}
 	if view.ReservedOrderID != 0 {
-		return "order:" + strconv.Itoa(view.ReservedOrderID)
+		return scope + "|order:" + strconv.Itoa(view.ReservedOrderID)
 	}
 	if view.PermID != 0 {
-		return "perm:" + strconv.Itoa(view.PermID)
+		return scope + "|perm:" + strconv.Itoa(view.PermID)
 	}
 	return ""
 }

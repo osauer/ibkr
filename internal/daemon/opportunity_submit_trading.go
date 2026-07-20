@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
@@ -30,6 +31,7 @@ func (s *Server) submitOptionExercise(ctx context.Context, opp rpc.Opportunity, 
 		At:           now,
 		Type:         orderJournalEventSendAttempted,
 		OrderRef:     orderRef,
+		ClientID:     auth.Status.ClientID,
 		Account:      auth.Status.Account,
 		Endpoint:     auth.Status.Endpoint,
 		Mode:         auth.Status.Mode,
@@ -52,10 +54,11 @@ func (s *Server) submitOptionExercise(ctx context.Context, opp rpc.Opportunity, 
 		SendState:    orderSendStateSendAttempted,
 		Message:      "option exercise instruction transmit attempted; TWS may treat exercise requests as final depending on settings",
 	}
-	if s.orderJournal != nil {
-		if err := s.orderJournal.Append(ev); err != nil {
-			return fmt.Errorf("%w: append exercise journal: %v", ErrTradingDisabled, err)
-		}
+	if s.orderJournal == nil {
+		return fmt.Errorf("%w: order journal is unavailable", ErrTradingDisabled)
+	}
+	if err := s.orderJournal.StagePreTransmit("", "", 0, 0, corestore.ActionExercise, coreOrderOrigin(origin), []orderJournalEvent{ev}); err != nil {
+		return fmt.Errorf("%w: append exercise journal: %v", ErrTradingDisabled, err)
 	}
 	req := ibkrlib.OptionExerciseRequest{
 		TickerID:         0,

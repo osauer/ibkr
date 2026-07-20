@@ -2,18 +2,17 @@ package rpc
 
 import "time"
 
-// MethodRegimeHistory serves the regime-decision journal timeline from the
-// daemon's derived history index (history.db). Read-only: the JSONL
-// journal stays the evidence of record; the index is rebuildable at any
-// time by deleting history.db and restarting the daemon.
+// MethodRegimeHistory serves the post-cutover regime-decision timeline from
+// the daemon's authoritative daemon.db event store. Read-only: these results
+// never feed policy or broker-write authority.
 const MethodRegimeHistory = "regime.history"
 
-// MethodRulesHistory serves the rulebook transition journal timeline from
-// the same derived index. Advisory/read-only end to end — nothing in
+// MethodRulesHistory serves the rulebook transition timeline from the same
+// daemon.db authority. Advisory/read-only end to end — nothing in
 // these results touches submit eligibility or any broker-write path.
 const MethodRulesHistory = "rules.history"
 
-// RegimeHistoryParams selects a window of indexed regime decisions.
+// RegimeHistoryParams selects a window of persisted regime decisions.
 // Boundary grammar mirrors orders.history: RFC3339 timestamps or
 // YYYY-MM-DD UTC days.
 type RegimeHistoryParams struct {
@@ -30,8 +29,8 @@ type RegimeHistoryParams struct {
 	Limit int `json:"limit,omitempty"`
 }
 
-// RegimeHistoryEntry is one journaled regime decision. Free-text fields
-// (Verdict) are journal data for display, never parsed into authority.
+// RegimeHistoryEntry is one persisted regime decision. Free-text fields
+// (Verdict) are event data for display, never parsed into authority.
 type RegimeHistoryEntry struct {
 	At                 time.Time `json:"at"`
 	SessionKey         string    `json:"session_key,omitempty"`
@@ -47,22 +46,23 @@ type RegimeHistoryEntry struct {
 	Fingerprint        string    `json:"fingerprint,omitempty"`
 }
 
-// HistoryIndexHealth discloses index freshness on every history result so
-// a catching-up or stalled index is never silently presented as complete:
-// when JournalBytes exceeds IngestedBytes, rows may be missing.
+// HistoryIndexHealth is retained in history result shapes for wire
+// compatibility. The daemon.db authority has no asynchronous JSONL ingest or
+// journal-byte freshness comparison; storage availability is reported by the
+// RPC outcome and daemon health surface.
 type HistoryIndexHealth struct {
-	// LastIngestAt is when the index last committed ingested bytes for
-	// this source; zero when nothing has been ingested yet.
+	// LastIngestAt is a retired legacy-ingest field and is zero for direct
+	// daemon.db history reads.
 	LastIngestAt time.Time `json:"last_ingest_at,omitzero"`
-	// IngestedBytes is the journal byte watermark fully mirrored into the
-	// index (complete lines only).
+	// IngestedBytes is a retired legacy journal watermark.
 	IngestedBytes int64 `json:"ingested_bytes"`
-	// JournalBytes is the journal file's current on-disk size.
+	// JournalBytes is a retired legacy journal-size field.
 	JournalBytes int64 `json:"journal_bytes"`
 }
 
 // RegimeHistoryResult is the regime.history envelope: the filtered window,
-// newest first, with total-vs-returned counts and index health.
+// newest first, with total-vs-returned counts and a legacy-shaped compatibility
+// health block.
 type RegimeHistoryResult struct {
 	AsOf       time.Time            `json:"as_of"`
 	Since      time.Time            `json:"since"`
@@ -75,19 +75,19 @@ type RegimeHistoryResult struct {
 	Index      HistoryIndexHealth   `json:"index"`
 }
 
-// RulesHistoryParams selects a window of indexed rulebook transitions;
+// RulesHistoryParams selects a window of persisted rulebook transitions;
 // boundary and limit semantics match RegimeHistoryParams.
 type RulesHistoryParams struct {
 	Since string `json:"since,omitempty"`
 	Until string `json:"until,omitempty"`
-	// Rule filters on the exact journal rule id (for example
+	// Rule filters on the exact rule id (for example
 	// single_name_exposure). Empty matches all rules.
 	Rule  string `json:"rule,omitempty"`
 	Limit int    `json:"limit,omitempty"`
 }
 
-// RuleTransitionEntry is one journaled rule status transition. Evidence is
-// journal free text for display, never parsed into authority.
+// RuleTransitionEntry is one persisted rule status transition. Evidence is
+// event free text for display, never parsed into authority.
 type RuleTransitionEntry struct {
 	At                time.Time `json:"at"`
 	Rule              string    `json:"rule"`
@@ -113,28 +113,27 @@ type RulesHistoryResult struct {
 	Index      HistoryIndexHealth    `json:"index"`
 }
 
-// MethodCanaryHistory serves the canary-decision journal timeline
-// (canary-decisions.jsonl) from the same derived index. Read-only journal
-// evidence — nothing here touches submit eligibility or any broker-write
-// path.
+// MethodCanaryHistory serves the post-cutover canary-decision timeline from
+// daemon.db. Read-only event evidence — nothing here touches submit eligibility
+// or any broker-write path.
 const MethodCanaryHistory = "canary.history"
 
-// CanaryHistoryParams selects a window of indexed canary decisions;
+// CanaryHistoryParams selects a window of persisted canary decisions;
 // boundary and limit semantics match RegimeHistoryParams.
 type CanaryHistoryParams struct {
 	Since string `json:"since,omitempty"`
 	Until string `json:"until,omitempty"`
-	// Severity filters on the exact journal severity word (for example
+	// Severity filters on the exact decision severity word (for example
 	// watch, act). Empty matches all severities.
 	Severity string `json:"severity,omitempty"`
-	// Action filters on the exact journal action word (for example defend,
+	// Action filters on the exact decision action word (for example defend,
 	// watch). Empty matches all actions.
 	Action string `json:"action,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
 }
 
-// CanaryHistoryEntry is one journaled canary decision. Summary is journal
-// free text for display, never parsed into authority.
+// CanaryHistoryEntry is one persisted canary decision. Summary is event free
+// text for display, never parsed into authority.
 type CanaryHistoryEntry struct {
 	At          time.Time `json:"at"`
 	SessionKey  string    `json:"session_key,omitempty"`
@@ -146,7 +145,7 @@ type CanaryHistoryEntry struct {
 	Direction   string    `json:"direction,omitempty"`
 	MarketStage string    `json:"market_stage,omitempty"`
 	// PortfolioAlertRelevant mirrors the producer-stamped verdict; nil
-	// means the journal line predates the stamp.
+	// means the event predates the stamp.
 	PortfolioAlertRelevant *bool  `json:"portfolio_alert_relevant,omitempty"`
 	InputHealth            string `json:"input_health,omitempty"`
 	Summary                string `json:"summary,omitempty"`
@@ -166,10 +165,10 @@ type CanaryHistoryResult struct {
 	Index      HistoryIndexHealth   `json:"index"`
 }
 
-// MethodReconEquity serves the statement-derived daily equity series
-// (statement_equity_days, from retained Flex statements) joined with the
-// declared capital-event ledger, from the derived history index.
-// Read-only: statements and journals stay the evidence of record.
+// MethodReconEquity serves the daemon.db statement-derived daily equity series
+// joined with authoritative capital events. Read-only: retained Flex XML stays
+// the original broker evidence, while SQLite holds its transactionally
+// refreshed typed projection.
 const MethodReconEquity = "recon.equity"
 
 // ReconEquityParams selects a window of equity days. Boundary grammar
@@ -193,8 +192,8 @@ type EquityDayEntry struct {
 	WhenGenerated time.Time `json:"when_generated,omitzero"`
 }
 
-// CapitalEventEntry is one declared capital event from
-// capital-events.jsonl, rendered alongside the equity series.
+// CapitalEventEntry is one authoritative declared-capital event rendered
+// alongside the equity series.
 type CapitalEventEntry struct {
 	At          time.Time `json:"at"`
 	Type        string    `json:"type"`
@@ -207,8 +206,7 @@ type CapitalEventEntry struct {
 
 // ReconEquityResult is the recon.equity envelope: the equity-day window
 // newest first, capital events over the same window (hard-capped, newest
-// first), and two health blocks — the capital journal source and the
-// statement file set (bytes = summed retained XML sizes).
+// first), and two legacy-shaped health blocks retained for wire compatibility.
 type ReconEquityResult struct {
 	AsOf            time.Time           `json:"as_of"`
 	Since           time.Time           `json:"since"`
