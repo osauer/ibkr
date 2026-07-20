@@ -539,8 +539,7 @@ func writeCutoverReviewError(w nethttp.ResponseWriter, err error) {
 		writeError(w, nethttp.StatusBadGateway, "invalid governance cutover review result")
 		return
 	}
-	var rpcErr *rpc.Error
-	if errors.As(err, &rpcErr) {
+	if rpcErr, ok := errors.AsType[*rpc.Error](err); ok {
 		switch rpcErr.Code {
 		case rpc.CodeBadRequest:
 			writeError(w, nethttp.StatusConflict, "governance cutover review requires fresh revalidation")

@@ -272,7 +272,7 @@ func (s *Server) reserveBrokerOrderID(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	floor, err := maxReservedBrokerOrderID(s.orderJournal)
+	floor, err := s.reservedBrokerOrderIDFloor()
 	if err != nil {
 		return 0, err
 	}

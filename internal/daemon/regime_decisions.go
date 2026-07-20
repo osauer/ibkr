@@ -87,6 +87,9 @@ func (s *Server) journalRegimeDecision(res *rpc.RegimeSnapshotResult) {
 	if err := s.regimeDecisions.append(time.Now(), res); err != nil {
 		s.logger.Warnf("regime: decisions journal append failed: %v", err)
 	}
+	// Wake the history-index ingester unconditionally (not gated on the
+	// append outcome): the kick carries no data, only "look at the file".
+	s.kickHistoryIndex()
 }
 
 func (s *Server) regimeJournalEnabled() bool {
@@ -100,19 +103,23 @@ func (s *Server) regimeJournalEnabled() bool {
 	return *data.Regime.Journal.Enabled
 }
 
+// append journals one deduped regime decision. Since phase 2 the mutex is
+// held across marshal, directory ensure, open, write, and close — the
+// writer-quiescence contract journal rotation relies on (a live-file
+// rename is invisible to an open-per-append writer only while no append
+// is in flight).
 func (j *regimeDecisionJournal) append(now time.Time, res *rpc.RegimeSnapshotResult) error {
 	if j == nil || res == nil {
 		return nil
 	}
-	fp := res.Fingerprint.Key
 	j.mu.Lock()
+	defer j.mu.Unlock()
+	fp := res.Fingerprint.Key
 	if fp != "" && fp == j.lastFingerprint && now.Sub(j.lastWrite) < regimeDecisionHeartbeat {
-		j.mu.Unlock()
 		return nil
 	}
 	j.lastFingerprint = fp
 	j.lastWrite = now
-	j.mu.Unlock()
 
 	line := regimeDecisionLine{
 		V:           1,

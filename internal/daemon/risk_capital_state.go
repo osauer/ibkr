@@ -129,13 +129,38 @@ type riskCapitalStore struct {
 	// scopeRejectionsJournaled throttles equity_observation_rejected journal
 	// rows to one per (reason, account) per process.
 	scopeRejectionsJournaled map[string]bool
+	// kick nudges the history-index ingester after a capital or
+	// risk-policy journal append (data-free; the file is the input).
+	// Nil-safe; set at install to Server.kickHistoryIndex.
+	kick func()
 }
 
 func (s *Server) installRiskCapitalStore() {
 	if s == nil {
 		return
 	}
-	s.riskCapital = &riskCapitalStore{now: s.now}
+	s.riskCapital = &riskCapitalStore{now: s.now, kick: s.kickHistoryIndex}
+}
+
+// appendCapitalEvent journals one declared capital event and nudges the
+// history index. Evidence first, kick second — the kick carries no data.
+func (st *riskCapitalStore) appendCapitalEvent(ev capitalEventV1) error {
+	err := appendCapitalEvent(ev)
+	st.kickIndex()
+	return err
+}
+
+// appendRiskPolicyJournal journals one governance event and nudges the
+// history index.
+func (st *riskCapitalStore) appendRiskPolicyJournal(entry map[string]any) {
+	appendRiskPolicyJournal(entry)
+	st.kickIndex()
+}
+
+func (st *riskCapitalStore) kickIndex() {
+	if st != nil && st.kick != nil {
+		st.kick()
+	}
 }
 
 func (st *riskCapitalStore) loadLocked() {
@@ -306,7 +331,7 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 		st.state.AccountID = scope.Account
 		st.state.AccountMode = scope.Mode
 		force = true
-		appendRiskPolicyJournal(map[string]any{
+		st.appendRiskPolicyJournal(map[string]any{
 			"version": 1, "at": now.UTC(), "kind": "capital_state_scoped",
 			"account": scope.Account, "account_mode": scope.Mode,
 			"policy_fingerprint": constitutionFingerprint(c),
@@ -334,7 +359,7 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 		// state that a single bad equity observation (e.g. a reconnect-window
 		// glitch) can poison, and an unexplained jump must be diagnosable
 		// after the fact from the journal alone.
-		appendRiskPolicyJournal(map[string]any{
+		st.appendRiskPolicyJournal(map[string]any{
 			"version": 1, "at": now.UTC(), "kind": "adjusted_peak_advanced",
 			"from_base": st.state.AdjustedPeakBase, "to_base": adjusted,
 			"seed": !st.state.Seeded, "equity_base": equityBase, "equity_as_of": asOf.UTC(),
@@ -354,14 +379,14 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 		st.state.LatchedAt = now.UTC()
 		st.state.LatchConsumedPct = *v.ConsumedPct
 		force = true
-		appendRiskPolicyJournal(map[string]any{
+		st.appendRiskPolicyJournal(map[string]any{
 			"version": 1, "at": now.UTC(), "kind": "drawdown_block_latched",
 			"consumed_pct": *v.ConsumedPct, "enforcement": constitutionEnforcement(c),
 			"policy_fingerprint": constitutionFingerprint(c),
 		})
 	}
 	if prev := st.state.LastTier; prev != v.Tier {
-		appendRiskPolicyJournal(map[string]any{
+		st.appendRiskPolicyJournal(map[string]any{
 			"version": 1, "at": now.UTC(), "kind": "capital_tier", "from": prev, "to": v.Tier,
 			"policy_fingerprint": constitutionFingerprint(c),
 		})
@@ -399,7 +424,7 @@ func (st *riskCapitalStore) journalScopeRejectionLocked(scope brokerStateScope, 
 		return
 	}
 	st.scopeRejectionsJournaled[key] = true
-	appendRiskPolicyJournal(map[string]any{
+	st.appendRiskPolicyJournal(map[string]any{
 		"version": 1, "at": now.UTC(), "kind": "equity_observation_rejected",
 		"reason": reason, "observed_account": scope.Account, "observed_mode": scope.Mode,
 		"bound_account": st.state.AccountID, "equity_base": equityBase, "equity_as_of": asOf.UTC(),
@@ -437,7 +462,7 @@ func (st *riskCapitalStore) CorrectPeak(peakBase float64, peakAsOf time.Time, so
 	} else {
 		st.state.PeakAsOf = now
 	}
-	appendRiskPolicyJournal(map[string]any{
+	st.appendRiskPolicyJournal(map[string]any{
 		"version": 1, "at": now, "kind": "adjusted_peak_corrected",
 		"from_base": from, "to_base": peakBase, "source": source, "reason": reason,
 		"peak_as_of": st.state.PeakAsOf, "latch_untouched": st.state.BlockLatched,
@@ -487,7 +512,7 @@ func (st *riskCapitalStore) ApplyCapitalEventForPolicy(p rpc.CapitalEventParams,
 			ev.CoverageTo = refs[0].CoverageTo
 		}
 	}
-	if err := appendCapitalEvent(ev); err != nil {
+	if err := st.appendCapitalEvent(ev); err != nil {
 		return capitalEventV1{}, err
 	}
 	switch ev.Type {
@@ -544,7 +569,7 @@ func (st *riskCapitalStore) ApplyAutomaticReconcile(reportID string, coverageTo 
 		Version: 1, At: now, Type: "reconcile", Origin: riskCapitalAutoOrigin,
 		ReportID: reportID, CoverageTo: coverageTo,
 	}
-	if err := appendCapitalEvent(ev); err != nil {
+	if err := st.appendCapitalEvent(ev); err != nil {
 		return capitalEventV1{}, false, err
 	}
 	if st.reconciledReportIDs == nil {
@@ -667,7 +692,7 @@ func (st *riskCapitalStore) GrantOverride(p rpc.OverrideParams, c *risk.Constitu
 		Active:            true,
 	}
 	st.state.Overrides = append(st.state.Overrides, rec)
-	appendRiskPolicyJournal(map[string]any{
+	st.appendRiskPolicyJournal(map[string]any{
 		"version": 1, "at": now, "kind": "override_granted", "id": rec.ID,
 		"control": rec.Control, "reason": rec.Reason, "expires_at": rec.ExpiresAt,
 		"policy_fingerprint": rec.PolicyFingerprint,
@@ -697,7 +722,7 @@ func (st *riskCapitalStore) ResetDrawdown(reason string, c *risk.Constitution) e
 		st.state.PeakAsOf = st.state.LastEquityAsOf
 		st.state.Seeded = true
 	}
-	appendRiskPolicyJournal(map[string]any{
+	st.appendRiskPolicyJournal(map[string]any{
 		"version": 1, "at": now, "kind": "drawdown_reset", "reason": reason,
 		"was_latched": wasLatched, "policy_fingerprint": constitutionFingerprint(c),
 	})
@@ -747,7 +772,7 @@ func (st *riskCapitalStore) RecordArtefact(p rpc.ArtefactParams, c *risk.Constit
 	if rec.BriefFingerprint != "" {
 		journal["brief_fingerprint"] = rec.BriefFingerprint
 	}
-	appendRiskPolicyJournal(journal)
+	st.appendRiskPolicyJournal(journal)
 	st.persistLocked(true)
 	return rec, nil
 }
@@ -862,7 +887,7 @@ func (st *riskCapitalStore) ActiveOverrides() []rpc.OverrideRecord {
 		if o.Active && now.After(o.ExpiresAt) {
 			o.Active = false
 			changed = true
-			appendRiskPolicyJournal(map[string]any{
+			st.appendRiskPolicyJournal(map[string]any{
 				"version": 1, "at": now.UTC(), "kind": "override_expired", "id": o.ID, "control": o.Control,
 			})
 		}
@@ -1095,4 +1120,5 @@ func (s *Server) journalRiskPolicyTransition(prev, next string, c *risk.Constitu
 		entry["policy_fingerprint"] = c.FingerprintKey()
 	}
 	appendRiskPolicyJournal(entry)
+	s.kickHistoryIndex()
 }

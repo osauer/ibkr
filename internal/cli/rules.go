@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/osauer/ibkr/v2/internal/risk"
@@ -13,6 +14,9 @@ import (
 // (docs/design/trading-rulebook.md). Read-only; verdicts, ranking, and
 // thresholds all come from the daemon — this renderer adds no policy.
 func runRules(ctx context.Context, env *Env, args []string) int {
+	if slicesContains(args, "history") {
+		return runRulesHistory(ctx, env, args)
+	}
 	fs := flagSet(env, "rules")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	symbol := fs.String("symbol", "", "narrow offender lists to one underlying")
@@ -100,6 +104,110 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 		}
 	}
 	return 0
+}
+
+// runRulesHistory renders the daemon's derived rule-transition index
+// (rules.history). Evidence strings are journal free text — rendered,
+// truncated to the terminal, never parsed into authority.
+func runRulesHistory(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "rules")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	since := fs.String("since", "", "inclusive lower boundary: YYYY-MM-DD UTC day or RFC3339 timestamp")
+	until := fs.String("until", "", "upper boundary: YYYY-MM-DD UTC day (whole day included) or RFC3339 timestamp")
+	rule := fs.String("rule", "", "exact rule id filter (e.g. single_name_exposure)")
+	limit := fs.Int("limit", 0, "max rows, newest first (default 50, max 500)")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	rest := fs.Args()
+	if len(rest) > 0 && rest[0] == "history" {
+		rest = rest[1:]
+	}
+	if len(rest) != 0 {
+		return fail(env, "rules history: usage is `ibkr rules history [--since YYYY-MM-DD|RFC3339] [--until YYYY-MM-DD|RFC3339] [--rule ID] [--limit N] [--json]`")
+	}
+	params := rpc.RulesHistoryParams{
+		Since: strings.TrimSpace(*since),
+		Until: strings.TrimSpace(*until),
+		Rule:  strings.TrimSpace(*rule),
+		Limit: *limit,
+	}
+	var res rpc.RulesHistoryResult
+	if err := env.Conn.Call(ctx, rpc.MethodRulesHistory, params, &res); err != nil {
+		return fail(env, "rules history: %v", err)
+	}
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	renderRulesHistoryText(env, env.Stdout, &res)
+	return 0
+}
+
+// renderRulesHistoryText prints the newest-first transition table, the
+// shared index footer, and — when every row carries the same policy
+// provenance — one compact policy line.
+func renderRulesHistoryText(env *Env, out io.Writer, res *rpc.RulesHistoryResult) {
+	width := outputColumns(out)
+	if width < 60 {
+		width = 120
+	}
+	header := fmt.Sprintf("Rules history  %s → %s UTC  %d of %d rows",
+		res.Since.UTC().Format("2006-01-02"), res.Until.UTC().Format("2006-01-02"), res.Count, res.TotalCount)
+	if res.Truncated {
+		header += " (truncated; raise --limit)"
+	}
+	fmt.Fprintln(out, header)
+	if len(res.Entries) == 0 {
+		fmt.Fprintln(out, "  no indexed rule transitions in this window")
+	} else {
+		ruleW, transW := 4, 10
+		for _, e := range res.Entries {
+			ruleW = min(max(ruleW, len(e.Rule)), 24)
+			transW = min(max(transW, len(ruleTransitionLabel(e))), 20)
+		}
+		fmt.Fprintf(out, "  %s\n", env.dim(fmt.Sprintf("%-16s  %-*s  %-*s  %s",
+			"AT (UTC)", ruleW, "RULE", transW, "WAS→STATUS", "EVIDENCE")))
+		evidenceW := max(width-(2+16+2+ruleW+2+transW+2), 16)
+		for _, e := range res.Entries {
+			fmt.Fprintf(out, "  %-16s  %-*s  %-*s  %s\n",
+				e.At.UTC().Format("2006-01-02 15:04"),
+				ruleW, truncateVisible(e.Rule, ruleW),
+				transW, truncateVisible(ruleTransitionLabel(e), transW),
+				truncateVisible(e.Evidence, evidenceW))
+		}
+	}
+	renderHistoryIndexFooter(env, out, res.Index)
+	if id, version, uniform := uniformRulesPolicy(res.Entries); uniform {
+		fmt.Fprintf(out, "  %s\n", env.dim(fmt.Sprintf("policy %s v%d", id, version)))
+	}
+}
+
+// ruleTransitionLabel renders was→status; a first observation (empty was)
+// reads as the bare status.
+func ruleTransitionLabel(e rpc.RuleTransitionEntry) string {
+	if e.Was == "" {
+		return e.Status
+	}
+	return e.Was + "→" + e.Status
+}
+
+// uniformRulesPolicy reports the single (policy id, version) shared by
+// every entry, when there is exactly one.
+func uniformRulesPolicy(entries []rpc.RuleTransitionEntry) (string, int, bool) {
+	id, version := "", 0
+	for _, e := range entries {
+		if e.PolicyID == "" {
+			return "", 0, false
+		}
+		if id == "" {
+			id, version = e.PolicyID, e.PolicyVersion
+			continue
+		}
+		if e.PolicyID != id || e.PolicyVersion != version {
+			return "", 0, false
+		}
+	}
+	return id, version, id != ""
 }
 
 func ruleGlyph(status string) string {

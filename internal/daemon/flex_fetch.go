@@ -143,6 +143,9 @@ func (s *Server) kickFlexFetch(ctx context.Context) {
 			s.logger.Infof("flex fetch failed: %v", err)
 		} else {
 			s.logger.Infof("flex statement ingested: %s", filepath.Base(path))
+			// Nudge the history index so the new statement's equity days
+			// derive promptly (data-free kick; the file is the input).
+			s.kickHistoryIndex()
 			go s.evaluateRiskPolicyV3Reconciliation()
 		}
 	}()

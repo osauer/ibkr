@@ -264,6 +264,7 @@ func (s *Server) handleReconDismiss(_ context.Context, req *rpc.Request) (*rpc.R
 		"version": 1, "at": now, "kind": "recon_dismiss", "line_id": lineID, "reason": reason,
 		"report": rep.ReportID, "policy_fingerprint": constitutionFingerprint(s.riskPolicies.snapshot().policy),
 	})
+	s.kickHistoryIndex()
 	return &rpc.RiskPolicyWriteResult{OK: true, At: now,
 		Message: "exception dismissed and journaled; the report id changes to reflect it — rerun `ibkr recon` before reconciling"}, nil
 }

@@ -46,6 +46,8 @@ type PlatformSettings struct {
 	Trading    PlatformTradingSettings   `json:"trading"`
 	AutoTrade  PlatformAutoTradeSettings `json:"auto_trade"`
 	Regime     PlatformRegimeSettings    `json:"regime"`
+	Canary     PlatformCanarySettings    `json:"canary"`
+	History    PlatformHistorySettings   `json:"history"`
 	MarketData PlatformMarketDataSetting `json:"market_data"`
 	Build      PlatformBuildSettings     `json:"build"`
 	AsOf       time.Time                 `json:"as_of"`
@@ -64,6 +66,36 @@ type PlatformRegimeSettings struct {
 // journal ($XDG_STATE_HOME/ibkr/regime-decisions.jsonl).
 type RegimeJournalSettings struct {
 	Enabled SettingsBool `json:"enabled"`
+}
+
+// PlatformCanarySettings holds the canary evidence-collection runtime
+// preferences (docs/design/history-index.md).
+type PlatformCanarySettings struct {
+	Journal CanaryJournalSettings `json:"journal"`
+}
+
+// CanaryJournalSettings controls the canary-decisions forward-collection
+// journal ($XDG_STATE_HOME/ibkr/canary-decisions.jsonl), mirroring
+// RegimeJournalSettings.
+type CanaryJournalSettings struct {
+	Enabled SettingsBool `json:"enabled"`
+}
+
+// PlatformHistorySettings holds the derived-history-index runtime
+// preferences (docs/design/history-index.md).
+type PlatformHistorySettings struct {
+	Rotation HistoryRotationSettings `json:"rotation"`
+}
+
+// HistoryRotationSettings controls automatic decision-journal rotation:
+// fully-indexed month prefixes of the regime/rules/canary journals move
+// into immutable gzip archives under rotated/. Rotation never deletes
+// evidence.
+type HistoryRotationSettings struct {
+	Enabled SettingsBool `json:"enabled"`
+	// KeepRawMonths is how many most-recent calendar months stay raw in
+	// the live journals (current month counts as month 1); minimum 1.
+	KeepRawMonths SettingsInt `json:"keep_raw_months"`
 }
 
 type PlatformFeatureSettings struct {

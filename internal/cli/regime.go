@@ -13,6 +13,9 @@ import (
 )
 
 func runRegime(ctx context.Context, env *Env, args []string) int {
+	if slicesContains(args, "history") {
+		return runRegimeHistory(ctx, env, args)
+	}
 	fs := flagSet(env, "regime")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON for tooling")
 	explain := fs.Bool("explain", false, "show concise threshold, reading, and provenance notes")
@@ -87,6 +90,94 @@ func runRegime(ctx context.Context, env *Env, args []string) int {
 	code := fetchAndRender(env.Stdout)
 	stop()
 	return code
+}
+
+// runRegimeHistory renders the daemon's derived regime-decision index
+// (regime.history). Read-only: rows are journal evidence; the daemon owns
+// filtering, ordering, and index-health disclosure.
+func runRegimeHistory(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "regime")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	since := fs.String("since", "", "inclusive lower boundary: YYYY-MM-DD UTC day or RFC3339 timestamp")
+	until := fs.String("until", "", "upper boundary: YYYY-MM-DD UTC day (whole day included) or RFC3339 timestamp")
+	stage := fs.String("stage", "", "exact lifecycle stage filter (e.g. calm, early_warning)")
+	limit := fs.Int("limit", 0, "max rows, newest first (default 50, max 500)")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	rest := fs.Args()
+	if len(rest) > 0 && rest[0] == "history" {
+		rest = rest[1:]
+	}
+	if len(rest) != 0 {
+		return fail(env, "regime history: usage is `ibkr regime history [--since YYYY-MM-DD|RFC3339] [--until YYYY-MM-DD|RFC3339] [--stage STAGE] [--limit N] [--json]`")
+	}
+	params := rpc.RegimeHistoryParams{
+		Since: strings.TrimSpace(*since),
+		Until: strings.TrimSpace(*until),
+		Stage: strings.TrimSpace(*stage),
+		Limit: *limit,
+	}
+	var res rpc.RegimeHistoryResult
+	if err := env.Conn.Call(ctx, rpc.MethodRegimeHistory, params, &res); err != nil {
+		return fail(env, "regime history: %v", err)
+	}
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	renderRegimeHistoryText(env, env.Stdout, &res)
+	return 0
+}
+
+// renderRegimeHistoryText prints the newest-first decision table plus the
+// index-freshness footer. Verdicts are journal free text — truncated to
+// the terminal, never interpreted.
+func renderRegimeHistoryText(env *Env, out io.Writer, res *rpc.RegimeHistoryResult) {
+	width := outputColumns(out)
+	if width < 60 {
+		width = 120
+	}
+	header := fmt.Sprintf("Regime history  %s → %s UTC  %d of %d rows",
+		res.Since.UTC().Format("2006-01-02"), res.Until.UTC().Format("2006-01-02"), res.Count, res.TotalCount)
+	if res.Truncated {
+		header += " (truncated; raise --limit)"
+	}
+	fmt.Fprintln(out, header)
+	if len(res.Entries) == 0 {
+		fmt.Fprintln(out, "  no indexed regime decisions in this window")
+	} else {
+		stageW := 5
+		for _, e := range res.Entries {
+			stageW = min(max(stageW, len(e.Stage)), 16)
+		}
+		fmt.Fprintf(out, "  %s\n", env.dim(fmt.Sprintf("%-16s  %-*s  %-6s  %-9s  %s",
+			"AT (UTC)", stageW, "STAGE", "SEV", "R/Y(elig)", "VERDICT")))
+		verdictW := max(width-(2+16+2+stageW+2+6+2+9+2), 16)
+		for _, e := range res.Entries {
+			fmt.Fprintf(out, "  %-16s  %-*s  %-6s  %-9s  %s\n",
+				e.At.UTC().Format("2006-01-02 15:04"),
+				stageW, truncateVisible(e.Stage, stageW),
+				truncateVisible(nonEmpty(e.Severity, "-"), 6),
+				fmt.Sprintf("%d/%d(%d)", e.ClusterRed, e.ClusterYellow, e.ClusterEligibleRed),
+				truncateVisible(e.Verdict, verdictW))
+		}
+	}
+	renderHistoryIndexFooter(env, out, res.Index)
+}
+
+// renderHistoryIndexFooter is the shared index-health line for both
+// history renderers: a fully-ingested watermark, or a loud byte-backlog
+// warning — the index is never presented as silently fresh.
+func renderHistoryIndexFooter(env *Env, out io.Writer, idx rpc.HistoryIndexHealth) {
+	if behind := idx.JournalBytes - idx.IngestedBytes; behind > 0 {
+		fmt.Fprintf(out, "  %s\n", env.yellow(fmt.Sprintf("index catching up: %d bytes behind (rows may be missing)", behind)))
+		return
+	}
+	label := "index: journal fully ingested"
+	if !idx.LastIngestAt.IsZero() {
+		label = fmt.Sprintf("index: through %s · journal fully ingested", idx.LastIngestAt.UTC().Format("2006-01-02 15:04Z"))
+	}
+	fmt.Fprintf(out, "  %s\n", env.dim(label))
 }
 
 // appendRegimeLog writes one JSONL line to path: an object with the

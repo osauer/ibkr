@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- md-source: config.md sha256:9fd86e3cec59bb937a8d98d559ed00102836517a4adeaa937d22400e0882d2a8 -->
+<!-- md-source: config.md sha256:9fb4be890656069bfc205b8351be61b36c0d5d414a53a9486634e20f4a84ed02 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -278,6 +278,9 @@
 <tr><td><code>trading.limits.allow_stock_short</code></td><td><code>true/false/null</code></td><td>trading-limit</td><td>Runtime override of [trading].allow_stock_short; null falls back to the TOML value.</td></tr>
 <tr><td><code>trading.limits.allow_option_sell_to_open</code></td><td><code>true/false/null</code></td><td>trading-limit</td><td>Runtime override of [trading].allow_option_sell_to_open; null falls back to the TOML value.</td></tr>
 <tr><td><code>regime.journal.enabled</code></td><td><code>true/false/null</code></td><td>runtime</td><td>Turns the regime-decisions forward-collection journal on ($XDG_STATE_HOME/ibkr/regime-decisions.jsonl).</td></tr>
+<tr><td><code>canary.journal.enabled</code></td><td><code>true/false/null</code></td><td>runtime</td><td>Turns the canary-decisions forward-collection journal on ($XDG_STATE_HOME/ibkr/canary-decisions.jsonl), mirroring regime.journal.enabled.</td></tr>
+<tr><td><code>history.rotation.enabled</code></td><td><code>true/false/null</code></td><td>runtime</td><td>Turns automatic monthly journal rotation (regime/rules/canary decision journals → gzip archives under rotated/) on; rotation only compresses fully-indexed evidence and never deletes it (default true).</td></tr>
+<tr><td><code>history.rotation.keep_raw_months</code></td><td><code>integer/null</code></td><td>runtime</td><td>How many most-recent calendar months of decision-journal lines stay raw in the live files before rotating to gzip archives; minimum 1, null restores the default 2.</td></tr>
 </tbody>
 </table>
 <h2 id="environment-variables">Environment variables</h2>

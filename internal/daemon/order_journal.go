@@ -41,6 +41,19 @@ var errOrderPreviewTokenAlreadyUsed = errors.New("preview token already used")
 type orderJournalStore struct {
 	Path string
 	mu   sync.Mutex
+	// onAppend nudges the history-index ingester after a successful append
+	// (data-free kick; the journal file is the only ingest input). Nil-safe
+	// and non-blocking; invoked under mu at the end of appendLocked /
+	// appendAllLocked so every present and future append site is covered.
+	onAppend func()
+	// tokenIndex, when set, may answer the token-redemption prior-event
+	// lookup from the derived history index: it returns the raw journal
+	// lines carrying the token and ok=true only when the index is provably
+	// complete for the journal at this instant (watermark == size, no
+	// parse markers, query succeeded). ok=false always falls back to the
+	// unchanged full journal scan. The journal scan remains the
+	// semantics-defining reference implementation.
+	tokenIndex func(tokenID string) ([][]byte, bool)
 }
 
 type orderJournalEvent struct {
@@ -160,6 +173,9 @@ func (s *orderJournalStore) appendLocked(ev orderJournalEvent) error {
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("append order journal: %w", err)
 	}
+	if s.onAppend != nil {
+		s.onAppend()
+	}
 	return nil
 }
 
@@ -198,6 +214,9 @@ func (s *orderJournalStore) appendAllLocked(events []orderJournalEvent) error {
 	}
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("append order journal: %w", err)
+	}
+	if s.onAppend != nil {
+		s.onAppend()
 	}
 	return nil
 }
@@ -271,23 +290,36 @@ func (s *orderJournalStore) ConfirmPreviewTokenUseAndAppend(ev orderJournalEvent
 		return fmt.Errorf("preview token confirmation event type must be %q", orderJournalEventTokenConfirmed)
 	}
 
+	// The existing mu critical section is the serialization guarantee: all
+	// appends go through it, so while it is held the journal cannot grow
+	// and the prior-event check races nothing.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	events, err := s.loadEventsLocked(0)
-	if err != nil {
-		return err
-	}
-	for _, prior := range events {
-		if prior.PreviewTokenID != ev.PreviewTokenID {
-			continue
-		}
-		if orderJournalEventConsumesPreviewToken(prior) {
-			when := ""
-			if !prior.At.IsZero() {
-				when = " at " + prior.At.Format(time.RFC3339)
+	// Indexed fast path: only when the history index proves itself
+	// complete for the journal at this instant AND every returned line
+	// decodes under the daemon's own event type. Anything else falls back
+	// to the unchanged full scan below. Both paths run the same
+	// consumption predicate and error formatting, so accept/reject
+	// decisions and error strings are byte-identical by construction.
+	checked := false
+	if s.tokenIndex != nil {
+		if raws, ok := s.tokenIndex(ev.PreviewTokenID); ok {
+			if priors, decodeOK := decodeOrderJournalRawLines(raws); decodeOK {
+				if err := orderJournalPriorTokenUse(priors, ev.PreviewTokenID); err != nil {
+					return err
+				}
+				checked = true
 			}
-			return fmt.Errorf("%w: %s was already consumed by %s%s", errOrderPreviewTokenAlreadyUsed, ev.PreviewTokenID, prior.Type, when)
+		}
+	}
+	if !checked {
+		events, err := s.loadEventsLocked(0)
+		if err != nil {
+			return err
+		}
+		if err := orderJournalPriorTokenUse(events, ev.PreviewTokenID); err != nil {
+			return err
 		}
 	}
 	if err := s.appendLocked(ev); err != nil {
@@ -299,6 +331,44 @@ func (s *orderJournalStore) ConfirmPreviewTokenUseAndAppend(ev orderJournalEvent
 		}
 	}
 	return nil
+}
+
+// orderJournalPriorTokenUse is the single reference implementation of the
+// token-consumption check, shared verbatim by the journal-scan and
+// indexed paths (SQL only prunes; this Go predicate decides).
+func orderJournalPriorTokenUse(events []orderJournalEvent, tokenID string) error {
+	for _, prior := range events {
+		if prior.PreviewTokenID != tokenID {
+			continue
+		}
+		if orderJournalEventConsumesPreviewToken(prior) {
+			when := ""
+			if !prior.At.IsZero() {
+				when = " at " + prior.At.Format(time.RFC3339)
+			}
+			return fmt.Errorf("%w: %s was already consumed by %s%s", errOrderPreviewTokenAlreadyUsed, tokenID, prior.Type, when)
+		}
+	}
+	return nil
+}
+
+// decodeOrderJournalRawLines decodes indexed raw journal lines with the
+// daemon's own event type and the same version validation LoadEvents
+// applies. ok=false on any failure — the caller must fall back to the
+// journal scan, which fails loudly on the same line.
+func decodeOrderJournalRawLines(raws [][]byte) ([]orderJournalEvent, bool) {
+	events := make([]orderJournalEvent, 0, len(raws))
+	for _, raw := range raws {
+		var ev orderJournalEvent
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			return nil, false
+		}
+		if ev.Version != orderJournalFileVersion {
+			return nil, false
+		}
+		events = append(events, ev)
+	}
+	return events, true
 }
 
 func (s *orderJournalStore) Summary() (orderJournalSummary, error) {

@@ -116,8 +116,7 @@ func (h *handler) requirePurgeWriteConfirmation(r *nethttp.Request, req purgeAct
 }
 
 func writePurgeConfirmationError(w nethttp.ResponseWriter, err error) {
-	var rpcErr *rpc.Error
-	if errors.As(err, &rpcErr) {
+	if rpcErr, ok := errors.AsType[*rpc.Error](err); ok {
 		writeError(w, nethttp.StatusBadRequest, rpcErr.Message)
 		return
 	}

@@ -27,6 +27,8 @@ type platformSettingsData struct {
 	Features platformFeatureSettingsData `json:"features"`
 	Trading  platformTradingSettingsData `json:"trading"`
 	Regime   platformRegimeSettingsData  `json:"regime"`
+	Canary   platformCanarySettingsData  `json:"canary"`
+	History  platformHistorySettingsData `json:"history"`
 }
 
 type platformRegimeSettingsData struct {
@@ -35,6 +37,24 @@ type platformRegimeSettingsData struct {
 
 type platformRegimeJournalSettingsData struct {
 	Enabled *bool `json:"enabled,omitempty"`
+}
+
+type platformCanarySettingsData struct {
+	Journal platformCanaryJournalSettingsData `json:"journal"`
+}
+
+type platformCanaryJournalSettingsData struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+type platformHistorySettingsData struct {
+	Rotation platformHistoryRotationSettingsData `json:"rotation"`
+}
+
+type platformHistoryRotationSettingsData struct {
+	Enabled *bool `json:"enabled,omitempty"`
+	// KeepRawMonths >= 1; nil restores the built-in default of 2.
+	KeepRawMonths *int `json:"keep_raw_months,omitempty"`
 }
 
 type platformFeatureSettingsData struct {
@@ -312,6 +332,17 @@ func applySettingsKey(next *platformSettingsData, key string, raw json.RawMessag
 		return boolField(&next.Trading.AllowOptionSellToOpen)
 	case "regime.journal.enabled":
 		return boolField(&next.Regime.Journal.Enabled)
+	case "canary.journal.enabled":
+		return boolField(&next.Canary.Journal.Enabled)
+	case "history.rotation.enabled":
+		return boolField(&next.History.Rotation.Enabled)
+	case "history.rotation.keep_raw_months":
+		v, err := nullableInt(raw)
+		if err != nil || (v != nil && *v < 1) {
+			return errBadRequest("history.rotation.keep_raw_months must be an integer >= 1 or null")
+		}
+		next.History.Rotation.KeepRawMonths = v
+		return nil
 	default:
 		return errBadRequest("unknown settings field " + key)
 	}
@@ -474,6 +505,17 @@ func (s *Server) platformSettingsSnapshot(observed *platformSettingsObserved) rp
 				Enabled: settingsBool(regimeJournalEnabledFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "regime-decisions forward-collection journal (calibration corpus); safe to disable"),
 			},
 		},
+		Canary: rpc.PlatformCanarySettings{
+			Journal: rpc.CanaryJournalSettings{
+				Enabled: settingsBool(canaryJournalEnabledFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "canary-decisions forward-collection journal (calibration corpus); safe to disable"),
+			},
+		},
+		History: rpc.PlatformHistorySettings{
+			Rotation: rpc.HistoryRotationSettings{
+				Enabled:       settingsBool(historyRotationEnabledFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "monthly decision-journal rotation into gzip archives; compresses fully-indexed evidence, never deletes it"),
+				KeepRawMonths: settingsInt(historyRotationKeepRawMonthsFrom(data), rpc.SettingsAccessWrite, rpc.SettingsSourceRuntime, "most-recent calendar months kept raw in the live journals (minimum 1; null restores 2)"),
+			},
+		},
 		MarketData: rpc.PlatformMarketDataSetting{Quality: observedMarketDataQuality(observed)},
 		Build: rpc.PlatformBuildSettings{
 			Channel:                settingsString(buildChannel(), rpc.SettingsAccessRead, rpc.SettingsSourceBuild, "controlled by the ibkr build"),
@@ -494,6 +536,40 @@ func regimeJournalEnabledFrom(data platformSettingsData) bool {
 		return true
 	}
 	return *data.Regime.Journal.Enabled
+}
+
+func canaryJournalEnabledFrom(data platformSettingsData) bool {
+	if data.Canary.Journal.Enabled == nil {
+		return true
+	}
+	return *data.Canary.Journal.Enabled
+}
+
+// historyRotationDefaultKeepRawMonths is the built-in keep window: the
+// current calendar month plus the previous one stay raw.
+const historyRotationDefaultKeepRawMonths = 2
+
+func historyRotationEnabledFrom(data platformSettingsData) bool {
+	if data.History.Rotation.Enabled == nil {
+		return true
+	}
+	return *data.History.Rotation.Enabled
+}
+
+func historyRotationKeepRawMonthsFrom(data platformSettingsData) int {
+	if data.History.Rotation.KeepRawMonths == nil {
+		return historyRotationDefaultKeepRawMonths
+	}
+	return max(*data.History.Rotation.KeepRawMonths, 1)
+}
+
+// historyRotationSettings reports the effective rotation runtime policy.
+func (s *Server) historyRotationSettings() (enabled bool, keepRawMonths int) {
+	if s == nil || s.platformSettings == nil {
+		return true, historyRotationDefaultKeepRawMonths
+	}
+	data := s.platformSettings.snapshot()
+	return historyRotationEnabledFrom(data), historyRotationKeepRawMonthsFrom(data)
 }
 
 func buildChannel() string {

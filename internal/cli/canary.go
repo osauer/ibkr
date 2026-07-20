@@ -67,6 +67,9 @@ func appendUniqueString(values []string, value string) []string {
 }
 
 func runCanary(ctx context.Context, env *Env, args []string) int {
+	if slicesContains(args, "history") {
+		return runCanaryHistory(ctx, env, args)
+	}
 	fs := flagSet(env, "canary")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON for scheduling")
 	details := fs.Bool("details", false, "show full canary evidence rows")
@@ -103,6 +106,82 @@ func runCanary(ctx context.Context, env *Env, args []string) int {
 		return printJSON(env, res)
 	}
 	return renderCanaryTextDetails(env, env.Stdout, &res, *details)
+}
+
+// runCanaryHistory renders the daemon's derived canary-decision index
+// (canary.history). Read-only: rows are journal evidence; the daemon owns
+// filtering, ordering, and index-health disclosure.
+func runCanaryHistory(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "canary")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	since := fs.String("since", "", "inclusive lower boundary: YYYY-MM-DD UTC day or RFC3339 timestamp")
+	until := fs.String("until", "", "upper boundary: YYYY-MM-DD UTC day (whole day included) or RFC3339 timestamp")
+	severity := fs.String("severity", "", "exact severity filter (e.g. observe, watch, act, urgent)")
+	action := fs.String("action", "", "exact action filter (e.g. watch, defend, rebalance)")
+	limit := fs.Int("limit", 0, "max rows, newest first (default 50, max 500)")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	rest := fs.Args()
+	if len(rest) > 0 && rest[0] == "history" {
+		rest = rest[1:]
+	}
+	if len(rest) != 0 {
+		return fail(env, "canary history: usage is `ibkr canary history [--since YYYY-MM-DD|RFC3339] [--until YYYY-MM-DD|RFC3339] [--severity SEV] [--action ACTION] [--limit N] [--json]`")
+	}
+	params := rpc.CanaryHistoryParams{
+		Since:    strings.TrimSpace(*since),
+		Until:    strings.TrimSpace(*until),
+		Severity: strings.TrimSpace(*severity),
+		Action:   strings.TrimSpace(*action),
+		Limit:    *limit,
+	}
+	var res rpc.CanaryHistoryResult
+	if err := env.Conn.Call(ctx, rpc.MethodCanaryHistory, params, &res); err != nil {
+		return fail(env, "canary history: %v", err)
+	}
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	renderCanaryHistoryText(env, env.Stdout, &res)
+	return 0
+}
+
+// renderCanaryHistoryText prints the newest-first decision table plus the
+// index-freshness footer. Summaries are journal free text — truncated to
+// the terminal, never interpreted.
+func renderCanaryHistoryText(env *Env, out io.Writer, res *rpc.CanaryHistoryResult) {
+	width := outputColumns(out)
+	if width < 60 {
+		width = 120
+	}
+	header := fmt.Sprintf("Canary history  %s → %s UTC  %d of %d rows",
+		res.Since.UTC().Format("2006-01-02"), res.Until.UTC().Format("2006-01-02"), res.Count, res.TotalCount)
+	if res.Truncated {
+		header += " (truncated; raise --limit)"
+	}
+	fmt.Fprintln(out, header)
+	if len(res.Entries) == 0 {
+		fmt.Fprintln(out, "  no indexed canary decisions in this window")
+	} else {
+		actionW, stageW := 6, 5
+		for _, e := range res.Entries {
+			actionW = min(max(actionW, len(e.Action)), 14)
+			stageW = min(max(stageW, len(e.MarketStage)), 16)
+		}
+		fmt.Fprintf(out, "  %s\n", env.dim(fmt.Sprintf("%-16s  %-7s  %-*s  %-*s  %s",
+			"AT (UTC)", "SEV", actionW, "ACTION", stageW, "STAGE", "SUMMARY")))
+		summaryW := max(width-(2+16+2+7+2+actionW+2+stageW+2), 16)
+		for _, e := range res.Entries {
+			fmt.Fprintf(out, "  %-16s  %-7s  %-*s  %-*s  %s\n",
+				e.At.UTC().Format("2006-01-02 15:04"),
+				truncateVisible(nonEmpty(e.Severity, "-"), 7),
+				actionW, truncateVisible(nonEmpty(e.Action, "-"), actionW),
+				stageW, truncateVisible(nonEmpty(e.MarketStage, "-"), stageW),
+				truncateVisible(e.Summary, summaryW))
+		}
+	}
+	renderHistoryIndexFooter(env, out, res.Index)
 }
 
 func startCanarySpinner(env *Env) func() {

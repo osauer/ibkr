@@ -122,6 +122,9 @@ Daemon-owned preferences stored in `$XDG_STATE_HOME/ibkr/platform-settings.json`
 | `trading.limits.allow_stock_short` | `true/false/null` | trading-limit | Runtime override of [trading].allow_stock_short; null falls back to the TOML value. |
 | `trading.limits.allow_option_sell_to_open` | `true/false/null` | trading-limit | Runtime override of [trading].allow_option_sell_to_open; null falls back to the TOML value. |
 | `regime.journal.enabled` | `true/false/null` | runtime | Turns the regime-decisions forward-collection journal on ($XDG_STATE_HOME/ibkr/regime-decisions.jsonl). |
+| `canary.journal.enabled` | `true/false/null` | runtime | Turns the canary-decisions forward-collection journal on ($XDG_STATE_HOME/ibkr/canary-decisions.jsonl), mirroring regime.journal.enabled. |
+| `history.rotation.enabled` | `true/false/null` | runtime | Turns automatic monthly journal rotation (regime/rules/canary decision journals → gzip archives under rotated/) on; rotation only compresses fully-indexed evidence and never deletes it (default true). |
+| `history.rotation.keep_raw_months` | `integer/null` | runtime | How many most-recent calendar months of decision-journal lines stay raw in the live files before rotating to gzip archives; minimum 1, null restores the default 2. |
 
 ## Environment variables
 

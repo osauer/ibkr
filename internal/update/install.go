@@ -319,8 +319,7 @@ func StripQuarantine(path string) error {
 	if strings.Contains(combined, "no such xattr") {
 		return nil
 	}
-	var notFound *exec.Error
-	if errors.As(err, &notFound) {
+	if _, ok := errors.AsType[*exec.Error](err); ok {
 		// `xattr` binary not on PATH. Not fatal; nothing to strip.
 		return nil
 	}

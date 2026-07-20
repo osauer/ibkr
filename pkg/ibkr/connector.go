@@ -4672,8 +4672,7 @@ func normalizeHistoricalWhatToShow(value string) (string, error) {
 }
 
 func shouldRetryHistorical(err error) bool {
-	var hErr *HistoricalRequestError
-	if errors.As(err, &hErr) {
+	if hErr, ok := errors.AsType[*HistoricalRequestError](err); ok {
 		switch hErr.Code {
 		case 162:
 			return true

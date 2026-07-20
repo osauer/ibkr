@@ -467,8 +467,7 @@ func classifyGammaLegFailure(err error) string {
 	if err == nil {
 		return ""
 	}
-	var rej *SubscriptionRejectedError
-	if errors.As(err, &rej) {
+	if rej, ok := errors.AsType[*SubscriptionRejectedError](err); ok {
 		return classifyGammaRejectionCode(rej.Rejection.Code, rej.Rejection.Message)
 	}
 	msg := strings.ToLower(err.Error())

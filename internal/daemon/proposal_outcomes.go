@@ -24,6 +24,10 @@ type proposalOutcomeStore struct {
 	Path        string
 	mu          sync.Mutex
 	outcomeKeys map[string]struct{}
+	// onAppend nudges the history-index ingester after a successful mark
+	// append (data-free kick; the journal file is the only ingest input).
+	// Nil-safe; invoked under mu.
+	onAppend func()
 }
 
 type proposalOutcomeMark struct {
@@ -68,6 +72,7 @@ func (s *Server) installProposalOutcomeStore() {
 		return
 	}
 	s.proposalOutcomes = newProposalOutcomeStore(path)
+	s.proposalOutcomes.onAppend = s.kickHistoryIndex
 }
 
 func (s *proposalOutcomeStore) AppendMark(mark proposalOutcomeMark) error {
@@ -127,6 +132,9 @@ func (s *proposalOutcomeStore) appendMarkLocked(mark proposalOutcomeMark) error 
 		return fmt.Errorf("append proposal outcome: %w", err)
 	}
 	s.outcomeKeys[identity] = struct{}{}
+	if s.onAppend != nil {
+		s.onAppend()
+	}
 	return nil
 }
 

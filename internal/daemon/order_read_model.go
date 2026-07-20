@@ -245,9 +245,19 @@ func (s *Server) loadScopedOrderHistoryEvents(since, until time.Time, scope brok
 	if s == nil || s.orderJournal == nil {
 		return nil, fmt.Errorf("%w: order journal is unavailable", ErrTradingDisabled)
 	}
-	events, err := s.orderJournal.LoadEvents(0)
-	if err != nil {
-		return nil, err
+	// Index first when provably fresh: SQL prunes on at_unix_ms with the
+	// range widened by 1 ms at both ends, then the exact existing Go
+	// predicates below re-decide scope and range — results are identical
+	// to the journal scan by construction.
+	sinceMS := since.UnixMilli() - 1
+	untilMS := until.UnixMilli()
+	events, ok := s.indexedOrderEvents("orders.history", &sinceMS, &untilMS)
+	if !ok {
+		var err error
+		events, err = s.orderJournal.LoadEvents(0)
+		if err != nil {
+			return nil, err
+		}
 	}
 	out := make([]orderJournalEvent, 0, len(events))
 	for _, ev := range events {
@@ -337,7 +347,9 @@ func (s *Server) loadOrderViews() ([]rpc.OrderView, map[string][]rpc.OrderEvent,
 	if s == nil || s.orderJournal == nil {
 		return nil, nil, fmt.Errorf("%w: order journal is unavailable", ErrTradingDisabled)
 	}
-	events, err := s.orderJournal.LoadEvents(0)
+	// Indexed when provably fresh, journal scan otherwise; the fold below
+	// is the unchanged reference implementation either way.
+	events, err := s.loadOrderJournalEventsForRead("orders.open")
 	if err != nil {
 		return nil, nil, err
 	}

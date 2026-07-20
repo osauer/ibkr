@@ -25,6 +25,7 @@ import (
 
 	"github.com/osauer/ibkr/v2/internal/breadth/spx"
 	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/history"
 	"github.com/osauer/ibkr/v2/internal/discover"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -316,6 +317,36 @@ type Server struct {
 	// fails a snapshot.
 	regimeDecisions *regimeDecisionJournal
 
+	// canaryDecisions is the canary counterpart
+	// ($XDG_STATE_HOME/ibkr/canary-decisions.jsonl): the portfolio-canary
+	// evidence corpus written by the brief hook and the 5-minute cadence
+	// loop. Same nil semantics as regimeDecisions.
+	canaryDecisions *canaryDecisionJournal
+
+	// rulesJournalMu is the rules-decisions.jsonl writer-quiescence lock:
+	// journalRuleTransitions holds it across path-resolve + open + write +
+	// close, and journal rotation holds it across the live-file swap.
+	rulesJournalMu sync.Mutex
+
+	// orderIndexWarns rate-limits the indexed-order-read fallback
+	// disclosures to one line per surface per minute.
+	orderIndexWarns orderIndexWarnLimiter
+
+	// historyIndex is the derived, always-rebuildable SQLite index
+	// (history.db) over the regime/rules decision journals, serving
+	// regime.history and rules.history (docs/design/history-index.md).
+	// Deliberately NOT named history: regimeHistory below already names
+	// the unrelated HMDS daily-bars cache. Opened by the flock winner in
+	// Start, published before the accept loop so handlers read it without
+	// synchronization; nil means unavailable (classified error) and the
+	// journals are unaffected. historyIndexOpts carries the paths resolved
+	// at construction time — New must not touch the DB because every
+	// autospawn race loser runs it before the flock decides.
+	// The store is published once at Start and read by the ingest and
+	// maintenance goroutines, so the pointer itself is atomic.
+	historyIndex     atomic.Pointer[history.Store]
+	historyIndexOpts *history.Options
+
 	// tradingReadiness persists daemon-owned evidence for local write
 	// gates, starting with the recent paper-smoke proof required before
 	// live mode. It deliberately lives outside config so a TOML edit cannot
@@ -519,6 +550,8 @@ func New(opts Options) *Server {
 	s.installMembersRefresher()
 	s.installContractStore()
 	s.installStreakStore()
+	s.installCanaryDecisionJournal()
+	s.installHistoryIndex()
 	// The token signer must exist before the readiness store: paper-smoke
 	// evidence is MAC'd with the order-token key.
 	s.installOrderTokenSigner()
@@ -633,6 +666,7 @@ func (s *Server) installOrderJournalStore() {
 		return
 	}
 	s.orderJournal = newOrderJournalStore(path)
+	s.installOrderIndexReads()
 }
 
 func (s *Server) installPurgeLedgerStore() {
@@ -1197,6 +1231,11 @@ func (s *Server) Start(ctx context.Context) error {
 	s.logger.Infof("ibkr daemon %s listening on %s (gateway=%s:%d, clientID=%d)",
 		s.version, s.socketPath, ep.Host, ep.Port, ep.ClientID)
 	s.evaluateRiskPolicyV3Reconciliation()
+	// Open the derived history index only here — after the instance flock
+	// is won — and before the accept loop, so handlers observe the
+	// published pointer without synchronization. Backfill/tail ingest runs
+	// on its own goroutine off the snapshot path.
+	s.startHistoryIndex(serverCtx)
 
 	// Skip the connect goroutine when discovery already failed — there's
 	// nothing to connect to. The socket is still up so `ibkr status`
@@ -1219,6 +1258,7 @@ func (s *Server) Start(ctx context.Context) error {
 		go s.riskPolicies.Run(serverCtx, s.logger.Infof)
 	}
 	go s.runFlexFetchLoop(serverCtx)
+	go s.runCanaryJournalLoop(serverCtx)
 	if s.tradeProposals != nil {
 		s.proposalsStarted.Do(func() {
 			go s.tradeProposals.Run(serverCtx)
@@ -1299,6 +1339,12 @@ func (s *Server) Stop() {
 
 	s.stopConnector()
 	s.stopBreadthConnector()
+	// The history index closes after listener teardown (no new queries can
+	// arrive) and before the flock release; Close is idempotent and the
+	// ingest goroutine's errors are swallowed by design.
+	if store := s.historyIndex.Load(); store != nil {
+		_ = store.Close()
+	}
 	if s.lock != nil {
 		s.lock.Release()
 		s.lock = nil
@@ -2431,6 +2477,14 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleGammaZeroSPX(ctx, req) })
 	case rpc.MethodRegimeSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleRegimeSnapshot(ctx, req) })
+	case rpc.MethodRegimeHistory:
+		s.unary(req, enc, func() (any, error) { return s.handleRegimeHistory(req) })
+	case rpc.MethodRulesHistory:
+		s.unary(req, enc, func() (any, error) { return s.handleRulesHistory(req) })
+	case rpc.MethodCanaryHistory:
+		s.unary(req, enc, func() (any, error) { return s.handleCanaryHistory(req) })
+	case rpc.MethodReconEquity:
+		s.unary(req, enc, func() (any, error) { return s.handleReconEquity(req) })
 	case rpc.MethodMarketEventsSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleMarketEventsSnapshot(ctx, req) })
 	case rpc.MethodStatusHealth:

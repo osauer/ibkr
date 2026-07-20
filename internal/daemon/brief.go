@@ -463,8 +463,11 @@ func (s *Server) composeBrief(ctx context.Context) (*rpc.BriefResult, *rpc.Rules
 	// their full weight.
 	sessionOpen := calErr != nil || cal == nil || cal.Session.IsOpen
 
-	market := composeBriefMarket(now, acct, pos, regime, breadth, gamma, marketEvents,
+	market, can := composeBriefMarket(now, acct, pos, regime, breadth, gamma, marketEvents,
 		acctErr, posErr, regimeErr, breadthErr, marketEventsErr, sessionOpen)
+	// Brief-hook canary evidence: the same computed result the brief row
+	// rendered, journaled with dedupe (docs/design/history-index.md).
+	s.journalCanaryDecision(&can)
 	calendar := composeBriefCalendar(cal, marketEvents, rules, calErr, marketEventsErr, sessionOpen)
 	portfolio := s.composeBriefPortfolio(acct, pos, acctErr, posErr, sessionOpen)
 	riskLimits := composeBriefRisk(policy, now)
@@ -671,9 +674,12 @@ func (s *Server) briefProposals(_ time.Time) rpc.BriefProposalsRow {
 	}
 }
 
+// composeBriefMarket stays pure: it also returns the computed canary
+// result so composeBrief (the method) can journal it as canary evidence
+// without this function taking on daemon state.
 func composeBriefMarket(now time.Time, acct *rpc.AccountResult, pos *rpc.PositionsResult,
 	regime *rpc.RegimeSnapshotResult, breadth *rpc.BreadthSPXResult, gamma *rpc.GammaZeroSPXResult,
-	events *rpc.MarketEventsResult, acctErr, posErr, regimeErr, breadthErr, eventsErr error, sessionOpen bool) rpc.BriefMarketSection {
+	events *rpc.MarketEventsResult, acctErr, posErr, regimeErr, breadthErr, eventsErr error, sessionOpen bool) (rpc.BriefMarketSection, rpc.CanaryResult) {
 	out := rpc.BriefMarketSection{}
 	if regimeErr != nil || regime == nil {
 		out.Regime.BriefRowState = briefUnavailable("regime snapshot unavailable: " + errText(regimeErr))
@@ -724,7 +730,7 @@ func composeBriefMarket(now time.Time, acct *rpc.AccountResult, pos *rpc.Positio
 		out.Canary.BriefRowState = briefDegraded("canary inputs are partial; unavailable sources remain explicit")
 	}
 	out.BriefRowState = briefSectionState("market", out.Regime.BriefRowState, out.Breadth.BriefRowState, out.Gamma.BriefRowState, out.Canary.BriefRowState)
-	return out
+	return out, can
 }
 
 func composeBriefGamma(env *rpc.GammaZeroSPXResult, sessionOpen bool) rpc.BriefGammaRow {

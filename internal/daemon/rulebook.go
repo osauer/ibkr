@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -562,19 +563,12 @@ func (s *Server) journalRuleTransitions(res *rpc.RulesResult) {
 			prevStatus[r.ID] = r.Status
 		}
 	}
-	path, err := defaultTradingStatePath("rules-decisions.jsonl")
-	if err != nil {
-		return
-	}
-	if err := ensurePrivateStateDir(path); err != nil {
-		return
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
+	// All transition lines are buffered and land in ONE write syscall: to
+	// the history-index ingester a torn multi-syscall append would be
+	// indistinguishable from a crash mid-write. Line shape is unchanged
+	// (json.Encoder emits each map with a trailing newline).
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	for _, r := range res.Rules {
 		if was, seen := prevStatus[r.ID]; seen && was == r.Status {
 			continue
@@ -586,6 +580,33 @@ func (s *Server) journalRuleTransitions(res *rpc.RulesResult) {
 			"policy_fingerprint": policyFingerprint,
 		})
 	}
+	// rulesJournalMu is the writer-quiescence lock journal rotation
+	// excludes: held across path resolve, open, write, and close so a
+	// live-file swap can never interleave with an append. Line shape,
+	// dedupe, and the 0o644 mode are untouched.
+	s.rulesJournalMu.Lock()
+	path, err := defaultTradingStatePath("rules-decisions.jsonl")
+	if err != nil {
+		s.rulesJournalMu.Unlock()
+		return
+	}
+	if err := ensurePrivateStateDir(path); err != nil {
+		s.rulesJournalMu.Unlock()
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		s.rulesJournalMu.Unlock()
+		return
+	}
+	if buf.Len() > 0 {
+		_, _ = f.Write(buf.Bytes())
+	}
+	_ = f.Close()
+	s.rulesJournalMu.Unlock()
+	// Wake the history-index ingester; data-free by design (the journal
+	// file is the only ingest input).
+	s.kickHistoryIndex()
 }
 
 func errText(err error) string {

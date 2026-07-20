@@ -51,8 +51,7 @@ func (h *handler) handleReconcileSignoff(w nethttp.ResponseWriter, r *nethttp.Re
 }
 
 func writeDaemonGovernanceError(w nethttp.ResponseWriter, err error) {
-	var rpcErr *rpc.Error
-	if errors.As(err, &rpcErr) {
+	if rpcErr, ok := errors.AsType[*rpc.Error](err); ok {
 		writeError(w, nethttp.StatusBadGateway, rpcErr.Message)
 		return
 	}

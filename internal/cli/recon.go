@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -27,11 +28,112 @@ func runRecon(ctx context.Context, env *Env, args []string) int {
 		return runReconShow(ctx, env, args)
 	case "backtest":
 		return runReconBacktest(ctx, env, args)
+	case "equity":
+		return runReconEquity(ctx, env, args)
 	case "dismiss":
 		return runReconDismiss(ctx, env, args)
 	default:
 		return fail(env, "recon: unknown subcommand %q (try `ibkr recon show`)", sub)
 	}
+}
+
+// runReconEquity renders the statement-derived daily equity series joined
+// with declared capital events (recon.equity) from the daemon's derived
+// history index. Read-only: statements and journals stay the evidence of
+// record.
+func runReconEquity(ctx context.Context, env *Env, args []string) int {
+	fs := flagSet(env, "recon equity")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	since := fs.String("since", "", "inclusive lower boundary: YYYY-MM-DD UTC day or RFC3339 timestamp")
+	until := fs.String("until", "", "upper boundary: YYYY-MM-DD UTC day (whole day included) or RFC3339 timestamp")
+	limit := fs.Int("limit", 0, "max equity days, newest first (default 200, max 1000)")
+	if err := fs.Parse(args); err != nil {
+		return parseExit(err)
+	}
+	if fs.NArg() != 0 {
+		return fail(env, "recon equity: usage is `ibkr recon equity [--since YYYY-MM-DD|RFC3339] [--until YYYY-MM-DD|RFC3339] [--limit N] [--json]`")
+	}
+	params := rpc.ReconEquityParams{
+		Since: strings.TrimSpace(*since),
+		Until: strings.TrimSpace(*until),
+		Limit: *limit,
+	}
+	var res rpc.ReconEquityResult
+	if err := env.Conn.Call(ctx, rpc.MethodReconEquity, params, &res); err != nil {
+		return fail(env, "recon equity: %v", err)
+	}
+	if *jsonOut {
+		return printJSON(env, res)
+	}
+	renderReconEquityText(env, env.Stdout, &res)
+	return 0
+}
+
+// renderReconEquityText prints the newest-first equity-day table with
+// declared capital events interleaved as annotation lines at their place
+// in the timeline, then the two index-health footers (capital journal +
+// statement file set).
+func renderReconEquityText(env *Env, out io.Writer, res *rpc.ReconEquityResult) {
+	header := fmt.Sprintf("Statement equity  %s → %s UTC  %d of %d days",
+		res.Since.UTC().Format("2006-01-02"), res.Until.UTC().Format("2006-01-02"), res.Count, res.TotalCount)
+	if res.Truncated {
+		header += " (truncated; raise --limit)"
+	}
+	fmt.Fprintln(out, header)
+	if len(res.Days) == 0 && len(res.Events) == 0 {
+		fmt.Fprintln(out, "  no statement equity days in this window (statement ingest may still be catching up)")
+	} else {
+		fmt.Fprintf(out, "  %s\n", env.dim(fmt.Sprintf("%-10s  %14s  %s", "DAY", "EQUITY(BASE)", "SOURCE")))
+		events := res.Events // newest first, like Days
+		ei := 0
+		printEventsNewerThan := func(cutoff time.Time) {
+			for ei < len(events) && (cutoff.IsZero() || !events[ei].At.Before(cutoff)) {
+				ev := events[ei]
+				line := fmt.Sprintf("%s  %s %s", ev.At.UTC().Format("2006-01-02 15:04"), ev.Type, formatEquityAmount(ev.AmountBase))
+				if ev.Origin != "" {
+					line += "  " + ev.Origin
+				}
+				if ev.Note != "" {
+					line += "  " + ev.Note
+				}
+				fmt.Fprintf(out, "  %s\n", env.yellow("· "+line))
+				ei++
+			}
+		}
+		for _, day := range res.Days {
+			if dayStart, err := time.ParseInLocation("2006-01-02", day.Day, time.UTC); err == nil {
+				printEventsNewerThan(dayStart.Add(24 * time.Hour))
+			}
+			fmt.Fprintf(out, "  %-10s  %14.2f  %s\n", day.Day, day.EquityBase, env.dim(day.SourceStmt))
+		}
+		printEventsNewerThan(time.Time{})
+		if res.EventsTruncated {
+			fmt.Fprintf(out, "  %s\n", env.dim("older capital events truncated"))
+		}
+	}
+	renderLabeledIndexFooter(env, out, "capital journal", res.Index)
+	renderLabeledIndexFooter(env, out, "statements", res.Statements)
+}
+
+func formatEquityAmount(amount float64) string {
+	if amount == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.2f", amount)
+}
+
+// renderLabeledIndexFooter is renderHistoryIndexFooter with a source
+// label, for results carrying more than one health block.
+func renderLabeledIndexFooter(env *Env, out io.Writer, label string, idx rpc.HistoryIndexHealth) {
+	if behind := idx.JournalBytes - idx.IngestedBytes; behind > 0 {
+		fmt.Fprintf(out, "  %s\n", env.yellow(fmt.Sprintf("%s index catching up: %d bytes behind (rows may be missing)", label, behind)))
+		return
+	}
+	text := label + " index: fully ingested"
+	if !idx.LastIngestAt.IsZero() {
+		text = fmt.Sprintf("%s index: through %s · fully ingested", label, idx.LastIngestAt.UTC().Format("2006-01-02 15:04Z"))
+	}
+	fmt.Fprintf(out, "  %s\n", env.dim(text))
 }
 
 func runReconShow(ctx context.Context, env *Env, args []string) int {
