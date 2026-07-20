@@ -306,10 +306,6 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 	if m.Store == nil {
 		return nil, nil
 	}
-	if !canaryOccurrenceEligible(canary) {
-		return nil, nil
-	}
-	modeBeforeRecord := m.Store.AlertSettings().Mode
 	fp := canary.Fingerprint.Key
 	if fp == "" {
 		fp = canary.Fingerprint.Version + ":" + canary.Action + ":" + string(canary.Severity)
@@ -318,14 +314,24 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 	if m.Now != nil {
 		now = m.Now().UTC()
 	}
-	rec := RedactedRecord(canary, fp, now)
-	rec.Fingerprint = fp
+	account, tradingMode := "", ""
 	if m.TradingStatus != nil {
 		if trading := m.TradingStatus(); trading != nil {
-			rec.Account = trading.Account
-			rec.Mode = trading.Mode
+			account, tradingMode = trading.Account, trading.Mode
 		}
 	}
+	// Every observation, eligible or not, refreshes context stamps and
+	// expires read previous-context history; a failed save only skips this
+	// round's compaction.
+	_ = m.Store.CompactAlertHistory(fp, account, tradingMode, now)
+	if !canaryOccurrenceEligible(canary) {
+		return nil, nil
+	}
+	modeBeforeRecord := m.Store.AlertSettings().Mode
+	rec := RedactedRecord(canary, fp, now)
+	rec.Fingerprint = fp
+	rec.Account = account
+	rec.Mode = tradingMode
 	created, err := m.Store.RecordAlertIfNew(rec)
 	if err != nil {
 		return nil, []state.PushAttempt{{At: now, AlertID: rec.ID, Error: err.Error()}}

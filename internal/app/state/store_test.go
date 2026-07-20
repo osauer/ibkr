@@ -50,6 +50,90 @@ func TestClearAlertHistoryPreservesUnreadAndReportsActualCount(t *testing.T) {
 	}
 }
 
+func TestCompactAlertHistoryExpiresOnlyReadPreviousContext(t *testing.T) {
+	t.Parallel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	// canary-unread-previous records last so it alone holds the unread
+	// (highest) attention sequence after MarkAttentionRead below.
+	records := []AlertRecord{
+		{ID: "canary-current", Fingerprint: "fp-live", CreatedAt: base, Title: "current", Body: "b"},
+		{ID: "canary-previous", Fingerprint: "fp-dead", CreatedAt: base, Title: "previous", Body: "b"},
+		{ID: "stop-mismatch", Fingerprint: "stop-fp", Account: "old-account", CreatedAt: base, Title: "other source", Body: "b"},
+		{ID: "canary-unread-previous", Fingerprint: "fp-dead", CreatedAt: base, Title: "unread previous", Body: "b"},
+	}
+	for _, rec := range records {
+		if err := store.RecordAlert(rec); err != nil {
+			t.Fatalf("RecordAlert(%s): %v", rec.ID, err)
+		}
+	}
+	unreadSeq := store.Attention().HighWaterSeq
+	if _, err := store.MarkAttentionRead(unreadSeq - 1); err != nil {
+		t.Fatalf("MarkAttentionRead: %v", err)
+	}
+	for _, rec := range store.AlertHistory(0) {
+		if rec.AttentionSeq == unreadSeq && rec.ID != "canary-unread-previous" {
+			t.Fatalf("fixture drift: unread seq belongs to %s", rec.ID)
+		}
+	}
+
+	// Within the window nothing expires; matching records get stamped.
+	if err := store.CompactAlertHistory("fp-live", "live-account", "live", base.Add(24*time.Hour)); err != nil {
+		t.Fatalf("CompactAlertHistory: %v", err)
+	}
+	byID := map[string]AlertRecord{}
+	for _, rec := range store.AlertHistory(0) {
+		byID[rec.ID] = rec
+	}
+	if len(byID) != 4 {
+		t.Fatalf("nothing may expire inside the window, got %d records", len(byID))
+	}
+	if byID["canary-current"].LastMatchedAt.IsZero() {
+		t.Fatal("matching record must carry a last-matched stamp")
+	}
+	if !byID["canary-previous"].LastMatchedAt.IsZero() {
+		t.Fatal("mismatched record must not be stamped")
+	}
+	if !byID["stop-mismatch"].LastMatchedAt.IsZero() {
+		t.Fatal("different-account record must not be stamped")
+	}
+
+	// Past the window: read previous-context records expire, the matching
+	// record survives on its refreshed stamp, unread survives regardless.
+	late := base.Add(alertPreviousContextRetention + 48*time.Hour)
+	if err := store.CompactAlertHistory("fp-live", "live-account", "live", late); err != nil {
+		t.Fatalf("CompactAlertHistory late: %v", err)
+	}
+	byID = map[string]AlertRecord{}
+	for _, rec := range store.AlertHistory(0) {
+		byID[rec.ID] = rec
+	}
+	if _, ok := byID["canary-previous"]; ok {
+		t.Fatal("read previous-context record must expire after the window")
+	}
+	if _, ok := byID["stop-mismatch"]; ok {
+		t.Fatal("read different-account record must expire after the window")
+	}
+	if _, ok := byID["canary-current"]; !ok {
+		t.Fatal("still-matching record must never expire")
+	}
+	if _, ok := byID["canary-unread-previous"]; !ok {
+		t.Fatal("unread record must never expire, previous-context or not")
+	}
+
+	// An unknown live context (no fingerprint) expires nothing and keeps
+	// stamping conservative: everything still present stays present.
+	if err := store.CompactAlertHistory("", "", "", late.Add(alertPreviousContextRetention+time.Hour)); err != nil {
+		t.Fatalf("CompactAlertHistory unknown context: %v", err)
+	}
+	if got := len(store.AlertHistory(0)); got != 2 {
+		t.Fatalf("unknown context must not expire records, got %d", got)
+	}
+}
+
 func TestAttentionSnapshotReturnsOrderedAllowlistedRefs(t *testing.T) {
 	t.Parallel()
 	store, err := Open(t.TempDir())

@@ -74,7 +74,15 @@ const (
 )
 
 const (
-	governanceRetention       = 90 * 24 * time.Hour
+	governanceRetention = 90 * 24 * time.Hour
+	// alertPreviousContextRetention expires read alert records that stopped
+	// matching the live context (operator decision 2026-07-20: 14 days).
+	// Unread records and still-matching records never expire.
+	alertPreviousContextRetention = 14 * 24 * time.Hour
+	// alertMatchStampInterval bounds LastMatchedAt refresh writes: matching
+	// is observed on the canary cadence (about once a minute), but a
+	// 14-day retention only needs hourly stamp granularity.
+	alertMatchStampInterval   = time.Hour
 	defaultGovernanceMaxItems = 4096
 )
 
@@ -155,16 +163,21 @@ type PushSubscription struct {
 }
 
 type AlertRecord struct {
-	ID           string    `json:"id"`
-	Fingerprint  string    `json:"fingerprint"`
-	Action       string    `json:"action,omitempty"`
-	Severity     string    `json:"severity,omitempty"`
-	Account      string    `json:"account,omitempty"`
-	Mode         string    `json:"mode,omitempty"`
-	Title        string    `json:"title"`
-	Body         string    `json:"body"`
-	CreatedAt    time.Time `json:"created_at"`
-	AttentionSeq uint64    `json:"attention_seq"`
+	ID          string    `json:"id"`
+	Fingerprint string    `json:"fingerprint"`
+	Action      string    `json:"action,omitempty"`
+	Severity    string    `json:"severity,omitempty"`
+	Account     string    `json:"account,omitempty"`
+	Mode        string    `json:"mode,omitempty"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body"`
+	CreatedAt   time.Time `json:"created_at"`
+	// LastMatchedAt is refreshed while an observed canary still matches this
+	// record's context (fingerprint for canary-source records, account/mode
+	// for all). Previous-context expiry keys on it; records from before the
+	// stamp existed fall back to CreatedAt.
+	LastMatchedAt time.Time `json:"last_matched_at,omitzero"`
+	AttentionSeq  uint64    `json:"attention_seq"`
 }
 
 type PushAttempt struct {
@@ -1746,6 +1759,65 @@ func (s *Store) ClearAlertHistory() (int, error) {
 		return 0, err
 	}
 	return cleared, nil
+}
+
+// CompactAlertHistory refreshes the last-matched stamp on records that still
+// match the observed context and drops read records whose context died more
+// than the retention window ago. Matching mirrors the SPA's staleness rule:
+// only a positive mismatch (a different live canary fingerprint for a
+// canary-source record, or a different stated account/mode) marks a record
+// previous-context; unknown context never expires anything. Unread records
+// never expire — the operator sees evidence before the store forgets it.
+func (s *Store) CompactAlertHistory(canaryFingerprint, account, mode string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now = now.UTC()
+	cutoff := now.Add(-alertPreviousContextRetention)
+	changed := false
+	retained := make([]AlertRecord, 0, len(s.data.AlertHistory))
+	for _, rec := range s.data.AlertHistory {
+		if alertRecordMatchesContext(rec, canaryFingerprint, account, mode) {
+			if rec.LastMatchedAt.IsZero() || now.Sub(rec.LastMatchedAt) >= alertMatchStampInterval {
+				rec.LastMatchedAt = now
+				changed = true
+			}
+			retained = append(retained, rec)
+			continue
+		}
+		read := rec.AttentionSeq == 0 || rec.AttentionSeq <= s.data.AttentionReadThroughSeq
+		lastCurrent := rec.LastMatchedAt
+		if lastCurrent.IsZero() {
+			lastCurrent = rec.CreatedAt
+		}
+		if read && lastCurrent.Before(cutoff) {
+			changed = true
+			continue
+		}
+		retained = append(retained, rec)
+	}
+	if !changed {
+		return nil
+	}
+	prior := s.data.AlertHistory
+	s.data.AlertHistory = retained
+	if err := s.save(); err != nil {
+		s.data.AlertHistory = prior
+		return err
+	}
+	return nil
+}
+
+func alertRecordMatchesContext(rec AlertRecord, canaryFingerprint, account, mode string) bool {
+	if strings.HasPrefix(rec.ID, "canary-") && rec.Fingerprint != "" && canaryFingerprint != "" && rec.Fingerprint != canaryFingerprint {
+		return false
+	}
+	if rec.Account != "" && account != "" && rec.Account != account {
+		return false
+	}
+	if rec.Mode != "" && mode != "" && rec.Mode != mode {
+		return false
+	}
+	return true
 }
 
 func (s *Store) HasAlertFingerprint(fp string) bool {
