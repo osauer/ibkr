@@ -1,7 +1,7 @@
 import { heldStressEvidence, heldStressItems, humanList, marketQuoteErrorLabel, quoteBySymbol, quoteChange, quoteChangePct, quotePrevClose, quotePrice, quoteTime } from "./canary.js";
 import { marketEventFlagsForSymbol, marketFlagRow, renderMarketFlagRail, underlyingHeroMarketFlags } from "./market-events.js";
 import { refreshOpenOrders } from "./orders.js";
-import { $, cleanDetail, compactMoney, displayMoney, firstNumber, hasNumericValue, labelize, mergeCurrency, normalizeCurrency, normalizeSymbol, pct, privacyMask, protectionWriteUnavailableReason, purgeRestoreSettingEnabled, quoteTimestamp, readJSONOrText, renderFreshnessTimestamp, renderSensitiveSignedMoney, renderSensitiveText, riskMoney, sensitiveDisplayMoney, sensitiveMoneyHidden, signedClass, signedDisplayMoney, signedPct } from "./shared.js";
+import { $, cleanDetail, compactMoney, displayMoney, firstNumber, hasNumericValue, labelize, mergeCurrency, normalizeCurrency, normalizeSymbol, pct, privacyMask, protectionWriteUnavailableReason, purgeRestoreSettingEnabled, quoteTimestamp, readJSONOrText, renderFreshnessTimestamp, renderSensitiveAccountId, renderSensitiveSignedMoney, renderSensitiveText, riskMoney, sensitiveDisplayMoney, sensitiveMoneyHidden, signedClass, signedDisplayMoney, signedPct } from "./shared.js";
 import { state } from "./state.js";
 
 function renderAccountPanel(account = {}, positions = {}, canary = {}) {
@@ -23,9 +23,11 @@ function renderAccountPanel(account = {}, positions = {}, canary = {}) {
   renderSensitiveText("buyingPower", compactMoney(account.buying_power, account.base_currency), hasSnapshot && hasNumericValue(account.buying_power));
   renderSensitiveSignedMoney("dailyPnl", account.daily_pnl, account.base_currency);
   renderAccountDailyPnlPct(account);
-  $("accountLabel").textContent = accountContext.accountLabel;
-  $("tradingEnvPill").textContent = accountContext.modeLabel;
-  $("tradingEnvPill").className = "trading-env-pill " + accountContext.modeClass;
+  // The account id is demoted to a quiet subtitle and masked by the eye toggle;
+  // money values are the headline. A placeholder (aggregate/pending) renders
+  // plainly since it is not a sensitive id.
+  renderSensitiveAccountId("accountLabel", accountContext.accountId, accountContext.accountLabel);
+  renderTradingEnvPill(accountContext.modeClass);
   renderFreshnessTimestamp("accountAsOf", account.as_of, { staleMinutes: 15, quietWhenFresh: true });
 
   const button = $("accountPrivacyToggle");
@@ -873,11 +875,40 @@ function currentAccountContext(account = {}) {
     rawStatusAccount.toLowerCase() === "all";
   const visibleAccountLabel = accountLabel || (aggregate ? "Aggregate account" : "Account pending");
   return {
+    // accountId is the concrete broker id (masked by the eye toggle); it is
+    // empty for an aggregate/pending placeholder, which is not sensitive.
+    accountId: accountLabel,
     accountLabel: visibleAccountLabel,
     modeClass: String(modeLabel).toLowerCase().includes("paper") ? "paper" : String(modeLabel).toLowerCase().includes("live") ? "live" : "neutral",
     modeLabel,
     hasAccount: Boolean(accountLabel || aggregate),
   };
+}
+
+// Operator decision: live mode renders NO pill (the safe default is silent);
+// paper mode renders a loud red PAPER pill ("portfolio data is fake"); an
+// unknown/unresolved mode renders a muted "mode?" pill — fail visible, never
+// silently resemble live.
+function renderTradingEnvPill(modeClass) {
+  const pill = $("tradingEnvPill");
+  if (!pill) return;
+  if (modeClass === "live") {
+    pill.hidden = true;
+    pill.textContent = "";
+    pill.className = "trading-env-pill trading-env-pill--live";
+    pill.removeAttribute("title");
+    return;
+  }
+  pill.hidden = false;
+  if (modeClass === "paper") {
+    pill.textContent = "PAPER";
+    pill.className = "trading-env-pill trading-env-pill--paper";
+    pill.title = "Paper trading — portfolio data is not real money.";
+    return;
+  }
+  pill.textContent = "mode?";
+  pill.className = "trading-env-pill trading-env-pill--unknown";
+  pill.title = "Trading environment could not be resolved.";
 }
 
 async function refreshPurgeStatus() {

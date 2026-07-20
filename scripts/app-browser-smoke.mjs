@@ -230,6 +230,28 @@ await context.route(`${baseURL}/api/attention/read`, async (route) => {
     body: JSON.stringify({ high_water_seq: throughSeq, read_through_seq: throughSeq, unread_count: 0, unread_refs: [] }),
   });
 });
+// Second net for the render stamp (see the wrapped-fetch divert init script
+// below): the primary guard is the page-level fetch wrapper because WebKit
+// hides SW-controlled fetches from routing, so this route only fires on engines
+// and windows where routing observes the request. It must never forward.
+await context.route(`${baseURL}/api/brief/seen`, async (route) => {
+  if (route.request().method() !== "POST") {
+    await route.fallback();
+    return;
+  }
+  let kind = "morning";
+  try {
+    const parsed = JSON.parse(route.request().postData() || "{}");
+    if (typeof parsed.kind === "string" && parsed.kind) kind = parsed.kind;
+  } catch {
+    // Malformed body still must not reach the real host.
+  }
+  await route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ ok: true, kind, day: "2026-01-01", already_stamped: false, brief_fingerprint: "smoke-diverted" }),
+  });
+});
 async function attentionReadInterceptedCount(page) {
   const diverted = await page.evaluate(() => globalThis.__ibkrSmoke?.attentionReadDiverted || 0);
   return diverted + attentionReadRouted;
@@ -275,6 +297,7 @@ await context.addInitScript(() => {
     fetches: [],
     openedEvents: 0,
     attentionReadDiverted: 0,
+    briefSeenDiverted: 0,
   };
   const nativeFetch = globalThis.fetch.bind(globalThis);
   globalThis.fetch = async (...fetchArgs) => {
@@ -298,6 +321,27 @@ await context.addInitScript(() => {
       globalThis.__ibkrSmoke.fetches.push({ url, status: 200, diverted: true, at: Date.now() });
       return new Response(
         JSON.stringify({ unread_count: 0, high_water_seq: throughSeq, read_through_seq: throughSeq, unread_refs: [] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (method === "POST" && url.endsWith("/api/brief/seen")) {
+      // The render-stamp is human-only evidence: a QA page that reports itself
+      // visible would stamp the operator's real brief the instant the Brief tab
+      // renders. Divert before any network layer (SW control hides this fetch
+      // from Playwright routing in WebKit, exactly like /api/attention/read) and
+      // answer with a receipt the render-stamp state machine accepts.
+      let kind = "morning";
+      try {
+        const raw = typeof request === "string" ? fetchArgs[1]?.body : await request.clone().text();
+        const parsed = JSON.parse(raw || "{}");
+        if (typeof parsed.kind === "string" && parsed.kind) kind = parsed.kind;
+      } catch {
+        // Malformed body still must not reach the real host.
+      }
+      globalThis.__ibkrSmoke.briefSeenDiverted += 1;
+      globalThis.__ibkrSmoke.fetches.push({ url, status: 200, diverted: true, at: Date.now() });
+      return new Response(
+        JSON.stringify({ ok: true, kind, day: "2026-01-01", already_stamped: false, brief_fingerprint: "smoke-diverted" }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
@@ -547,6 +591,7 @@ async function exerciseAccountPanel(page) {
     accountMenuTogglePresent: !!document.getElementById("accountMenuToggle"),
     accountLabel: document.getElementById("accountLabel")?.textContent?.trim() || "",
     pill: document.getElementById("tradingEnvPill")?.textContent?.trim() || "",
+    pillHidden: !!document.getElementById("tradingEnvPill")?.hidden,
     freshness: document.getElementById("accountAsOf")?.textContent?.trim() || "",
     freshnessQuiet: !!document.getElementById("accountAsOf")?.hidden,
     dailyPnl: document.getElementById("dailyPnl")?.textContent?.trim() || "",
@@ -565,8 +610,14 @@ async function exerciseAccountPanel(page) {
   // Freshness runs quiet-when-fresh: a hidden empty badge is the healthy
   // state; visible text is required only when the badge is shown (stale or
   // missing timestamp).
-  if (!panel.accountLabel || !panel.pill || !panel.dailyPnlPct || panel.riskValues.some((value) => !value)) {
+  if (!panel.accountLabel || !panel.dailyPnlPct || panel.riskValues.some((value) => !value)) {
     throw new Error(`account panel is missing values: ${JSON.stringify(panel)}`);
+  }
+  // Operator decision: the trading-env pill renders nothing in live mode (a
+  // hidden empty pill is correct), a loud PAPER in paper mode, and a muted
+  // "mode?" when the environment is unresolved. Anything else is a bug.
+  if (panel.pillHidden ? panel.pill : !["PAPER", "mode?"].includes(panel.pill)) {
+    throw new Error(`unexpected trading-env pill state: ${JSON.stringify(panel)}`);
   }
   if (!panel.freshnessQuiet && !panel.freshness) {
     throw new Error(`account freshness badge is visible but empty: ${JSON.stringify(panel)}`);
@@ -1447,7 +1498,7 @@ async function exerciseGovernanceFixtures(page) {
   await renderFixture({ patch: {
     sources: { nudges: { state: "current", updated_at: asOf, last_success_at: asOf } },
     nudges: { as_of: asOf, candidates: [], source_health: readyHealth, context: null, confirmed_flow_coverage: { coverage_from: earlier, pre_cutover_flows_unreviewed: false } },
-    brief: { stamp_target: "", brief_fingerprint: "", process: { monthly_pulse: { status: "not_due", month: "2099-01", due_at: later } } },
+    brief: { stamp_target: "", brief_fingerprint: "", ready: { monthly_pulse: { status: "not_due", month: "2099-01", due_at: later } } },
     governance: baseGovernance,
     governanceRefreshSucceeded: true,
   } });
@@ -1468,7 +1519,7 @@ async function exerciseGovernanceFixtures(page) {
       context: { shadow: { count: 2 }, drawdown: { tier: "block", consumed_pct: 0 } },
       confirmed_flow_coverage: { coverage_from: earlier, pre_cutover_flows_unreviewed: true },
     },
-    brief: { stamp_target: "", brief_fingerprint: "", process: { monthly_pulse: { status: "due", month: "2099-01", due_at: earlier } } },
+    brief: { stamp_target: "", brief_fingerprint: "", ready: { monthly_pulse: { status: "due", month: "2099-01", due_at: earlier } } },
     governance: baseGovernance,
   } });
   await page.waitForFunction(() => document.getElementById("governanceCurrentList")?.textContent?.includes("Monthly risk pulse"), { timeout: 5000 });
@@ -1500,7 +1551,7 @@ async function exerciseGovernanceFixtures(page) {
   await renderFixture({ patch: {
     sources: { nudges: { state: "current", updated_at: asOf, last_success_at: asOf } },
     nudges: { candidates: [], source_health: { ...readyHealth, aggregate: "suppressed", pins: { status: "stale", reason: "evidence_stale", as_of: asOf } }, context: { drawdown: { tier: "block", consumed_pct: null } }, confirmed_flow_coverage: { coverage_from: earlier, pre_cutover_flows_unreviewed: false } },
-    brief: { stamp_target: "", brief_fingerprint: "", process: { monthly_pulse: { status: "blocked", month: "2099-01" } } },
+    brief: { stamp_target: "", brief_fingerprint: "", ready: { monthly_pulse: { status: "blocked", month: "2099-01" } } },
     governance: baseGovernance,
   } });
   const blocked = await page.evaluate(() => ({ source: document.getElementById("governanceSourceHealth")?.textContent || "", context: document.getElementById("governanceContext")?.textContent || "", monthly: [...document.querySelectorAll("#briefSections .brief-row")].find((row) => row.querySelector(".brief-row__head b")?.textContent === "Monthly pulse")?.textContent || "" }));
@@ -1509,7 +1560,7 @@ async function exerciseGovernanceFixtures(page) {
   await renderFixture({ patch: {
     sources: { nudges: { state: "current", updated_at: asOf, last_success_at: asOf } },
     nudges: { candidates: [], source_health: readyHealth, context: null, confirmed_flow_coverage: { coverage_from: earlier, pre_cutover_flows_unreviewed: false } },
-    brief: { stamp_target: "", brief_fingerprint: "", process: { monthly_pulse: { status: "completed", month: "2099-01", completed_at: asOf } } },
+    brief: { stamp_target: "", brief_fingerprint: "", ready: { monthly_pulse: { status: "completed", month: "2099-01", completed_at: asOf } } },
   } });
   const completed = await page.evaluate(() => ({ current: document.getElementById("governanceCurrentList")?.textContent || "", monthly: [...document.querySelectorAll("#briefSections .brief-row")].find((row) => row.querySelector(".brief-row__head b")?.textContent === "Monthly pulse")?.textContent || "" }));
   if (!completed.current.includes("No current risk & process nudges") || !completed.monthly.includes("completed this month")) throw new Error(`governance completed fixture is incomplete: ${JSON.stringify(completed)}`);
@@ -1618,7 +1669,7 @@ async function exerciseGovernanceFixtures(page) {
   return { not_due: notDue, due, blocked, completed, failed_push: failedPush, partial_multi_target: partialPush, stale, not_observed: notObserved, unavailable_with_history: unavailable, mutation_fetches: 0 };
 }
 
-// Orders now lives on its own bottom-nav tab (Monitor, Alerts, Orders,
+// Orders lives on its own bottom-nav tab (Monitor, Brief, Alerts, Orders,
 // Settings) rather than an inline <details> panel — visibility is
 // tab-driven, not a per-panel open/closed toggle, and the panel itself is
 // always present once the tab is active (emptiness is signaled by the

@@ -100,20 +100,22 @@ try {
       }
       await page.locator("#underlyingDetailToggle").click();
     }
-    // Let the first snapshot/account events render, then assert the fixture
-    // actually took: the real id must be nowhere, the placeholder visible.
-    await page.waitForFunction(
-      (id) => document.body.innerText.includes(id),
-      FIXTURE.accountID,
-      { timeout: 15000 },
-    );
-    // Balances are privacy-masked (******) by default; the published shots
-    // show the (fixture) figures, so reveal them before capturing.
+    // Balances and the account id are privacy-masked by default (the id now
+    // masks to U•••••NN under the same eye toggle); the published shots show the
+    // (fixture) figures, so reveal them first — and the id-visible assertion
+    // below depends on the id being unmasked.
     await page.locator("#accountPrivacyToggle").click();
     await page.waitForFunction(() => {
       const text = document.getElementById("netLiquidation")?.textContent?.trim();
       return Boolean(text) && text !== "******" && text !== "--";
     }, { timeout: 5000 });
+    // With balances (and the id) revealed, assert the fixture actually took:
+    // the fixture id is visible and no real id leaked.
+    await page.waitForFunction(
+      (id) => document.body.innerText.includes(id),
+      FIXTURE.accountID,
+      { timeout: 15000 },
+    );
     if (synthetic) {
       await assertSyntheticRender(page);
       await page.evaluate(() => {
@@ -139,6 +141,17 @@ try {
         png: await page.screenshot(),
         viewport: shot.viewport,
       });
+      // Brief-tab shot: the daily brief now lives on its own tab, so the
+      // published gallery gains a second synthetic frame showing it.
+      await page.locator("#tabBrief").click();
+      await page.waitForSelector("#briefTab:not([hidden]) #briefSections .brief-section", { state: "visible", timeout: 5000 });
+      pendingSyntheticShots.push({
+        out: out.replace(/\.png$/i, "-brief.png"),
+        png: await page.screenshot(),
+        viewport: shot.viewport,
+      });
+      await page.locator("#tabMonitor").click();
+      await page.waitForSelector("#dashboard:not([hidden])", { timeout: 5000 });
     } else {
       await page.screenshot({ path: out });
       console.log(`app-screenshots: wrote ${out} (${shot.viewport.width}x${shot.viewport.height}@2x)`);
@@ -154,9 +167,13 @@ try {
 }
 
 async function assertSyntheticRender(page) {
-  const expectedHeadings = ["A Market", "B Calendar", "C Portfolio", "D Risk & limits", "E Process"];
+  const expectedHeadings = ["Review", "Ready"];
   const expectedNetLiquidation = compactFixtureMoney(FIXTURE.netLiquidation, "EUR");
 
+  // The daily brief lives on its own bottom tab now: switch to it, assert the
+  // two process movements render, then return to Monitor for the hero shot.
+  await page.locator("#tabBrief").click();
+  await page.waitForSelector("#briefTab:not([hidden])", { timeout: 5000 });
   await page.waitForSelector("#briefPanel:not([hidden])", { timeout: 5000 });
   await page.waitForFunction(
     (headings) => {
@@ -167,6 +184,9 @@ async function assertSyntheticRender(page) {
     expectedHeadings,
     { timeout: 5000 },
   );
+  await page.locator("#tabMonitor").click();
+  await page.waitForSelector("#dashboard:not([hidden])", { timeout: 5000 });
+
   await page.waitForFunction(
     (expected) => document.getElementById("netLiquidation")?.textContent?.trim() === expected,
     expectedNetLiquidation,
@@ -1001,39 +1021,32 @@ function buildSyntheticSnapshot() {
     brief: {
       as_of: asOf,
       brief_fingerprint: "synthetic-brief-quiet",
-      market: {
-        ...briefState("Market inputs are fresh and quiet."),
+      review: {
+        ...briefState("Last session closed clean."),
+        session_pnl: { ...briefState("Account snapshot is fresh."), equity_base: FIXTURE.netLiquidation, daily_pnl_base: FIXTURE.dailyPnl, base_currency: baseCurrency, as_of: asOf },
+        attribution: { ...briefState("Position-level daily P/L is orderly."), rows: [{ symbol: "AAPL", daily_pnl_base: 900 }, { symbol: "NVDA", daily_pnl_base: 800.4 }, { symbol: "SPY", daily_pnl_base: 639.6 }] },
+        rules_delta: { ...briefState("No rule transitions."), baseline_at: at(-day), transitions: [], added: [], removed: [], rulebook_fingerprint_changed: false, baseline_fingerprint: "synthetic-rulebook-quiet", current_fingerprint: "synthetic-rulebook-quiet" },
+        proposals: { ...briefState("2 offered, 1 acted in the last recorded session."), day: "synthetic", offered: 2, acted: 1 },
+        overrides: { ...briefState("No overrides used."), rows: [] },
+        capital_events: { ...briefState("No capital events this session; adjusted-peak provenance shown."), latched: false, adjusted_peak_base: 1_275_000, peak_as_of: at(-day), base_currency: baseCurrency },
+        reconcile: { ...briefState("Reconciliation is comfortably inside its window."), last_reconciled_at: at(-day), source: "synthetic clean report", deadline: at(5 * day), days_remaining: 5 },
+        auto_extend: { ...briefState("No extension is needed."), report_id: "synthetic-clean", at: asOf },
+        one_tap: { ...briefState("No exception sign-off is pending."), report_id: "", signable: false, blockers: [] },
+        working_orders: { ...briefState("No working orders."), count: 0 },
+      },
+      ready: {
+        ...briefState("Desk is ready for the open."),
         regime: { ...briefState("No stress lifecycle is active."), stage: "quiet", verdict: "Normal regime" },
         breadth: { ...briefState("Participation is broad."), pct_above_50dma: 62, pct_above_200dma: 58, net_new_highs_pct: 1.4, as_of: asOf, data_type: "live" },
         gamma: { ...briefState("Dealer positioning is dampening."), spot: 620, zero_gamma: 607, gap_pct: 2.14, gamma_sign: "positive", as_of: asOf },
         canary: { ...briefState("No defensive action."), action: "stand down", severity: "observe", summary: "Quiet desk" },
-      },
-      calendar: {
-        ...briefState("No held-name calendar exceptions."),
         session: { ...briefState("Regular session context."), market: "US", state: "regular", is_open: true, open: at(-2 * hour), close: at(4 * hour), next_open: at(22 * hour) },
         market_events: [{ ...briefState("No held-name market events."), kind: "earnings", count: 0, symbols: [] }],
-      },
-      portfolio: {
-        ...briefState("The book is modest relative to account equity."),
-        account: { ...briefState("Account snapshot is fresh."), equity_base: FIXTURE.netLiquidation, daily_pnl_base: FIXTURE.dailyPnl, base_currency: baseCurrency, as_of: asOf },
-        movers: { ...briefState("Position-level daily P/L is orderly."), rows: [{ symbol: "AAPL", daily_pnl_base: 900 }, { symbol: "NVDA", daily_pnl_base: 800.4 }, { symbol: "SPY", daily_pnl_base: 639.6 }] },
-        premium_at_risk: { ...briefState("Option premium at risk is contained."), amount_base: 1_564, base_currency: baseCurrency, included_legs: 1, excluded_legs: 0 },
-        hedge_cost: { ...briefState("Hedge carry is modest."), amount_base: -18.4, base_currency: baseCurrency, included_legs: 1, excluded_legs: 0 },
-        working_orders: { ...briefState("No working orders."), count: 0 },
-      },
-      risk_limits: {
-        ...briefState("Risk capital is comfortably inside limits."),
         capital: { ...briefState("No drawdown warning."), tier: "normal", enforcement: "open", consumed_pct: 2, drawdown_base: 25_000, adjusted_peak_base: 1_275_000, base_currency: baseCurrency },
         latch: { ...briefState("Drawdown latch is open."), latched: false },
-        overrides: { ...briefState("No active overrides."), rows: [] },
+        premium_at_risk: { ...briefState("Option premium at risk is contained."), amount_base: 1_564, base_currency: baseCurrency, included_legs: 1, excluded_legs: 0 },
+        hedge_cost: { ...briefState("Hedge carry is modest."), amount_base: -18.4, base_currency: baseCurrency, included_legs: 1, excluded_legs: 0 },
         policy_drift: { ...briefState("Policy pins match."), rows: [] },
-      },
-      process: {
-        ...briefState("Routine process clocks are current."),
-        reconcile: { ...briefState("Reconciliation is comfortably inside its window."), last_reconciled_at: at(-day), source: "synthetic clean report", deadline: at(5 * day), days_remaining: 5 },
-        auto_extend: { ...briefState("No extension is needed."), report_id: "synthetic-clean", at: asOf },
-        one_tap: { ...briefState("No exception sign-off is pending."), report_id: "", signable: false, blockers: [] },
-        rules_delta: { ...briefState("No rule transitions."), baseline_at: at(-day), transitions: [], added: [], removed: [], rulebook_fingerprint_changed: false, baseline_fingerprint: "synthetic-rulebook-quiet", current_fingerprint: "synthetic-rulebook-quiet" },
         artefacts: { ...briefState("Scheduled artefacts are current."), rows: [{ ...briefState("Morning artefact complete."), kind: "morning", cadence: "daily", declared: true, completed: true, completed_at: asOf }] },
       },
     },

@@ -53,13 +53,13 @@ function installSmokeHooks() {
       brief: snapshotPatch.brief ? {
         ...(current.brief || {}),
         ...snapshotPatch.brief,
-        process: snapshotPatch.brief.process ? {
-          ...(current.brief?.process || {}),
-          ...snapshotPatch.brief.process,
-          monthly_pulse: Object.prototype.hasOwnProperty.call(snapshotPatch.brief.process, "monthly_pulse")
-            ? snapshotPatch.brief.process.monthly_pulse
-            : current.brief?.process?.monthly_pulse,
-        } : current.brief?.process,
+        ready: snapshotPatch.brief.ready ? {
+          ...(current.brief?.ready || {}),
+          ...snapshotPatch.brief.ready,
+          monthly_pulse: Object.prototype.hasOwnProperty.call(snapshotPatch.brief.ready, "monthly_pulse")
+            ? snapshotPatch.brief.ready.monthly_pulse
+            : current.brief?.ready?.monthly_pulse,
+        } : current.brief?.ready,
       } : current.brief,
     };
     if (Object.prototype.hasOwnProperty.call(patch, "governance")) state.governance = governance;
@@ -79,7 +79,7 @@ async function main() {
   setupAttentionVisibility();
   await navigator.serviceWorker?.register("/service-worker.js");
   const params = new URLSearchParams(location.search);
-  const launchTab = ["monitor", "alerts"].includes(params.get("tab")) ? params.get("tab") : "";
+  const launchTab = ["monitor", "brief", "alerts"].includes(params.get("tab")) ? params.get("tab") : "";
   const pair = params.get("pair");
   const nonce = params.get("nonce");
   const remote = params.get("remote");

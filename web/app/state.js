@@ -75,7 +75,7 @@ const state = {
 };
 
 function normalizedTab(tab) {
-  if (tab === "alerts" || tab === "orders" || tab === "settings") return tab;
+  if (tab === "brief" || tab === "alerts" || tab === "orders" || tab === "settings") return tab;
   return "monitor";
 }
 

@@ -199,6 +199,38 @@ function renderSensitiveText(id, value, hasValue) {
   el.textContent = value;
 }
 
+// The account id is the one sensitive string the eye toggle also masks. Unlike
+// money values (fully hidden as "******"), an id keeps its first and last two
+// characters — the operator still recognizes which account is shown, without
+// the full identifier sitting on screen or in a screenshot.
+function maskAccountId(id) {
+  const value = String(id || "").trim();
+  if (!value) return "";
+  if (value.length <= 3) return `${value[0]}•••••`;
+  return `${value[0]}•••••${value.slice(-2)}`;
+}
+
+// renderSensitiveAccountId mirrors renderSensitiveText, but hides the account id
+// with the id-preserving mask instead of the full money mask. A placeholder
+// (e.g. "Aggregate account") is not a sensitive id and renders as-is.
+function renderSensitiveAccountId(elementId, accountId, placeholder = "--") {
+  const el = $(elementId);
+  if (!el) return;
+  const id = String(accountId || "").trim();
+  if (!id) {
+    el.classList.remove("is-private");
+    el.textContent = placeholder || "--";
+    return;
+  }
+  if (!state.accountValueVisible) {
+    el.classList.add("is-private");
+    el.textContent = maskAccountId(id);
+    return;
+  }
+  el.classList.remove("is-private");
+  el.textContent = id;
+}
+
 function sensitiveMoney(value, currency) {
   if (!hasNumericValue(value)) return "--";
   return state.accountValueVisible ? money(value, currency) : privacyMask();
@@ -354,4 +386,4 @@ function shortTimeWithZone(value) {
   });
 }
 
-export { $, ageLabel, blockerText, cleanDetail, compactMoney, compactWholeMoney, currentSettings, displayMoney, firstNumber, hasNumericValue, labelize, mergeCurrency, money, normalizeCurrency, normalizeSymbol, numberRead, parseDate, pct, privacyMask, protectionWriteConfirmation, protectionWriteConfirmationLabel, protectionWriteUnavailableReason, purgeRestoreSettingEnabled, quoteTimestamp, readJSONOrText, renderFreshnessTimestamp, renderSensitiveSignedMoney, renderSensitiveText, riskMoney, sensitiveDisplayMoney, sensitiveMoney, sensitiveMoneyHidden, setMetricTone, shortPreviewMessage, shortPreviewTokenID, shortTime, shortTimeWithZone, signedClass, signedDisplayMoney, signedMoneyRead, signedPct, signedTone, stockProtectionSettingEnabled, wholePct };
+export { $, ageLabel, blockerText, cleanDetail, compactMoney, compactWholeMoney, currentSettings, displayMoney, firstNumber, hasNumericValue, labelize, maskAccountId, mergeCurrency, money, normalizeCurrency, normalizeSymbol, numberRead, parseDate, pct, privacyMask, protectionWriteConfirmation, protectionWriteConfirmationLabel, protectionWriteUnavailableReason, purgeRestoreSettingEnabled, quoteTimestamp, readJSONOrText, renderFreshnessTimestamp, renderSensitiveAccountId, renderSensitiveSignedMoney, renderSensitiveText, riskMoney, sensitiveDisplayMoney, sensitiveMoney, sensitiveMoneyHidden, setMetricTone, shortPreviewMessage, shortPreviewTokenID, shortTime, shortTimeWithZone, signedClass, signedDisplayMoney, signedMoneyRead, signedPct, signedTone, stockProtectionSettingEnabled, wholePct };

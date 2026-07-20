@@ -23,12 +23,12 @@ function setupBriefVisibility() {
     briefStampArmed = true;
     renderBriefCard(state.snapshot || {});
   });
-  const dashboard = $("dashboard");
-  if (dashboard && typeof MutationObserver !== "undefined") {
+  const briefTab = $("briefTab");
+  if (briefTab && typeof MutationObserver !== "undefined") {
     const tabObserver = new MutationObserver(() => {
-      if (!dashboard.hidden && state.activeTab === "monitor") renderBriefCard(state.snapshot || {});
+      if (!briefTab.hidden && state.activeTab === "brief") renderBriefCard(state.snapshot || {});
     });
-    tabObserver.observe(dashboard, { attributes: true, attributeFilter: ["hidden"] });
+    tabObserver.observe(briefTab, { attributes: true, attributeFilter: ["hidden"] });
   }
 }
 
@@ -49,11 +49,8 @@ function renderBriefCard(snap = state.snapshot || {}) {
 
   $("briefAsOf").textContent = dateTimeValue(brief.as_of);
   $("briefSections").replaceChildren(
-    renderMarketSection(brief.market || {}),
-    renderCalendarSection(brief.calendar || {}, snap.sources || {}),
-    renderPortfolioSection(brief.portfolio || {}),
-    renderRiskSection(brief.risk_limits || {}),
-    renderProcessSection(brief.process || {}, brief),
+    renderReviewSection(brief.review || {}, brief),
+    renderReadySection(brief.ready || {}, snap.sources || {}),
   );
   renderBriefAckStatus(brief);
   scheduleBriefStamp(brief);
@@ -81,8 +78,44 @@ function renderBriefSource(source = {}) {
   banner.replaceChildren(label, detail);
 }
 
-function renderMarketSection(section) {
-  return briefSection("A", "Market", section, [
+const SVG_NS = "http://www.w3.org/2000/svg";
+// House-style 24×24 phase glyphs (stroke via CSS): a sunrise for the pre-trade
+// Ready movement, a history clock for the post-trade Review movement.
+const REVIEW_ICON = ["M12 7v5l3 2", "M5.2 8.5A7.5 7.5 0 1 1 4.5 12", "M4.5 7.5v3.2h3.2"];
+const READY_ICON = ["M4 17h16", "M8.5 17a3.5 3.5 0 0 1 7 0", "M12 10V7", "M6.8 11.8 5 10", "M17.2 11.8 19 10"];
+
+// Review — post-trade of the last completed session. Rows are rendered
+// verbatim from the daemon-composed movement.
+function renderReviewSection(section, brief) {
+  const account = section.session_pnl || {};
+  const currency = account.base_currency || "";
+  const rows = [
+    briefRow("Session P/L", account, joinValues(
+      moneyValue(account, "equity_base", currency, "Equity"),
+      moneyValue(account, "daily_pnl_base", currency, "Daily P/L"),
+    )),
+    briefRow("By underlying", section.attribution, moversValue(section.attribution, currency)),
+    briefRow("Rules delta", section.rules_delta, rulesDeltaValue(section.rules_delta || {})),
+    briefRow("Proposals", section.proposals, proposalsValue(section.proposals || {})),
+    briefRow("Overrides used", section.overrides, (section.overrides?.rows || []).map((row) => joinValues(row.control, dateTimeValue(row.expires_at))).join(" · ")),
+    briefRow("Capital events", section.capital_events, capitalEventsValue(section.capital_events || {})),
+    briefRow("Reconcile", section.reconcile, joinValues(
+      dateTimeValue(section.reconcile?.last_reconciled_at),
+      section.reconcile?.source,
+      section.reconcile?.deadline ? `due ${dateValue(section.reconcile.deadline)}` : "",
+      integerValue(section.reconcile, "days_remaining", "Days remaining"),
+    )),
+    briefRow("Auto-extend", section.auto_extend, joinValues(section.auto_extend?.report_id, dateTimeValue(section.auto_extend?.at))),
+    renderOneTapRow(section.one_tap || {}, brief, section.rules_delta || {}),
+    briefRow("Working orders", section.working_orders, integerValue(section.working_orders, "count", "Count")),
+  ];
+  return briefSection(REVIEW_ICON, "Review", section, rows, "brief-section--review");
+}
+
+// Ready — pre-trade for today.
+function renderReadySection(section, sources = {}) {
+  const capital = section.capital || {};
+  const rows = [
     briefRow("Regime", section.regime, joinValues(section.regime?.stage, section.regime?.verdict)),
     briefRow("Breadth", section.breadth, joinValues(
       percentValue(section.breadth, "pct_above_50dma", "50-DMA"),
@@ -97,11 +130,6 @@ function renderMarketSection(section) {
       fieldValue(section.gamma, "gamma_sign", "Sign"),
     )),
     briefRow("Canary", section.canary, joinValues(...canaryHeadline(section.canary), section.canary?.summary)),
-  ]);
-}
-
-function renderCalendarSection(section, sources = {}) {
-  const rows = [
     briefRow("Session", section.session, joinValues(section.session?.market, section.session?.state)),
   ];
   const events = section.market_events || [];
@@ -118,7 +146,33 @@ function renderCalendarSection(section, sources = {}) {
       )));
     }
   }
-  return briefSection("B", "Calendar", section, rows);
+  rows.push(
+    briefRow("Capital", capital, joinValues(
+      fieldValue(capital, "tier", "Tier"),
+      fieldValue(capital, "enforcement", "Enforcement"),
+      percentValue(capital, "consumed_pct", "Consumed"),
+      moneyValue(capital, "drawdown_base", capital.base_currency, "Drawdown"),
+      moneyValue(capital, "adjusted_peak_base", capital.base_currency, "Adjusted peak"),
+      capital.peak_as_of ? `peak set ${dateTimeValue(capital.peak_as_of)}` : "",
+    )),
+    briefRow("Drawdown latch", section.latch, joinValues(
+      hasField(section.latch, "latched") ? (section.latch.latched ? "latched" : "open") : "",
+      latchAgeValue(section.latch),
+      percentValue(section.latch, "consumed_pct_at_latch", "Engaged at"),
+      dateValue(section.latch?.latched_at),
+    )),
+    briefRow("Premium at risk", section.premium_at_risk, moneyCoverageValue(section.premium_at_risk)),
+    briefRow("Hedge cost / day", section.hedge_cost, moneyCoverageValue(section.hedge_cost)),
+    briefRow("Policy drift", section.policy_drift, (section.policy_drift?.rows || []).map((row) => joinValues(row.policy, row.status, row.live_id, row.live_version)).join(" · ")),
+  );
+  if (Object.prototype.hasOwnProperty.call(section, "monthly_pulse") && section.monthly_pulse) {
+    rows.push(renderMonthlyPulseRow(section.monthly_pulse));
+  }
+  rows.push(briefRow("Artefacts", section.artefacts, null));
+  for (const artefact of section.artefacts?.rows || []) {
+    rows.push(briefRow(`Artefact · ${artefact.kind || "--"}`, artefact, artefactValue(artefact), "brief-row--nested"));
+  }
+  return briefSection(READY_ICON, "Ready", section, rows, "brief-section--ready");
 }
 
 function heldNameEventsUnavailable(sources) {
@@ -136,63 +190,22 @@ function canaryHeadline(canary = {}) {
   return [action, `severity ${severity}`];
 }
 
-function renderPortfolioSection(section) {
-  const account = section.account || {};
-  const currency = account.base_currency || "";
-  return briefSection("C", "Portfolio", section, [
-    briefRow("Account", account, joinValues(
-      moneyValue(account, "equity_base", currency, "Equity"),
-      moneyValue(account, "daily_pnl_base", currency, "Daily P/L"),
-    )),
-    briefRow("Movers", section.movers, moversValue(section.movers, currency)),
-    briefRow("Premium at risk", section.premium_at_risk, moneyCoverageValue(section.premium_at_risk)),
-    briefRow("Hedge cost / day", section.hedge_cost, moneyCoverageValue(section.hedge_cost)),
-    briefRow("Working orders", section.working_orders, integerValue(section.working_orders, "count", "Count")),
-  ]);
+function proposalsValue(row = {}) {
+  return joinValues(
+    integerValue(row, "offered", "Offered"),
+    integerValue(row, "acted", "Acted"),
+    row.day || "",
+  );
 }
 
-function renderRiskSection(section) {
-  const capital = section.capital || {};
-  return briefSection("D", "Risk & limits", section, [
-    briefRow("Capital", capital, joinValues(
-      fieldValue(capital, "tier", "Tier"),
-      fieldValue(capital, "enforcement", "Enforcement"),
-      percentValue(capital, "consumed_pct", "Consumed"),
-      moneyValue(capital, "drawdown_base", capital.base_currency, "Drawdown"),
-      moneyValue(capital, "adjusted_peak_base", capital.base_currency, "Adjusted peak"),
-      capital.peak_as_of ? `peak set ${dateTimeValue(capital.peak_as_of)}` : "",
-    )),
-    briefRow("Drawdown latch", section.latch, joinValues(
-      hasField(section.latch, "latched") ? (section.latch.latched ? "latched" : "open") : "",
-      latchAgeValue(section.latch),
-      percentValue(section.latch, "consumed_pct_at_latch", "Engaged at"),
-      dateValue(section.latch?.latched_at),
-    )),
-    briefRow("Active overrides", section.overrides, (section.overrides?.rows || []).map((row) => joinValues(row.control, dateTimeValue(row.expires_at))).join(" · ")),
-    briefRow("Policy drift", section.policy_drift, (section.policy_drift?.rows || []).map((row) => joinValues(row.policy, row.status, row.live_id, row.live_version)).join(" · ")),
-  ]);
-}
-
-function renderProcessSection(section, brief) {
-  const rows = [
-    briefRow("Reconcile", section.reconcile, joinValues(
-      dateTimeValue(section.reconcile?.last_reconciled_at),
-      section.reconcile?.source,
-      section.reconcile?.deadline ? `due ${dateValue(section.reconcile.deadline)}` : "",
-      integerValue(section.reconcile, "days_remaining", "Days remaining"),
-    )),
-    briefRow("Auto-extend", section.auto_extend, joinValues(section.auto_extend?.report_id, dateTimeValue(section.auto_extend?.at))),
-    renderOneTapRow(section.one_tap || {}, brief, section.rules_delta || {}),
-    briefRow("Rules delta", section.rules_delta, rulesDeltaValue(section.rules_delta || {})),
-  ];
-  if (Object.prototype.hasOwnProperty.call(section, "monthly_pulse") && section.monthly_pulse) {
-    rows.push(renderMonthlyPulseRow(section.monthly_pulse));
-  }
-  rows.push(briefRow("Artefacts", section.artefacts, null));
-  for (const artefact of section.artefacts?.rows || []) {
-    rows.push(briefRow(`Artefact · ${artefact.kind || "--"}`, artefact, artefactValue(artefact), "brief-row--nested"));
-  }
-  return briefSection("E", "Process", section, rows, "brief-section--process");
+function capitalEventsValue(row = {}) {
+  return joinValues(
+    hasField(row, "latched") ? (row.latched ? "latched" : "no latch") : "",
+    latchAgeValue(row, "latch_age_days"),
+    percentValue(row, "consumed_pct_at_latch", "Engaged at"),
+    moneyValue(row, "adjusted_peak_base", row.base_currency, "Adjusted peak"),
+    row.peak_as_of ? `peak set ${dateTimeValue(row.peak_as_of)}` : "",
+  );
 }
 
 function renderMonthlyPulseRow(monthly) {
@@ -223,13 +236,29 @@ function artefactValue(artefact) {
   return artefact.cadence === "weekly" ? "not yet completed this week" : "not yet completed today";
 }
 
-function briefSection(letter, title, section, rows, className = "") {
+function phaseIcon(paths) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("class", "brief-section__icon");
+  for (const d of paths) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+function briefSection(iconPaths, title, section, rows, className = "") {
   const el = document.createElement("section");
   el.className = `brief-section ${className}`.trim();
   const head = document.createElement("div");
   head.className = "brief-section__head";
   const heading = document.createElement("h3");
-  heading.textContent = `${letter} ${title}`;
+  heading.append(phaseIcon(iconPaths));
+  const titleText = document.createElement("span");
+  titleText.textContent = title;
+  heading.append(titleText);
   head.append(heading, statusBadge(section?.status));
   const detail = document.createElement("p");
   detail.className = "brief-section__detail";
@@ -345,7 +374,7 @@ function signoffOutcome(fingerprint, reportID) {
 
 function scheduleBriefStamp(brief) {
   const fingerprint = String(brief?.brief_fingerprint || "");
-  if (brief?.stamp_target === "monthly" && !brief?.process?.monthly_pulse?.month) return;
+  if (brief?.stamp_target === "monthly" && !brief?.ready?.monthly_pulse?.month) return;
   if (!briefStampArmed || briefStampScheduled || briefStampInFlight || !brief?.stamp_target || !fingerprint || attemptedStampFingerprints.has(fingerprint) || pendingStampFingerprints.has(fingerprint)) return;
   if (!briefStampVisible()) return;
   const look = briefStampLook;
@@ -364,7 +393,7 @@ function scheduleBriefStamp(brief) {
 
 function briefStampVisible() {
   const panel = $("briefPanel");
-  return state.authenticated === true && state.activeTab === "monitor" && panel && !panel.hidden && document.visibilityState === "visible";
+  return state.authenticated === true && state.activeTab === "brief" && panel && !panel.hidden && document.visibilityState === "visible";
 }
 
 async function acknowledgeBrief(brief, fingerprint, look) {
@@ -390,7 +419,7 @@ async function acknowledgeBrief(brief, fingerprint, look) {
 function briefAckBody(brief, fingerprint) {
   const body = { kind: brief.stamp_target, brief_fingerprint: fingerprint };
   if (brief.stamp_target === "monthly") {
-    body.month = brief.process?.monthly_pulse?.month || "";
+    body.month = brief.ready?.monthly_pulse?.month || "";
     body.evidence = "render";
   }
   return body;
@@ -432,9 +461,9 @@ function statusClass(status) {
   return ["ok", "attention", "degraded", "unavailable"].includes(normalized) ? `brief-status--${normalized}` : "";
 }
 
-function latchAgeValue(latch = {}) {
-  if (!hasField(latch, "age_days") || !Number.isFinite(latch.age_days)) return "";
-  const days = Math.trunc(latch.age_days);
+function latchAgeValue(latch = {}, key = "age_days") {
+  if (!hasField(latch, key) || !Number.isFinite(latch[key])) return "";
+  const days = Math.trunc(latch[key]);
   return `Age ${days} ${days === 1 ? "day" : "days"}`;
 }
 

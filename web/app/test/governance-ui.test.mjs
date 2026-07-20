@@ -92,7 +92,7 @@ function loadBrief() {
   };
   const state = {
     authenticated: true,
-    activeTab: "monitor",
+    activeTab: "brief",
     snapshot: null,
   };
   const context = vm.createContext({
@@ -105,6 +105,7 @@ function loadBrief() {
       visibilityState: "visible",
       addEventListener() {},
       createElement: () => new FakeElement(),
+      createElementNS: () => new FakeElement(),
     },
     MutationObserver: undefined,
     state,
@@ -433,7 +434,7 @@ test("monthly foreground-render scheduling sends one exact authenticated acknowl
   const monthlyBrief = (fingerprint) => ({
     stamp_target: "monthly",
     brief_fingerprint: fingerprint,
-    process: { monthly_pulse: { month: "2026-07", status: "due" } },
+    ready: { monthly_pulse: { month: "2026-07", status: "due" } },
   });
   for (const fixture of [
     { body: { ok: true, kind: "monthly", already_stamped: false }, ok: true, copy: "foreground render recorded" },
@@ -465,7 +466,7 @@ test("monthly foreground-render scheduling sends one exact authenticated acknowl
   }
 
   const morning = loadBrief();
-  const brief = { stamp_target: "morning", brief_fingerprint: "sha256:morning", process: {} };
+  const brief = { stamp_target: "morning", brief_fingerprint: "sha256:morning", ready: {} };
   morning.state.snapshot = { brief };
   const calls = [];
   morning.context.fetch = async (url, init = {}) => {

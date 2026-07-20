@@ -14,12 +14,20 @@ func TestBriefCardStaticContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := string(htmlData)
+	// The brief lives on its own tab now: the brief panel must sit inside the
+	// brief tab panel, ahead of the monitor dashboard, not among the monitor
+	// cards. The signal panel stays in the monitor dashboard.
+	briefTabAt := strings.Index(html, `data-tab-panel="brief"`)
 	briefAt := strings.Index(html, `id="briefPanel"`)
+	monitorAt := strings.Index(html, `data-tab-panel="monitor"`)
 	signalAt := strings.Index(html, `id="signalPanel"`)
-	if briefAt < 0 || signalAt < 0 || briefAt > signalAt {
-		t.Fatalf("brief card must be the first monitor card: brief=%d signal=%d", briefAt, signalAt)
+	if briefTabAt < 0 || briefAt < 0 || monitorAt < 0 || signalAt < 0 || briefAt < briefTabAt || briefAt > monitorAt || signalAt < monitorAt {
+		t.Fatalf("brief panel must live inside the brief tab before the monitor dashboard: briefTab=%d brief=%d monitor=%d signal=%d", briefTabAt, briefAt, monitorAt, signalAt)
 	}
-	for _, id := range []string{"briefPanel", "briefAsOf", "briefSourceBanner", "briefSections", "briefAckStatus"} {
+	if !strings.Contains(html, `id="tabBrief"`) || !strings.Contains(html, `data-tab="brief"`) {
+		t.Error("index.html missing the Brief bottom-tab button (#tabBrief / data-tab=\"brief\")")
+	}
+	for _, id := range []string{"briefTab", "briefPanel", "briefAsOf", "briefSourceBanner", "briefSections", "briefAckStatus"} {
 		if !strings.Contains(html, `id="`+id+`"`) {
 			t.Errorf("index.html missing brief id %q", id)
 		}
@@ -31,11 +39,13 @@ func TestBriefCardStaticContract(t *testing.T) {
 	}
 	brief := string(briefData)
 	for _, want := range []string{
-		`renderMarketSection(brief.market || {})`,
-		`renderCalendarSection(brief.calendar || {}, snap.sources || {})`,
-		`renderPortfolioSection(brief.portfolio || {})`,
-		`renderRiskSection(brief.risk_limits || {})`,
-		`renderProcessSection(brief.process || {}, brief)`,
+		`renderReviewSection(brief.review || {}, brief)`,
+		`renderReadySection(brief.ready || {}, snap.sources || {})`,
+		`proposalsValue(section.proposals || {})`,
+		`capitalEventsValue(section.capital_events || {})`,
+		`briefRow("Session P/L", account`,
+		`briefRow("By underlying", section.attribution`,
+		`briefRow("Capital events", section.capital_events`,
 		`dateTimeValue(brief.as_of)`,
 		`percentValue(section.gamma, "gap_pct", "Gap", true)`,
 		`briefRow("Artefacts", section.artefacts, null)`,
@@ -56,14 +66,14 @@ func TestBriefCardStaticContract(t *testing.T) {
 		`fetch("/api/recon/signoff"`,
 		`["ok", "attention", "degraded", "unavailable"]`,
 		`canaryHeadline(section.canary)`,
-		`moversValue(section.movers, currency)`,
+		`moversValue(section.attribution, currency)`,
 		`other_daily_pnl_base`,
 		`fieldValue(capital, "tier", "Tier")`,
 		`fieldValue(capital, "enforcement", "Enforcement")`,
 		`body: JSON.stringify({ report_id: reportID })`,
 		`fetch("/api/brief/seen"`,
 		`body: JSON.stringify(briefAckBody(brief, fingerprint))`,
-		`body.month = brief.process?.monthly_pulse?.month || ""`,
+		`body.month = brief.ready?.monthly_pulse?.month || ""`,
 		`body.evidence = "render"`,
 		`monthlyPulseStatus(monthly)`,
 		`return "not due"`,
@@ -71,7 +81,7 @@ func TestBriefCardStaticContract(t *testing.T) {
 		`return "blocked by policy evidence"`,
 		`foreground render recorded`,
 		`state.authenticated === true`,
-		`state.activeTab === "monitor"`,
+		`state.activeTab === "brief"`,
 		`document.visibilityState === "visible"`,
 		`const attemptedStampFingerprints = new Set()`,
 		`const pendingStampFingerprints = new Set()`,

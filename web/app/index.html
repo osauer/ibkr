@@ -122,7 +122,7 @@
       </section>
 
       <section class="tab-panels" id="tabPanels" hidden>
-      <section class="dashboard tab-panel" id="dashboard" data-tab-panel="monitor" role="tabpanel" aria-labelledby="tabMonitor">
+      <section class="tab-panel tab-panel--brief" id="briefTab" data-tab-panel="brief" role="tabpanel" aria-labelledby="tabBrief" hidden>
         <article class="panel brief-panel" id="briefPanel" hidden>
           <div class="panel-head">
             <span>Daily brief</span>
@@ -132,7 +132,9 @@
           <div class="brief-sections" id="briefSections"></div>
           <p class="brief-receipt" id="briefAckStatus" role="status" hidden></p>
         </article>
+      </section>
 
+      <section class="dashboard tab-panel" id="dashboard" data-tab-panel="monitor" role="tabpanel" aria-labelledby="tabMonitor">
         <article class="panel signal-panel signal-panel--combined" id="signalPanel">
           <div class="panel-head">
             <span>Market &amp; Portfolio</span>
@@ -639,6 +641,16 @@
             <path d="M4 13h3l2-6 4 10 2-5h5"></path>
           </svg>
           <span>Monitor</span>
+        </button>
+        <button class="bottom-tab" id="tabBrief" type="button" data-tab="brief" aria-selected="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 17h16"></path>
+            <path d="M8.5 17a3.5 3.5 0 0 1 7 0"></path>
+            <path d="M12 10V7"></path>
+            <path d="M6.8 11.8 5 10"></path>
+            <path d="M17.2 11.8 19 10"></path>
+          </svg>
+          <span>Brief</span>
         </button>
         <button class="bottom-tab" id="tabAlerts" type="button" data-tab="alerts" aria-selected="false" aria-label="Alerts, no unread alerts">
           <svg viewBox="0 0 24 24" aria-hidden="true">
