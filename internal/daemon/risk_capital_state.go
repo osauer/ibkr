@@ -295,19 +295,22 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 		st.journalScopeRejectionLocked(scope, equityBase, asOf, reason, c, now)
 		return
 	}
+	force := false
+	if st.state.GenesisAt.IsZero() {
+		st.state.GenesisAt = now.UTC()
+		force = true
+	}
 	if st.state.AccountID == "" {
+		// The binding must hit disk immediately: until it persists, a
+		// mis-pinned daemon sharing this state dir could adopt instead.
 		st.state.AccountID = scope.Account
 		st.state.AccountMode = scope.Mode
+		force = true
 		appendRiskPolicyJournal(map[string]any{
 			"version": 1, "at": now.UTC(), "kind": "capital_state_scoped",
 			"account": scope.Account, "account_mode": scope.Mode,
 			"policy_fingerprint": constitutionFingerprint(c),
 		})
-	}
-	force := false
-	if st.state.GenesisAt.IsZero() {
-		st.state.GenesisAt = now.UTC()
-		force = true
 	}
 	st.state.LastEquityBase = equityBase
 	st.state.LastEquityAsOf = asOf
