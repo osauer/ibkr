@@ -1106,34 +1106,47 @@ func cloneBriefResult(in *rpc.BriefResult) *rpc.BriefResult {
 		return nil
 	}
 	out := *in
-	out.Market.Breadth.PctAbove50DMA = cloneValue(in.Market.Breadth.PctAbove50DMA)
-	out.Market.Breadth.PctAbove200DMA = cloneValue(in.Market.Breadth.PctAbove200DMA)
-	out.Market.Breadth.NetNewHighsPct = cloneValue(in.Market.Breadth.NetNewHighsPct)
-	out.Market.Gamma.Spot = cloneValue(in.Market.Gamma.Spot)
-	out.Market.Gamma.ZeroGamma = cloneValue(in.Market.Gamma.ZeroGamma)
-	out.Market.Gamma.GapPct = cloneValue(in.Market.Gamma.GapPct)
-	out.Calendar.MarketEvents = append([]rpc.BriefMarketEventRow(nil), in.Calendar.MarketEvents...)
-	for i := range out.Calendar.MarketEvents {
-		out.Calendar.MarketEvents[i].Symbols = append([]string(nil), in.Calendar.MarketEvents[i].Symbols...)
+
+	// Review movement (post-trade).
+	out.Review.SessionPnL.EquityBase = cloneValue(in.Review.SessionPnL.EquityBase)
+	out.Review.SessionPnL.DailyPnLBase = cloneValue(in.Review.SessionPnL.DailyPnLBase)
+	out.Review.Attribution.Rows = append([]rpc.BriefMover(nil), in.Review.Attribution.Rows...)
+	out.Review.Attribution.OtherPnLBase = cloneValue(in.Review.Attribution.OtherPnLBase)
+	out.Review.RulesDelta.Transitions = append([]rpc.BriefRuleTransition(nil), in.Review.RulesDelta.Transitions...)
+	out.Review.RulesDelta.Added = append([]string(nil), in.Review.RulesDelta.Added...)
+	out.Review.RulesDelta.Removed = append([]string(nil), in.Review.RulesDelta.Removed...)
+	out.Review.Overrides.Rows = append([]rpc.BriefOverride(nil), in.Review.Overrides.Rows...)
+	out.Review.CapitalEvents.LatchAgeDays = cloneValue(in.Review.CapitalEvents.LatchAgeDays)
+	out.Review.CapitalEvents.ConsumedPctAtLatch = cloneValue(in.Review.CapitalEvents.ConsumedPctAtLatch)
+	out.Review.CapitalEvents.AdjustedPeakBase = cloneValue(in.Review.CapitalEvents.AdjustedPeakBase)
+	out.Review.Reconcile.DaysRemaining = cloneValue(in.Review.Reconcile.DaysRemaining)
+	out.Review.OneTap.Blockers = append([]string(nil), in.Review.OneTap.Blockers...)
+	out.Review.WorkingOrders.Count = cloneValue(in.Review.WorkingOrders.Count)
+
+	// Ready movement (pre-trade).
+	out.Ready.Breadth.PctAbove50DMA = cloneValue(in.Ready.Breadth.PctAbove50DMA)
+	out.Ready.Breadth.PctAbove200DMA = cloneValue(in.Ready.Breadth.PctAbove200DMA)
+	out.Ready.Breadth.NetNewHighsPct = cloneValue(in.Ready.Breadth.NetNewHighsPct)
+	out.Ready.Gamma.Spot = cloneValue(in.Ready.Gamma.Spot)
+	out.Ready.Gamma.ZeroGamma = cloneValue(in.Ready.Gamma.ZeroGamma)
+	out.Ready.Gamma.GapPct = cloneValue(in.Ready.Gamma.GapPct)
+	out.Ready.MarketEvents = append([]rpc.BriefMarketEventRow(nil), in.Ready.MarketEvents...)
+	for i := range out.Ready.MarketEvents {
+		out.Ready.MarketEvents[i].Symbols = append([]string(nil), in.Ready.MarketEvents[i].Symbols...)
 	}
-	out.Portfolio.Account.EquityBase = cloneValue(in.Portfolio.Account.EquityBase)
-	out.Portfolio.Account.DailyPnLBase = cloneValue(in.Portfolio.Account.DailyPnLBase)
-	out.Portfolio.Movers.Rows = append([]rpc.BriefMover(nil), in.Portfolio.Movers.Rows...)
-	out.Portfolio.PremiumAtRisk.AmountBase = cloneValue(in.Portfolio.PremiumAtRisk.AmountBase)
-	out.Portfolio.HedgeCost.AmountBase = cloneValue(in.Portfolio.HedgeCost.AmountBase)
-	out.Portfolio.WorkingOrders.Count = cloneValue(in.Portfolio.WorkingOrders.Count)
-	out.RiskLimits.Capital.ConsumedPct = cloneValue(in.RiskLimits.Capital.ConsumedPct)
-	out.RiskLimits.Capital.DrawdownBase = cloneValue(in.RiskLimits.Capital.DrawdownBase)
-	out.RiskLimits.Capital.AdjustedPeakBase = cloneValue(in.RiskLimits.Capital.AdjustedPeakBase)
-	out.RiskLimits.Latch.AgeDays = cloneValue(in.RiskLimits.Latch.AgeDays)
-	out.RiskLimits.Overrides.Rows = append([]rpc.BriefOverride(nil), in.RiskLimits.Overrides.Rows...)
-	out.RiskLimits.PolicyDrift.Rows = append([]rpc.PolicyPinStatus(nil), in.RiskLimits.PolicyDrift.Rows...)
-	out.Process.Reconcile.DaysRemaining = cloneValue(in.Process.Reconcile.DaysRemaining)
-	out.Process.OneTap.Blockers = append([]string(nil), in.Process.OneTap.Blockers...)
-	out.Process.RulesDelta.Transitions = append([]rpc.BriefRuleTransition(nil), in.Process.RulesDelta.Transitions...)
-	out.Process.RulesDelta.Added = append([]string(nil), in.Process.RulesDelta.Added...)
-	out.Process.RulesDelta.Removed = append([]string(nil), in.Process.RulesDelta.Removed...)
-	out.Process.Artefacts.Rows = append([]rpc.BriefArtefact(nil), in.Process.Artefacts.Rows...)
+	out.Ready.Capital.ConsumedPct = cloneValue(in.Ready.Capital.ConsumedPct)
+	out.Ready.Capital.DrawdownBase = cloneValue(in.Ready.Capital.DrawdownBase)
+	out.Ready.Capital.AdjustedPeakBase = cloneValue(in.Ready.Capital.AdjustedPeakBase)
+	out.Ready.Latch.AgeDays = cloneValue(in.Ready.Latch.AgeDays)
+	out.Ready.Latch.ConsumedPctAtLatch = cloneValue(in.Ready.Latch.ConsumedPctAtLatch)
+	out.Ready.PremiumAtRisk.AmountBase = cloneValue(in.Ready.PremiumAtRisk.AmountBase)
+	out.Ready.HedgeCost.AmountBase = cloneValue(in.Ready.HedgeCost.AmountBase)
+	out.Ready.PolicyDrift.Rows = append([]rpc.PolicyPinStatus(nil), in.Ready.PolicyDrift.Rows...)
+	out.Ready.Artefacts.Rows = append([]rpc.BriefArtefact(nil), in.Ready.Artefacts.Rows...)
+	if in.Ready.MonthlyPulse != nil {
+		monthly := *in.Ready.MonthlyPulse
+		out.Ready.MonthlyPulse = &monthly
+	}
 	return &out
 }
 

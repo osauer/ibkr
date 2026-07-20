@@ -184,7 +184,7 @@ func TestGovernanceDTOIsAuthenticatedAndTyped(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
 	client := governanceRouteClient{routeFakeClient: routeFakeClient{}, nudges: readyRouteNudges(now), brief: &rpc.BriefResult{
-		Process: rpc.BriefProcessSection{MonthlyPulse: &rpc.BriefMonthlyPulseRow{Status: rpc.BriefMonthlyPulseDue, Month: "2026-07", DueAt: now}},
+		Ready: rpc.BriefReadySection{MonthlyPulse: &rpc.BriefMonthlyPulseRow{Status: rpc.BriefMonthlyPulseDue, Month: "2026-07", DueAt: now}},
 	}}
 	srv, store, _ := newGovernanceTestHandler(t, client)
 	handler := srv.Handler()

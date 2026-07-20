@@ -463,12 +463,18 @@ func (s *Server) composeBrief(ctx context.Context) (*rpc.BriefResult, *rpc.Rules
 	// their full weight.
 	sessionOpen := calErr != nil || cal == nil || cal.Session.IsOpen
 
-	res.Market = composeBriefMarket(now, acct, pos, regime, breadth, gamma, marketEvents,
+	market := composeBriefMarket(now, acct, pos, regime, breadth, gamma, marketEvents,
 		acctErr, posErr, regimeErr, breadthErr, marketEventsErr, sessionOpen)
-	res.Calendar = composeBriefCalendar(cal, marketEvents, rules, calErr, marketEventsErr, sessionOpen)
-	res.Portfolio = s.composeBriefPortfolio(acct, pos, acctErr, posErr, sessionOpen)
-	res.RiskLimits = composeBriefRisk(policy, now)
-	res.Process = s.composeBriefProcessForAuthority(policy, constitution, recon, rules, renderAuthority, now)
+	calendar := composeBriefCalendar(cal, marketEvents, rules, calErr, marketEventsErr, sessionOpen)
+	portfolio := s.composeBriefPortfolio(acct, pos, acctErr, posErr, sessionOpen)
+	riskLimits := composeBriefRisk(policy, now)
+	process := s.composeBriefProcessForAuthority(policy, constitution, recon, rules, renderAuthority, now)
+
+	// The five domain sections above are composition intermediates: the two
+	// rendered movements regroup their rows without changing any row's
+	// severity/status semantics or the worst-child rollup behavior.
+	res.Review = s.composeBriefReview(portfolio, riskLimits, process, now)
+	res.Ready = composeBriefReady(market, calendar, riskLimits, portfolio, process)
 	res.StampTarget, res.StampTargetReason = s.briefStampTarget(policy, constitution, now)
 	res.BriefFingerprint = briefContentFingerprint(res)
 	// V4 monthly render evidence is bound to the current constitution even
@@ -553,6 +559,116 @@ func (s *Server) briefPolicyResultForAuthority(acct *rpc.AccountResult, acctErr 
 	res.Overrides = s.riskCapital.OverridesSnapshot()
 	res.Cadence = s.riskCapital.Artefacts()
 	return res
+}
+
+// composeBriefReview assembles the post-trade Review movement from the existing
+// portfolio, risk, and process composition intermediates plus the read-only
+// proposals-offered-vs-acted derivation. Row severities and the worst-child
+// rollup are unchanged from the domain composers.
+func (s *Server) composeBriefReview(portfolio rpc.BriefPortfolioSection, riskLimits rpc.BriefRiskSection, process rpc.BriefProcessSection, now time.Time) rpc.BriefReviewSection {
+	out := rpc.BriefReviewSection{
+		SessionPnL:    portfolio.Account,
+		Attribution:   portfolio.Movers,
+		RulesDelta:    process.RulesDelta,
+		Proposals:     s.briefProposals(now),
+		Overrides:     riskLimits.Overrides,
+		CapitalEvents: briefCapitalEvents(riskLimits.Capital, riskLimits.Latch),
+		Reconcile:     process.Reconcile,
+		AutoExtend:    process.AutoExtend,
+		OneTap:        process.OneTap,
+		WorkingOrders: portfolio.WorkingOrders,
+	}
+	out.BriefRowState = briefSectionState("review",
+		out.SessionPnL.BriefRowState, out.Attribution.BriefRowState, out.RulesDelta.BriefRowState,
+		out.Proposals.BriefRowState, out.Overrides.BriefRowState, out.CapitalEvents.BriefRowState,
+		out.Reconcile.BriefRowState, out.AutoExtend.BriefRowState, out.OneTap.BriefRowState,
+		out.WorkingOrders.BriefRowState)
+	return out
+}
+
+// composeBriefReady assembles the pre-trade Ready movement from the existing
+// market, calendar, risk, portfolio, and process intermediates.
+func composeBriefReady(market rpc.BriefMarketSection, calendar rpc.BriefCalendarSection,
+	riskLimits rpc.BriefRiskSection, portfolio rpc.BriefPortfolioSection, process rpc.BriefProcessSection) rpc.BriefReadySection {
+	out := rpc.BriefReadySection{
+		Regime:        market.Regime,
+		Breadth:       market.Breadth,
+		Gamma:         market.Gamma,
+		Canary:        market.Canary,
+		Session:       calendar.Session,
+		MarketEvents:  calendar.MarketEvents,
+		Capital:       riskLimits.Capital,
+		Latch:         riskLimits.Latch,
+		PremiumAtRisk: portfolio.PremiumAtRisk,
+		HedgeCost:     portfolio.HedgeCost,
+		PolicyDrift:   riskLimits.PolicyDrift,
+		Artefacts:     process.Artefacts,
+		MonthlyPulse:  process.MonthlyPulse,
+	}
+	out.BriefRowState = briefReadySectionState(out)
+	return out
+}
+
+func briefReadySectionState(ready rpc.BriefReadySection) rpc.BriefRowState {
+	rows := []rpc.BriefRowState{
+		ready.Regime.BriefRowState, ready.Breadth.BriefRowState, ready.Gamma.BriefRowState,
+		ready.Canary.BriefRowState, ready.Session.BriefRowState,
+	}
+	for _, ev := range ready.MarketEvents {
+		rows = append(rows, ev.BriefRowState)
+	}
+	rows = append(rows,
+		ready.Capital.BriefRowState, ready.Latch.BriefRowState,
+		ready.PremiumAtRisk.BriefRowState, ready.HedgeCost.BriefRowState,
+		ready.PolicyDrift.BriefRowState, ready.Artefacts.BriefRowState)
+	if ready.MonthlyPulse != nil {
+		rows = append(rows, briefMonthlyPulseRollupState(ready.MonthlyPulse.Status))
+	}
+	return briefSectionState("ready", rows...)
+}
+
+// briefCapitalEvents frames the current latch and adjusted-peak provenance as
+// the Review movement's capital-events row. It regroups existing facts only —
+// no new journal read — and inherits the latch/capital condition so an engaged
+// latch or an absent constitution never reads as a clean "no events" line.
+func briefCapitalEvents(capital rpc.BriefCapitalRow, latch rpc.BriefLatchRow) rpc.BriefCapitalEventsRow {
+	row := rpc.BriefCapitalEventsRow{
+		BriefRowState:      briefOK("no capital events this session; adjusted-peak provenance shown"),
+		Latched:            latch.Latched,
+		LatchedAt:          latch.At,
+		LatchAgeDays:       latch.AgeDays,
+		ConsumedPctAtLatch: latch.ConsumedPctAtLatch,
+		AdjustedPeakBase:   capital.AdjustedPeakBase,
+		PeakAsOf:           capital.PeakAsOf,
+		BaseCurrency:       capital.BaseCurrency,
+	}
+	switch {
+	case capital.Status == rpc.BriefStatusUnavailable:
+		row.BriefRowState = briefUnavailable("risk constitution absent; capital events cannot be evaluated")
+	case latch.Latched:
+		row.BriefRowState = briefAttention("drawdown latch engaged this episode and remains open until a human reset")
+	}
+	return row
+}
+
+// briefProposals derives protection-proposal offered-vs-acted counts read-only
+// from the trade-proposal-outcomes journal. It is the one new derivation this
+// restructure adds; only counts and the covered day reach the wire.
+func (s *Server) briefProposals(_ time.Time) rpc.BriefProposalsRow {
+	if s == nil || s.proposalOutcomes == nil {
+		return rpc.BriefProposalsRow{BriefRowState: briefUnavailable("proposal outcome journal is unavailable")}
+	}
+	offered, acted, day, ok, err := s.proposalOutcomes.SessionSummary()
+	if err != nil {
+		return rpc.BriefProposalsRow{BriefRowState: briefUnavailable("proposal outcome journal could not be read")}
+	}
+	if !ok {
+		return rpc.BriefProposalsRow{BriefRowState: briefOK("no protection proposals recorded yet")}
+	}
+	return rpc.BriefProposalsRow{
+		BriefRowState: briefOK(fmt.Sprintf("%d offered, %d acted in the last recorded session (%s)", offered, acted, day)),
+		Day:           day, Offered: offered, Acted: acted,
+	}
 }
 
 func composeBriefMarket(now time.Time, acct *rpc.AccountResult, pos *rpc.PositionsResult,
@@ -1106,16 +1222,23 @@ func briefProcessSectionState(process rpc.BriefProcessSection) rpc.BriefRowState
 		process.Artefacts.BriefRowState,
 	}
 	if process.MonthlyPulse != nil {
-		switch process.MonthlyPulse.Status {
-		case rpc.BriefMonthlyPulseNotDue, rpc.BriefMonthlyPulseCompleted:
-			rows = append(rows, briefOK("monthly pulse is current"))
-		case rpc.BriefMonthlyPulseDue:
-			rows = append(rows, briefDegraded("monthly pulse is due"))
-		default:
-			rows = append(rows, briefDegraded("monthly pulse is blocked by policy evidence"))
-		}
+		rows = append(rows, briefMonthlyPulseRollupState(process.MonthlyPulse.Status))
 	}
 	return briefSectionState("process", rows...)
+}
+
+// briefMonthlyPulseRollupState maps the monthly-pulse status vocabulary onto a
+// section-rollup row state. Shared so the Ready movement and the legacy process
+// rollup treat a due/blocked pulse identically.
+func briefMonthlyPulseRollupState(status string) rpc.BriefRowState {
+	switch status {
+	case rpc.BriefMonthlyPulseNotDue, rpc.BriefMonthlyPulseCompleted:
+		return briefOK("monthly pulse is current")
+	case rpc.BriefMonthlyPulseDue:
+		return briefDegraded("monthly pulse is due")
+	default:
+		return briefDegraded("monthly pulse is blocked by policy evidence")
+	}
 }
 
 func policyPinsReady(inventory []rpc.PolicyPinStatus) bool {
@@ -1293,12 +1416,9 @@ func localDay(t time.Time) string      { return t.In(time.Local).Format(time.Dat
 
 func briefContentFingerprint(res *rpc.BriefResult) string {
 	projection := struct {
-		Market     rpc.BriefMarketSection
-		Calendar   rpc.BriefCalendarSection
-		Portfolio  rpc.BriefPortfolioSection
-		RiskLimits rpc.BriefRiskSection
-		Process    rpc.BriefProcessSection
-	}{res.Market, res.Calendar, res.Portfolio, res.RiskLimits, res.Process}
+		Review rpc.BriefReviewSection
+		Ready  rpc.BriefReadySection
+	}{res.Review, res.Ready}
 	raw, _ := json.Marshal(projection)
 	sum := sha256.Sum256(raw)
 	return "sha256:" + hex.EncodeToString(sum[:])

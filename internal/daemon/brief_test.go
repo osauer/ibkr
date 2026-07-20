@@ -461,8 +461,8 @@ func TestMonthlyCompletionRecoversWithFreshReceiptAfterExpiry(t *testing.T) {
 	s.riskPolicies.lastCheckedAt = now
 	s.riskPolicies.mu.Unlock()
 	freshRender, _ := s.composeBrief(context.Background())
-	if freshRender.Process.MonthlyPulse == nil || freshRender.Process.MonthlyPulse.Status != rpc.BriefMonthlyPulseDue {
-		t.Fatalf("fault recovery monthly process=%+v, want conservatively due", freshRender.Process.MonthlyPulse)
+	if freshRender.Ready.MonthlyPulse == nil || freshRender.Ready.MonthlyPulse.Status != rpc.BriefMonthlyPulseDue {
+		t.Fatalf("fault recovery monthly ready=%+v, want conservatively due", freshRender.Ready.MonthlyPulse)
 	}
 	s.monthlyRenderMu.Lock()
 	freshReceipt, issued := s.monthlyRenderReceipts[freshRender.BriefFingerprint]
@@ -761,10 +761,10 @@ func TestBriefSnapshotPurityAndDegradedRows(t *testing.T) {
 	before := stateTree(t, root)
 	for range 3 {
 		res, _ := s.composeBrief(context.Background())
-		if res.Market.Regime.Status != rpc.BriefStatusUnavailable || res.Portfolio.Account.Status != rpc.BriefStatusUnavailable {
-			t.Fatalf("gateway rows not unavailable: market=%+v account=%+v", res.Market.Regime, res.Portfolio.Account)
+		if res.Ready.Regime.Status != rpc.BriefStatusUnavailable || res.Review.SessionPnL.Status != rpc.BriefStatusUnavailable {
+			t.Fatalf("gateway rows not unavailable: regime=%+v session_pnl=%+v", res.Ready.Regime, res.Review.SessionPnL)
 		}
-		if res.RiskLimits.Capital.Status == "" || res.Process.Reconcile.Status == "" || res.BriefFingerprint == "" {
+		if res.Ready.Capital.Status == "" || res.Review.Reconcile.Status == "" || res.BriefFingerprint == "" {
 			t.Fatalf("policy/process rows did not render: %+v", res)
 		}
 	}
@@ -832,6 +832,82 @@ func TestBriefNilMoneyAndGreeksDegradeWithoutZeroFill(t *testing.T) {
 	hedge := briefHedgeCost(pos, "EUR")
 	if hedge.Status != rpc.BriefStatusDegraded || hedge.AmountBase != nil || hedge.ExcludedLegs != 1 {
 		t.Fatalf("hedge=%+v", hedge)
+	}
+}
+
+func TestBriefProposalsSessionSummaryFromJournal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trade-proposal-outcomes.jsonl")
+	lines := []proposalOutcomeMark{
+		// Older session: one proposal offered (marked), not acted.
+		{Version: 1, MarkDate: "2026-07-17", State: proposalOutcomeStateMarked, ProposalKey: "P-OLD-1"},
+		// Latest session (2026-07-18): three distinct proposals offered, one
+		// submitted+filled (acted once, deduped), one only marked.
+		{Version: 1, MarkDate: "2026-07-18", State: proposalOutcomeStateMarked, ProposalKey: "P-A"},
+		{Version: 1, MarkDate: "2026-07-18", State: proposalOutcomeStateSubmitted, ProposalKey: "P-B"},
+		{Version: 1, MarkDate: "2026-07-18", State: proposalOutcomeStateFilled, ProposalKey: "P-B"},
+		{Version: 1, MarkDate: "2026-07-18", State: proposalOutcomeStateMarked, ProposalKey: "P-C"},
+	}
+	var buf strings.Builder
+	for _, m := range lines {
+		raw, _ := json.Marshal(m)
+		buf.Write(raw)
+		buf.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(buf.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := newProposalOutcomeStore(path)
+	offered, acted, day, ok, err := store.SessionSummary()
+	if err != nil || !ok {
+		t.Fatalf("summary ok=%v err=%v", ok, err)
+	}
+	if day != "2026-07-18" || offered != 3 || acted != 1 {
+		t.Fatalf("latest session summary day=%q offered=%d acted=%d", day, offered, acted)
+	}
+
+	// The wire row leaks no proposal identity — counts and the day only.
+	s := &Server{proposalOutcomes: store}
+	row := s.briefProposals(time.Now())
+	if row.Status != rpc.BriefStatusOK || row.Offered != 3 || row.Acted != 1 || row.Day != "2026-07-18" {
+		t.Fatalf("proposals row=%+v", row)
+	}
+	raw, _ := json.Marshal(row)
+	for _, forbidden := range []string{"P-A", "P-B", "P-C", "proposal_key"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("proposals row leaked %q: %s", forbidden, raw)
+		}
+	}
+
+	// Missing journal reads as a clean "no proposals" row, never an error.
+	empty := &Server{proposalOutcomes: newProposalOutcomeStore(filepath.Join(dir, "missing.jsonl"))}
+	if got := empty.briefProposals(time.Now()); got.Status != rpc.BriefStatusOK || got.Offered != 0 {
+		t.Fatalf("missing-journal proposals row=%+v", got)
+	}
+}
+
+func TestBriefCapitalEventsRegroupsLatchAndPeak(t *testing.T) {
+	age := 4
+	consumed := 30.4
+	peak := 260000.0
+	peakAsOf := time.Date(2026, 7, 15, 20, 0, 0, 0, time.UTC)
+	latch := rpc.BriefLatchRow{BriefRowState: briefAttention("engaged"), Latched: true, AgeDays: &age, ConsumedPctAtLatch: &consumed}
+	capital := rpc.BriefCapitalRow{BriefRowState: briefOK("ok"), AdjustedPeakBase: &peak, PeakAsOf: peakAsOf, BaseCurrency: "EUR"}
+	got := briefCapitalEvents(capital, latch)
+	if got.Status != rpc.BriefStatusAttention || !got.Latched || got.LatchAgeDays == nil || *got.LatchAgeDays != 4 {
+		t.Fatalf("latched capital events=%+v", got)
+	}
+	if got.AdjustedPeakBase == nil || *got.AdjustedPeakBase != peak || !got.PeakAsOf.Equal(peakAsOf) {
+		t.Fatalf("peak provenance did not flow: %+v", got)
+	}
+
+	// An absent constitution renders capital events unavailable, not a clean line.
+	if unavailable := briefCapitalEvents(rpc.BriefCapitalRow{BriefRowState: briefUnavailable("absent")}, rpc.BriefLatchRow{}); unavailable.Status != rpc.BriefStatusUnavailable {
+		t.Fatalf("absent constitution capital events=%+v", unavailable)
+	}
+	// A quiet book reads ok.
+	if quiet := briefCapitalEvents(rpc.BriefCapitalRow{BriefRowState: briefOK("ok")}, rpc.BriefLatchRow{BriefRowState: briefOK("open")}); quiet.Status != rpc.BriefStatusOK || quiet.Latched {
+		t.Fatalf("quiet capital events=%+v", quiet)
 	}
 }
 

@@ -419,3 +419,46 @@ requires one cutover review, never expires unseen events, and revalidates them
 against current statement truth. Source failures stay persistently visible but
 do not emit a separate push in the first implementation. A policy fingerprint
 change reopens that month's pulse.
+
+## Brief re-conception — two process movements (2026-07-20)
+
+Updated: 2026-07-20 15:13 CEST. Operator decision, final: the daily brief is
+re-conceived from five data-domain sections (A Market, B Calendar, C Portfolio,
+D Risk & limits, E Process) into two **process movements** in one morning
+edition. The daemon still composes the whole brief and every surface renders it
+verbatim — that split is unchanged.
+
+- **Review** — post-trade of the last completed session, statement-authoritative
+  where the overnight Flex statement is available. Rows: Session P&L (equity +
+  daily P&L headline); attribution by underlying (the existing movers basis plus
+  the disclosed residual); process coherence (the rulebook-adherence delta with
+  act transitions, proposals offered-vs-acted from the trade-proposal-outcomes
+  journal, and overrides used); capital events (latch engagement and
+  adjusted-peak provenance); reconcile / auto-extend / one-tap sign-off (the tap
+  closes the movement); working-orders end state.
+- **Ready** — pre-trade for today. Rows: overnight & market (regime posture +
+  canary verdict + breadth/gamma tape with their existing provenance stamps);
+  calendar (session phase/next open, held-name earnings with the rule-unknown
+  cross-link, event flags); risk capacity (capital tier, drawdown latch, premium
+  at risk, hedge carry); desk readiness (policy-pin drift, cadence artefacts, the
+  monthly pulse).
+
+This is a **regrouping** of facts the daemon already had: row severities, the
+attention semantics, and the worst-child section rollup are unchanged in kind.
+The five domain composers remain as internal intermediates; the two movements
+reassemble their rows. The one new derivation is **proposals offered vs acted**,
+read read-only from `trade-proposal-outcomes.jsonl` (only the counts and the
+covered day reach the wire — no proposal keys, symbols, order refs, or tokens).
+VaR and any risk-unit measure are explicitly out of scope (reserved to the
+operator). The one-tap reconcile sign-off keeps its exact endpoint, evidence
+class, and semantics. Where a named facet is not a fact the brief already held,
+the row renders honestly unavailable rather than inventing a value.
+
+The wire contract changes shape accordingly: `BriefResult` now carries `review`
+and `ready` movements (the `market`/`calendar`/`portfolio`/`risk_limits`/
+`process` top-level sections are retired), the content fingerprint hashes the
+two movements, and the monthly-pulse row moves under `ready`. The brief also
+moves to its own bottom-tab slot ("Brief", slot 2 of Monitor · Brief · Alerts ·
+Orders · Settings); Monitor stays the default landing and the universal
+fallback. Phase heads render a sunrise (Ready) or history-clock (Review) glyph
+next to a sentence-case title. The `brief` SSE event name is unchanged.

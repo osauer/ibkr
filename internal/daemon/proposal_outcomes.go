@@ -158,6 +158,77 @@ func (s *proposalOutcomeStore) loadOutcomeKeysLocked() (map[string]struct{}, err
 	return out, nil
 }
 
+// SessionSummary reports, for the most recent recorded session in the journal,
+// how many distinct protection proposals were offered versus acted on. It reads
+// the journal read-only and never mutates the append cache. "Offered" is any
+// distinct proposal with a recorded outcome that day (marks are shadow-hold
+// offers); "acted" is a proposal that was submitted or filled. Raw proposal
+// identities are used only to count distinct subjects and never returned.
+func (s *proposalOutcomeStore) SessionSummary() (offered, acted int, day string, ok bool, err error) {
+	if s == nil || s.Path == "" {
+		return 0, 0, "", false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, err := os.Open(s.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, "", false, nil
+		}
+		return 0, 0, "", false, fmt.Errorf("open proposal outcomes %s: %w", s.Path, err)
+	}
+	defer func() { _ = f.Close() }()
+	offeredByDay := map[string]map[string]struct{}{}
+	actedByDay := map[string]map[string]struct{}{}
+	latest := ""
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var mark proposalOutcomeMark
+		if json.Unmarshal([]byte(line), &mark) != nil {
+			continue
+		}
+		subject := proposalOutcomeSubject(mark)
+		if subject == "" || mark.MarkDate == "" {
+			continue
+		}
+		if mark.MarkDate > latest {
+			latest = mark.MarkDate
+		}
+		if offeredByDay[mark.MarkDate] == nil {
+			offeredByDay[mark.MarkDate] = map[string]struct{}{}
+			actedByDay[mark.MarkDate] = map[string]struct{}{}
+		}
+		offeredByDay[mark.MarkDate][subject] = struct{}{}
+		if mark.State == proposalOutcomeStateSubmitted || mark.State == proposalOutcomeStateFilled {
+			actedByDay[mark.MarkDate][subject] = struct{}{}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return 0, 0, "", false, fmt.Errorf("read proposal outcomes: %w", err)
+	}
+	if latest == "" {
+		return 0, 0, "", false, nil
+	}
+	return len(offeredByDay[latest]), len(actedByDay[latest]), latest, true, nil
+}
+
+// proposalOutcomeSubject is a stable per-proposal identity used only for
+// distinct-count aggregation. It never reaches any wire contract.
+func proposalOutcomeSubject(mark proposalOutcomeMark) string {
+	if key := strings.TrimSpace(mark.ProposalKey); key != "" {
+		return key
+	}
+	if ref := strings.TrimSpace(mark.OrderRef); ref != "" {
+		return "order:" + ref
+	}
+	return strings.TrimSpace(mark.PreviewTokenID)
+}
+
 func proposalOutcomeIdentity(mark proposalOutcomeMark) string {
 	return strings.Join([]string{
 		strings.TrimSpace(mark.ProposalKey),

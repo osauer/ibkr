@@ -175,62 +175,63 @@ func TestBriefPollErrorKeepsLastGoodSnapshotAndSetsSourceMeta(t *testing.T) {
 func TestSnapshotBriefCloneIsIndependent(t *testing.T) {
 	t.Parallel()
 	brief := &rpc.BriefResult{
-		Market: rpc.BriefMarketSection{
-			Breadth: rpc.BriefBreadthRow{PctAbove50DMA: new(51.0)},
-			Gamma:   rpc.BriefGammaRow{Spot: new(6000.0)},
-		},
-		Calendar: rpc.BriefCalendarSection{MarketEvents: []rpc.BriefMarketEventRow{{Symbols: []string{"AAA"}}}},
-		Portfolio: rpc.BriefPortfolioSection{
-			Account:       rpc.BriefAccountRow{EquityBase: new(100.0)},
-			Movers:        rpc.BriefMoversRow{Rows: []rpc.BriefMover{{Symbol: "AAA"}}},
-			PremiumAtRisk: rpc.BriefMoneyCoverageRow{AmountBase: new(10.0)},
+		Review: rpc.BriefReviewSection{
+			SessionPnL:    rpc.BriefAccountRow{EquityBase: new(100.0)},
+			Attribution:   rpc.BriefMoversRow{Rows: []rpc.BriefMover{{Symbol: "AAA"}}},
+			RulesDelta:    rpc.BriefRulesDeltaRow{Transitions: []rpc.BriefRuleTransition{{RuleID: "r1"}}, Added: []string{"r2"}, Removed: []string{"r3"}},
+			Overrides:     rpc.BriefOverridesRow{Rows: []rpc.BriefOverride{{Control: "limit"}}},
+			CapitalEvents: rpc.BriefCapitalEventsRow{LatchAgeDays: new(2)},
+			Reconcile:     rpc.BriefReconcileRow{DaysRemaining: new(3)},
+			OneTap:        rpc.BriefOneTapRow{Blockers: []string{"blocked"}},
 			WorkingOrders: rpc.BriefCountRow{Count: new(1)},
 		},
-		RiskLimits: rpc.BriefRiskSection{
-			Capital:     rpc.BriefCapitalRow{ConsumedPct: new(20.0)},
-			Latch:       rpc.BriefLatchRow{AgeDays: new(2)},
-			Overrides:   rpc.BriefOverridesRow{Rows: []rpc.BriefOverride{{Control: "limit"}}},
-			PolicyDrift: rpc.BriefPolicyDriftRow{Rows: []rpc.PolicyPinStatus{{Policy: "rules"}}},
-		},
-		Process: rpc.BriefProcessSection{
-			Reconcile:  rpc.BriefReconcileRow{DaysRemaining: new(3)},
-			OneTap:     rpc.BriefOneTapRow{Blockers: []string{"blocked"}},
-			RulesDelta: rpc.BriefRulesDeltaRow{Transitions: []rpc.BriefRuleTransition{{RuleID: "r1"}}, Added: []string{"r2"}, Removed: []string{"r3"}},
-			Artefacts:  rpc.BriefArtefactsRow{Rows: []rpc.BriefArtefact{{Kind: "morning"}}},
+		Ready: rpc.BriefReadySection{
+			Breadth:       rpc.BriefBreadthRow{PctAbove50DMA: new(51.0)},
+			Gamma:         rpc.BriefGammaRow{Spot: new(6000.0)},
+			MarketEvents:  []rpc.BriefMarketEventRow{{Symbols: []string{"AAA"}}},
+			Capital:       rpc.BriefCapitalRow{ConsumedPct: new(20.0)},
+			Latch:         rpc.BriefLatchRow{AgeDays: new(2)},
+			PremiumAtRisk: rpc.BriefMoneyCoverageRow{AmountBase: new(10.0)},
+			PolicyDrift:   rpc.BriefPolicyDriftRow{Rows: []rpc.PolicyPinStatus{{Policy: "rules"}}},
+			Artefacts:     rpc.BriefArtefactsRow{Rows: []rpc.BriefArtefact{{Kind: "morning"}}},
+			MonthlyPulse:  &rpc.BriefMonthlyPulseRow{Status: "due", Month: "2026-08"},
 		},
 	}
 	svc := New(&fakeClient{}, time.Minute, time.Minute)
 	svc.snapshot = Snapshot{Brief: brief}
 	got := svc.Snapshot()
 
-	*got.Brief.Market.Breadth.PctAbove50DMA = 0
-	*got.Brief.Market.Gamma.Spot = 0
-	got.Brief.Calendar.MarketEvents[0].Symbols[0] = "MUTATED"
-	*got.Brief.Portfolio.Account.EquityBase = 0
-	got.Brief.Portfolio.Movers.Rows[0].Symbol = "MUTATED"
-	*got.Brief.Portfolio.PremiumAtRisk.AmountBase = 0
-	*got.Brief.Portfolio.WorkingOrders.Count = 0
-	*got.Brief.RiskLimits.Capital.ConsumedPct = 0
-	*got.Brief.RiskLimits.Latch.AgeDays = 0
-	got.Brief.RiskLimits.Overrides.Rows[0].Control = "MUTATED"
-	got.Brief.RiskLimits.PolicyDrift.Rows[0].Policy = "MUTATED"
-	*got.Brief.Process.Reconcile.DaysRemaining = 0
-	got.Brief.Process.OneTap.Blockers[0] = "MUTATED"
-	got.Brief.Process.RulesDelta.Transitions[0].RuleID = "MUTATED"
-	got.Brief.Process.RulesDelta.Added[0] = "MUTATED"
-	got.Brief.Process.RulesDelta.Removed[0] = "MUTATED"
-	got.Brief.Process.Artefacts.Rows[0].Kind = "MUTATED"
+	*got.Brief.Ready.Breadth.PctAbove50DMA = 0
+	*got.Brief.Ready.Gamma.Spot = 0
+	got.Brief.Ready.MarketEvents[0].Symbols[0] = "MUTATED"
+	*got.Brief.Review.SessionPnL.EquityBase = 0
+	got.Brief.Review.Attribution.Rows[0].Symbol = "MUTATED"
+	*got.Brief.Ready.PremiumAtRisk.AmountBase = 0
+	*got.Brief.Review.WorkingOrders.Count = 0
+	*got.Brief.Ready.Capital.ConsumedPct = 0
+	*got.Brief.Ready.Latch.AgeDays = 0
+	*got.Brief.Review.CapitalEvents.LatchAgeDays = 0
+	got.Brief.Review.Overrides.Rows[0].Control = "MUTATED"
+	got.Brief.Ready.PolicyDrift.Rows[0].Policy = "MUTATED"
+	*got.Brief.Review.Reconcile.DaysRemaining = 0
+	got.Brief.Review.OneTap.Blockers[0] = "MUTATED"
+	got.Brief.Review.RulesDelta.Transitions[0].RuleID = "MUTATED"
+	got.Brief.Review.RulesDelta.Added[0] = "MUTATED"
+	got.Brief.Review.RulesDelta.Removed[0] = "MUTATED"
+	got.Brief.Ready.Artefacts.Rows[0].Kind = "MUTATED"
+	got.Brief.Ready.MonthlyPulse.Status = "MUTATED"
 
 	current := svc.Snapshot().Brief
-	if *current.Market.Breadth.PctAbove50DMA != 51 || *current.Market.Gamma.Spot != 6000 ||
-		current.Calendar.MarketEvents[0].Symbols[0] != "AAA" || *current.Portfolio.Account.EquityBase != 100 ||
-		current.Portfolio.Movers.Rows[0].Symbol != "AAA" || *current.Portfolio.PremiumAtRisk.AmountBase != 10 ||
-		*current.Portfolio.WorkingOrders.Count != 1 || *current.RiskLimits.Capital.ConsumedPct != 20 ||
-		*current.RiskLimits.Latch.AgeDays != 2 || current.RiskLimits.Overrides.Rows[0].Control != "limit" ||
-		current.RiskLimits.PolicyDrift.Rows[0].Policy != "rules" || *current.Process.Reconcile.DaysRemaining != 3 ||
-		current.Process.OneTap.Blockers[0] != "blocked" || current.Process.RulesDelta.Transitions[0].RuleID != "r1" ||
-		current.Process.RulesDelta.Added[0] != "r2" || current.Process.RulesDelta.Removed[0] != "r3" ||
-		current.Process.Artefacts.Rows[0].Kind != "morning" {
+	if *current.Ready.Breadth.PctAbove50DMA != 51 || *current.Ready.Gamma.Spot != 6000 ||
+		current.Ready.MarketEvents[0].Symbols[0] != "AAA" || *current.Review.SessionPnL.EquityBase != 100 ||
+		current.Review.Attribution.Rows[0].Symbol != "AAA" || *current.Ready.PremiumAtRisk.AmountBase != 10 ||
+		*current.Review.WorkingOrders.Count != 1 || *current.Ready.Capital.ConsumedPct != 20 ||
+		*current.Ready.Latch.AgeDays != 2 || *current.Review.CapitalEvents.LatchAgeDays != 2 ||
+		current.Review.Overrides.Rows[0].Control != "limit" ||
+		current.Ready.PolicyDrift.Rows[0].Policy != "rules" || *current.Review.Reconcile.DaysRemaining != 3 ||
+		current.Review.OneTap.Blockers[0] != "blocked" || current.Review.RulesDelta.Transitions[0].RuleID != "r1" ||
+		current.Review.RulesDelta.Added[0] != "r2" || current.Review.RulesDelta.Removed[0] != "r3" ||
+		current.Ready.Artefacts.Rows[0].Kind != "morning" || current.Ready.MonthlyPulse.Status != "due" {
 		t.Fatalf("mutating returned brief changed service snapshot: %#v", current)
 	}
 }

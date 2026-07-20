@@ -302,17 +302,78 @@ type BriefArtefactsRow struct {
 	Rows []BriefArtefact `json:"rows"`
 }
 
-// BriefResult is the complete typed daily brief. BriefFingerprint hashes the
-// five composed sections only; AsOf and stamp-target state are deliberately
-// outside the content identity.
+// BriefProposalsRow reports how many protection proposals were offered versus
+// acted on over the most recent recorded session, derived read-only from the
+// trade-proposal-outcomes journal. It carries counts and the covered day only:
+// no proposal keys, symbols, order references, or tokens reach the wire.
+type BriefProposalsRow struct {
+	BriefRowState
+	Day     string `json:"day,omitempty"`
+	Offered int    `json:"offered"`
+	Acted   int    `json:"acted"`
+}
+
+// BriefCapitalEventsRow frames the drawdown latch and adjusted-peak provenance
+// as post-trade capital events for the Review movement. The fields mirror the
+// existing latch/peak facts; nothing new is invented.
+type BriefCapitalEventsRow struct {
+	BriefRowState
+	Latched            bool      `json:"latched"`
+	LatchedAt          time.Time `json:"latched_at,omitzero"`
+	LatchAgeDays       *int      `json:"latch_age_days,omitempty"`
+	ConsumedPctAtLatch *float64  `json:"consumed_pct_at_latch,omitempty"`
+	AdjustedPeakBase   *float64  `json:"adjusted_peak_base,omitempty"`
+	PeakAsOf           time.Time `json:"peak_as_of,omitzero"`
+	BaseCurrency       string    `json:"base_currency,omitempty"`
+}
+
+// BriefReviewSection is the post-trade movement over the last completed
+// session. Its rows are a regrouping of existing brief facts (plus the
+// read-only proposals-offered-vs-acted derivation); the section rolls up its
+// worst child exactly like every other brief section.
+type BriefReviewSection struct {
+	BriefRowState
+	SessionPnL    BriefAccountRow       `json:"session_pnl"`
+	Attribution   BriefMoversRow        `json:"attribution"`
+	RulesDelta    BriefRulesDeltaRow    `json:"rules_delta"`
+	Proposals     BriefProposalsRow     `json:"proposals"`
+	Overrides     BriefOverridesRow     `json:"overrides"`
+	CapitalEvents BriefCapitalEventsRow `json:"capital_events"`
+	Reconcile     BriefReconcileRow     `json:"reconcile"`
+	AutoExtend    BriefAutoExtendRow    `json:"auto_extend"`
+	OneTap        BriefOneTapRow        `json:"one_tap"`
+	WorkingOrders BriefCountRow         `json:"working_orders"`
+}
+
+// BriefReadySection is the pre-trade movement for today. Its rows regroup the
+// existing market, calendar, risk-capacity, and desk-readiness facts.
+type BriefReadySection struct {
+	BriefRowState
+	Regime        BriefRegimeRow        `json:"regime"`
+	Breadth       BriefBreadthRow       `json:"breadth"`
+	Gamma         BriefGammaRow         `json:"gamma"`
+	Canary        BriefCanaryRow        `json:"canary"`
+	Session       BriefSessionRow       `json:"session"`
+	MarketEvents  []BriefMarketEventRow `json:"market_events"`
+	Capital       BriefCapitalRow       `json:"capital"`
+	Latch         BriefLatchRow         `json:"latch"`
+	PremiumAtRisk BriefMoneyCoverageRow `json:"premium_at_risk"`
+	HedgeCost     BriefMoneyCoverageRow `json:"hedge_cost"`
+	PolicyDrift   BriefPolicyDriftRow   `json:"policy_drift"`
+	Artefacts     BriefArtefactsRow     `json:"artefacts"`
+	MonthlyPulse  *BriefMonthlyPulseRow `json:"monthly_pulse,omitempty"`
+}
+
+// BriefResult is the complete typed daily brief, composed as two process
+// movements: Review (post-trade of the last completed session) and Ready
+// (pre-trade for today). BriefFingerprint hashes the two composed movements
+// only; AsOf and stamp-target state are deliberately outside the content
+// identity. The daemon composes both movements; surfaces render them verbatim.
 type BriefResult struct {
-	AsOf              time.Time             `json:"as_of"`
-	BriefFingerprint  string                `json:"brief_fingerprint"`
-	StampTarget       string                `json:"stamp_target,omitempty"`
-	StampTargetReason string                `json:"stamp_target_reason,omitempty"`
-	Market            BriefMarketSection    `json:"market"`
-	Calendar          BriefCalendarSection  `json:"calendar"`
-	Portfolio         BriefPortfolioSection `json:"portfolio"`
-	RiskLimits        BriefRiskSection      `json:"risk_limits"`
-	Process           BriefProcessSection   `json:"process"`
+	AsOf              time.Time          `json:"as_of"`
+	BriefFingerprint  string             `json:"brief_fingerprint"`
+	StampTarget       string             `json:"stamp_target,omitempty"`
+	StampTargetReason string             `json:"stamp_target_reason,omitempty"`
+	Review            BriefReviewSection `json:"review"`
+	Ready             BriefReadySection  `json:"ready"`
 }

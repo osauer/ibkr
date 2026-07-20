@@ -72,141 +72,159 @@ func briefHumanOrigin(origin string) bool {
 
 func renderBrief(env *Env, res rpc.BriefResult) {
 	fmt.Fprintf(env.Stdout, "Daily brief — %s  %s\n", res.AsOf.Local().Format("2006-01-02 15:04 MST"), shortFingerprint(res.BriefFingerprint))
+	renderBriefReview(env, res.Review)
+	renderBriefReady(env, res.Ready)
+}
 
-	fmt.Fprintln(env.Stdout, "\nA  Market")
-	briefLine(env, "regime", res.Market.Regime.BriefRowState,
-		briefJoin(res.Market.Regime.Stage, res.Market.Regime.Verdict))
+func renderBriefReview(env *Env, review rpc.BriefReviewSection) {
+	fmt.Fprintln(env.Stdout, "\nReview  (last completed session)")
+	acct := "—"
+	if review.SessionPnL.EquityBase != nil {
+		acct = formatMoneyCcy(*review.SessionPnL.EquityBase, review.SessionPnL.BaseCurrency)
+	}
+	if review.SessionPnL.DailyPnLBase != nil {
+		acct += " · day " + formatMoneyCcy(*review.SessionPnL.DailyPnLBase, review.SessionPnL.BaseCurrency)
+	}
+	briefLine(env, "session P&L", review.SessionPnL.BriefRowState, acct)
+	movers := make([]string, 0, len(review.Attribution.Rows)+1)
+	for _, mover := range review.Attribution.Rows {
+		movers = append(movers, fmt.Sprintf("%s %s", mover.Symbol, formatMoneyCcy(mover.DailyPnLBase, review.SessionPnL.BaseCurrency)))
+	}
+	if review.Attribution.OtherPnLBase != nil && review.Attribution.OtherCount > 0 {
+		unit := "others"
+		if review.Attribution.OtherCount == 1 {
+			unit = "other"
+		}
+		movers = append(movers, fmt.Sprintf("%d %s %s", review.Attribution.OtherCount, unit,
+			formatMoneyCcy(*review.Attribution.OtherPnLBase, review.SessionPnL.BaseCurrency)))
+	}
+	briefLine(env, "by underlying", review.Attribution.BriefRowState, strings.Join(movers, " · "))
+	delta := fmt.Sprintf("%d transition(s), %d added, %d removed", len(review.RulesDelta.Transitions), len(review.RulesDelta.Added), len(review.RulesDelta.Removed))
+	if review.RulesDelta.RulebookFingerprintChanged {
+		delta += " · fingerprint changed"
+	}
+	briefLine(env, "rules delta", review.RulesDelta.BriefRowState, delta)
+	briefLine(env, "proposals", review.Proposals.BriefRowState, fmt.Sprintf("%d offered · %d acted", review.Proposals.Offered, review.Proposals.Acted))
+	briefLine(env, "overrides used", review.Overrides.BriefRowState, fmt.Sprintf("%d", len(review.Overrides.Rows)))
+	capitalEvents := "no capital events"
+	if review.CapitalEvents.Latched {
+		capitalEvents = "LATCHED"
+		if review.CapitalEvents.LatchAgeDays != nil {
+			unit := "days"
+			if *review.CapitalEvents.LatchAgeDays == 1 {
+				unit = "day"
+			}
+			capitalEvents += fmt.Sprintf(" · %d %s", *review.CapitalEvents.LatchAgeDays, unit)
+		}
+		if review.CapitalEvents.ConsumedPctAtLatch != nil {
+			capitalEvents += fmt.Sprintf(" · engaged at %.1f%%", *review.CapitalEvents.ConsumedPctAtLatch)
+		}
+	}
+	if !review.CapitalEvents.PeakAsOf.IsZero() {
+		capitalEvents = briefJoin(capitalEvents, "peak set "+review.CapitalEvents.PeakAsOf.Local().Format("2006-01-02 15:04"))
+	}
+	briefLine(env, "capital events", review.CapitalEvents.BriefRowState, capitalEvents)
+	reconcile := "never"
+	if !review.Reconcile.LastReconciledAt.IsZero() {
+		reconcile = review.Reconcile.LastReconciledAt.Local().Format("2006-01-02 15:04")
+		if review.Reconcile.Source != "" {
+			reconcile += " · " + review.Reconcile.Source
+		}
+	}
+	if !review.Reconcile.Deadline.IsZero() {
+		reconcile += " · due " + review.Reconcile.Deadline.Local().Format("2006-01-02")
+		if review.Reconcile.DaysRemaining != nil {
+			reconcile += fmt.Sprintf(" (%d day(s))", *review.Reconcile.DaysRemaining)
+		}
+	}
+	briefLine(env, "reconcile", review.Reconcile.BriefRowState, reconcile)
+	briefLine(env, "auto-extend", review.AutoExtend.BriefRowState, review.AutoExtend.ReportID)
+	oneTap := "blocked"
+	if review.OneTap.Signable {
+		oneTap = "signable · ibkr policy capital-event reconcile"
+	} else if len(review.OneTap.Blockers) > 0 {
+		oneTap += " · " + strings.Join(review.OneTap.Blockers, "; ")
+	}
+	briefLine(env, "one-tap sign-off", review.OneTap.BriefRowState, oneTap)
+	orders := "—"
+	if review.WorkingOrders.Count != nil {
+		orders = fmt.Sprintf("%d", *review.WorkingOrders.Count)
+	}
+	briefLine(env, "working orders", review.WorkingOrders.BriefRowState, orders)
+}
+
+func renderBriefReady(env *Env, ready rpc.BriefReadySection) {
+	fmt.Fprintln(env.Stdout, "\nReady  (today)")
+	briefLine(env, "regime", ready.Regime.BriefRowState,
+		briefJoin(ready.Regime.Stage, ready.Regime.Verdict))
 	breadth := "—"
-	if res.Market.Breadth.PctAbove50DMA != nil {
-		breadth = fmt.Sprintf("50-DMA %.1f%%", *res.Market.Breadth.PctAbove50DMA)
-		if res.Market.Breadth.PctAbove200DMA != nil {
-			breadth += fmt.Sprintf(" · 200-DMA %.1f%%", *res.Market.Breadth.PctAbove200DMA)
+	if ready.Breadth.PctAbove50DMA != nil {
+		breadth = fmt.Sprintf("50-DMA %.1f%%", *ready.Breadth.PctAbove50DMA)
+		if ready.Breadth.PctAbove200DMA != nil {
+			breadth += fmt.Sprintf(" · 200-DMA %.1f%%", *ready.Breadth.PctAbove200DMA)
 		}
 	}
-	briefLine(env, "breadth", res.Market.Breadth.BriefRowState, breadth)
+	briefLine(env, "breadth", ready.Breadth.BriefRowState, breadth)
 	gamma := "—"
-	if res.Market.Gamma.Spot != nil {
-		gamma = fmt.Sprintf("spot %.2f", *res.Market.Gamma.Spot)
-		if res.Market.Gamma.ZeroGamma != nil {
-			gamma += fmt.Sprintf(" · zero %.2f", *res.Market.Gamma.ZeroGamma)
+	if ready.Gamma.Spot != nil {
+		gamma = fmt.Sprintf("spot %.2f", *ready.Gamma.Spot)
+		if ready.Gamma.ZeroGamma != nil {
+			gamma += fmt.Sprintf(" · zero %.2f", *ready.Gamma.ZeroGamma)
 		}
-		if res.Market.Gamma.GapPct != nil {
-			gamma += fmt.Sprintf(" · gap %+.1f%%", *res.Market.Gamma.GapPct)
+		if ready.Gamma.GapPct != nil {
+			gamma += fmt.Sprintf(" · gap %+.1f%%", *ready.Gamma.GapPct)
 		}
 	}
-	briefLine(env, "dealer gamma", res.Market.Gamma.BriefRowState, gamma)
+	briefLine(env, "dealer gamma", ready.Gamma.BriefRowState, gamma)
 	// Action and severity are usually the same word; printing both reads as a
 	// stutter, so the pair collapses when equal (the SPA does the same).
-	severity := res.Market.Canary.Severity
-	if strings.EqualFold(severity, res.Market.Canary.Action) {
+	severity := ready.Canary.Severity
+	if strings.EqualFold(severity, ready.Canary.Action) {
 		severity = ""
 	}
-	briefLine(env, "canary", res.Market.Canary.BriefRowState,
-		briefJoin(res.Market.Canary.Action, severity, res.Market.Canary.Summary))
-
-	fmt.Fprintln(env.Stdout, "\nB  Calendar")
-	session := briefJoin(res.Calendar.Session.Market, res.Calendar.Session.State)
-	briefLine(env, "session", res.Calendar.Session.BriefRowState, session)
-	for _, event := range res.Calendar.MarketEvents {
+	briefLine(env, "canary", ready.Canary.BriefRowState,
+		briefJoin(ready.Canary.Action, severity, ready.Canary.Summary))
+	briefLine(env, "session", ready.Session.BriefRowState, briefJoin(ready.Session.Market, ready.Session.State))
+	for _, event := range ready.MarketEvents {
 		value := fmt.Sprintf("%d", event.Count)
 		if len(event.Symbols) > 0 {
 			value += " · " + strings.Join(event.Symbols, ", ")
 		}
 		briefLine(env, event.Kind, event.BriefRowState, value)
 	}
-
-	fmt.Fprintln(env.Stdout, "\nC  Portfolio")
-	acct := "—"
-	if res.Portfolio.Account.EquityBase != nil {
-		acct = formatMoneyCcy(*res.Portfolio.Account.EquityBase, res.Portfolio.Account.BaseCurrency)
-	}
-	if res.Portfolio.Account.DailyPnLBase != nil {
-		acct += " · day " + formatMoneyCcy(*res.Portfolio.Account.DailyPnLBase, res.Portfolio.Account.BaseCurrency)
-	}
-	briefLine(env, "account", res.Portfolio.Account.BriefRowState, acct)
-	movers := make([]string, 0, len(res.Portfolio.Movers.Rows)+1)
-	for _, mover := range res.Portfolio.Movers.Rows {
-		movers = append(movers, fmt.Sprintf("%s %s", mover.Symbol, formatMoneyCcy(mover.DailyPnLBase, res.Portfolio.Account.BaseCurrency)))
-	}
-	if res.Portfolio.Movers.OtherPnLBase != nil && res.Portfolio.Movers.OtherCount > 0 {
-		unit := "others"
-		if res.Portfolio.Movers.OtherCount == 1 {
-			unit = "other"
-		}
-		movers = append(movers, fmt.Sprintf("%d %s %s", res.Portfolio.Movers.OtherCount, unit,
-			formatMoneyCcy(*res.Portfolio.Movers.OtherPnLBase, res.Portfolio.Account.BaseCurrency)))
-	}
-	briefLine(env, "movers", res.Portfolio.Movers.BriefRowState, strings.Join(movers, " · "))
-	briefLine(env, "premium at risk", res.Portfolio.PremiumAtRisk.BriefRowState, briefMoney(res.Portfolio.PremiumAtRisk))
-	briefLine(env, "hedge cost / day", res.Portfolio.HedgeCost.BriefRowState, briefMoney(res.Portfolio.HedgeCost))
-	orders := "—"
-	if res.Portfolio.WorkingOrders.Count != nil {
-		orders = fmt.Sprintf("%d", *res.Portfolio.WorkingOrders.Count)
-	}
-	briefLine(env, "working orders", res.Portfolio.WorkingOrders.BriefRowState, orders)
-
-	fmt.Fprintln(env.Stdout, "\nD  Risk & limits")
 	capital := ""
-	if res.RiskLimits.Capital.Tier != "" {
-		capital = "tier " + res.RiskLimits.Capital.Tier
+	if ready.Capital.Tier != "" {
+		capital = "tier " + ready.Capital.Tier
 	}
-	if res.RiskLimits.Capital.Enforcement != "" {
-		capital = briefJoin(capital, "enforcement "+res.RiskLimits.Capital.Enforcement)
+	if ready.Capital.Enforcement != "" {
+		capital = briefJoin(capital, "enforcement "+ready.Capital.Enforcement)
 	}
-	if res.RiskLimits.Capital.ConsumedPct != nil {
-		capital = briefJoin(capital, fmt.Sprintf("%.1f%% consumed", *res.RiskLimits.Capital.ConsumedPct))
+	if ready.Capital.ConsumedPct != nil {
+		capital = briefJoin(capital, fmt.Sprintf("%.1f%% consumed", *ready.Capital.ConsumedPct))
 	}
-	if !res.RiskLimits.Capital.PeakAsOf.IsZero() {
-		capital = briefJoin(capital, "peak set "+res.RiskLimits.Capital.PeakAsOf.Local().Format("2006-01-02 15:04"))
+	if !ready.Capital.PeakAsOf.IsZero() {
+		capital = briefJoin(capital, "peak set "+ready.Capital.PeakAsOf.Local().Format("2006-01-02 15:04"))
 	}
-	briefLine(env, "capital", res.RiskLimits.Capital.BriefRowState, capital)
+	briefLine(env, "capital", ready.Capital.BriefRowState, capital)
 	latch := "open"
-	if res.RiskLimits.Latch.Latched {
+	if ready.Latch.Latched {
 		latch = "LATCHED"
-		if res.RiskLimits.Latch.AgeDays != nil {
+		if ready.Latch.AgeDays != nil {
 			unit := "days"
-			if *res.RiskLimits.Latch.AgeDays == 1 {
+			if *ready.Latch.AgeDays == 1 {
 				unit = "day"
 			}
-			latch += fmt.Sprintf(" · %d %s", *res.RiskLimits.Latch.AgeDays, unit)
+			latch += fmt.Sprintf(" · %d %s", *ready.Latch.AgeDays, unit)
 		}
-		if res.RiskLimits.Latch.ConsumedPctAtLatch != nil {
-			latch += fmt.Sprintf(" · engaged at %.1f%%", *res.RiskLimits.Latch.ConsumedPctAtLatch)
-		}
-	}
-	briefLine(env, "drawdown latch", res.RiskLimits.Latch.BriefRowState, latch)
-	briefLine(env, "active overrides", res.RiskLimits.Overrides.BriefRowState, fmt.Sprintf("%d", len(res.RiskLimits.Overrides.Rows)))
-	briefLine(env, "policy drift", res.RiskLimits.PolicyDrift.BriefRowState, fmt.Sprintf("%d", len(res.RiskLimits.PolicyDrift.Rows)))
-
-	fmt.Fprintln(env.Stdout, "\nE  Process")
-	reconcile := "never"
-	if !res.Process.Reconcile.LastReconciledAt.IsZero() {
-		reconcile = res.Process.Reconcile.LastReconciledAt.Local().Format("2006-01-02 15:04")
-		if res.Process.Reconcile.Source != "" {
-			reconcile += " · " + res.Process.Reconcile.Source
+		if ready.Latch.ConsumedPctAtLatch != nil {
+			latch += fmt.Sprintf(" · engaged at %.1f%%", *ready.Latch.ConsumedPctAtLatch)
 		}
 	}
-	if !res.Process.Reconcile.Deadline.IsZero() {
-		reconcile += " · due " + res.Process.Reconcile.Deadline.Local().Format("2006-01-02")
-		if res.Process.Reconcile.DaysRemaining != nil {
-			reconcile += fmt.Sprintf(" (%d day(s))", *res.Process.Reconcile.DaysRemaining)
-		}
-	}
-	briefLine(env, "reconcile", res.Process.Reconcile.BriefRowState, reconcile)
-	briefLine(env, "auto-extend", res.Process.AutoExtend.BriefRowState, res.Process.AutoExtend.ReportID)
-	oneTap := "blocked"
-	if res.Process.OneTap.Signable {
-		oneTap = "signable · ibkr policy capital-event reconcile"
-	} else if len(res.Process.OneTap.Blockers) > 0 {
-		oneTap += " · " + strings.Join(res.Process.OneTap.Blockers, "; ")
-	}
-	briefLine(env, "one-tap sign-off", res.Process.OneTap.BriefRowState, oneTap)
-	delta := fmt.Sprintf("%d transition(s), %d added, %d removed", len(res.Process.RulesDelta.Transitions), len(res.Process.RulesDelta.Added), len(res.Process.RulesDelta.Removed))
-	if res.Process.RulesDelta.RulebookFingerprintChanged {
-		delta += " · fingerprint changed"
-	}
-	briefLine(env, "rules delta", res.Process.RulesDelta.BriefRowState, delta)
-	for _, artefact := range res.Process.Artefacts.Rows {
+	briefLine(env, "drawdown latch", ready.Latch.BriefRowState, latch)
+	briefLine(env, "premium at risk", ready.PremiumAtRisk.BriefRowState, briefMoney(ready.PremiumAtRisk))
+	briefLine(env, "hedge cost / day", ready.HedgeCost.BriefRowState, briefMoney(ready.HedgeCost))
+	briefLine(env, "policy drift", ready.PolicyDrift.BriefRowState, fmt.Sprintf("%d", len(ready.PolicyDrift.Rows)))
+	for _, artefact := range ready.Artefacts.Rows {
 		state := "not declared"
 		if artefact.Declared {
 			state = "not completed"
@@ -216,7 +234,7 @@ func renderBrief(env *Env, res rpc.BriefResult) {
 		}
 		briefLine(env, "artefact "+artefact.Kind, artefact.BriefRowState, state)
 	}
-	if monthly := res.Process.MonthlyPulse; monthly != nil {
+	if monthly := ready.MonthlyPulse; monthly != nil {
 		value := briefJoin(monthly.Status, monthly.Month)
 		if !monthly.DueAt.IsZero() {
 			value += " · due " + monthly.DueAt.Local().Format("2006-01-02 15:04")

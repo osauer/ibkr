@@ -12,42 +12,40 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
-func TestRenderBriefFiveSectionsAndDegradation(t *testing.T) {
+func TestRenderBriefTwoMovementsAndDegradation(t *testing.T) {
 	var stdout bytes.Buffer
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	res := rpc.BriefResult{
 		AsOf: time.Date(2026, 7, 18, 8, 0, 0, 0, time.Local), BriefFingerprint: "sha256:abcdef",
-		Market: rpc.BriefMarketSection{
-			Regime:  rpc.BriefRegimeRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "gateway unavailable"}},
-			Breadth: rpc.BriefBreadthRow{BriefRowState: rpc.BriefRowState{Status: "unavailable", Detail: "cold"}},
-			Gamma:   rpc.BriefGammaRow{BriefRowState: rpc.BriefRowState{Status: "unavailable", Detail: "cold"}},
-			Canary:  rpc.BriefCanaryRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "partial"}},
-		},
-		Calendar: rpc.BriefCalendarSection{Session: rpc.BriefSessionRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "official"}}},
-		Portfolio: rpc.BriefPortfolioSection{
-			Account:       rpc.BriefAccountRow{BriefRowState: rpc.BriefRowState{Status: "unavailable", Detail: "account down"}},
-			Movers:        rpc.BriefMoversRow{BriefRowState: rpc.BriefRowState{Status: "unavailable", Detail: "positions down"}},
-			PremiumAtRisk: rpc.BriefMoneyCoverageRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "nil values excluded"}},
-			HedgeCost:     rpc.BriefMoneyCoverageRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "nil greeks excluded"}},
+		Review: rpc.BriefReviewSection{
+			SessionPnL:    rpc.BriefAccountRow{BriefRowState: rpc.BriefRowState{Status: "unavailable", Detail: "account down"}},
+			Attribution:   rpc.BriefMoversRow{BriefRowState: rpc.BriefRowState{Status: "unavailable", Detail: "positions down"}},
+			RulesDelta:    rpc.BriefRulesDeltaRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "no delta baseline yet"}},
+			Proposals:     rpc.BriefProposalsRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "no proposals"}, Offered: 2, Acted: 1},
+			Overrides:     rpc.BriefOverridesRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "none"}},
+			CapitalEvents: rpc.BriefCapitalEventsRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "no capital events"}},
+			Reconcile:     rpc.BriefReconcileRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "never"}},
+			AutoExtend:    rpc.BriefAutoExtendRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "none"}},
+			OneTap:        rpc.BriefOneTapRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "blocked"}},
 			WorkingOrders: rpc.BriefCountRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "journal"}},
 		},
-		RiskLimits: rpc.BriefRiskSection{
-			Capital:     rpc.BriefCapitalRow{BriefRowState: rpc.BriefRowState{Status: "attention", Detail: "block tier breached"}, Tier: "block", Enforcement: "shadow"},
-			Latch:       rpc.BriefLatchRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "open"}},
-			Overrides:   rpc.BriefOverridesRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "none"}},
-			PolicyDrift: rpc.BriefPolicyDriftRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "match"}},
-		},
-		Process: rpc.BriefProcessSection{
-			Reconcile:  rpc.BriefReconcileRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "never"}},
-			AutoExtend: rpc.BriefAutoExtendRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "none"}},
-			OneTap:     rpc.BriefOneTapRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "blocked"}},
-			RulesDelta: rpc.BriefRulesDeltaRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "no delta baseline yet"}},
-			Artefacts:  rpc.BriefArtefactsRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "declared"}},
+		Ready: rpc.BriefReadySection{
+			Regime:        rpc.BriefRegimeRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "gateway unavailable"}},
+			Breadth:       rpc.BriefBreadthRow{BriefRowState: rpc.BriefRowState{Status: "unavailable", Detail: "cold"}},
+			Gamma:         rpc.BriefGammaRow{BriefRowState: rpc.BriefRowState{Status: "unavailable", Detail: "cold"}},
+			Canary:        rpc.BriefCanaryRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "partial"}},
+			Session:       rpc.BriefSessionRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "official"}},
+			Capital:       rpc.BriefCapitalRow{BriefRowState: rpc.BriefRowState{Status: "attention", Detail: "block tier breached"}, Tier: "block", Enforcement: "shadow"},
+			Latch:         rpc.BriefLatchRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "open"}},
+			PremiumAtRisk: rpc.BriefMoneyCoverageRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "nil values excluded"}},
+			HedgeCost:     rpc.BriefMoneyCoverageRow{BriefRowState: rpc.BriefRowState{Status: "degraded", Detail: "nil greeks excluded"}},
+			PolicyDrift:   rpc.BriefPolicyDriftRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "match"}},
+			Artefacts:     rpc.BriefArtefactsRow{BriefRowState: rpc.BriefRowState{Status: "ok", Detail: "declared"}},
 		},
 	}
 	renderBrief(env, res)
 	got := stdout.String()
-	for _, want := range []string{"A  Market", "B  Calendar", "C  Portfolio", "D  Risk & limits", "E  Process", "gateway unavailable", "nil greeks excluded", "no delta baseline yet", "attention", "tier block · enforcement shadow"} {
+	for _, want := range []string{"Review  (last completed session)", "Ready  (today)", "session P&L", "by underlying", "proposals", "capital events", "gateway unavailable", "nil greeks excluded", "no delta baseline yet", "attention", "tier block · enforcement shadow", "2 offered · 1 acted"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("brief render missing %q:\n%s", want, got)
 		}
@@ -135,7 +133,7 @@ func TestRunBriefMonthlyTargetNeverAcknowledgesFromCLI(t *testing.T) {
 	snapshot := rpc.BriefResult{
 		AsOf:             time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC),
 		BriefFingerprint: "sha256:monthly", StampTarget: rpc.BriefKindMonthly,
-		Process: rpc.BriefProcessSection{MonthlyPulse: &rpc.BriefMonthlyPulseRow{
+		Ready: rpc.BriefReadySection{MonthlyPulse: &rpc.BriefMonthlyPulseRow{
 			Status: rpc.BriefMonthlyPulseDue, Month: "2026-08",
 		}},
 	}
