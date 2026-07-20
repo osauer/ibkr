@@ -37,20 +37,28 @@ type CanaryResult struct {
 	Action             string                   `json:"action,omitempty"`
 	MarketConfirmation string                   `json:"market_confirmation,omitempty"`
 	PortfolioFit       string                   `json:"portfolio_fit,omitempty"`
-	InputHealth        string                   `json:"input_health,omitempty"`
-	Direction          risk.SignalDirection     `json:"direction,omitempty"`
-	Severity           risk.SignalSeverity      `json:"severity"`
-	PlannerModeHint    risk.PlannerMode         `json:"planner_mode_hint,omitempty"`
-	PlannerReadiness   risk.PlannerReadiness    `json:"planner_readiness,omitempty"`
-	Summary            string                   `json:"summary"`
-	PrimaryDrivers     []risk.SignalID          `json:"primary_drivers,omitempty"`
-	Signals            []risk.Signal            `json:"signals,omitempty"`
-	Rows               []CanaryRow              `json:"rows"`
-	Portfolio          CanaryPortfolioSummary   `json:"portfolio"`
-	Market             CanaryMarketSummary      `json:"market"`
-	MarketIndicators   []CanaryMarketIndicator  `json:"market_indicators,omitempty"`
-	Warnings           []string                 `json:"warnings,omitempty"`
-	NotExecution       string                   `json:"not_execution"`
+	// PortfolioAlertRelevant is the producer-stamped verdict for "does this
+	// snapshot concern the live portfolio enough to alert on". The policy has
+	// exactly one copy, in internal/canary; the app alert gate and the SPA
+	// preview gate read this field instead of re-deriving fit/exposure edge
+	// cases. Nil means the producer predates the stamp — consumers fail open
+	// to relevant, so version skew can add market-weather noise but never
+	// suppress alert delivery.
+	PortfolioAlertRelevant *bool                   `json:"portfolio_alert_relevant,omitempty"`
+	InputHealth            string                  `json:"input_health,omitempty"`
+	Direction              risk.SignalDirection    `json:"direction,omitempty"`
+	Severity               risk.SignalSeverity     `json:"severity"`
+	PlannerModeHint        risk.PlannerMode        `json:"planner_mode_hint,omitempty"`
+	PlannerReadiness       risk.PlannerReadiness   `json:"planner_readiness,omitempty"`
+	Summary                string                  `json:"summary"`
+	PrimaryDrivers         []risk.SignalID         `json:"primary_drivers,omitempty"`
+	Signals                []risk.Signal           `json:"signals,omitempty"`
+	Rows                   []CanaryRow             `json:"rows"`
+	Portfolio              CanaryPortfolioSummary  `json:"portfolio"`
+	Market                 CanaryMarketSummary     `json:"market"`
+	MarketIndicators       []CanaryMarketIndicator `json:"market_indicators,omitempty"`
+	Warnings               []string                `json:"warnings,omitempty"`
+	NotExecution           string                  `json:"not_execution"`
 }
 
 type CanarySourceAsOf struct {

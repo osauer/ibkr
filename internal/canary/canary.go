@@ -78,6 +78,7 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	res.Signals = append(res.Signals, canarySourceDataQualitySignals(sourceIssues)...)
 	res.MarketConfirmation = canaryMarketConfirmation(res.Market)
 	res.PortfolioFit = canaryPortfolioFit(res.Portfolio, res.Signals)
+	res.PortfolioAlertRelevant = new(canaryPortfolioAlertRelevant(&res))
 	res.InputHealth = canaryInputHealth(in, res.Market, sourceIssues)
 	res.Direction, res.Severity = canaryDecisionState(res.MarketConfirmation, res.PortfolioFit, res.InputHealth, res.Market, res.Signals)
 	res.Action = canaryAction(res.Direction, res.Severity, res.MarketConfirmation, res.PortfolioFit, res.InputHealth)
@@ -866,7 +867,7 @@ func canaryPnLShockRow(p CanaryPortfolioSummary) CanaryRow {
 	}
 	pct := *p.DailyPnLPct
 	absPct := math.Abs(pct)
-	evidence := fmt.Sprintf("daily P&L %+.1f%% NLV", pct)
+	evidence := fmt.Sprintf("daily P&L %+.1f%% NLV (watch at ±%.0f%%)", pct, canaryPolicy.DailyPnLWatchPct)
 	if absPct >= canaryPolicy.DailyPnLActPct {
 		if pct < 0 {
 			return canaryRow("Portfolio P&L shock", risk.DirectionDefensive, risk.SeverityAct, "Large daily loss; review defensive actions and protect liquidity.", evidence)
@@ -944,7 +945,8 @@ func canaryExposureRow(p CanaryPortfolioSummary, m CanaryMarketSummary) CanaryRo
 	gross := derefPct(p.GrossExposurePctNLV)
 	delta := derefPct(p.NetDeltaPctNLV)
 	grossDelta := derefPct(p.GrossDeltaPctNLV)
-	evidence := fmt.Sprintf("gross %.0f%% NLV; net delta %.0f%% NLV; gross delta %.0f%% NLV", gross, delta, grossDelta)
+	evidence := fmt.Sprintf("gross %.0f%% NLV (watch %.0f%%); net delta %.0f%% NLV (watch %.0f%%); gross delta %.0f%% NLV (watch %.0f%%)",
+		gross, canaryPolicy.GrossExposureWatchPct, delta, canaryPolicy.NetDeltaWatchPct, grossDelta, canaryPolicy.GrossDeltaWatchPct)
 	stressed := m.EligibleRedClusters >= 2 || canaryConfirmedTapeStress(m)
 	switch {
 	case (gross >= canaryPolicy.GrossExposureStressUrgentPct || delta >= canaryPolicy.NetDeltaStressUrgentPct || grossDelta >= canaryPolicy.GrossDeltaStressUrgentPct) && stressed:
@@ -984,7 +986,14 @@ func canaryProtectionCoverageRow(p CanaryPortfolioSummary) CanaryRow {
 		return canaryRow("Protection coverage", risk.DirectionRebalance, risk.SeverityWatch, "Reconcile stale protective orders before counting them as coverage.", evidence)
 	}
 	if coverage.Counts.Unprotected > 0 || coverage.Counts.Partial > 0 {
-		return canaryRow("Protection coverage", risk.DirectionRebalance, risk.SeverityWatch, "Review largest unprotected stock/ETF exposures before adding risk.", evidence)
+		guidance := "Review largest unprotected stock/ETF exposures before adding risk."
+		// Naming the position turns "go look somewhere" into a decision the
+		// row itself supports; the phrase shape mirrors the Monitor protection
+		// panel ("largest unprotected SYM amount").
+		if largest := largestUnprotectedPhrase(coverage); largest != "" {
+			guidance = "Review largest unprotected stock/ETF exposures before adding risk; largest unprotected " + largest + "."
+		}
+		return canaryRow("Protection coverage", risk.DirectionRebalance, risk.SeverityWatch, guidance, evidence)
 	}
 	if coverage.Counts.Unknown > 0 || coverage.Status == rpc.ProtectionCoverageStateUnknown {
 		return canaryRow("Protection coverage", risk.DirectionDataQuality, risk.SeverityWatch, "Open-order coverage is unknown; confirm open orders before relying on stop coverage.", evidence)
@@ -1182,6 +1191,35 @@ func canaryPortfolioFit(p CanaryPortfolioSummary, signals []risk.Signal) string 
 		return canaryPortfolioFitUnknown
 	}
 	return canaryPortfolioFitLow
+}
+
+// canaryPortfolioAlertRelevant is the single policy copy for "does this
+// snapshot concern the live portfolio enough to alert on": only a low-fit,
+// flat book (no held stress, every exposure print under 0.5% NLV) is market
+// weather rather than a portfolio alert. Unknown fit stays relevant — an
+// unmeasurable portfolio must never be silenced. The app alert gate and the
+// SPA preview gate read the stamped PortfolioAlertRelevant field instead of
+// re-deriving these edge cases.
+func canaryPortfolioAlertRelevant(r *CanaryResult) bool {
+	if r.PortfolioFit != canaryPortfolioFitLow {
+		return true
+	}
+	p := r.Portfolio
+	if len(p.HeldStress) > 0 {
+		return true
+	}
+	for _, value := range []*float64{
+		p.GrossExposurePctNLV,
+		p.NetDeltaPctNLV,
+		p.GrossDeltaPctNLV,
+		p.LargestExposurePct,
+		p.LargestDeltaPctNLV,
+	} {
+		if value != nil && math.Abs(*value) >= 0.5 {
+			return true
+		}
+	}
+	return false
 }
 
 func canaryInputHealth(in CanaryInput, m CanaryMarketSummary, sourceIssues []canarySourceIssue) string {
@@ -2474,6 +2512,30 @@ func formatProtectionCoverageEvidence(c *rpc.ProtectionCoverageSummary) string {
 	return strings.Join(parts, "; ")
 }
 
+// largestUnprotectedPhrase names the single largest unprotected position and
+// its uncovered amount ("MSFT € 12,345.67") for row guidance. The daemon
+// orders LargestUnprotected by uncovered notional; a row without a valued
+// notional still contributes its name. Empty when the daemon filled nothing.
+func largestUnprotectedPhrase(c *rpc.ProtectionCoverageSummary) string {
+	if c == nil {
+		return ""
+	}
+	for _, row := range c.LargestUnprotected {
+		if row.Underlying == "" {
+			continue
+		}
+		if row.UnprotectedNotionalBase != nil && *row.UnprotectedNotionalBase != 0 {
+			ccy := row.UnprotectedNotionalBaseCurrency
+			if ccy == "" {
+				ccy = c.UnprotectedNotionalBaseCurrency
+			}
+			return row.Underlying + " " + formatMoneyCcy(*row.UnprotectedNotionalBase, ccy)
+		}
+		return row.Underlying
+	}
+	return ""
+}
+
 func canaryHasMarketDataIssue(m CanaryMarketSummary) bool {
 	return len(m.AmbiguousClusters) > 0 ||
 		len(m.PartialClusters) > 0 ||
@@ -2494,6 +2556,9 @@ func canaryWorstCushionPct(p CanaryPortfolioSummary) *float64 {
 	}
 }
 
+// The trailing trigger mirrors the tape row's disclosure style: the reader
+// sees how far the printed number sits from the policy line, not just the
+// number. Both cushion variants share the same watch floor.
 func canaryCushionEvidence(p CanaryPortfolioSummary) string {
 	parts := []string{}
 	if p.CushionPct != nil {
@@ -2505,16 +2570,16 @@ func canaryCushionEvidence(p CanaryPortfolioSummary) string {
 	if len(parts) == 0 {
 		return "cushion unavailable"
 	}
-	return strings.Join(parts, "; ")
+	return strings.Join(parts, "; ") + fmt.Sprintf(" (watch below %.0f%%)", canaryPolicy.MarginWatchPct)
 }
 
 func canaryConcentrationEvidence(p CanaryPortfolioSummary) string {
 	parts := []string{}
 	if p.LargestExposurePct != nil && p.LargestExposure != "" {
-		parts = append(parts, fmt.Sprintf("%s market %.0f%% NLV", p.LargestExposure, math.Abs(*p.LargestExposurePct)))
+		parts = append(parts, fmt.Sprintf("%s market %.0f%% NLV (watch %.0f%%)", p.LargestExposure, math.Abs(*p.LargestExposurePct), canaryPolicy.SingleNameExposureWatchPct))
 	}
 	if p.LargestDeltaPctNLV != nil && p.LargestDeltaExposure != "" {
-		parts = append(parts, fmt.Sprintf("%s delta %.0f%% NLV", p.LargestDeltaExposure, *p.LargestDeltaPctNLV))
+		parts = append(parts, fmt.Sprintf("%s delta %.0f%% NLV (watch %.0f%%)", p.LargestDeltaExposure, *p.LargestDeltaPctNLV, canaryPolicy.SingleNameDeltaWatchPct))
 	}
 	return strings.Join(parts, "; ")
 }

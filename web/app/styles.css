@@ -3916,6 +3916,20 @@ p {
   border-left-color: var(--red);
 }
 
+/* Push delivery failing during an open session outranks every other line on
+   the page: the operator may be trading unalerted. */
+.alerts-delivery-banner {
+  margin: 2px 0 10px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--red);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
 .alert-row__head {
   display: flex;
   align-items: center;

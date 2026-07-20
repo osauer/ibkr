@@ -408,6 +408,9 @@ function renderAlerts() {
   const dismissible = attentionItems.some((item) => alertTone(item) !== "risk") || passedItems.length > 0;
   dismiss.hidden = suppressed || !dismissible;
   dismiss.title = "Hides watch and data rows for this signal. Act rows and the counter are unaffected; rows return when the canary signal changes.";
+  // The banner reads snapshot session state, which arrives on this render
+  // path; the governance path re-renders it when delivery health changes.
+  renderDeliveryBanner();
 }
 
 function renderAttentionList(decisionRows, dataRows, emptyText) {
@@ -432,6 +435,27 @@ function renderAttentionList(decisionRows, dataRows, emptyText) {
 function marketSessionClosed() {
   const session = state.snapshot?.market_calendar?.session;
   return Boolean(session) && session.is_open !== true;
+}
+
+// Push delivery failing during an open session means the operator may be
+// trading unalerted — that fact belongs at the top of the page in plain
+// English, not inside the governance evidence disclosure. Known-closed
+// sessions keep the quiet disclosure-only presentation; an unknown session
+// state fails visible. Suppressed delivery (operator chose Off) is not a
+// failure and never banners.
+function renderDeliveryBanner() {
+  const banner = $("alertsDeliveryBanner");
+  const health = state.governance?.delivery_health || {};
+  const failing = ["degraded", "unavailable"].includes(health.state);
+  if (!failing || marketSessionClosed()) {
+    banner.hidden = true;
+    banner.textContent = "";
+    return;
+  }
+  banner.textContent = health.state === "degraded"
+    ? "Alerts may not be reaching your phone — push delivery is degraded while the market is open. Rely on this page until delivery recovers."
+    : "Alerts are not reaching your phone — push delivery is down while the market is open. Rely on this page and check notification settings.";
+  banner.hidden = false;
 }
 
 // The one-sentence page lede: the daemon-authored canary summary plus when the
@@ -574,6 +598,7 @@ function renderGovernance() {
   renderGovernanceDelivery(governance);
   renderGovernanceAttempts(governance?.attempts);
   renderGovernanceControlStatus();
+  renderDeliveryBanner();
 }
 
 function governanceCandidateElement(candidate = {}) {
@@ -1188,19 +1213,13 @@ function currentCanaryHasPortfolioAlert() {
   return canaryHasPortfolioAlert(state.snapshot?.canary || {});
 }
 
+// The daemon stamps portfolio_alert_relevant on every canary snapshot; the
+// single policy copy lives in internal/canary (a low-fit flat book is market
+// weather, not a portfolio alert). An unstamped snapshot — an older daemon —
+// fails open to relevant: version skew may add market-weather rows but must
+// never hide alerts.
 function canaryHasPortfolioAlert(canary) {
-  const fit = String(canary.portfolio_fit || "").toLowerCase();
-  if (fit !== "low") return true;
-  const portfolio = canary.portfolio || {};
-  if ((portfolio.held_stress || []).length > 0) return true;
-  const exposureValues = [
-    portfolio.gross_exposure_pct_nlv,
-    portfolio.net_delta_pct_nlv,
-    portfolio.gross_delta_pct_nlv,
-    portfolio.largest_exposure_pct_nlv,
-    portfolio.largest_delta_pct_nlv,
-  ];
-  return exposureValues.some((value) => typeof value === "number" && Math.abs(value) >= 0.5);
+  return canary.portfolio_alert_relevant !== false;
 }
 
 function liveAlertPreviewsSuppressed() {
@@ -1337,4 +1356,4 @@ function canUseWebPush() {
   return hasNotifications() && "PushManager" in globalThis && !!navigator.serviceWorker;
 }
 
-export { acknowledgeAttention, acknowledgeAttentionNow, alertIsStale, alertRowElement, alertSourceLabel, alertTone, allAlertItems, applyAttention, applyGovernanceCutoverOverlay, applyGovernanceCutoverReceipt, attentionViewReady, canUseWebPush, canaryHasPortfolioAlert, canaryPreviewRows, clearAlerts, currentAlertPreviewItems, currentCanaryFingerprint, currentCanaryHasPortfolioAlert, currentHistoryAlertItems, dismissCurrentSignals, enablePush, fetchAttentionHistories, firstSeenForCurrentSignal, governanceAttemptRows, governanceOccurrenceLifecycle, handleAttentionContextChange, hasNotifications, liveAlertPreviewsSuppressed, notificationStateLabel, previousContextAlertItems, refreshAlerts, refreshAttention, refreshGovernance, refreshPushState, renderAlertList, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, scheduleGovernanceRefresh, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility, staleAlertReason, unreadRefsAppear, validateAlertSettings, validateAttention, validateGovernanceResponse, warningMessages };
+export { acknowledgeAttention, acknowledgeAttentionNow, alertIsStale, alertRowElement, alertSourceLabel, alertTone, allAlertItems, applyAttention, applyGovernanceCutoverOverlay, applyGovernanceCutoverReceipt, attentionViewReady, canUseWebPush, canaryHasPortfolioAlert, canaryPreviewRows, clearAlerts, currentAlertPreviewItems, currentCanaryFingerprint, currentCanaryHasPortfolioAlert, currentHistoryAlertItems, dismissCurrentSignals, enablePush, fetchAttentionHistories, firstSeenForCurrentSignal, governanceAttemptRows, governanceOccurrenceLifecycle, handleAttentionContextChange, hasNotifications, liveAlertPreviewsSuppressed, notificationStateLabel, previousContextAlertItems, refreshAlerts, refreshAttention, refreshGovernance, refreshPushState, renderAlertList, renderAlertMode, renderAlerts, renderAttention, renderDeliveryBanner, renderGovernance, renderSelectedAlert, scheduleGovernanceRefresh, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility, staleAlertReason, unreadRefsAppear, validateAlertSettings, validateAttention, validateGovernanceResponse, warningMessages };

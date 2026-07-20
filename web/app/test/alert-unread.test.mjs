@@ -81,7 +81,7 @@ function loadAlerts({ visibility = "visible", alertsPanelHidden = false } = {}) 
     safeNotificationTest: { busy: false, state: "", error: false },
     selectedAlertID: null,
     snapshot: {
-      canary: { fingerprint: { key: "canary-current" }, portfolio_fit: "low", portfolio: {} },
+      canary: { fingerprint: { key: "canary-current" }, portfolio_fit: "low", portfolio_alert_relevant: false, portfolio: {} },
       sources: { nudges: { state: "current" } },
       nudges: {
         as_of: "2026-07-02T00:00:00Z",
@@ -629,6 +629,7 @@ test("act day dominates: act rows sort first, dismiss never hides them, counter 
     as_of: "2026-07-19T19:00:00Z",
     fingerprint: { key: "canary-current" },
     portfolio_fit: "high",
+    portfolio_alert_relevant: true,
     severity: "urgent",
     action: "defend",
     summary: "Market stress is confirmed against a vulnerable portfolio; review defensive actions.",
@@ -643,6 +644,8 @@ test("act day dominates: act rows sort first, dismiss never hides them, counter 
   };
   harness.exports.renderAlerts();
   assert.equal(harness.elements.get("alertCount").textContent, "1 act · 1 watch · 1 data");
+  assert.equal(harness.elements.get("alertCount").textContent.includes("All clear"), false,
+    "the header can never render All clear while any act/watch condition exists");
   assert.equal(harness.elements.get("currentSignalCount").textContent, "2", "section counts decisions, not data caveats");
   const list = harness.elements.get("currentSignalList");
   const classNames = list.children.map((child) => child.className);
@@ -655,9 +658,67 @@ test("act day dominates: act rows sort first, dismiss never hides them, counter 
   harness.state.clearedAlertFingerprint = "canary-current";
   harness.exports.renderAlerts();
   assert.equal(harness.elements.get("alertCount").textContent, "1 act · 1 watch · 1 data", "dismiss must not change the counter");
+  assert.equal(harness.elements.get("alertCount").textContent.includes("All clear"), false,
+    "dismissing rows can never make the header claim All clear while conditions persist");
   const visibleRows = harness.elements.get("currentSignalList").children.filter((child) => String(child.className).includes("alert-row"));
   assert.equal(visibleRows.length, 1, "only the act row stays visible after dismiss");
   assert.match(visibleText(harness.elements.get("currentSignalList")), /Immediate margin safety/);
   assert.equal(harness.elements.get("alertsPassedChecks").hidden, true, "passed checks hide while dismissed");
   assert.equal(harness.elements.get("dismissCurrentButton").hidden, true, "dismiss control disappears once used");
+});
+
+test("delivery-down banner is prominent during an open session and quiet otherwise", () => {
+  const harness = loadAlerts();
+  // Degraded web-push delivery while the session is open: prominent banner.
+  harness.state.governance = governanceDTO({ delivery_health: { state: "degraded", updated_at: "2026-07-20T14:31:00Z" } });
+  harness.state.snapshot.market_calendar = { session: { is_open: true } };
+  harness.exports.renderGovernance();
+  const banner = harness.elements.get("alertsDeliveryBanner");
+  assert.equal(banner.hidden, false, "degraded delivery during an open session must banner");
+  assert.match(banner.textContent, /may not be reaching your phone/i);
+  // Unavailable delivery escalates the copy.
+  harness.state.governance = governanceDTO({ delivery_health: { state: "unavailable", updated_at: "2026-07-20T14:31:00Z" } });
+  harness.exports.renderGovernance();
+  assert.equal(banner.hidden, false);
+  assert.match(banner.textContent, /not reaching your phone/i);
+  // A known-closed session keeps the quiet disclosure-only presentation.
+  harness.state.snapshot.market_calendar = { session: { is_open: false } };
+  harness.exports.renderAlerts();
+  assert.equal(banner.hidden, true, "closed session must not banner");
+  assert.equal(banner.textContent, "");
+  // An unknown session state fails visible: no calendar is no excuse to hide
+  // a delivery failure.
+  delete harness.state.snapshot.market_calendar;
+  harness.exports.renderGovernance();
+  assert.equal(banner.hidden, false, "unknown session state fails visible");
+  // Healthy delivery never banners; neither does operator-chosen suppression.
+  harness.state.snapshot.market_calendar = { session: { is_open: true } };
+  for (const state of ["healthy", "suppressed"]) {
+    harness.state.governance = governanceDTO({ delivery_health: { state, updated_at: "2026-07-20T14:31:00Z" } });
+    harness.exports.renderGovernance();
+    assert.equal(banner.hidden, true, `${state} delivery must not banner`);
+  }
+});
+
+test("preview relevance reads the daemon-stamped flag and fails open when unstamped", () => {
+  const harness = loadAlerts();
+  const rows = [{ title: "Immediate margin safety", severity: "watch", direction: "defensive", guidance: "Do not add risk.", evidence: "cushion 30%" }];
+  // The daemon stamped the snapshot irrelevant (low-fit flat book): no
+  // preview rows, whatever fit heuristics a client might be tempted to run.
+  harness.state.snapshot.canary = {
+    as_of: "2026-07-20T14:31:00Z",
+    fingerprint: { key: "canary-current" },
+    portfolio_fit: "high",
+    portfolio_alert_relevant: false,
+    severity: "watch",
+    portfolio: {},
+    rows,
+  };
+  assert.equal(harness.exports.currentAlertPreviewItems().length, 0, "a stamped-irrelevant snapshot renders no previews");
+  // Stamped relevant: previews render.
+  harness.state.snapshot.canary.portfolio_alert_relevant = true;
+  assert.equal(harness.exports.currentAlertPreviewItems().length, 1);
+  // Unstamped (older daemon): fail open — skew may add noise, never hide.
+  delete harness.state.snapshot.canary.portfolio_alert_relevant;
+  assert.equal(harness.exports.currentAlertPreviewItems().length, 1, "an unstamped snapshot fails open to relevant");
 });

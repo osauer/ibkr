@@ -173,6 +173,9 @@ func TestComputeCanaryLowExposureMarketWatchDoesNotClaimPortfolioExposed(t *test
 	if res.Action != canaryActionWatch || res.PortfolioFit != canaryPortfolioFitLow {
 		t.Fatalf("decision = action %s portfolio_fit %s, want watch/low", res.Action, res.PortfolioFit)
 	}
+	if res.PortfolioAlertRelevant == nil || *res.PortfolioAlertRelevant {
+		t.Fatalf("portfolio_alert_relevant = %v, want stamped false for a low-fit flat book", res.PortfolioAlertRelevant)
+	}
 	summary := strings.ToLower(res.Summary)
 	if strings.Contains(summary, "portfolio is exposed") || strings.Contains(summary, "stage reductions") {
 		t.Fatalf("summary should not claim low-exposure portfolio is exposed: %q", res.Summary)
@@ -471,6 +474,9 @@ func TestComputeCanaryLargestDeltaConcentrationWatchesWithoutMarketStress(t *tes
 	}
 	if res.Action != canaryActionRebalance || res.PortfolioFit != canaryPortfolioFitHigh {
 		t.Fatalf("decision = action %s fit %s, want rebalance/high", res.Action, res.PortfolioFit)
+	}
+	if res.PortfolioAlertRelevant == nil || !*res.PortfolioAlertRelevant {
+		t.Fatalf("portfolio_alert_relevant = %v, want stamped true for a concentrated book", res.PortfolioAlertRelevant)
 	}
 	if res.PlannerModeHint != risk.PlannerModeRebalance || res.PlannerReadiness != risk.PlannerReadinessReady {
 		t.Fatalf("planner = %s/%s, want rebalance/ready", res.PlannerModeHint, res.PlannerReadiness)
@@ -820,7 +826,7 @@ func TestComputeCanarySurfacesProtectionCoverage(t *testing.T) {
 				UnprotectedNotionalBase:         &unprotected,
 				UnprotectedNotionalBaseCurrency: "USD",
 				Counts:                          rpc.ProtectionCoverageCounts{Unprotected: 1},
-				LargestUnprotected:              []rpc.ProtectionCoverageRow{{Underlying: "MSFT"}},
+				LargestUnprotected:              []rpc.ProtectionCoverageRow{{Underlying: "MSFT", UnprotectedNotionalBase: &unprotected, UnprotectedNotionalBaseCurrency: "USD"}},
 			},
 		},
 		Regime: healthyCanaryRegime(),
@@ -828,11 +834,31 @@ func TestComputeCanarySurfacesProtectionCoverage(t *testing.T) {
 	if res.Portfolio.ProtectionCoverage == nil {
 		t.Fatal("portfolio protection coverage missing")
 	}
-	if !rowContains(res.Rows, "Protection coverage", "Review largest unprotected stock/ETF exposures") {
-		t.Fatalf("coverage guidance missing, rows: %+v", res.Rows)
+	// The row copy itself names the largest unprotected position and amount
+	// (mirrors the Monitor protection panel's "largest unprotected SYM
+	// amount" wording); the reader decides from the row, not a disclosure.
+	if !rowContains(res.Rows, "Protection coverage", "largest unprotected MSFT $ 12,000.00") {
+		t.Fatalf("coverage guidance should name largest unprotected position and amount, rows: %+v", res.Rows)
 	}
 	if !rowContainsEvidence(res.Rows, "Protection coverage", "unprotected $ 12,000.00") {
 		t.Fatalf("coverage evidence missing, rows: %+v", res.Rows)
+	}
+
+	// A largest-unprotected row without a valued notional still contributes
+	// its name — an unvalued exposure must not fall out of the copy.
+	unvalued := ComputeCanary(CanaryInput{Now: canaryTestNow,
+		Account: baseCanaryAccount(),
+		Positions: rpc.PositionsResult{
+			ProtectionCoverage: &rpc.ProtectionCoverageSummary{
+				Status:             "review",
+				Counts:             rpc.ProtectionCoverageCounts{Unprotected: 1},
+				LargestUnprotected: []rpc.ProtectionCoverageRow{{Underlying: "MSFT"}},
+			},
+		},
+		Regime: healthyCanaryRegime(),
+	})
+	if !rowContains(unvalued.Rows, "Protection coverage", "largest unprotected MSFT.") {
+		t.Fatalf("coverage guidance should name largest unprotected position without amount, rows: %+v", unvalued.Rows)
 	}
 }
 

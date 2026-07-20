@@ -43,19 +43,27 @@ func TestShouldAlertModes(t *testing.T) {
 	if !ShouldAlert(state.AlertModeWatchAndAct, watch) {
 		t.Fatalf("watch_and_act should alert on watch severity")
 	}
+	// The relevance policy has one copy, in internal/canary; the daemon stamps
+	// its verdict on the snapshot and this gate only reads it.
 	emptyMarketWatch := rpc.CanaryResult{
-		Severity:     risk.SeverityWatch,
-		PortfolioFit: "low",
-		Portfolio:    rpc.CanaryPortfolioSummary{},
+		Severity:               risk.SeverityWatch,
+		PortfolioFit:           "low",
+		PortfolioAlertRelevant: new(false),
 	}
 	if ShouldAlert(state.AlertModeWatchAndAct, emptyMarketWatch) {
-		t.Fatalf("watch_and_act should not alert on market-only low-exposure canary")
+		t.Fatalf("watch_and_act should not alert when the daemon stamped the canary portfolio-irrelevant")
 	}
-	exposed := 1.0
 	portfolioWatch := emptyMarketWatch
-	portfolioWatch.Portfolio.GrossExposurePctNLV = &exposed
+	portfolioWatch.PortfolioAlertRelevant = new(true)
 	if !ShouldAlert(state.AlertModeWatchAndAct, portfolioWatch) {
-		t.Fatalf("watch_and_act should alert when low-fit canary still has material exposure")
+		t.Fatalf("watch_and_act should alert when the daemon stamped the canary portfolio-relevant")
+	}
+	// An unstamped snapshot (older daemon) fails open: skew may add noise but
+	// must never suppress delivery. The `watch` fixture above already proves
+	// nil-stamp alerts; this pins the low-fit variant explicitly.
+	unstampedWatch := rpc.CanaryResult{Severity: risk.SeverityWatch, PortfolioFit: "low"}
+	if !ShouldAlert(state.AlertModeWatchAndAct, unstampedWatch) {
+		t.Fatalf("watch_and_act must fail open on an unstamped canary snapshot")
 	}
 	if ShouldAlert("bogus", act) {
 		t.Fatalf("unknown mode should not alert")

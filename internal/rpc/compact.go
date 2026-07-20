@@ -23,28 +23,31 @@ const (
 )
 
 type CanaryAlertResult struct {
-	AsOf               time.Time                  `json:"as_of"`
-	Fingerprint        Fingerprint                `json:"fingerprint"`
-	SourceFingerprints CanarySourceFingerprints   `json:"source_fingerprints,omitzero"`
-	SourceHealth       []CompactSourceHealth      `json:"source_health,omitempty"`
-	Action             string                     `json:"action,omitempty"`
-	MarketConfirmation string                     `json:"market_confirmation,omitempty"`
-	PortfolioFit       string                     `json:"portfolio_fit,omitempty"`
-	InputHealth        string                     `json:"input_health,omitempty"`
-	Direction          risk.SignalDirection       `json:"direction,omitempty"`
-	Severity           risk.SignalSeverity        `json:"severity"`
-	PlannerModeHint    risk.PlannerMode           `json:"planner_mode_hint,omitempty"`
-	PlannerReadiness   risk.PlannerReadiness      `json:"planner_readiness,omitempty"`
-	Summary            string                     `json:"summary"`
-	PrimaryDrivers     []risk.SignalID            `json:"primary_drivers,omitempty"`
-	Portfolio          CanaryPortfolioSummary     `json:"portfolio"`
-	Market             CanaryMarketSummary        `json:"market"`
-	OptionHealth       OptionHealthSummary        `json:"option_health"`
-	ProtectionCoverage *ProtectionCoverageSummary `json:"protection_coverage,omitempty"`
-	SPYHedgeOffsetPct  *float64                   `json:"spy_hedge_offset_pct,omitempty"`
-	Flags              []CanaryAlertFlag          `json:"flags,omitempty"`
-	Warnings           []string                   `json:"warnings,omitempty"`
-	NotExecution       string                     `json:"not_execution"`
+	AsOf               time.Time                `json:"as_of"`
+	Fingerprint        Fingerprint              `json:"fingerprint"`
+	SourceFingerprints CanarySourceFingerprints `json:"source_fingerprints,omitzero"`
+	SourceHealth       []CompactSourceHealth    `json:"source_health,omitempty"`
+	Action             string                   `json:"action,omitempty"`
+	MarketConfirmation string                   `json:"market_confirmation,omitempty"`
+	PortfolioFit       string                   `json:"portfolio_fit,omitempty"`
+	// PortfolioAlertRelevant carries the producer-stamped relevance verdict
+	// through the alert view; see CanaryResult.PortfolioAlertRelevant.
+	PortfolioAlertRelevant *bool                      `json:"portfolio_alert_relevant,omitempty"`
+	InputHealth            string                     `json:"input_health,omitempty"`
+	Direction              risk.SignalDirection       `json:"direction,omitempty"`
+	Severity               risk.SignalSeverity        `json:"severity"`
+	PlannerModeHint        risk.PlannerMode           `json:"planner_mode_hint,omitempty"`
+	PlannerReadiness       risk.PlannerReadiness      `json:"planner_readiness,omitempty"`
+	Summary                string                     `json:"summary"`
+	PrimaryDrivers         []risk.SignalID            `json:"primary_drivers,omitempty"`
+	Portfolio              CanaryPortfolioSummary     `json:"portfolio"`
+	Market                 CanaryMarketSummary        `json:"market"`
+	OptionHealth           OptionHealthSummary        `json:"option_health"`
+	ProtectionCoverage     *ProtectionCoverageSummary `json:"protection_coverage,omitempty"`
+	SPYHedgeOffsetPct      *float64                   `json:"spy_hedge_offset_pct,omitempty"`
+	Flags                  []CanaryAlertFlag          `json:"flags,omitempty"`
+	Warnings               []string                   `json:"warnings,omitempty"`
+	NotExecution           string                     `json:"not_execution"`
 }
 
 type CanaryAlertFlag struct {
@@ -140,24 +143,25 @@ func CompactCanaryAlert(c *CanaryResult, positions *PositionsResult) CanaryAlert
 		return CanaryAlertResult{}
 	}
 	out := CanaryAlertResult{
-		AsOf:               c.AsOf,
-		Fingerprint:        c.Fingerprint,
-		SourceFingerprints: c.SourceFingerprints,
-		SourceHealth:       compactSourceHealth(c.SourceHealth),
-		Action:             c.Action,
-		MarketConfirmation: c.MarketConfirmation,
-		PortfolioFit:       c.PortfolioFit,
-		InputHealth:        c.InputHealth,
-		Direction:          c.Direction,
-		Severity:           c.Severity,
-		PlannerModeHint:    c.PlannerModeHint,
-		PlannerReadiness:   c.PlannerReadiness,
-		Summary:            c.Summary,
-		PrimaryDrivers:     c.PrimaryDrivers,
-		Portfolio:          c.Portfolio,
-		Market:             c.Market,
-		Warnings:           c.Warnings,
-		NotExecution:       c.NotExecution,
+		AsOf:                   c.AsOf,
+		Fingerprint:            c.Fingerprint,
+		SourceFingerprints:     c.SourceFingerprints,
+		SourceHealth:           compactSourceHealth(c.SourceHealth),
+		Action:                 c.Action,
+		MarketConfirmation:     c.MarketConfirmation,
+		PortfolioFit:           c.PortfolioFit,
+		PortfolioAlertRelevant: c.PortfolioAlertRelevant,
+		InputHealth:            c.InputHealth,
+		Direction:              c.Direction,
+		Severity:               c.Severity,
+		PlannerModeHint:        c.PlannerModeHint,
+		PlannerReadiness:       c.PlannerReadiness,
+		Summary:                c.Summary,
+		PrimaryDrivers:         c.PrimaryDrivers,
+		Portfolio:              c.Portfolio,
+		Market:                 c.Market,
+		Warnings:               c.Warnings,
+		NotExecution:           c.NotExecution,
 	}
 	for _, row := range c.Rows {
 		if row.Severity != "" && row.Severity != risk.SeverityObserve {

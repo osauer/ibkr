@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"math"
 	"strings"
 	"sync"
 	"time"
@@ -386,26 +385,12 @@ func canaryActEligible(canary rpc.CanaryResult) bool {
 		canary.Action == "confirm_inputs"
 }
 
+// portfolioAlertRelevant reads the daemon-stamped relevance verdict; the
+// policy's single copy lives in internal/canary. An unstamped snapshot (a
+// producer predating the field) fails open to relevant: version skew may add
+// market-weather noise but must never silently suppress alert delivery.
 func portfolioAlertRelevant(canary rpc.CanaryResult) bool {
-	if !strings.EqualFold(canary.PortfolioFit, "low") {
-		return true
-	}
-	p := canary.Portfolio
-	if len(p.HeldStress) > 0 {
-		return true
-	}
-	for _, value := range []*float64{
-		p.GrossExposurePctNLV,
-		p.NetDeltaPctNLV,
-		p.GrossDeltaPctNLV,
-		p.LargestExposurePct,
-		p.LargestDeltaPctNLV,
-	} {
-		if value != nil && math.Abs(*value) >= 0.5 {
-			return true
-		}
-	}
-	return false
+	return canary.PortfolioAlertRelevant == nil || *canary.PortfolioAlertRelevant
 }
 
 // RedactedRecord authors the stored in-app history copy. It stays deliberately
