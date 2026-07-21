@@ -483,15 +483,11 @@ func (s *Server) pruneMonthlyRenderReceiptsLocked(now time.Time) {
 }
 
 func (s *Server) composeBrief(ctx context.Context) (*rpc.BriefResult, *rpc.RulesResult) {
-	now := s.briefNow()
-	res := &rpc.BriefResult{AsOf: now}
-
 	acct, acctErr := s.buildAccountSummary(ctx, false)
 	pos, posErr := s.handlePositionsList(ctx, &rpc.Request{})
 	regime, regimeErr := s.briefRegimeSnapshotContext(ctx)
 	breadth, breadthErr := s.buildBreadthSPX(&rpc.Request{}, false)
 	gamma := s.briefGammaSnapshot()
-	cal, calErr := s.handleMarketCalendar(&rpc.Request{Params: briefJSON(rpc.MarketCalendarParams{Market: "us", At: now, Days: 1})})
 
 	var marketEvents *rpc.MarketEventsResult
 	var marketEventsErr error
@@ -503,6 +499,13 @@ func (s *Server) composeBrief(ctx context.Context) (*rpc.BriefResult, *rpc.Rules
 	}
 
 	rules := s.evaluateRulesMode(ctx, false, false)
+	// The brief boundary is captured after its input reads. In particular,
+	// Canary source snapshots are stamped while those reads are in flight; a
+	// boundary captured before them makes healthy evidence look future-dated
+	// and causes the shadow producer to fail closed with source_time_invalid.
+	now := s.briefNow()
+	res := &rpc.BriefResult{AsOf: now}
+	cal, calErr := s.handleMarketCalendar(&rpc.Request{Params: briefJSON(rpc.MarketCalendarParams{Market: "us", At: now, Days: 1})})
 	renderAuthority := s.currentNudgeAuthority(now)
 	policy := s.briefPolicyResultForAuthority(acct, acctErr, renderAuthority, now)
 	constitution := renderAuthority.policy
