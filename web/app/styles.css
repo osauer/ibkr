@@ -4221,6 +4221,146 @@ p {
   white-space: nowrap;
 }
 
+.shadow-advisory {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--muted-2);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.shadow-advisory--warn {
+  border-left-color: var(--amber);
+  background: rgba(255, 181, 33, 0.07);
+}
+
+.shadow-advisory__head,
+.shadow-advisory-row__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.shadow-advisory__head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.shadow-advisory__head > div > span {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.shadow-advisory__head > div > b {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.shadow-advisory__state {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.shadow-advisory--warn .shadow-advisory__state {
+  border-color: rgba(255, 181, 33, 0.35);
+  color: #9a6500;
+}
+
+.shadow-advisory__summary,
+.shadow-advisory__empty,
+.shadow-advisory__meta p,
+.shadow-advisory__meta time {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.shadow-advisory__meta {
+  display: grid;
+  gap: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.shadow-advisory__list {
+  display: grid;
+  gap: 8px;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.shadow-advisory-row {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--blue);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.shadow-advisory-row--watch {
+  border-left-color: var(--amber);
+}
+
+.shadow-advisory-row--act,
+.shadow-advisory-row--urgent {
+  border-left-color: var(--red);
+}
+
+.shadow-advisory-row__head b {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.shadow-advisory-row__head span {
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
+.shadow-advisory-row__evidence,
+.shadow-advisory-row__times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+}
+
+.shadow-advisory-row__evidence span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 680;
+}
+
+.shadow-advisory-row__times time {
+  color: var(--muted-2);
+  font-size: 10px;
+}
+
+.shadow-advisory-row__context {
+  margin: 0;
+  color: #9a6500;
+  font-size: 11px;
+  font-weight: 680;
+}
+
 .governance-section {
   display: grid;
   gap: 12px;

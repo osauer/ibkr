@@ -1672,6 +1672,14 @@ func TestRegimeContentionMessage_NamesRunningTasks(t *testing.T) {
 		t.Errorf("idle daemon: regimeContentionMessage()=%q; want a 'no daemon-internal contention' hedge", msg)
 	}
 
+	// The acquisition advertises itself to the idle watcher, but must not
+	// diagnose itself as contention when its own fan-out times out.
+	srv.regimeSnapshots = &regimeSnapshotCache{refresh: &regimeSnapshotRefresh{done: make(chan struct{})}}
+	msg = srv.regimeContentionMessage()
+	if strings.Contains(msg, "regime-refresh") || !strings.Contains(msg, "no daemon-internal contention detected") {
+		t.Errorf("self-only refresh: regimeContentionMessage()=%q", msg)
+	}
+
 	// 2. Gamma in flight → message names gamma-zero. Synthetic job
 	// injected via the combined slot (the canonical cache cell for
 	// dashboard / regime callers).
@@ -1690,6 +1698,9 @@ func TestRegimeContentionMessage_NamesRunningTasks(t *testing.T) {
 	}
 	if strings.Contains(msg, "breadth-spx") {
 		t.Errorf("gamma in flight, breadth idle: message=%q; should NOT name breadth-spx", msg)
+	}
+	if strings.Contains(msg, "regime-refresh") {
+		t.Errorf("gamma plus own refresh: message=%q; should NOT name regime-refresh", msg)
 	}
 	close(fakeJob.done) // tidy up the synthetic computation
 }

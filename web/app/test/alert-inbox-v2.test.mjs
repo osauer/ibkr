@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 globalThis.localStorage = {
   getItem() { return null; },
@@ -11,12 +12,47 @@ const { state } = await import("../state.js");
 const {
   AlertInboxV2ContractError,
   alertInboxV2CanAssertClear,
+  alertInboxV2OccurrenceView,
+  alertInboxV2RenderedOccurrences,
+  alertInboxV2View,
   ingestAlertInboxV2,
   ingestAlertInboxV2Event,
   validateAlertInboxV2,
 } = await import("../alert-inbox-v2.js");
 const lifecycleSource = await readFile(new URL("../lifecycle.js", import.meta.url), "utf8");
 const stateSource = await readFile(new URL("../state.js", import.meta.url), "utf8");
+const serviceWorkerSource = await readFile(new URL("../service-worker.js", import.meta.url), "utf8");
+const canarySource = await readFile(new URL("../canary.js", import.meta.url), "utf8");
+
+function sourceFunction(source, name) {
+  const marker = `function ${name}(`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `missing ${name}`);
+  const next = source.indexOf("\nfunction ", start + marker.length);
+  return source.slice(start, next === -1 ? source.length : next);
+}
+
+const regimeViewContext = vm.createContext({
+  cleanDetail(value) { return value ? String(value).replaceAll("_", " ") : "--"; },
+  labelize(value) { return String(value || "--"); },
+});
+vm.runInContext([
+  sourceFunction(canarySource, "regimeAuthorityReasonLabel"),
+  sourceFunction(canarySource, "regimeAuthorityView"),
+  sourceFunction(canarySource, "regimePresentationPosture"),
+  sourceFunction(canarySource, "marketRegimeLabel"),
+  sourceFunction(canarySource, "regimeAuthorityLabel"),
+  sourceFunction(canarySource, "regimeAuthorityStatusLine"),
+  sourceFunction(canarySource, "regimeWeatherClass"),
+  "globalThis.__regimeViews = { regimeAuthorityLabel, regimeAuthorityStatusLine, regimeAuthorityView, regimePresentationPosture, regimeWeatherClass };",
+].join("\n"), regimeViewContext);
+const {
+  regimeAuthorityLabel,
+  regimeAuthorityStatusLine,
+  regimeAuthorityView,
+  regimePresentationPosture,
+  regimeWeatherClass,
+} = regimeViewContext.__regimeViews;
 
 const at = "2026-07-20T18:00:00Z";
 
@@ -118,7 +154,75 @@ test("bootstrap and SSE are the only lifecycle ingestion wires", () => {
   assert.match(lifecycleSource, /ingestAlertInboxV2\(data\.alert_inbox_v2\)/);
   assert.match(lifecycleSource, /"alert_inbox_v2"/);
   assert.match(lifecycleSource, /if \(type === "alert_inbox_v2"\) \{\s*ingestAlertInboxV2Event\(event\.data\);/);
+  assert.match(lifecycleSource, /ingestAlertInboxV2Event\(event\.data\);\s*renderAlertInboxV2\(\);/);
   assert.doesNotMatch(lifecycleSource, /fetch\("\/api\/alert-inbox-v2/);
+  assert.doesNotMatch(serviceWorkerSource, /alert_inbox_v2|alert-inbox-v2/i);
+});
+
+test("regime authority health immediately overrides only presentation tone", () => {
+  const posture = { label: "Constructive regime", tone: "normal", severity: "observe" };
+  const lastSuccess = "2026-07-20T17:59:59Z";
+  const stale = {
+    regime: {
+      authority_health: {
+        status: "stale",
+        refreshing: true,
+        last_success_at: lastSuccess,
+        last_success_age_seconds: 1,
+        failure_code: "refresh_failed",
+      },
+    },
+    sources: { regime: { state: "current", last_success_at: at } },
+  };
+  const authority = regimeAuthorityView(stale);
+  assert.equal(authority.status, "stale", "typed stale must not wait for an indicator-age budget");
+  assert.equal(authority.lastSuccessAt, lastSuccess);
+  const presented = regimePresentationPosture(posture, authority);
+  assert.equal(presented.label, posture.label, "the daemon-authored verdict is retained");
+  assert.equal(presented.severity, posture.severity);
+  assert.equal(presented.tone, "data_quality");
+  assert.equal(regimeAuthorityLabel(posture, authority), "Last known · Constructive regime");
+  assert.equal(regimeWeatherClass(presented.tone), "amber");
+  const line = regimeAuthorityStatusLine(stale, posture);
+  assert.match(line.summary, /Last-known regime · stale/);
+  assert.match(line.detail, /canonical last-good verdict is retained as context/i);
+  assert.match(line.detail, /refresh failed/);
+
+  const rollback = clone(stale);
+  rollback.regime.authority_health.failure_code = "clock_invalid";
+  assert.match(regimeAuthorityStatusLine(rollback, posture).detail, /daemon clock is behind the last successful Regime commit/i);
+});
+
+test("unavailable app source outranks cached fresh authority without replacing its verdict", () => {
+  const posture = { label: "Confirmed stress", tone: "stress" };
+  const unavailable = {
+    regime: {
+      authority_health: {
+        status: "fresh",
+        refreshing: false,
+        last_success_at: at,
+        last_success_age_seconds: 0,
+      },
+    },
+    sources: { regime: { state: "unavailable", reason: "transport_unavailable", last_success_at: at } },
+  };
+  const authority = regimeAuthorityView(unavailable);
+  assert.equal(authority.status, "unavailable");
+  assert.equal(regimePresentationPosture(posture, authority).label, posture.label);
+  assert.equal(regimeAuthorityLabel(posture, authority), "Last known · Confirmed stress");
+  assert.equal(regimeWeatherClass(regimePresentationPosture(posture, authority).tone), "amber");
+  const line = regimeAuthorityStatusLine(unavailable, posture);
+  assert.match(line.summary, /Last-known regime · authority unavailable/);
+  assert.match(line.detail, /context only/);
+  assert.match(line.detail, /daemon transport is unavailable/);
+
+  const fresh = regimeAuthorityView({
+    regime: { authority_health: { status: "fresh", refreshing: false, last_success_at: at, last_success_age_seconds: 0 } },
+    sources: { regime: { state: "current", last_success_at: at } },
+  });
+  assert.equal(fresh.degraded, false);
+  assert.equal(regimePresentationPosture(posture, fresh), posture);
+  assert.equal(regimeAuthorityLabel(posture, fresh), posture.label);
 });
 
 test("validator accepts only the recursive exact public contract", () => {
@@ -244,6 +348,29 @@ test("validator enforces recovered-state and timestamp coherence", () => {
   assert.equal(validateAlertInboxV2(delayedRecovery).occurrences[0].end_reason, "recovered");
 });
 
+test("authority scope retirement remains active history and renders only generic previous context", () => {
+  const scoped = inbox({ current_state: "unknown" });
+  scoped.occurrences[0] = occurrence({
+    ended_at: at,
+    end_reason: "authority_scope_changed",
+  });
+  scoped.attention.unread_refs[0] = {
+    display_id: scoped.occurrences[0].display_id,
+    source: scoped.occurrences[0].source,
+    kind: scoped.occurrences[0].kind,
+  };
+  assert.equal(validateAlertInboxV2(scoped).occurrences[0].state, "open");
+  const view = alertInboxV2OccurrenceView(scoped.occurrences[0]);
+  assert.deepEqual(Object.keys(view).sort(), ["evidenceHealth", "kind", "previousContext", "severity", "source", "timestamps"]);
+  assert.equal(view.previousContext, true);
+  assert.equal(JSON.stringify(view).includes("authority_scope_changed"), false);
+  assert.equal(JSON.stringify(view).includes(scoped.occurrences[0].display_id), false);
+
+  const falseRecovery = clone(scoped);
+  falseRecovery.occurrences[0].state = "recovered";
+  assert.throws(() => validateAlertInboxV2(falseRecovery), /recovered state requires current evidence and a coherent recovery end/);
+});
+
 test("validator treats occurrences as retained history and fail-closes clear claims", () => {
   const activeClaimedUnknown = inbox({ current_state: "unknown" });
   assert.equal(validateAlertInboxV2(activeClaimedUnknown).current_state, "unknown");
@@ -307,6 +434,72 @@ test("malformed SSE event marks feed invalid and retains last-good", () => {
   assert.deepEqual(state.alertInboxV2, accepted);
   assert.equal(state.alertInboxV2FeedValid, false);
   assert.equal(state.alertInboxV2FeedError, "malformed alert inbox v2 event");
+});
+
+test("shadow ingestion never changes legacy unread or foreground attention state", () => {
+  resetState();
+  const legacyAttention = { unread_count: 7, high_water_seq: 11, read_through_seq: 4, unread_refs: [{ kind: "canary", id: "legacy" }] };
+  state.attention = legacyAttention;
+  state.attentionEpoch = 23;
+  ingestAlertInboxV2(inbox());
+  assert.equal(state.attention, legacyAttention);
+  assert.equal(state.attentionEpoch, 23);
+});
+
+test("pure shadow advisory view exposes every state without granting all-clear", () => {
+  const cold = alertInboxV2View(uninitialized(), true);
+  assert.equal(cold.state, "uninitialized");
+  assert.match(cold.summary, /No delivery is active/);
+
+  const active = alertInboxV2View(inbox(), true);
+  assert.equal(active.state, "active");
+  assert.equal(active.occurrences.length, 1);
+  assert.equal("attention" in active, false);
+  assert.equal("destination" in active.occurrences[0], false);
+  assert.equal("deliveryPreference" in active.occurrences[0], false);
+
+  const unknown = alertInboxV2View(inbox({ current_state: "unknown" }), true);
+  assert.equal(unknown.state, "unknown");
+  assert.match(unknown.summary, /cannot determine/);
+
+  const clear = alertInboxV2View(clearInbox(), true);
+  assert.equal(clear.state, "clear");
+  assert.match(clear.summary, /cannot assert operator all-clear/);
+  assert.equal(clear.tone, "neutral", "shadow clear must not render as a green operator all-clear");
+
+  const invalid = alertInboxV2View(inbox(), false);
+  assert.equal(invalid.state, "invalid");
+  assert.match(invalid.summary, /invalid/);
+  assert.match(invalid.coverage.summary, /Last-valid/);
+});
+
+test("unhealthy or unexpected initialized delivery health can never render shadow clear", () => {
+  const healthCases = [
+    { state: "degraded", class: "retry_pending", updated_at: at },
+    { state: "unavailable", class: "no_active_subscription", updated_at: at },
+    { state: "overflow", class: "capacity_overflow", updated_at: at },
+    { state: "healthy", class: "", updated_at: at },
+  ];
+  for (const deliveryHealth of healthCases) {
+    const value = clearInbox({ delivery_health: deliveryHealth });
+    assert.equal(validateAlertInboxV2(value).current_state, "clear");
+    const view = alertInboxV2View(value, true);
+    assert.equal(view.state, "unknown", JSON.stringify(deliveryHealth));
+    assert.equal(view.tone, "warn");
+    assert.match(view.summary, /cannot assert current advisory state or operator all-clear/);
+  }
+});
+
+test("shadow evidence rendering is bounded to the deterministic latest 24 occurrences", () => {
+  const occurrences = Array.from({ length: 30 }, (_, index) => occurrence({
+    last_seen_at: `2026-07-20T18:00:${String(index).padStart(2, "0")}Z`,
+    evidence_as_of: `2026-07-20T18:00:${String(index).padStart(2, "0")}Z`,
+    state_changed_at: `2026-07-20T18:00:${String(index).padStart(2, "0")}Z`,
+  }));
+  const rendered = alertInboxV2RenderedOccurrences(occurrences);
+  assert.equal(rendered.length, 24);
+  assert.equal(rendered[0].timestamps.find((item) => item.label === "Last seen").value, "2026-07-20T18:00:29Z");
+  assert.equal(rendered.at(-1).timestamps.find((item) => item.label === "Last seen").value, "2026-07-20T18:00:06Z");
 });
 
 test("clear measurement requires complete current coverage but shadow never asserts all-clear", () => {

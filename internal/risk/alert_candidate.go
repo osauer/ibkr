@@ -13,13 +13,17 @@ import (
 )
 
 const (
-	// AlertCandidateSnapshotVersion identifies the first source-neutral alert
-	// candidate wire contract. It does not approve any routing or pageability
-	// policy.
-	AlertCandidateSnapshotVersion  = "alert-candidate-snapshot-v1"
+	// AlertCandidateSnapshotVersion identifies the scope-bound source-neutral
+	// alert candidate wire contract. It does not approve any routing or
+	// pageability policy.
+	AlertCandidateSnapshotVersion  = "alert-candidate-snapshot-v2"
 	alertEpisodeKeyPrefix          = "alert-episode-v1:"
 	alertOccurrenceKeyPrefix       = "alert-occurrence-v1:"
 	alertEvidenceFingerprintPrefix = "sha256:"
+	alertAuthorityScopePrefix      = "alert-authority-scope-v1:"
+	alertEpisodeIdentityVersion    = "alert-episode-v1"
+	alertOccurrenceIdentityVersion = "alert-occurrence-v1"
+	alertAuthorityIdentityVersion  = "alert-authority-scope-v1"
 )
 
 // AlertSource names the daemon authority that produced a candidate. These are
@@ -181,11 +185,52 @@ type AlertCoverage struct {
 // CurrentState is validated from candidates and coverage: an empty result is
 // Clear only with complete, current coverage; otherwise it is Unknown.
 type AlertCandidateSnapshot struct {
-	SchemaVersion string             `json:"schema_version"`
-	AsOf          time.Time          `json:"as_of"`
-	CurrentState  AlertSnapshotState `json:"current_state"`
-	Coverage      AlertCoverage      `json:"coverage"`
-	Candidates    []AlertCandidate   `json:"candidates"`
+	SchemaVersion  string             `json:"schema_version"`
+	AuthorityScope string             `json:"authority_scope"`
+	AsOf           time.Time          `json:"as_of"`
+	CurrentState   AlertSnapshotState `json:"current_state"`
+	Coverage       AlertCoverage      `json:"coverage"`
+	Candidates     []AlertCandidate   `json:"candidates"`
+}
+
+// BuildAlertAuthorityScope binds private alert state to one normalized broker
+// account/mode context without exposing either raw value. The canonicalization
+// is intentionally part of the builder so case or surrounding whitespace
+// cannot split one authority. Callers must still reject aggregate or unknown
+// broker scopes before invoking it.
+func BuildAlertAuthorityScope(account, mode string) (string, error) {
+	account = strings.ToUpper(strings.TrimSpace(account))
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if account == "" || mode == "" {
+		return "", errors.New("alert authority scope requires account and mode")
+	}
+	if len(account) > 256 || len(mode) > 32 {
+		return "", errors.New("alert authority scope input is too long")
+	}
+	raw, err := json.Marshal(struct {
+		Version string `json:"version"`
+		Account string `json:"account"`
+		Mode    string `json:"mode"`
+	}{
+		Version: alertAuthorityIdentityVersion,
+		Account: account,
+		Mode:    mode,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode alert authority scope: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return alertAuthorityScopePrefix + hex.EncodeToString(sum[:]), nil
+}
+
+// ValidateAlertAuthorityScope accepts only the opaque value produced by
+// BuildAlertAuthorityScope. Raw account or mode values never belong in a
+// candidate snapshot, daemon registry document, or app inbox.
+func ValidateAlertAuthorityScope(value string) error {
+	if !validOpaqueSHA256(value, alertAuthorityScopePrefix) {
+		return errors.New("invalid alert authority_scope")
+	}
+	return nil
 }
 
 // BuildAlertEpisodeKey hashes a producer-approved semantic identity into an
@@ -216,7 +261,7 @@ func BuildAlertEpisodeKey(source AlertSource, kind AlertKind, identityParts ...s
 		Kind    AlertKind   `json:"kind"`
 		Parts   []string    `json:"parts"`
 	}{
-		Version: AlertCandidateSnapshotVersion,
+		Version: alertEpisodeIdentityVersion,
 		Source:  source,
 		Kind:    kind,
 		Parts:   parts,
@@ -255,7 +300,7 @@ func BuildAlertOccurrenceKey(episodeKey string, identityParts ...string) (string
 		EpisodeKey string   `json:"episode_key"`
 		Parts      []string `json:"parts"`
 	}{
-		Version:    AlertCandidateSnapshotVersion,
+		Version:    alertOccurrenceIdentityVersion,
 		EpisodeKey: episodeKey,
 		Parts:      parts,
 	})
@@ -371,6 +416,9 @@ func (coverage AlertCoverage) Validate() error {
 func (snapshot AlertCandidateSnapshot) Validate() error {
 	if snapshot.SchemaVersion != AlertCandidateSnapshotVersion {
 		return errors.New("invalid alert candidate snapshot schema_version")
+	}
+	if err := ValidateAlertAuthorityScope(snapshot.AuthorityScope); err != nil {
+		return err
 	}
 	if snapshot.AsOf.IsZero() {
 		return errors.New("alert candidate snapshot is missing as_of")
@@ -501,7 +549,7 @@ func (snapshot *AlertCandidateSnapshot) UnmarshalJSON(data []byte) error {
 	type wire AlertCandidateSnapshot
 	var decoded wire
 	if err := decodeExactAlertJSONObject(data, []string{
-		"schema_version", "as_of", "current_state", "coverage", "candidates",
+		"schema_version", "authority_scope", "as_of", "current_state", "coverage", "candidates",
 	}, &decoded); err != nil {
 		return err
 	}

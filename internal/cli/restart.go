@@ -72,16 +72,18 @@ type restartResult struct {
 }
 
 type appProcess struct {
-	PID     int
-	Command string
-	Args    []string
+	PID               int
+	Command           string
+	Args              []string
+	CurrentExecutable bool
 }
 
 type appRestartDeps struct {
-	find  func(context.Context) (appProcess, error)
-	stop  func(int, time.Duration) error
-	kill  func(int, time.Duration) error
-	start func(context.Context, []string) (int, error)
+	find            func(context.Context) (appProcess, error)
+	stop            func(int, time.Duration) error
+	kill            func(int, time.Duration) error
+	start           func(context.Context, []string) (int, error)
+	executablePaths map[string]struct{}
 	// supervisor reports a loaded launchd job owning the app; kickstart
 	// restarts it in place. Both nil outside macOS wiring and most tests.
 	supervisor func(context.Context) (appSupervisor, bool)
@@ -155,26 +157,59 @@ func RunRestart(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, "ibkr restart: --timeout must be positive")
 		return 2
 	}
-	appDeps := appRestartDeps{
-		find:       findAppProcess,
-		stop:       stopAppProcess,
-		kill:       killAppProcess,
-		start:      startAppProcess,
-		supervisor: findAppLaunchAgent,
-		kickstart:  kickstartLaunchAgent,
-	}
+	appDeps := productionAppRestartDeps()
 	if opts.app {
 		return runRestartAppCore(ctx, &opts, appDeps)
 	}
-	return runRestartAllCore(ctx, &opts,
-		restartDeps{
-			find:           update.FindDaemonProcess,
-			stop:           update.StopDaemon,
-			kill:           update.KillDaemon,
-			startAndHealth: startDaemonAndFetchHealth,
+	return runRestartAllCore(ctx, &opts, productionDaemonRestartDeps(), appDeps)
+}
+
+func productionDaemonRestartDeps() restartDeps {
+	return restartDeps{
+		find:           update.FindDaemonProcess,
+		stop:           update.StopDaemon,
+		kill:           update.KillDaemon,
+		startAndHealth: startDaemonAndFetchHealth,
+	}
+}
+
+func productionDaemonRestartDepsForExecutable(executable string) restartDeps {
+	return restartDeps{
+		find: update.FindDaemonProcess,
+		stop: update.StopDaemon,
+		kill: update.KillDaemon,
+		startAndHealth: func(ctx context.Context, socketPath string, progress io.Writer, quiet bool) (int, rpc.HealthResult, error) {
+			return startDaemonAndFetchHealthUsing(ctx, socketPath, progress, quiet, func(ctx context.Context, socketPath string) (*dial.Conn, error) {
+				return dial.AutospawnAndConnectContextFromExecutable(ctx, socketPath, executable)
+			})
 		},
-		appDeps,
-	)
+	}
+}
+
+func productionAppRestartDeps() appRestartDeps {
+	return productionAppRestartDepsForExecutable("")
+}
+
+func productionAppRestartDepsForExecutable(executable string) appRestartDeps {
+	executablePaths := currentExecutablePaths()
+	start := startAppProcess
+	if strings.TrimSpace(executable) != "" {
+		executablePaths = executablePathVariants(executable)
+		start = func(ctx context.Context, args []string) (int, error) {
+			return startAppProcessFromExecutable(ctx, executable, args)
+		}
+	}
+	return appRestartDeps{
+		find: func(ctx context.Context) (appProcess, error) {
+			return findAppProcessForExecutables(ctx, executablePaths)
+		},
+		stop:            stopAppProcess,
+		kill:            killAppProcess,
+		start:           start,
+		executablePaths: executablePaths,
+		supervisor:      findAppLaunchAgent,
+		kickstart:       kickstartLaunchAgent,
+	}
 }
 
 func runRestartCore(ctx context.Context, opts *restartOptions, deps restartDeps) int {
@@ -189,36 +224,58 @@ func runRestartCore(ctx context.Context, opts *restartOptions, deps restartDeps)
 	return 0
 }
 
+type restartStackBehavior struct {
+	startDaemonWhenMissing bool
+}
+
 func runRestartAllCore(ctx context.Context, opts *restartOptions, daemonDeps restartDeps, appDeps appRestartDeps) int {
-	res, exit := restartDaemon(ctx, opts, daemonDeps)
-	if exit != 0 {
-		return exit
-	}
-	if !opts.jsonOut {
-		renderRestartStarted(opts.out, res)
-	}
+	return runRestartStackCore(ctx, opts, daemonDeps, appDeps, restartStackBehavior{startDaemonWhenMissing: true})
+}
+
+func runRestartStackCore(ctx context.Context, opts *restartOptions, daemonDeps restartDeps, appDeps appRestartDeps, behavior restartStackBehavior) int {
 	// App discovery is by process name (findAppProcess) and cannot tell
 	// which daemon scope a found app belongs to. When IBKR_SOCKET points
 	// at a non-default scope, the only app this command could find is one
 	// outside that scope, so implicit app management must stay hands-off.
-	// `ibkr restart --app` remains available as the explicit path.
+	// Decide that before either process can be mutated. `ibkr restart --app`
+	// remains available as the explicit, separate path.
+	var appRes *appRestartResult
+	appRan := false
 	if dial.SocketPathOverridden() {
-		res.App = &appRestartResult{Action: "skipped", Reason: "socket_overridden", Target: "app"}
-		if opts.jsonOut {
-			return printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res)
+		appRes = &appRestartResult{Action: "skipped", Reason: "socket_overridden", Target: "app"}
+		if !opts.jsonOut {
+			fmt.Fprintln(opts.out, "ibkr restart: IBKR_SOCKET is set; leaving the app untouched and restarting only that daemon scope (use `ibkr restart --app` as a separate explicit, non-atomic operation)")
 		}
-		fmt.Fprintln(opts.out, "ibkr restart: IBKR_SOCKET is set; skipping app management (use `ibkr restart --app` to manage the app explicitly)")
-		return 0
+	} else {
+		completed, ran, appExit := restartApp(ctx, opts, appDeps, appRestartBehavior{
+			startWhenMissing: false,
+			prefix:           "ibkr restart",
+		})
+		if appExit != 0 {
+			fmt.Fprintln(opts.err, "ibkr restart: app stage failed; daemon was not touched")
+			return appExit
+		}
+		appRan = ran
+		if ran {
+			appRes = &completed
+		}
 	}
-	appRes, appRan, appExit := restartApp(ctx, opts, appDeps, appRestartBehavior{
-		startWhenMissing: false,
-		prefix:           "ibkr restart",
-	})
-	if appExit != 0 {
-		return appExit
+
+	res, exit := restartDaemonWithBehavior(ctx, opts, daemonDeps, behavior.startDaemonWhenMissing)
+	res.App = appRes
+	if exit != 0 {
+		if appRan {
+			fmt.Fprintln(opts.err, "ibkr restart: app stage succeeded but daemon stage failed; the app was not rolled back (fix the reported failure and rerun `ibkr restart`)")
+		}
+		if opts.jsonOut {
+			if jsonExit := printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res); jsonExit != 0 {
+				return jsonExit
+			}
+		}
+		return exit
 	}
-	if appRan {
-		res.App = &appRes
+	if !opts.jsonOut && res.Started {
+		renderRestartStarted(opts.out, res)
 	}
 	if opts.jsonOut {
 		return printJSON(&Env{Stdout: opts.out, Stderr: opts.err}, res)
@@ -227,6 +284,10 @@ func runRestartAllCore(ctx context.Context, opts *restartOptions, daemonDeps res
 }
 
 func restartDaemon(ctx context.Context, opts *restartOptions, deps restartDeps) (restartResult, int) {
+	return restartDaemonWithBehavior(ctx, opts, deps, true)
+}
+
+func restartDaemonWithBehavior(ctx context.Context, opts *restartOptions, deps restartDeps, startWhenMissing bool) (restartResult, int) {
 	startedAt := time.Now()
 	socketPath := dial.DefaultSocketPath()
 	lockPath := dial.LockPath(socketPath)
@@ -276,6 +337,14 @@ func restartDaemon(ctx context.Context, opts *restartOptions, deps restartDeps) 
 			fmt.Fprintln(opts.out, "ibkr restart: starting daemon")
 		}
 	case errors.Is(err, update.ErrDaemonNotRunning):
+		if !startWhenMissing {
+			res.Action = "not_running"
+			res.ElapsedMS = time.Since(startedAt).Milliseconds()
+			if !opts.jsonOut {
+				fmt.Fprintln(opts.out, "ibkr restart: no daemon was running; daemon left stopped")
+			}
+			return res, 0
+		}
 		if !opts.jsonOut {
 			fmt.Fprintln(opts.out, "ibkr restart: no daemon was running; starting daemon")
 		}
@@ -473,8 +542,12 @@ func appArgsStateDir(args []string) string {
 // crash-loops against it, and the app then runs without any supervisor.
 func restartSupervisedApp(ctx context.Context, opts *restartOptions, deps appRestartDeps, prefix string, startedAt time.Time, proc appProcess, findErr error, sup appSupervisor) (appRestartResult, bool, int) {
 	res := appRestartResult{Action: "restarted", Target: "app", Supervisor: sup.Target, Args: sup.Args}
+	if !executablePathMatches(sup.Executable, restartExecutablePaths(deps)) {
+		fmt.Fprintf(opts.err, "%s: launchd job %s points at %q, not the current installed ibkr executable; rewrite and reload its plist with `ibkr setup app`, then rerun\n", prefix, sup.Target, sup.Executable)
+		return res, true, 1
+	}
 	if opts.appAddrSet || opts.appPublicURLSet || opts.appRemoteSet || opts.appRemoteURLSet || opts.appStateDirSet {
-		fmt.Fprintf(opts.err, "%s: app flag overrides do not apply to the launchd-supervised app (%s); change its flags with `ibkr setup app` and rerun\n", prefix, sup.Target)
+		fmt.Fprintf(opts.err, "%s: app flag overrides do not apply to the launchd-supervised app (%s); rewrite and reload its plist with `ibkr setup app`, then rerun\n", prefix, sup.Target)
 		return res, true, 1
 	}
 	if findErr == nil && proc.PID > 0 {
@@ -622,7 +695,13 @@ func removeAppValueArg(args []string, name string) []string {
 }
 
 func startDaemonAndFetchHealth(ctx context.Context, socketPath string, progress io.Writer, quiet bool) (int, rpc.HealthResult, error) {
-	conn, err := dial.AutospawnAndConnectContext(ctx, socketPath)
+	return startDaemonAndFetchHealthUsing(ctx, socketPath, progress, quiet, dial.AutospawnAndConnectContext)
+}
+
+type daemonConnectFunc func(context.Context, string) (*dial.Conn, error)
+
+func startDaemonAndFetchHealthUsing(ctx context.Context, socketPath string, progress io.Writer, quiet bool, connect daemonConnectFunc) (int, rpc.HealthResult, error) {
+	conn, err := connect(ctx, socketPath)
 	if err != nil {
 		return 0, rpc.HealthResult{}, err
 	}
@@ -693,6 +772,9 @@ func waitForAppRespawn(ctx context.Context, find func(context.Context) (appProce
 		proc, err := find(ctx)
 		if err == nil {
 			if slices.Equal(proc.Args, expectedArgs) {
+				if !proc.CurrentExecutable {
+					return appProcess{}, false, errors.New("app respawned from a different executable; refusing to accept a stale binary")
+				}
 				return proc, true, nil
 			}
 			return appProcess{}, false, nil
@@ -712,14 +794,13 @@ func waitForAppRespawn(ctx context.Context, find func(context.Context) (appProce
 	return appProcess{}, false, nil
 }
 
-func findAppProcess(ctx context.Context) (appProcess, error) {
+func findAppProcessForExecutables(ctx context.Context, executablePaths map[string]struct{}) (appProcess, error) {
 	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,args=")
 	out, err := cmd.Output()
 	if err != nil {
 		return appProcess{}, err
 	}
 	self := os.Getpid()
-	executablePaths := currentExecutablePaths()
 	var exactMatches []appProcess
 	var genericMatches []appProcess
 	sc := bufio.NewScanner(strings.NewReader(string(out)))
@@ -740,7 +821,7 @@ func findAppProcess(ctx context.Context) (appProcess, error) {
 		if !ok {
 			continue
 		}
-		proc := appProcess{PID: pid, Command: strings.TrimSpace(cmdline), Args: args}
+		proc := appProcess{PID: pid, Command: strings.TrimSpace(cmdline), Args: args, CurrentExecutable: exact}
 		if exact {
 			exactMatches = append(exactMatches, proc)
 		} else {
@@ -779,7 +860,13 @@ func appCommandMatch(cmdline string, exactPaths map[string]struct{}) ([]string, 
 		if !isAppServerArgs(args) {
 			return nil, false, false
 		}
-		_, exact := exactPaths[fields[i]]
+		exact := false
+		for candidate := range executablePathVariants(fields[i]) {
+			if _, ok := exactPaths[candidate]; ok {
+				exact = true
+				break
+			}
+		}
 		return args, exact, true
 	}
 	return nil, false, false
@@ -791,9 +878,41 @@ func currentExecutablePaths() map[string]struct{} {
 	if err != nil || bin == "" {
 		return paths
 	}
-	paths[bin] = struct{}{}
-	if resolved, err := filepath.EvalSymlinks(bin); err == nil && resolved != "" {
-		paths[resolved] = struct{}{}
+	for path := range executablePathVariants(bin) {
+		paths[path] = struct{}{}
+	}
+	return paths
+}
+
+func restartExecutablePaths(deps appRestartDeps) map[string]struct{} {
+	if len(deps.executablePaths) > 0 {
+		return deps.executablePaths
+	}
+	return currentExecutablePaths()
+}
+
+func executablePathMatches(path string, current map[string]struct{}) bool {
+	for candidate := range executablePathVariants(path) {
+		if _, ok := current[candidate]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func executablePathVariants(path string) map[string]struct{} {
+	paths := map[string]struct{}{}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return paths
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	path = filepath.Clean(path)
+	paths[path] = struct{}{}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != "" {
+		paths[filepath.Clean(resolved)] = struct{}{}
 	}
 	return paths
 }
@@ -849,14 +968,22 @@ func signalAppProcess(pid int, sig syscall.Signal, timeout time.Duration, timeou
 }
 
 func startAppProcess(ctx context.Context, args []string) (int, error) {
-	if len(args) == 0 {
-		args = []string{"app"}
-	}
 	bin, err := os.Executable()
 	if err != nil {
 		return 0, fmt.Errorf("locate self: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, bin, args...)
+	return startAppProcessFromExecutable(ctx, bin, args)
+}
+
+func startAppProcessFromExecutable(ctx context.Context, executable string, args []string) (int, error) {
+	if len(args) == 0 {
+		args = []string{"app"}
+	}
+	executable = strings.TrimSpace(executable)
+	if executable == "" {
+		return 0, errors.New("app executable is empty")
+	}
+	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Stdin = nil
 	logFile, err := openAppRestartLog()
 	if err == nil {

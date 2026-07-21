@@ -1,6 +1,13 @@
 package rpc
 
 import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/marketcal"
@@ -59,6 +66,171 @@ type CanaryResult struct {
 	MarketIndicators       []CanaryMarketIndicator `json:"market_indicators,omitempty"`
 	Warnings               []string                `json:"warnings,omitempty"`
 	NotExecution           string                  `json:"not_execution"`
+	// EstablishedAlertProjection is the producer-authored compatibility
+	// contract for the Canary delivery behavior that existed at ad5b77b. It
+	// does not grant any new delivery or pageability: consumers may use it only
+	// to preserve that established occurrence and mode eligibility while the
+	// main result truthfully adopts newer advisory health semantics.
+	//
+	// Nil means the producer predates this projection. A present projection is
+	// strict and self-validating so consumers can fail closed on malformed
+	// new-daemon data without treating version skew as corruption.
+	EstablishedAlertProjection *EstablishedAlertProjection `json:"established_alert_projection,omitempty"`
+}
+
+const EstablishedAlertProjectionSchemaVersion = "canary-established-alert-v1"
+
+// EstablishedAlertProjection atomically carries every producer-owned field
+// the pre-shadow Canary monitor used for occurrence identity and delivery-mode
+// eligibility. CanonicalFingerprint remains the established canary-fp-v1
+// identity; it is not a new alert authority or a transport authorization.
+type EstablishedAlertProjection struct {
+	SchemaVersion        string              `json:"schema_version"`
+	CanonicalFingerprint Fingerprint         `json:"canonical_fingerprint"`
+	OccurrenceEligible   bool                `json:"occurrence_eligible"`
+	ActOnlyEligible      bool                `json:"act_only_eligible"`
+	Action               string              `json:"action"`
+	MarketConfirmation   string              `json:"market_confirmation"`
+	Severity             risk.SignalSeverity `json:"severity"`
+	PortfolioRelevant    bool                `json:"portfolio_relevant"`
+}
+
+// ValidateEstablishedAlertProjection rejects missing, unknown, or internally
+// inconsistent compatibility data. Eligibility is checked against the frozen
+// v1 schema semantics; adapters must not re-derive or extend those semantics.
+func ValidateEstablishedAlertProjection(projection EstablishedAlertProjection) error {
+	if projection.SchemaVersion != EstablishedAlertProjectionSchemaVersion {
+		return fmt.Errorf("invalid established alert projection schema version %q", projection.SchemaVersion)
+	}
+	if err := validateEstablishedAlertFingerprint(projection.CanonicalFingerprint); err != nil {
+		return err
+	}
+	if !validEstablishedAlertAction(projection.Action) {
+		return fmt.Errorf("invalid established alert action %q", projection.Action)
+	}
+	if !validEstablishedMarketConfirmation(projection.MarketConfirmation) {
+		return fmt.Errorf("invalid established alert market confirmation %q", projection.MarketConfirmation)
+	}
+	if !validEstablishedAlertSeverity(projection.Severity) {
+		return fmt.Errorf("invalid established alert severity %q", projection.Severity)
+	}
+	actCondition := establishedAlertSeverityAtLeastAct(projection.Severity) ||
+		projection.Action == "defend" ||
+		projection.Action == "rebalance" ||
+		projection.Action == "confirm_inputs"
+	wantOccurrence := projection.PortfolioRelevant &&
+		(projection.Severity == risk.SeverityWatch || establishedAlertSeverityAtLeastAct(projection.Severity) || actCondition)
+	wantActOnly := wantOccurrence && actCondition
+	if projection.OccurrenceEligible != wantOccurrence {
+		return errors.New("established alert occurrence eligibility is inconsistent")
+	}
+	if projection.ActOnlyEligible != wantActOnly {
+		return errors.New("established alert act-only eligibility is inconsistent")
+	}
+	return nil
+}
+
+func validateEstablishedAlertFingerprint(fingerprint Fingerprint) error {
+	if fingerprint.Version != CanaryFingerprintVersion {
+		return fmt.Errorf("invalid established alert fingerprint version %q", fingerprint.Version)
+	}
+	const prefix = "sha256:"
+	if !strings.HasPrefix(fingerprint.Key, prefix) {
+		return errors.New("established alert fingerprint must use sha256")
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(fingerprint.Key, prefix))
+	if err != nil || len(decoded) != 32 {
+		return errors.New("established alert fingerprint must contain a 32-byte sha256 digest")
+	}
+	return nil
+}
+
+func validEstablishedAlertAction(action string) bool {
+	switch action {
+	case "stand_down", "watch", "defend", "rebalance", "deploy", "confirm_inputs":
+		return true
+	default:
+		return false
+	}
+}
+
+func validEstablishedMarketConfirmation(confirmation string) bool {
+	switch confirmation {
+	case "none", "partial", "confirmed", "blocked":
+		return true
+	default:
+		return false
+	}
+}
+
+func validEstablishedAlertSeverity(severity risk.SignalSeverity) bool {
+	switch severity {
+	case risk.SeverityObserve, risk.SeverityWatch, risk.SeverityAct, risk.SeverityUrgent:
+		return true
+	default:
+		return false
+	}
+}
+
+func establishedAlertSeverityAtLeastAct(severity risk.SignalSeverity) bool {
+	return severity == risk.SeverityAct || severity == risk.SeverityUrgent
+}
+
+func (projection EstablishedAlertProjection) MarshalJSON() ([]byte, error) {
+	if err := ValidateEstablishedAlertProjection(projection); err != nil {
+		return nil, err
+	}
+	type wire EstablishedAlertProjection
+	return json.Marshal(wire(projection))
+}
+
+func (projection *EstablishedAlertProjection) UnmarshalJSON(data []byte) error {
+	if projection == nil {
+		return errors.New("cannot unmarshal established alert projection into nil receiver")
+	}
+	type projectionWire struct {
+		SchemaVersion        *string              `json:"schema_version"`
+		CanonicalFingerprint *Fingerprint         `json:"canonical_fingerprint"`
+		OccurrenceEligible   *bool                `json:"occurrence_eligible"`
+		ActOnlyEligible      *bool                `json:"act_only_eligible"`
+		Action               *string              `json:"action"`
+		MarketConfirmation   *string              `json:"market_confirmation"`
+		Severity             *risk.SignalSeverity `json:"severity"`
+		PortfolioRelevant    *bool                `json:"portfolio_relevant"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var decoded projectionWire
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("established alert projection has trailing JSON")
+		}
+		return err
+	}
+	if decoded.SchemaVersion == nil || decoded.CanonicalFingerprint == nil ||
+		decoded.OccurrenceEligible == nil || decoded.ActOnlyEligible == nil ||
+		decoded.Action == nil || decoded.MarketConfirmation == nil ||
+		decoded.Severity == nil || decoded.PortfolioRelevant == nil {
+		return errors.New("established alert projection is missing a required field")
+	}
+	value := EstablishedAlertProjection{
+		SchemaVersion:        *decoded.SchemaVersion,
+		CanonicalFingerprint: *decoded.CanonicalFingerprint,
+		OccurrenceEligible:   *decoded.OccurrenceEligible,
+		ActOnlyEligible:      *decoded.ActOnlyEligible,
+		Action:               *decoded.Action,
+		MarketConfirmation:   *decoded.MarketConfirmation,
+		Severity:             *decoded.Severity,
+		PortfolioRelevant:    *decoded.PortfolioRelevant,
+	}
+	if err := ValidateEstablishedAlertProjection(value); err != nil {
+		return err
+	}
+	*projection = value
+	return nil
 }
 
 type CanarySourceAsOf struct {

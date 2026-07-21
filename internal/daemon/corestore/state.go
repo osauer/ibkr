@@ -65,6 +65,9 @@ func (s *Store) CompareAndSwapStateDocument(ctx context.Context, update StateDoc
 }
 
 func compareAndSwapStateTx(ctx context.Context, tx *sql.Tx, update StateDocumentCAS, now time.Time) (StateDocument, error) {
+	if !update.UpdatedAtNotBefore.IsZero() && now.Before(update.UpdatedAtNotBefore) {
+		return StateDocument{}, fmt.Errorf("%w: state document commit clock precedes required floor", ErrRollback)
+	}
 	next := update.ExpectedRevision + 1
 	digest := sha256.Sum256(update.JSON)
 	var result sql.Result

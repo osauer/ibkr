@@ -17,6 +17,34 @@ import (
 	"github.com/osauer/ibkr/v2/internal/update"
 )
 
+func testCurrentExecutable(t *testing.T) string {
+	t.Helper()
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test executable: %v", err)
+	}
+	return path
+}
+
+func TestProductionDaemonRestartDepsForExecutableUsesRequestedBinary(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ibkr-restart-exact-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("IBKR_LOG", filepath.Join(dir, "daemon.log"))
+
+	target := filepath.Join(dir, "missing-installed-ibkr")
+	deps := productionDaemonRestartDepsForExecutable(target)
+	_, _, err = deps.startAndHealth(context.Background(), filepath.Join(dir, "s"), io.Discard, true)
+	if err == nil {
+		t.Fatal("exact executable start unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), target) {
+		t.Fatalf("start error = %q, want requested executable %q", err, target)
+	}
+}
+
 func TestRunRestartCoreStartsWhenNoDaemonWasRunning(t *testing.T) {
 	t.Setenv("IBKR_SOCKET", t.TempDir()+"/ibkr.sock")
 
@@ -183,34 +211,42 @@ func TestRunRestartAllCoreRestartsDaemonAndRunningApp(t *testing.T) {
 	appStopped := 0
 	appFindCalls := 0
 	appStartCalled := false
+	var events []string
 	exit := runRestartAllCore(context.Background(), opts, restartDeps{
 		find: func(context.Context, string) (update.DaemonProcess, error) {
+			events = append(events, "daemon.find")
 			return update.DaemonProcess{PID: 41, Command: "/tmp/ibkr daemon", SocketPath: "sock", LockPath: "lock"}, nil
 		},
 		stop: func(pid int, _ time.Duration) error {
+			events = append(events, "daemon.stop")
 			daemonStopped = pid
 			return nil
 		},
 		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			events = append(events, "daemon.start")
 			return 42, rpc.HealthResult{DaemonVersion: "test", Connected: true, GatewayHost: "127.0.0.1", GatewayPort: 7496, ClientID: 15}, nil
 		},
 	}, appRestartDeps{
 		find: func(context.Context) (appProcess, error) {
 			appFindCalls++
 			if appFindCalls == 1 {
+				events = append(events, "app.find")
 				return appProcess{
 					PID:     51,
 					Command: "/tmp/ibkr app --remote",
 					Args:    []string{"app", "--remote"},
 				}, nil
 			}
+			events = append(events, "app.verify")
 			return appProcess{
-				PID:     52,
-				Command: "/tmp/ibkr app --remote",
-				Args:    []string{"app", "--remote"},
+				PID:               52,
+				Command:           "/tmp/ibkr app --remote",
+				Args:              []string{"app", "--remote"},
+				CurrentExecutable: true,
 			}, nil
 		},
 		stop: func(pid int, _ time.Duration) error {
+			events = append(events, "app.stop")
 			appStopped = pid
 			return nil
 		},
@@ -230,6 +266,9 @@ func TestRunRestartAllCoreRestartsDaemonAndRunningApp(t *testing.T) {
 	}
 	if appStartCalled {
 		t.Fatal("manual app start should not run when supervisor respawned the app")
+	}
+	if got, want := strings.Join(events, ","), "app.find,app.stop,app.verify,daemon.find,daemon.stop,daemon.start"; got != want {
+		t.Fatalf("event order = %q, want %q", got, want)
 	}
 	var res restartResult
 	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
@@ -255,15 +294,19 @@ func TestRunRestartAllCoreSkipsAppWhenNotRunning(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	opts := &restartOptions{jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
 	appStartCalled := false
+	var events []string
 	exit := runRestartAllCore(context.Background(), opts, restartDeps{
 		find: func(context.Context, string) (update.DaemonProcess, error) {
+			events = append(events, "daemon.find")
 			return update.DaemonProcess{}, update.ErrDaemonNotRunning
 		},
 		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			events = append(events, "daemon.start")
 			return 61, rpc.HealthResult{DaemonVersion: "test"}, nil
 		},
 	}, appRestartDeps{
 		find: func(context.Context) (appProcess, error) {
+			events = append(events, "app.find")
 			return appProcess{}, errAppNotRunning
 		},
 		start: func(context.Context, []string) (int, error) {
@@ -277,12 +320,286 @@ func TestRunRestartAllCoreSkipsAppWhenNotRunning(t *testing.T) {
 	if appStartCalled {
 		t.Fatal("plain restart should not start a new app when none was running")
 	}
+	if got, want := strings.Join(events, ","), "app.find,daemon.find,daemon.start"; got != want {
+		t.Fatalf("event order = %q, want %q", got, want)
+	}
 	var res restartResult
 	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
 		t.Fatalf("decode json: %v\n%s", err, out.String())
 	}
 	if res.App != nil {
 		t.Fatalf("app result = %+v, want omitted", res.App)
+	}
+}
+
+func TestRunRestartStackCorePreservesAbsentProcessesForUpdate(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", "")
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{timeout: time.Second, out: &out, err: &errBuf}
+	var events []string
+	exit := runRestartStackCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			events = append(events, "daemon.find")
+			return update.DaemonProcess{}, update.ErrDaemonNotRunning
+		},
+		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			t.Fatal("update restart must not wake an absent daemon")
+			return 0, rpc.HealthResult{}, nil
+		},
+	}, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			events = append(events, "app.find")
+			return appProcess{}, errAppNotRunning
+		},
+		start: func(context.Context, []string) (int, error) {
+			t.Fatal("update restart must not wake an absent app")
+			return 0, nil
+		},
+	}, restartStackBehavior{startDaemonWhenMissing: false})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if got, want := strings.Join(events, ","), "app.find,daemon.find"; got != want {
+		t.Fatalf("event order = %q, want %q", got, want)
+	}
+	if !strings.Contains(out.String(), "app not restarted") || !strings.Contains(out.String(), "daemon left stopped") {
+		t.Fatalf("output missing preserved-liveness explanation: %s", out.String())
+	}
+}
+
+func TestRunRestartAllCoreAppFailureLeavesDaemonUntouched(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", "")
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{timeout: time.Second, out: &out, err: &errBuf}
+	exit := runRestartAllCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			t.Fatal("daemon discovery must not run after app-stage failure")
+			return update.DaemonProcess{}, nil
+		},
+		stop: func(int, time.Duration) error {
+			t.Fatal("daemon stop must not run after app-stage failure")
+			return nil
+		},
+		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			t.Fatal("daemon start must not run after app-stage failure")
+			return 0, rpc.HealthResult{}, nil
+		},
+	}, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			return appProcess{PID: 71, Command: "/tmp/ibkr app --remote", Args: []string{"app", "--remote"}}, nil
+		},
+		stop: func(int, time.Duration) error {
+			return fmt.Errorf("app stop failed")
+		},
+	})
+	if exit != 1 {
+		t.Fatalf("exit = %d, want 1", exit)
+	}
+	if !strings.Contains(errBuf.String(), "daemon was not touched") {
+		t.Fatalf("stderr missing untouched-daemon guarantee: %s", errBuf.String())
+	}
+}
+
+func TestRunRestartAllCoreRejectsStaleUnsupervisedRespawnBeforeDaemon(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", "")
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{timeout: time.Second, out: &out, err: &errBuf}
+	findCalls := 0
+	exit := runRestartAllCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			t.Fatal("daemon discovery must not run after stale app respawn")
+			return update.DaemonProcess{}, nil
+		},
+	}, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			findCalls++
+			if findCalls == 1 {
+				return appProcess{PID: 75, Command: "/old/ibkr app --remote", Args: []string{"app", "--remote"}}, nil
+			}
+			return appProcess{PID: 76, Command: "/stale/ibkr app --remote", Args: []string{"app", "--remote"}, CurrentExecutable: false}, nil
+		},
+		stop: func(int, time.Duration) error { return nil },
+		start: func(context.Context, []string) (int, error) {
+			t.Fatal("stale same-argv respawn must not be accepted or duplicated")
+			return 0, nil
+		},
+	})
+	if exit != 1 {
+		t.Fatalf("exit = %d, want 1", exit)
+	}
+	if !strings.Contains(errBuf.String(), "different executable") || !strings.Contains(errBuf.String(), "daemon was not touched") {
+		t.Fatalf("stderr missing stale-respawn safety explanation: %s", errBuf.String())
+	}
+}
+
+func TestRunRestartAllCoreDaemonFailureDoesNotRollBackApp(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", "")
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
+	findCalls := 0
+	appStops := 0
+	var events []string
+	exit := runRestartAllCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			events = append(events, "daemon.find")
+			return update.DaemonProcess{PID: 81, Command: "/tmp/ibkr daemon", SocketPath: "sock", LockPath: "lock"}, nil
+		},
+		stop: func(int, time.Duration) error {
+			events = append(events, "daemon.stop-failed")
+			return fmt.Errorf("daemon stop failed")
+		},
+		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			t.Fatal("daemon start must not run after daemon stop failure")
+			return 0, rpc.HealthResult{}, nil
+		},
+	}, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			findCalls++
+			if findCalls == 1 {
+				events = append(events, "app.find")
+				return appProcess{PID: 72, Command: "/tmp/ibkr app --remote", Args: []string{"app", "--remote"}}, nil
+			}
+			events = append(events, "app.verify")
+			return appProcess{PID: 73, Command: "/tmp/ibkr app --remote", Args: []string{"app", "--remote"}, CurrentExecutable: true}, nil
+		},
+		stop: func(int, time.Duration) error {
+			appStops++
+			events = append(events, "app.stop")
+			return nil
+		},
+		start: func(context.Context, []string) (int, error) {
+			t.Fatal("verified supervisor respawn must not start another app")
+			return 0, nil
+		},
+	})
+	if exit != 1 {
+		t.Fatalf("exit = %d, want 1", exit)
+	}
+	if appStops != 1 {
+		t.Fatalf("app stop calls = %d, want one initial restart and no rollback", appStops)
+	}
+	if got, want := strings.Join(events, ","), "app.find,app.stop,app.verify,daemon.find,daemon.stop-failed"; got != want {
+		t.Fatalf("event order = %q, want %q", got, want)
+	}
+	if !strings.Contains(errBuf.String(), "app was not rolled back") {
+		t.Fatalf("stderr missing no-rollback guidance: %s", errBuf.String())
+	}
+	var res restartResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode partial restart result: %v\n%s", err, out.String())
+	}
+	if res.App == nil || !res.App.Started || res.App.NewPID != 73 {
+		t.Fatalf("partial result lost successful app stage: %+v", res)
+	}
+	if res.Started {
+		t.Fatalf("partial result falsely reports daemon start: %+v", res)
+	}
+}
+
+func TestRunRestartAllCoreSupervisedAppCompletesBeforeDaemonMutation(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", "")
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{jsonOut: true, timeout: time.Second, out: &out, err: &errBuf}
+	var events []string
+	supervisorCalls := 0
+	exit := runRestartAllCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			events = append(events, "daemon.find")
+			return update.DaemonProcess{PID: 91, Command: "/tmp/ibkr daemon", SocketPath: "sock", LockPath: "lock"}, nil
+		},
+		stop: func(int, time.Duration) error {
+			events = append(events, "daemon.stop")
+			return nil
+		},
+		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			events = append(events, "daemon.start")
+			return 92, rpc.HealthResult{DaemonVersion: "test"}, nil
+		},
+	}, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			events = append(events, "app.find")
+			return appProcess{PID: 82, Command: "/tmp/ibkr app --remote", Args: []string{"app", "--remote"}}, nil
+		},
+		stop: func(int, time.Duration) error {
+			t.Fatal("supervised app must not be stopped directly")
+			return nil
+		},
+		start: func(context.Context, []string) (int, error) {
+			t.Fatal("supervised app must not be started directly")
+			return 0, nil
+		},
+		supervisor: func(context.Context) (appSupervisor, bool) {
+			supervisorCalls++
+			pid := 82
+			name := "app.supervisor-detect"
+			if supervisorCalls > 1 {
+				pid = 83
+				name = fmt.Sprintf("app.supervisor-verify-%d", supervisorCalls-1)
+			}
+			events = append(events, name)
+			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: pid, Executable: testCurrentExecutable(t), Args: []string{"app", "--remote"}}, true
+		},
+		kickstart: func(context.Context, string) error {
+			events = append(events, "app.kickstart")
+			return nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	want := "app.find,app.supervisor-detect,app.kickstart,app.supervisor-verify-1,app.supervisor-verify-2,daemon.find,daemon.stop,daemon.start"
+	if got := strings.Join(events, ","); got != want {
+		t.Fatalf("event order = %q, want %q", got, want)
+	}
+	var res restartResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, out.String())
+	}
+	if res.App == nil || res.App.Supervisor == "" || res.App.NewPID != 83 || res.NewPID != 92 {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
+func TestRunRestartAllCoreRejectsStaleLaunchdExecutableBeforeDaemon(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", "")
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{timeout: time.Second, out: &out, err: &errBuf}
+	exit := runRestartAllCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			t.Fatal("daemon discovery must not run for a stale launchd executable")
+			return update.DaemonProcess{}, nil
+		},
+		stop: func(int, time.Duration) error {
+			t.Fatal("daemon stop must not run for a stale launchd executable")
+			return nil
+		},
+		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			t.Fatal("daemon start must not run for a stale launchd executable")
+			return 0, rpc.HealthResult{}, nil
+		},
+	}, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			return appProcess{PID: 101, Args: []string{"app", "--remote"}}, nil
+		},
+		supervisor: func(context.Context) (appSupervisor, bool) {
+			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: 101, Executable: "/tmp/stale/ibkr", Args: []string{"app", "--remote"}}, true
+		},
+		kickstart: func(context.Context, string) error {
+			t.Fatal("stale launchd job must not be kickstarted")
+			return nil
+		},
+	})
+	if exit != 1 {
+		t.Fatalf("exit = %d, want 1", exit)
+	}
+	if !strings.Contains(errBuf.String(), "not the current installed ibkr executable") || !strings.Contains(errBuf.String(), "daemon was not touched") {
+		t.Fatalf("stderr missing stale-executable safety explanation: %s", errBuf.String())
 	}
 }
 
@@ -327,6 +644,40 @@ func TestRunRestartAllCoreSkipsAppWhenSocketOverridden(t *testing.T) {
 	}
 }
 
+func TestRunRestartAllCoreAnnouncesSocketHandsOffBeforeDaemonMutation(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", t.TempDir()+"/ibkr.sock")
+
+	var out, errBuf bytes.Buffer
+	opts := &restartOptions{timeout: time.Second, out: &out, err: &errBuf}
+	exit := runRestartAllCore(context.Background(), opts, restartDeps{
+		find: func(context.Context, string) (update.DaemonProcess, error) {
+			if !strings.Contains(out.String(), "separate explicit, non-atomic operation") {
+				t.Fatal("socket-override decision was not announced before daemon discovery")
+			}
+			return update.DaemonProcess{}, update.ErrDaemonNotRunning
+		},
+		startAndHealth: func(context.Context, string, io.Writer, bool) (int, rpc.HealthResult, error) {
+			return 72, rpc.HealthResult{DaemonVersion: "test"}, nil
+		},
+	}, appRestartDeps{
+		find: func(context.Context) (appProcess, error) {
+			t.Fatal("app discovery must remain hands-off for an overridden socket")
+			return appProcess{}, nil
+		},
+		stop: func(int, time.Duration) error {
+			t.Fatal("app stop must remain hands-off for an overridden socket")
+			return nil
+		},
+		start: func(context.Context, []string) (int, error) {
+			t.Fatal("app start must remain hands-off for an overridden socket")
+			return 0, nil
+		},
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+}
+
 func TestRunRestartAppCoreKickstartsLaunchdJob(t *testing.T) {
 	t.Parallel()
 
@@ -353,7 +704,7 @@ func TestRunRestartAppCoreKickstartsLaunchdJob(t *testing.T) {
 			if kicked != "" {
 				pid = 91
 			}
-			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: pid, Args: []string{"app", "--remote"}}, true
+			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: pid, Executable: testCurrentExecutable(t), Args: []string{"app", "--remote"}}, true
 		},
 		kickstart: func(_ context.Context, target string) error {
 			kicked = target
@@ -407,7 +758,7 @@ func TestRunRestartAppCoreStopsOrphanBeforeKickstart(t *testing.T) {
 			if kicked {
 				pid = 71
 			}
-			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: pid, Args: []string{"app", "--remote"}}, true
+			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: pid, Executable: testCurrentExecutable(t), Args: []string{"app", "--remote"}}, true
 		},
 		kickstart: func(context.Context, string) error {
 			if stoppedPID == 0 {
@@ -454,7 +805,7 @@ func TestRunRestartAppCoreLeavesIsolatedInstanceToUnsupervisedPath(t *testing.T)
 		supervisor: func(context.Context) (appSupervisor, bool) {
 			// The shared host's LaunchAgent is loaded, but the running app
 			// is an isolated smoke/preview instance with its own state dir.
-			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: 0, Args: []string{"app", "--remote"}}, true
+			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: 0, Executable: testCurrentExecutable(t), Args: []string{"app", "--remote"}}, true
 		},
 		kickstart: func(context.Context, string) error {
 			t.Fatal("must not kickstart the shared host for an isolated app instance")
@@ -477,7 +828,7 @@ func TestSupervisedRestartAppliesComparesStateLocks(t *testing.T) {
 	// pin the default state dir so the cases stay hermetic.
 	t.Setenv("IBKR_APP_STATE_DIR", "")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	shared := appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: 4098, Args: []string{"app", "--remote"}}
+	shared := appSupervisor{Target: "gui/501/com.osauer.ibkr-app", PID: 4098, Executable: testCurrentExecutable(t), Args: []string{"app", "--remote"}}
 	cases := []struct {
 		name    string
 		proc    appProcess
@@ -489,8 +840,8 @@ func TestSupervisedRestartAppliesComparesStateLocks(t *testing.T) {
 		{"ambiguous find defers to the job", appProcess{}, errAppUnverified, shared, true},
 		{"default-dir orphan with different argv", appProcess{PID: 70, Args: []string{"app", "--addr", "0.0.0.0:8765"}}, nil, shared, true},
 		{"isolated instance with its own state dir", appProcess{PID: 60, Args: []string{"app", "--state-dir", "/tmp/ibkr-smoke"}}, nil, shared, false},
-		{"same explicit state dir is the job's orphan", appProcess{PID: 61, Args: []string{"app", "--state-dir", "/var/lib/ibkr-app"}}, nil, appSupervisor{Target: shared.Target, Args: []string{"app", "--state-dir", "/var/lib/ibkr-app"}}, true},
-		{"unparsed plist args resolve to the default dir", appProcess{PID: 62, Args: []string{"app", "--state-dir", "/tmp/ibkr-smoke"}}, nil, appSupervisor{Target: shared.Target}, false},
+		{"same explicit state dir is the job's orphan", appProcess{PID: 61, Args: []string{"app", "--state-dir", "/var/lib/ibkr-app"}}, nil, appSupervisor{Target: shared.Target, Executable: shared.Executable, Args: []string{"app", "--state-dir", "/var/lib/ibkr-app"}}, true},
+		{"unparsed plist args resolve to the default dir", appProcess{PID: 62, Args: []string{"app", "--state-dir", "/tmp/ibkr-smoke"}}, nil, appSupervisor{Target: shared.Target, Executable: shared.Executable}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -514,6 +865,19 @@ func TestAppArgsStateDirResolvesSymlinkedSpellings(t *testing.T) {
 	}
 }
 
+func TestExecutablePathMatchesCurrentThroughSymlink(t *testing.T) {
+	link := filepath.Join(t.TempDir(), "ibkr")
+	if err := os.Symlink(testCurrentExecutable(t), link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if !executablePathMatches(link, currentExecutablePaths()) {
+		t.Fatalf("symlink %q should resolve to the current executable", link)
+	}
+	if executablePathMatches(filepath.Join(t.TempDir(), "stale-ibkr"), currentExecutablePaths()) {
+		t.Fatal("unrelated executable path matched current executable")
+	}
+}
+
 func TestRunRestartAppCoreRejectsOverridesForSupervisedApp(t *testing.T) {
 	t.Parallel()
 
@@ -524,7 +888,7 @@ func TestRunRestartAppCoreRejectsOverridesForSupervisedApp(t *testing.T) {
 			return appProcess{}, errAppNotRunning
 		},
 		supervisor: func(context.Context) (appSupervisor, bool) {
-			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app"}, true
+			return appSupervisor{Target: "gui/501/com.osauer.ibkr-app", Executable: testCurrentExecutable(t)}, true
 		},
 		kickstart: func(context.Context, string) error {
 			t.Fatal("must not kickstart when overrides were rejected")
@@ -551,7 +915,10 @@ func TestLaunchdProgramArgumentsParsesPrintOutput(t *testing.T) {
 		"\t\t--remote\n" +
 		"\t}\n" +
 		"}\n"
-	args := launchdProgramArguments(out)
+	executable, args := launchdProgramArguments(out)
+	if executable != "/Users/osauer/.local/bin/ibkr" {
+		t.Fatalf("executable = %q", executable)
+	}
 	if strings.Join(args, " ") != "app --remote" {
 		t.Fatalf("args = %q", strings.Join(args, " "))
 	}
@@ -605,9 +972,10 @@ func TestRunRestartAppCorePreservesArgsAndDetectsSupervisorRespawn(t *testing.T)
 				}, nil
 			}
 			return appProcess{
-				PID:     52,
-				Command: "/tmp/ibkr app --addr 127.0.0.1:18765",
-				Args:    []string{"app", "--addr", "127.0.0.1:18765"},
+				PID:               52,
+				Command:           "/tmp/ibkr app --addr 127.0.0.1:18765",
+				Args:              []string{"app", "--addr", "127.0.0.1:18765"},
+				CurrentExecutable: true,
 			}, nil
 		},
 		stop: func(pid int, _ time.Duration) error {

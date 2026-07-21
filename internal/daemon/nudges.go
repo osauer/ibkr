@@ -960,7 +960,8 @@ func (s *Server) handleNudgesSnapshot(ctx context.Context, req *rpc.Request) (*r
 			return nil, err
 		}
 	}
-	result, err := s.composeNudgesSnapshotContext(ctx)
+	var shadowInput alertShadowNudgeInput
+	result, err := s.composeNudgesSnapshotContextWithAuthority(ctx, &shadowInput)
 	if err != nil {
 		return nil, err
 	}
@@ -974,6 +975,8 @@ func (s *Server) handleNudgesSnapshot(ctx context.Context, req *rpc.Request) (*r
 	if err := json.Unmarshal(wire, &canonical); err != nil {
 		return nil, fmt.Errorf("decode canonical nudge snapshot: %w", err)
 	}
+	shadowInput.Snapshot = canonical
+	s.observeNudgesAlertShadow(ctx, shadowInput)
 	return &canonical, nil
 }
 
@@ -1127,6 +1130,15 @@ func (s *Server) composeNudgesSnapshot() rpc.NudgesSnapshotResult {
 }
 
 func (s *Server) composeNudgesSnapshotContext(ctx context.Context) (rpc.NudgesSnapshotResult, error) {
+	return s.composeNudgesSnapshotContextWithAuthority(ctx, nil)
+}
+
+// composeNudgesSnapshotContextWithAuthority captures the exact policy,
+// nudge-store health, and broker scope used by this composition for the
+// record-only alert hook. This avoids later independent reads racing a policy
+// reload, persistence fault, or account/mode transition after the snapshot was
+// built.
+func (s *Server) composeNudgesSnapshotContextWithAuthority(ctx context.Context, shadowInput *alertShadowNudgeInput) (rpc.NudgesSnapshotResult, error) {
 	now := time.Now().UTC()
 	if s != nil && s.now != nil {
 		now = s.now().UTC()
@@ -1142,6 +1154,22 @@ func (s *Server) composeNudgesSnapshotContext(ctx context.Context) (rpc.NudgesSn
 		ConfirmedFlow: setHealth(rpc.NudgeInputStatusUnavailable, rpc.NudgeHealthReasonCoverageUnavailable),
 	}
 	authority := s.currentNudgeAuthority(now)
+	if shadowInput != nil {
+		storeHealth := setHealth(rpc.NudgeInputStatusUnavailable, rpc.NudgeHealthReasonSourceUnavailable)
+		if s != nil && s.nudges != nil {
+			if s.nudges.healthOK() {
+				storeHealth = setHealth(rpc.NudgeInputStatusOK, rpc.NudgeHealthReasonNone)
+			} else {
+				storeHealth = setHealth(rpc.NudgeInputStatusError, rpc.NudgeHealthReasonEvaluationError)
+			}
+		}
+		scope, _ := newAlertShadowBrokerScope(s.currentBrokerStateScope())
+		*shadowInput = alertShadowNudgeInput{
+			PolicyFingerprint: rpc.Fingerprint{Version: rpc.RiskConstitutionFingerprintVersion, Key: authority.policyIdentity},
+			StoreHealth:       storeHealth,
+			Scope:             scope,
+		}
+	}
 	result.SourceHealth.Policy = authority.policyHealth
 	if authority.policyHealth.Status != rpc.NudgeInputStatusOK {
 		return result, nil

@@ -4,9 +4,11 @@ import (
 	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -15,7 +17,8 @@ import (
 )
 
 const (
-	AlertDeliveryVersion = "alert-delivery-v1"
+	AlertDeliveryVersion       = "alert-delivery-v2"
+	legacyAlertDeliveryVersion = "alert-delivery-v1"
 
 	AlertDeliveryAttemptReserved    = "reserved"
 	AlertDeliveryAttemptConfirmed   = "confirmed_pending_outcome"
@@ -47,6 +50,11 @@ const (
 	AlertDeliveryEndRecovered  = "recovered"
 	AlertDeliveryEndOmitted    = "authoritative_omission"
 	AlertDeliveryEndSuperseded = "qualified_escalation"
+	// AlertDeliveryEndAuthorityScopeChanged labels an immutable public boundary
+	// projection when the daemon moves to another opaque account/mode authority.
+	// The private producer occurrence stays active and resumable: a context
+	// switch is neither evidence of recovery nor a trustworthy clear.
+	AlertDeliveryEndAuthorityScopeChanged = "authority_scope_changed"
 
 	AlertDeliveryCompletionAccepted  AlertDeliveryCompletion = "accepted"
 	AlertDeliveryCompletionRetryable AlertDeliveryCompletion = "retryable_failure"
@@ -61,6 +69,12 @@ const (
 const (
 	defaultAlertDeliveryMaxItems = 4096
 	alertDeliveryRetention       = 90 * 24 * time.Hour
+	legacyAlertSnapshotVersion   = "alert-candidate-snapshot-v1"
+	// This value exists only long enough to reuse the v2 structural validator
+	// for an archived v1 ledger. It is never persisted or treated as a broker
+	// authority; v1 had no scope that could be recovered without fabrication.
+	legacyUnscopedValidationScope = "alert-authority-scope-v1:" +
+		"0000000000000000000000000000000000000000000000000000000000000000"
 )
 
 var (
@@ -82,9 +96,87 @@ type alertDeliveryEligibilityFunc func(rpc.AlertCandidate) bool
 // existing app state file. It never participates in the legacy Canary or
 // Governance arrays/cursors.
 type alertDeliveryData struct {
+	Version                  string                                   `json:"version"`
+	Generation               uint64                                   `json:"generation"`
+	Snapshot                 rpc.AlertCandidateSnapshot               `json:"snapshot"`
+	SourceWatermarks         map[rpc.AlertSource]time.Time            `json:"source_watermarks"`
+	SourceWatermarksByScope  map[string]map[rpc.AlertSource]time.Time `json:"source_watermarks_by_scope"`
+	Episodes                 []alertDeliveryEpisode                   `json:"episodes,omitempty"`
+	Occurrences              []alertDeliveryOccurrence                `json:"occurrences,omitempty"`
+	PreviousContexts         []alertDeliveryPreviousContext           `json:"previous_contexts,omitempty"`
+	PreviousContextHighWater uint64                                   `json:"previous_context_high_water_seq"`
+	Attempts                 []alertDeliveryAttempt                   `json:"attempts,omitempty"`
+	Receipts                 []alertDeliveryReceipt                   `json:"receipts,omitempty"`
+	RetiredTargets           map[string]time.Time                     `json:"retired_targets"`
+	Health                   AlertDeliveryHealth                      `json:"delivery_health"`
+	AttentionHighWaterSeq    uint64                                   `json:"attention_v2_high_water_seq"`
+	AttentionReadThroughSeq  uint64                                   `json:"attention_v2_read_through_seq"`
+	// legacyUnscopedRaw is populated only while opening a structurally valid
+	// pre-scope v1 ledger. It is archived byte-for-byte and never serialized as
+	// a live v2 authority.
+	legacyUnscopedRaw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON recognizes only the one pre-scope ledger/snapshot pair that
+// this rollout supersedes. It converts that value to an in-memory validation
+// shape and marks it for archival; no fabricated scope is ever written back.
+// Every malformed or ambiguous legacy value still reaches the ordinary
+// fail-closed quarantine path through a decode/validation error.
+func (data *alertDeliveryData) UnmarshalJSON(raw []byte) error {
+	var header struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return err
+	}
+	if header.Version != legacyAlertDeliveryVersion {
+		type wire alertDeliveryData
+		var decoded wire
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return err
+		}
+		*data = alertDeliveryData(decoded)
+		return nil
+	}
+
+	var legacy legacyAlertDeliveryData
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		return err
+	}
+	if legacy.Version != legacyAlertDeliveryVersion || legacy.Snapshot.SchemaVersion != legacyAlertSnapshotVersion {
+		return errors.New("invalid legacy alert delivery version")
+	}
+	converted := alertDeliveryData{
+		Version: legacyAlertDeliveryVersion, Generation: legacy.Generation,
+		Snapshot: legacy.Snapshot.validationSnapshot(), SourceWatermarks: legacy.SourceWatermarks,
+		Episodes: legacy.Episodes, Occurrences: legacy.Occurrences, Attempts: legacy.Attempts,
+		Receipts: legacy.Receipts, RetiredTargets: legacy.RetiredTargets, Health: legacy.Health,
+		AttentionHighWaterSeq: legacy.AttentionHighWaterSeq, AttentionReadThroughSeq: legacy.AttentionReadThroughSeq,
+		legacyUnscopedRaw: append(json.RawMessage(nil), raw...),
+	}
+	converted.SourceWatermarksByScope = map[string]map[rpc.AlertSource]time.Time{
+		legacyUnscopedValidationScope: cloneAlertSourceWatermarks(legacy.SourceWatermarks),
+	}
+	for i := range converted.Episodes {
+		converted.Episodes[i].AuthorityScope = legacyUnscopedValidationScope
+	}
+	for i := range converted.Occurrences {
+		converted.Occurrences[i].AuthorityScope = legacyUnscopedValidationScope
+	}
+	for i := range converted.Attempts {
+		converted.Attempts[i].AuthorityScope = legacyUnscopedValidationScope
+	}
+	for i := range converted.Receipts {
+		converted.Receipts[i].AuthorityScope = legacyUnscopedValidationScope
+	}
+	*data = converted
+	return nil
+}
+
+type legacyAlertDeliveryData struct {
 	Version                 string                        `json:"version"`
 	Generation              uint64                        `json:"generation"`
-	Snapshot                rpc.AlertCandidateSnapshot    `json:"snapshot"`
+	Snapshot                legacyAlertCandidateSnapshot  `json:"snapshot"`
 	SourceWatermarks        map[rpc.AlertSource]time.Time `json:"source_watermarks"`
 	Episodes                []alertDeliveryEpisode        `json:"episodes,omitempty"`
 	Occurrences             []alertDeliveryOccurrence     `json:"occurrences,omitempty"`
@@ -96,7 +188,54 @@ type alertDeliveryData struct {
 	AttentionReadThroughSeq uint64                        `json:"attention_v2_read_through_seq"`
 }
 
+type legacyAlertCandidateSnapshot struct {
+	SchemaVersion string                 `json:"schema_version"`
+	AsOf          time.Time              `json:"as_of"`
+	CurrentState  rpc.AlertSnapshotState `json:"current_state"`
+	Coverage      rpc.AlertCoverage      `json:"coverage"`
+	Candidates    []rpc.AlertCandidate   `json:"candidates"`
+}
+
+func (snapshot *legacyAlertCandidateSnapshot) UnmarshalJSON(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	want := []string{"schema_version", "as_of", "current_state", "coverage", "candidates"}
+	if len(fields) != len(want) {
+		return errors.New("invalid legacy alert candidate snapshot fields")
+	}
+	for _, name := range want {
+		if _, ok := fields[name]; !ok {
+			return errors.New("invalid legacy alert candidate snapshot fields")
+		}
+	}
+	type wire legacyAlertCandidateSnapshot
+	var decoded wire
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	value := legacyAlertCandidateSnapshot(decoded)
+	if value.SchemaVersion != legacyAlertSnapshotVersion {
+		return errors.New("invalid legacy alert candidate snapshot schema_version")
+	}
+	if err := rpc.ValidateAlertCandidateSnapshot(value.validationSnapshot()); err != nil {
+		return fmt.Errorf("invalid legacy alert candidate snapshot: %w", err)
+	}
+	*snapshot = value
+	return nil
+}
+
+func (snapshot legacyAlertCandidateSnapshot) validationSnapshot() rpc.AlertCandidateSnapshot {
+	return rpc.AlertCandidateSnapshot{
+		SchemaVersion: rpc.AlertCandidateSnapshotVersion, AuthorityScope: legacyUnscopedValidationScope,
+		AsOf: snapshot.AsOf, CurrentState: snapshot.CurrentState, Coverage: snapshot.Coverage,
+		Candidates: snapshot.Candidates,
+	}
+}
+
 type alertDeliveryEpisode struct {
+	AuthorityScope       string                `json:"authority_scope"`
 	EpisodeKey           string                `json:"episode_key"`
 	Source               rpc.AlertSource       `json:"source"`
 	Kind                 rpc.AlertKind         `json:"kind"`
@@ -107,6 +246,7 @@ type alertDeliveryEpisode struct {
 }
 
 type alertDeliveryOccurrence struct {
+	AuthorityScope      string                      `json:"authority_scope"`
 	OccurrenceKey       string                      `json:"occurrence_key"`
 	EpisodeKey          string                      `json:"episode_key"`
 	EvidenceFingerprint string                      `json:"evidence_fingerprint"`
@@ -129,26 +269,53 @@ type alertDeliveryOccurrence struct {
 	TransportEligible   bool                        `json:"transport_eligible"`
 }
 
+// alertDeliveryPreviousContext is an immutable, allowlisted audit projection
+// created when the app moves away from an account/mode authority. It records
+// that an alert was still active at the context boundary without changing the
+// producer-owned occurrence lifecycle or minting v2 attention.
+type alertDeliveryPreviousContext struct {
+	AuthorityScope     string                      `json:"authority_scope"`
+	ArchiveSeq         uint64                      `json:"archive_seq"`
+	DisplayID          string                      `json:"display_id"`
+	PriorDisplayID     string                      `json:"prior_display_id"`
+	Source             rpc.AlertSource             `json:"source"`
+	Kind               rpc.AlertKind               `json:"kind"`
+	State              rpc.AlertEpisodeState       `json:"state"`
+	Severity           rpc.AlertSeverity           `json:"severity"`
+	DeliveryPreference rpc.AlertDeliveryPreference `json:"delivery_preference"`
+	EvidenceHealth     rpc.AlertEvidenceHealth     `json:"evidence_health"`
+	Destination        rpc.AlertDestination        `json:"destination"`
+	EvidenceAsOf       time.Time                   `json:"evidence_as_of"`
+	StateChangedAt     time.Time                   `json:"state_changed_at"`
+	FirstSeenAt        time.Time                   `json:"first_seen_at"`
+	LastSeenAt         time.Time                   `json:"last_seen_at"`
+	EndedAt            time.Time                   `json:"ended_at"`
+	EndReason          string                      `json:"end_reason"`
+	OriginalAttention  uint64                      `json:"original_attention_v2_seq"`
+}
+
 type alertDeliveryAttempt struct {
-	ID            string                             `json:"id"`
-	OccurrenceKey string                             `json:"occurrence_key"`
-	TargetRef     string                             `json:"target_ref"`
-	ReceiptKey    string                             `json:"receipt_key"`
-	AttemptNumber int                                `json:"attempt_number"`
-	ReservedAt    time.Time                          `json:"reserved_at"`
-	CompletedAt   time.Time                          `json:"completed_at,omitzero"`
-	Class         string                             `json:"class"`
-	Disposition   AlertDeliveryCompletionDisposition `json:"disposition,omitempty"`
-	RetryAt       time.Time                          `json:"retry_at,omitzero"`
-	RetiredAt     time.Time                          `json:"retired_at,omitzero"`
+	AuthorityScope string                             `json:"authority_scope"`
+	ID             string                             `json:"id"`
+	OccurrenceKey  string                             `json:"occurrence_key"`
+	TargetRef      string                             `json:"target_ref"`
+	ReceiptKey     string                             `json:"receipt_key"`
+	AttemptNumber  int                                `json:"attempt_number"`
+	ReservedAt     time.Time                          `json:"reserved_at"`
+	CompletedAt    time.Time                          `json:"completed_at,omitzero"`
+	Class          string                             `json:"class"`
+	Disposition    AlertDeliveryCompletionDisposition `json:"disposition,omitempty"`
+	RetryAt        time.Time                          `json:"retry_at,omitzero"`
+	RetiredAt      time.Time                          `json:"retired_at,omitzero"`
 }
 
 type alertDeliveryReceipt struct {
-	OccurrenceKey string    `json:"occurrence_key"`
-	TargetRef     string    `json:"target_ref"`
-	ReceiptKey    string    `json:"receipt_key"`
-	AcceptedAt    time.Time `json:"accepted_at"`
-	RetiredAt     time.Time `json:"retired_at,omitzero"`
+	AuthorityScope string    `json:"authority_scope"`
+	OccurrenceKey  string    `json:"occurrence_key"`
+	TargetRef      string    `json:"target_ref"`
+	ReceiptKey     string    `json:"receipt_key"`
+	AcceptedAt     time.Time `json:"accepted_at"`
+	RetiredAt      time.Time `json:"retired_at,omitzero"`
 }
 
 // AlertDeliveryOccurrenceView is safe for HTTP/SSE projection. Producer keys,
@@ -218,6 +385,9 @@ type AlertDeliveryView struct {
 	Attention        AlertDeliveryAttention        `json:"attention"`
 	AttemptTotals    AlertDeliveryAttemptTotals    `json:"-"`
 	DeliveryHealth   AlertDeliveryHealth           `json:"delivery_health"`
+	// AuthorityScope is private app coordination state. HTTP/SSE DTOs map the
+	// view explicitly and JSON must never expose this opaque broker context.
+	AuthorityScope string `json:"-"`
 }
 
 type AlertDeliveryReservation struct {
@@ -262,9 +432,10 @@ func (s *Store) initAlertDeliveryRuntime() {
 
 func newAlertDeliveryData() *alertDeliveryData {
 	return &alertDeliveryData{
-		Version:          AlertDeliveryVersion,
-		SourceWatermarks: make(map[rpc.AlertSource]time.Time),
-		RetiredTargets:   make(map[string]time.Time),
+		Version:                 AlertDeliveryVersion,
+		SourceWatermarks:        make(map[rpc.AlertSource]time.Time),
+		SourceWatermarksByScope: make(map[string]map[rpc.AlertSource]time.Time),
+		RetiredTargets:          make(map[string]time.Time),
 	}
 }
 
@@ -323,6 +494,12 @@ func (s *Store) setAlertDeliveryOverflowLocked(prior *alertDeliveryData, at time
 	if next == nil {
 		next = newAlertDeliveryData()
 	}
+	if next.SourceWatermarksByScope == nil {
+		next.SourceWatermarksByScope = make(map[string]map[rpc.AlertSource]time.Time)
+	}
+	if next.Snapshot.AuthorityScope != "" {
+		next.SourceWatermarksByScope[next.Snapshot.AuthorityScope] = cloneAlertSourceWatermarks(next.SourceWatermarks)
+	}
 	next.Version = AlertDeliveryVersion
 	next.Health = AlertDeliveryHealth{State: AlertDeliveryHealthOverflow, Class: AlertDeliveryHealthClassOverflow, UpdatedAt: at.UTC(), LastAcceptedAt: next.Health.LastAcceptedAt}
 	if err := s.bumpAlertDeliveryGenerationLocked(next); err != nil {
@@ -354,7 +531,8 @@ func (s *Store) ObserveAlertSnapshot(snapshot rpc.AlertCandidateSnapshot) (Alert
 		return s.alertDeliveryViewLocked(nil, time.Now().UTC()), err
 	}
 	prior := s.data.AlertDelivery
-	if prior != nil && prior.Generation > 0 && snapshot.AsOf.Equal(prior.Snapshot.AsOf) {
+	scopeChanged := prior != nil && prior.Generation > 0 && prior.Snapshot.AuthorityScope != snapshot.AuthorityScope
+	if !scopeChanged && prior != nil && prior.Generation > 0 && snapshot.AsOf.Equal(prior.Snapshot.AsOf) {
 		if !equalAlertCandidateSnapshot(prior.Snapshot, snapshot) {
 			return AlertDeliveryView{}, fmt.Errorf("%w: snapshot %s conflicts with the persisted authority generation", ErrAlertDeliveryOldSnapshot, snapshot.AsOf.UTC().Format(time.RFC3339Nano))
 		}
@@ -364,8 +542,20 @@ func (s *Store) ObserveAlertSnapshot(snapshot rpc.AlertCandidateSnapshot) (Alert
 	if next == nil {
 		next = newAlertDeliveryData()
 	}
-	if err := rejectOldAlertSnapshot(next, snapshot); err != nil {
-		return AlertDeliveryView{}, err
+	if scopeChanged {
+		if err := s.archiveAlertDeliveryAuthorityScopeLocked(next, snapshot); err != nil {
+			if errors.Is(err, ErrAlertDeliveryOverflow) {
+				return AlertDeliveryView{}, s.setAlertDeliveryOverflowLocked(prior, snapshot.AsOf)
+			}
+			return AlertDeliveryView{}, err
+		}
+		if err := rejectAlertSourceWatermarks(next, snapshot); err != nil {
+			return AlertDeliveryView{}, err
+		}
+	} else {
+		if err := rejectOldAlertSnapshot(next, snapshot); err != nil {
+			return AlertDeliveryView{}, err
+		}
 	}
 	if err := s.applyAlertSnapshotLocked(next, snapshot); err != nil {
 		if errors.Is(err, ErrAlertDeliveryOverflow) {
@@ -402,9 +592,10 @@ func (s *Store) ObserveAlertSnapshot(snapshot rpc.AlertCandidateSnapshot) (Alert
 
 func unavailableAlertSnapshot(snapshot rpc.AlertCandidateSnapshot) rpc.AlertCandidateSnapshot {
 	return rpc.AlertCandidateSnapshot{
-		SchemaVersion: rpc.AlertCandidateSnapshotVersion,
-		AsOf:          snapshot.AsOf,
-		CurrentState:  rpc.AlertSnapshotUnknown,
+		SchemaVersion:  rpc.AlertCandidateSnapshotVersion,
+		AuthorityScope: snapshot.AuthorityScope,
+		AsOf:           snapshot.AsOf,
+		CurrentState:   rpc.AlertSnapshotUnknown,
 		Coverage: rpc.AlertCoverage{
 			State: rpc.AlertCoverageUnavailable, Freshness: rpc.AlertCoverageUnknown, AsOf: snapshot.AsOf,
 			ExpectedSources: append([]rpc.AlertSource{}, snapshot.Coverage.ExpectedSources...),
@@ -414,12 +605,71 @@ func unavailableAlertSnapshot(snapshot rpc.AlertCandidateSnapshot) rpc.AlertCand
 	}
 }
 
+func (s *Store) archiveAlertDeliveryAuthorityScopeLocked(data *alertDeliveryData, snapshot rpc.AlertCandidateSnapshot) error {
+	if data == nil {
+		return nil
+	}
+	priorScope := data.Snapshot.AuthorityScope
+	endedAt := snapshot.AsOf.UTC()
+	if data.Snapshot.AsOf.After(endedAt) {
+		endedAt = data.Snapshot.AsOf.UTC()
+	}
+	for i := range data.Episodes {
+		episode := &data.Episodes[i]
+		if episode.AuthorityScope != priorScope {
+			continue
+		}
+		occurrence, _, ok := findAlertDeliveryOccurrence(data, priorScope, episode.CurrentOccurrenceKey)
+		if !ok || !alertDeliveryOccurrenceActive(occurrence, episode) {
+			continue
+		}
+		if len(data.PreviousContexts) >= s.alertDeliveryMaxItems {
+			return ErrAlertDeliveryOverflow
+		}
+		if data.PreviousContextHighWater == ^uint64(0) {
+			return ErrAlertDeliveryOverflow
+		}
+		data.PreviousContextHighWater++
+		data.PreviousContexts = append(data.PreviousContexts, alertDeliveryPreviousContext{
+			AuthorityScope: priorScope,
+			ArchiveSeq:     data.PreviousContextHighWater,
+			DisplayID:      alertPreviousContextDisplayID(priorScope, occurrence.DisplayID, endedAt, data.PreviousContextHighWater),
+			PriorDisplayID: occurrence.DisplayID,
+			Source:         occurrence.Source, Kind: occurrence.Kind, State: occurrence.State,
+			Severity: occurrence.Severity, DeliveryPreference: occurrence.DeliveryPreference,
+			EvidenceHealth: occurrence.EvidenceHealth, Destination: occurrence.Destination,
+			EvidenceAsOf: occurrence.EvidenceAsOf, StateChangedAt: occurrence.StateChangedAt,
+			FirstSeenAt: occurrence.FirstSeenAt, LastSeenAt: occurrence.LastSeenAt,
+			EndedAt: endedAt, EndReason: AlertDeliveryEndAuthorityScopeChanged,
+			OriginalAttention: occurrence.AttentionSeq,
+		})
+	}
+	if data.SourceWatermarksByScope == nil {
+		data.SourceWatermarksByScope = make(map[string]map[rpc.AlertSource]time.Time)
+	}
+	data.SourceWatermarksByScope[priorScope] = cloneAlertSourceWatermarks(data.SourceWatermarks)
+	data.SourceWatermarks = cloneAlertSourceWatermarks(data.SourceWatermarksByScope[snapshot.AuthorityScope])
+	if data.Health.State == AlertDeliveryHealthOverflow || data.Health.State == AlertDeliveryHealthUnavailable {
+		data.Health.LastAcceptedAt = time.Time{}
+	} else {
+		data.Health = AlertDeliveryHealth{}
+	}
+	return nil
+}
+
 func rejectOldAlertSnapshot(data *alertDeliveryData, snapshot rpc.AlertCandidateSnapshot) error {
 	if data == nil {
 		return nil
 	}
 	if data.Generation > 0 && snapshot.AsOf.Before(data.Snapshot.AsOf) {
 		return fmt.Errorf("%w: snapshot %s precedes current view %s", ErrAlertDeliveryOldSnapshot, snapshot.AsOf.UTC().Format(time.RFC3339Nano), data.Snapshot.AsOf.UTC().Format(time.RFC3339Nano))
+	}
+	return rejectAlertSourceWatermarks(data, snapshot)
+}
+
+func rejectAlertSourceWatermarks(data *alertDeliveryData, snapshot rpc.AlertCandidateSnapshot) error {
+	if data == nil {
+		return nil
 	}
 	for _, candidate := range snapshot.Candidates {
 		if watermark := data.SourceWatermarks[candidate.Source]; !watermark.IsZero() && candidate.ObservedAt.Before(watermark) {
@@ -437,7 +687,7 @@ func rejectOldAlertSnapshot(data *alertDeliveryData, snapshot rpc.AlertCandidate
 }
 
 func equalAlertCandidateSnapshot(a, b rpc.AlertCandidateSnapshot) bool {
-	if a.SchemaVersion != b.SchemaVersion || !a.AsOf.Equal(b.AsOf) || a.CurrentState != b.CurrentState ||
+	if a.SchemaVersion != b.SchemaVersion || a.AuthorityScope != b.AuthorityScope || !a.AsOf.Equal(b.AsOf) || a.CurrentState != b.CurrentState ||
 		a.Coverage.State != b.Coverage.State || a.Coverage.Freshness != b.Coverage.Freshness || !a.Coverage.AsOf.Equal(b.Coverage.AsOf) ||
 		!slices.Equal(a.Coverage.ExpectedSources, b.Coverage.ExpectedSources) || !slices.Equal(a.Coverage.CoveredSources, b.Coverage.CoveredSources) ||
 		len(a.Candidates) != len(b.Candidates) {
@@ -459,43 +709,46 @@ func (s *Store) applyAlertSnapshotLocked(data *alertDeliveryData, snapshot rpc.A
 	episodes := make(map[string]int, len(data.Episodes))
 	occurrences := make(map[string]int, len(data.Occurrences))
 	for i := range data.Episodes {
-		episodes[data.Episodes[i].EpisodeKey] = i
+		episodes[alertDeliveryScopedKey(data.Episodes[i].AuthorityScope, data.Episodes[i].EpisodeKey)] = i
 	}
 	for i := range data.Occurrences {
-		occurrences[data.Occurrences[i].OccurrenceKey] = i
+		occurrences[alertDeliveryScopedKey(data.Occurrences[i].AuthorityScope, data.Occurrences[i].OccurrenceKey)] = i
 	}
 
 	seenEpisodes := make(map[string]struct{}, len(snapshot.Candidates))
 	for _, candidate := range snapshot.Candidates {
-		seenEpisodes[candidate.EpisodeKey] = struct{}{}
-		episodeIndex, exists := episodes[candidate.EpisodeKey]
+		episodeMapKey := alertDeliveryScopedKey(snapshot.AuthorityScope, candidate.EpisodeKey)
+		occurrenceMapKey := alertDeliveryScopedKey(snapshot.AuthorityScope, candidate.OccurrenceKey)
+		seenEpisodes[episodeMapKey] = struct{}{}
+		episodeIndex, exists := episodes[episodeMapKey]
 		if !exists {
 			if candidate.State == rpc.AlertEpisodeRecovered {
 				return fmt.Errorf("%w: recovery for unknown episode", ErrAlertDeliveryInvalidTransition)
 			}
-			if _, reused := occurrences[candidate.OccurrenceKey]; reused {
+			if _, reused := occurrences[occurrenceMapKey]; reused {
 				return fmt.Errorf("%w: occurrence key reused by another episode", ErrAlertDeliveryInvalidTransition)
 			}
-			occurrence, err := s.newAlertDeliveryOccurrenceLocked(data, candidate)
+			occurrence, err := s.newAlertDeliveryOccurrenceLocked(data, snapshot.AuthorityScope, candidate)
 			if err != nil {
 				return err
 			}
 			data.Episodes = append(data.Episodes, alertDeliveryEpisode{
-				EpisodeKey: candidate.EpisodeKey, Source: candidate.Source, Kind: candidate.Kind,
+				AuthorityScope: snapshot.AuthorityScope,
+				EpisodeKey:     candidate.EpisodeKey, Source: candidate.Source, Kind: candidate.Kind,
 				CurrentOccurrenceKey: candidate.OccurrenceKey, State: candidate.State,
 				FirstSeenAt: candidate.ObservedAt, LastSeenAt: candidate.ObservedAt,
 			})
 			data.Occurrences = append(data.Occurrences, occurrence)
-			episodes[candidate.EpisodeKey] = len(data.Episodes) - 1
-			occurrences[candidate.OccurrenceKey] = len(data.Occurrences) - 1
+			episodes[episodeMapKey] = len(data.Episodes) - 1
+			occurrences[occurrenceMapKey] = len(data.Occurrences) - 1
 			continue
 		}
 
 		episode := &data.Episodes[episodeIndex]
-		if episode.Source != candidate.Source || episode.Kind != candidate.Kind {
+		if episode.AuthorityScope != snapshot.AuthorityScope || episode.Source != candidate.Source || episode.Kind != candidate.Kind {
 			return fmt.Errorf("%w: episode source or kind changed", ErrAlertDeliveryInvalidTransition)
 		}
-		currentIndex, currentExists := occurrences[episode.CurrentOccurrenceKey]
+		currentIndex, currentExists := occurrences[alertDeliveryScopedKey(snapshot.AuthorityScope, episode.CurrentOccurrenceKey)]
 		if !currentExists {
 			return fmt.Errorf("%w: episode current occurrence is missing", ErrInvalidPersistedState)
 		}
@@ -518,7 +771,7 @@ func (s *Store) applyAlertSnapshotLocked(data *alertDeliveryData, snapshot rpc.A
 			continue
 		}
 
-		if _, reused := occurrences[candidate.OccurrenceKey]; reused {
+		if _, reused := occurrences[occurrenceMapKey]; reused {
 			return fmt.Errorf("%w: old occurrence replayed as current", ErrAlertDeliveryInvalidTransition)
 		}
 		if candidate.State == rpc.AlertEpisodeRecovered {
@@ -539,12 +792,12 @@ func (s *Store) applyAlertSnapshotLocked(data *alertDeliveryData, snapshot rpc.A
 		default:
 			return fmt.Errorf("%w: active opening changed occurrence key without escalation", ErrAlertDeliveryInvalidTransition)
 		}
-		occurrence, err := s.newAlertDeliveryOccurrenceLocked(data, candidate)
+		occurrence, err := s.newAlertDeliveryOccurrenceLocked(data, snapshot.AuthorityScope, candidate)
 		if err != nil {
 			return err
 		}
 		data.Occurrences = append(data.Occurrences, occurrence)
-		occurrences[candidate.OccurrenceKey] = len(data.Occurrences) - 1
+		occurrences[occurrenceMapKey] = len(data.Occurrences) - 1
 		episode.CurrentOccurrenceKey = candidate.OccurrenceKey
 		episode.State = candidate.State
 		episode.LastSeenAt = candidate.ObservedAt
@@ -561,20 +814,28 @@ func (s *Store) applyAlertSnapshotLocked(data *alertDeliveryData, snapshot rpc.A
 	// Partial or stale coverage can never clear an unrelated active episode.
 	for i := range data.Episodes {
 		episode := &data.Episodes[i]
+		if episode.AuthorityScope != snapshot.AuthorityScope {
+			continue
+		}
 		if episode.State == rpc.AlertEpisodeRecovered {
 			continue
 		}
 		if _, covered := authoritative[episode.Source]; !covered {
 			continue
 		}
-		if _, present := seenEpisodes[episode.EpisodeKey]; present {
+		if _, present := seenEpisodes[alertDeliveryScopedKey(snapshot.AuthorityScope, episode.EpisodeKey)]; present {
 			continue
 		}
-		occurrenceIndex, ok := occurrences[episode.CurrentOccurrenceKey]
+		occurrenceIndex, ok := occurrences[alertDeliveryScopedKey(snapshot.AuthorityScope, episode.CurrentOccurrenceKey)]
 		if !ok {
 			return fmt.Errorf("%w: omitted episode current occurrence is missing", ErrInvalidPersistedState)
 		}
 		occurrence := &data.Occurrences[occurrenceIndex]
+		if !occurrence.EndedAt.IsZero() {
+			// A previous-scope or qualified-escalation occurrence is historical
+			// context. Current coverage cannot reinterpret its end as recovery.
+			continue
+		}
 		occurrence.State = rpc.AlertEpisodeRecovered
 		occurrence.EvidenceHealth = rpc.AlertEvidenceCurrent
 		occurrence.EvidenceAsOf = snapshot.Coverage.AsOf
@@ -587,10 +848,17 @@ func (s *Store) applyAlertSnapshotLocked(data *alertDeliveryData, snapshot rpc.A
 		episode.State = rpc.AlertEpisodeRecovered
 		episode.LastSeenAt = snapshot.AsOf
 	}
+	if data.SourceWatermarksByScope == nil {
+		data.SourceWatermarksByScope = make(map[string]map[rpc.AlertSource]time.Time)
+	}
+	if _, exists := data.SourceWatermarksByScope[snapshot.AuthorityScope]; !exists && len(data.SourceWatermarksByScope) >= s.alertDeliveryMaxItems {
+		return ErrAlertDeliveryOverflow
+	}
+	data.SourceWatermarksByScope[snapshot.AuthorityScope] = cloneAlertSourceWatermarks(data.SourceWatermarks)
 	return nil
 }
 
-func (s *Store) newAlertDeliveryOccurrenceLocked(data *alertDeliveryData, candidate rpc.AlertCandidate) (alertDeliveryOccurrence, error) {
+func (s *Store) newAlertDeliveryOccurrenceLocked(data *alertDeliveryData, authorityScope string, candidate rpc.AlertCandidate) (alertDeliveryOccurrence, error) {
 	if s.alertDeliveryMaxItems <= 0 {
 		s.alertDeliveryMaxItems = defaultAlertDeliveryMaxItems
 	}
@@ -603,8 +871,9 @@ func (s *Store) newAlertDeliveryOccurrenceLocked(data *alertDeliveryData, candid
 	data.AttentionHighWaterSeq++
 	eligible := s.alertDeliveryCandidateEligible(candidate)
 	return alertDeliveryOccurrence{
-		OccurrenceKey: candidate.OccurrenceKey, EpisodeKey: candidate.EpisodeKey,
-		EvidenceFingerprint: candidate.EvidenceFingerprint, DisplayID: alertDeliveryDisplayID(candidate.OccurrenceKey),
+		AuthorityScope: authorityScope,
+		OccurrenceKey:  candidate.OccurrenceKey, EpisodeKey: candidate.EpisodeKey,
+		EvidenceFingerprint: candidate.EvidenceFingerprint, DisplayID: alertDeliveryDisplayID(authorityScope, candidate.OccurrenceKey),
 		Source: candidate.Source, Kind: candidate.Kind, State: candidate.State, Severity: candidate.Severity,
 		DeliveryPreference: candidate.DeliveryPreference, EvidenceHealth: candidate.EvidenceHealth, Destination: candidate.Destination,
 		EvidenceAsOf: candidate.EvidenceAsOf, StateChangedAt: candidate.StateChangedAt, ObservedAt: candidate.ObservedAt,
@@ -711,8 +980,8 @@ func (s *Store) AlertDeliveriesDue(now time.Time) []AlertDeliveryDueWork {
 	out := make([]AlertDeliveryDueWork, 0)
 	for i := range data.Occurrences {
 		occurrence := &data.Occurrences[i]
-		_, episode, ok := findAlertDeliveryOccurrence(data, occurrence.OccurrenceKey)
-		if !ok || !alertDeliveryOccurrenceActive(occurrence, episode) {
+		_, episode, ok := findAlertDeliveryOccurrence(data, occurrence.AuthorityScope, occurrence.OccurrenceKey)
+		if !ok || !alertDeliveryOccurrenceCurrent(data, occurrence, episode) {
 			continue
 		}
 		candidate := alertCandidateFromOccurrence(occurrence)
@@ -794,8 +1063,15 @@ func alertDeliveryViewLocked(data *alertDeliveryData, now time.Time) AlertDelive
 	view.AsOf = data.Snapshot.AsOf
 	view.CurrentState = data.Snapshot.CurrentState
 	view.Coverage = cloneAlertCoverage(data.Snapshot.Coverage)
+	view.AuthorityScope = data.Snapshot.AuthorityScope
 	view.SourceWatermarks = cloneAlertSourceWatermarks(data.SourceWatermarks)
 	for _, occurrence := range data.Occurrences {
+		if occurrence.AuthorityScope != data.Snapshot.AuthorityScope && occurrence.EndedAt.IsZero() {
+			// Active occurrences in another account/mode remain privately live so
+			// the daemon can resume them on re-entry. Their immutable boundary
+			// projection below is the only public representation while dormant.
+			continue
+		}
 		view.Occurrences = append(view.Occurrences, AlertDeliveryOccurrenceView{
 			DisplayID: occurrence.DisplayID, Source: occurrence.Source, Kind: occurrence.Kind, State: occurrence.State,
 			Severity: occurrence.Severity, DeliveryPreference: occurrence.DeliveryPreference,
@@ -804,6 +1080,17 @@ func alertDeliveryViewLocked(data *alertDeliveryData, now time.Time) AlertDelive
 			FirstSeenAt: occurrence.FirstSeenAt, LastSeenAt: occurrence.LastSeenAt,
 			EndedAt: occurrence.EndedAt, EndReason: occurrence.EndReason,
 			AttentionSeq: occurrence.AttentionSeq, TransportEligible: occurrence.TransportEligible,
+		})
+	}
+	for _, previous := range data.PreviousContexts {
+		view.Occurrences = append(view.Occurrences, AlertDeliveryOccurrenceView{
+			DisplayID: previous.DisplayID, Source: previous.Source, Kind: previous.Kind, State: previous.State,
+			Severity: previous.Severity, DeliveryPreference: previous.DeliveryPreference,
+			EvidenceHealth: previous.EvidenceHealth, Destination: previous.Destination,
+			EvidenceAsOf: previous.EvidenceAsOf, StateChangedAt: previous.StateChangedAt,
+			FirstSeenAt: previous.FirstSeenAt, LastSeenAt: previous.LastSeenAt,
+			EndedAt: previous.EndedAt, EndReason: previous.EndReason,
+			AttentionSeq: 0, TransportEligible: false,
 		})
 	}
 	view.Attention = alertDeliveryAttentionLocked(data)
@@ -823,7 +1110,17 @@ func alertDeliveryAttentionLocked(data *alertDeliveryData) AlertDeliveryAttentio
 	entries := make([]entry, 0)
 	for _, occurrence := range data.Occurrences {
 		if occurrence.AttentionSeq > data.AttentionReadThroughSeq && occurrence.AttentionSeq <= data.AttentionHighWaterSeq {
-			entries = append(entries, entry{seq: occurrence.AttentionSeq, ref: AlertDeliveryAttentionRef{DisplayID: occurrence.DisplayID, Source: occurrence.Source, Kind: occurrence.Kind}})
+			displayID := occurrence.DisplayID
+			if occurrence.AuthorityScope != data.Snapshot.AuthorityScope && occurrence.EndedAt.IsZero() {
+				if previous, ok := latestAlertDeliveryPreviousContext(data, occurrence.AuthorityScope, occurrence.DisplayID); ok {
+					displayID = previous.DisplayID
+				} else {
+					// Corrupt states are rejected at open. Keep this defensive path
+					// from emitting an unread reference to a hidden public row.
+					continue
+				}
+			}
+			entries = append(entries, entry{seq: occurrence.AttentionSeq, ref: AlertDeliveryAttentionRef{DisplayID: displayID, Source: occurrence.Source, Kind: occurrence.Kind}})
 		}
 	}
 	slices.SortFunc(entries, func(a, b entry) int { return cmp.Compare(a.seq, b.seq) })
@@ -832,6 +1129,18 @@ func alertDeliveryAttentionLocked(data *alertDeliveryData) AlertDeliveryAttentio
 		refs[i] = entries[i].ref
 	}
 	return AlertDeliveryAttention{UnreadCount: len(refs), HighWaterSeq: data.AttentionHighWaterSeq, ReadThroughSeq: data.AttentionReadThroughSeq, UnreadRefs: refs}
+}
+
+func latestAlertDeliveryPreviousContext(data *alertDeliveryData, authorityScope, priorDisplayID string) (alertDeliveryPreviousContext, bool) {
+	if data == nil {
+		return alertDeliveryPreviousContext{}, false
+	}
+	for _, previous := range slices.Backward(data.PreviousContexts) {
+		if previous.AuthorityScope == authorityScope && previous.PriorDisplayID == priorDisplayID {
+			return previous, true
+		}
+	}
+	return alertDeliveryPreviousContext{}, false
 }
 
 func (s *Store) MarkAlertDeliveryAttentionRead(throughSeq uint64) (AlertDeliveryAttention, error) {
@@ -923,17 +1232,18 @@ func (s *Store) BeginAlertDelivery(occurrenceKey, targetRef string, now time.Tim
 	if s.alertDeliveryVolatile != nil {
 		return AlertDeliveryReservation{}, false, ErrAlertDeliveryUnavailable
 	}
-	occurrence, episode, ok := findAlertDeliveryOccurrence(prior, occurrenceKey)
+	currentScope := prior.Snapshot.AuthorityScope
+	occurrence, episode, ok := findAlertDeliveryOccurrence(prior, currentScope, occurrenceKey)
 	if !ok {
 		return AlertDeliveryReservation{}, false, ErrAlertDeliveryUnknownOccurrence
 	}
-	if !alertDeliveryOccurrenceActive(occurrence, episode) || !s.alertDeliveryCandidateEligible(alertCandidateFromOccurrence(occurrence)) {
+	if !alertDeliveryOccurrenceCurrent(prior, occurrence, episode) || !s.alertDeliveryCandidateEligible(alertCandidateFromOccurrence(occurrence)) {
 		return AlertDeliveryReservation{DisplayID: occurrence.DisplayID}, false, nil
 	}
 	if _, retired := prior.RetiredTargets[targetRef]; retired {
 		return AlertDeliveryReservation{DisplayID: occurrence.DisplayID}, false, nil
 	}
-	receiptKey := alertDeliveryReceiptKey(occurrenceKey, targetRef)
+	receiptKey := alertDeliveryReceiptKey(currentScope, occurrenceKey, targetRef)
 	if alertDeliveryHasReceipt(prior, receiptKey) {
 		return AlertDeliveryReservation{DisplayID: occurrence.DisplayID}, false, nil
 	}
@@ -964,7 +1274,8 @@ func (s *Store) BeginAlertDelivery(occurrenceKey, targetRef string, now time.Tim
 		attemptNumber = latest.AttemptNumber + 1
 	}
 	attempt := alertDeliveryAttempt{
-		ID: alertDeliveryAttemptID(receiptKey, attemptNumber, now), OccurrenceKey: occurrenceKey,
+		AuthorityScope: currentScope,
+		ID:             alertDeliveryAttemptID(receiptKey, attemptNumber, now), OccurrenceKey: occurrenceKey,
 		TargetRef: targetRef, ReceiptKey: receiptKey, AttemptNumber: attemptNumber,
 		ReservedAt: now, Class: AlertDeliveryAttemptReserved,
 	}
@@ -1029,7 +1340,7 @@ func (s *Store) ConfirmAlertTransport(attemptID string, now time.Time) (AlertDel
 	if now.Before(stored.ReservedAt) {
 		return AlertDeliveryReservation{}, false, errors.New("alert delivery confirmation precedes reservation")
 	}
-	occurrence, episode, found := findAlertDeliveryOccurrence(prior, stored.OccurrenceKey)
+	occurrence, episode, found := findAlertDeliveryOccurrence(prior, stored.AuthorityScope, stored.OccurrenceKey)
 	displayID := ""
 	if found {
 		displayID = occurrence.DisplayID
@@ -1043,7 +1354,7 @@ func (s *Store) ConfirmAlertTransport(attemptID string, now time.Time) (AlertDel
 	case s.alertDeliveryVolatile != nil:
 		delete(s.alertDeliveryInFlight, attemptID)
 		return AlertDeliveryReservation{}, false, ErrAlertDeliveryUnavailable
-	case !found || !alertDeliveryOccurrenceActive(occurrence, episode):
+	case !found || !alertDeliveryOccurrenceCurrent(prior, occurrence, episode):
 		class = AlertDeliveryAttemptInactive
 	case !prior.RetiredTargets[stored.TargetRef].IsZero():
 		class = AlertDeliveryAttemptRetired
@@ -1150,12 +1461,12 @@ func (s *Store) CompleteAlertDelivery(attemptID string, completion AlertDelivery
 	}
 	next := cloneAlertDeliveryData(prior)
 	attempt := &next.Attempts[attemptIndex]
-	occurrence, episode, active := findAlertDeliveryOccurrence(next, attempt.OccurrenceKey)
+	occurrence, episode, active := findAlertDeliveryOccurrence(next, attempt.AuthorityScope, attempt.OccurrenceKey)
 	disposition := AlertDeliveryCompletionApplied
 	if retiredAt := next.RetiredTargets[attempt.TargetRef]; !retiredAt.IsZero() {
 		disposition = AlertDeliveryCompletionRetired
 		attempt.RetiredAt = retiredAt
-	} else if !active || !alertDeliveryOccurrenceActive(occurrence, episode) {
+	} else if !active || !alertDeliveryOccurrenceCurrent(next, occurrence, episode) {
 		disposition = AlertDeliveryCompletionInactive
 	}
 	attempt.Disposition = disposition
@@ -1169,7 +1480,8 @@ func (s *Store) CompleteAlertDelivery(attemptID string, completion AlertDelivery
 				return AlertDeliveryCompletionOutcome{}, err
 			}
 			next.Receipts = append(next.Receipts, alertDeliveryReceipt{
-				OccurrenceKey: attempt.OccurrenceKey, TargetRef: attempt.TargetRef,
+				AuthorityScope: attempt.AuthorityScope,
+				OccurrenceKey:  attempt.OccurrenceKey, TargetRef: attempt.TargetRef,
 				ReceiptKey: attempt.ReceiptKey, AcceptedAt: now, RetiredAt: attempt.RetiredAt,
 			})
 		}
@@ -1379,9 +1691,9 @@ func (s *Store) RecoverAlertDeliveries(now time.Time) error {
 		if now.Before(attempt.ReservedAt) {
 			return errors.New("alert delivery recovery precedes reservation")
 		}
-		occurrence, episode, active := findAlertDeliveryOccurrence(next, attempt.OccurrenceKey)
+		occurrence, episode, active := findAlertDeliveryOccurrence(next, attempt.AuthorityScope, attempt.OccurrenceKey)
 		switch {
-		case !active || !alertDeliveryOccurrenceActive(occurrence, episode):
+		case !active || !alertDeliveryOccurrenceCurrent(next, occurrence, episode):
 			if attempt.Class == AlertDeliveryAttemptConfirmed {
 				attempt.Class = AlertDeliveryAttemptInterrupted
 			} else {
@@ -1497,20 +1809,25 @@ func (s *Store) CompactAlertDelivery(now time.Time) error {
 		read := occurrence.AttentionSeq == 0 || occurrence.AttentionSeq <= next.AttentionReadThroughSeq
 		remove := read && !occurrence.EndedAt.IsZero() && occurrence.EndedAt.Before(cutoff)
 		if remove {
-			removedOccurrences[occurrence.OccurrenceKey] = struct{}{}
+			removedOccurrences[alertDeliveryScopedKey(occurrence.AuthorityScope, occurrence.OccurrenceKey)] = struct{}{}
 		}
 		return remove
 	})
 	if len(removedOccurrences) > 0 {
 		next.Attempts = slices.DeleteFunc(next.Attempts, func(attempt alertDeliveryAttempt) bool {
-			_, remove := removedOccurrences[attempt.OccurrenceKey]
+			_, remove := removedOccurrences[alertDeliveryScopedKey(attempt.AuthorityScope, attempt.OccurrenceKey)]
 			return remove
 		})
 		next.Receipts = slices.DeleteFunc(next.Receipts, func(receipt alertDeliveryReceipt) bool {
-			_, remove := removedOccurrences[receipt.OccurrenceKey]
+			_, remove := removedOccurrences[alertDeliveryScopedKey(receipt.AuthorityScope, receipt.OccurrenceKey)]
 			return remove
 		})
 	}
+	previousBefore := len(next.PreviousContexts)
+	next.PreviousContexts = slices.DeleteFunc(next.PreviousContexts, func(previous alertDeliveryPreviousContext) bool {
+		read := previous.OriginalAttention == 0 || previous.OriginalAttention <= next.AttentionReadThroughSeq
+		return read && previous.EndedAt.Before(cutoff)
+	})
 	activeTargets := s.activeAlertDeliveryTargetsLocked()
 	retainedTargets := make(map[string]bool, len(next.Attempts)+len(next.Receipts))
 	for _, attempt := range next.Attempts {
@@ -1528,14 +1845,38 @@ func (s *Store) CompactAlertDelivery(now time.Time) error {
 	}
 	remainingOccurrences := make(map[string]struct{}, len(next.Occurrences))
 	for _, occurrence := range next.Occurrences {
-		remainingOccurrences[occurrence.OccurrenceKey] = struct{}{}
+		remainingOccurrences[alertDeliveryScopedKey(occurrence.AuthorityScope, occurrence.OccurrenceKey)] = struct{}{}
 	}
 	next.Episodes = slices.DeleteFunc(next.Episodes, func(episode alertDeliveryEpisode) bool {
-		_, remains := remainingOccurrences[episode.CurrentOccurrenceKey]
+		_, remains := remainingOccurrences[alertDeliveryScopedKey(episode.AuthorityScope, episode.CurrentOccurrenceKey)]
 		return !remains && episode.State == rpc.AlertEpisodeRecovered
 	})
+	retainedScopes := map[string]bool{next.Snapshot.AuthorityScope: true}
+	for _, episode := range next.Episodes {
+		retainedScopes[episode.AuthorityScope] = true
+	}
+	removedScopes := 0
+	for scope, watermarks := range next.SourceWatermarksByScope {
+		if retainedScopes[scope] {
+			continue
+		}
+		old := len(watermarks) == 0
+		if !old {
+			old = true
+			for _, watermark := range watermarks {
+				if !watermark.Before(cutoff) {
+					old = false
+					break
+				}
+			}
+		}
+		if old {
+			delete(next.SourceWatermarksByScope, scope)
+			removedScopes++
+		}
+	}
 	recoveredCapacity := prior.Health.State == AlertDeliveryHealthOverflow && alertDeliveryBelowCapacity(next, s.alertDeliveryMaxItems)
-	if len(removedOccurrences) == 0 && len(next.Episodes) == len(prior.Episodes) && removedTargets == 0 && !recoveredCapacity {
+	if len(removedOccurrences) == 0 && previousBefore == len(next.PreviousContexts) && len(next.Episodes) == len(prior.Episodes) && removedTargets == 0 && removedScopes == 0 && !recoveredCapacity {
 		return nil
 	}
 	if recoveredCapacity {
@@ -1575,7 +1916,7 @@ func (s *Store) activeAlertDeliveryTargetsLocked() map[string]bool {
 }
 
 func alertDeliveryBelowCapacity(data *alertDeliveryData, maximum int) bool {
-	return data != nil && maximum > 0 && data.Snapshot.Coverage.State != rpc.AlertCoverageUnavailable && len(data.Episodes) < maximum && len(data.Occurrences) < maximum && len(data.Attempts) < maximum && len(data.Receipts) < maximum && len(data.RetiredTargets) < maximum
+	return data != nil && maximum > 0 && data.Snapshot.Coverage.State != rpc.AlertCoverageUnavailable && len(data.Episodes) < maximum && len(data.Occurrences) < maximum && len(data.PreviousContexts) < maximum && len(data.Attempts) < maximum && len(data.Receipts) < maximum && len(data.RetiredTargets) < maximum
 }
 
 func alertDeliveryAttemptTotals(data *alertDeliveryData, now time.Time) AlertDeliveryAttemptTotals {
@@ -1608,21 +1949,21 @@ func alertDeliveryAttemptTotals(data *alertDeliveryData, now time.Time) AlertDel
 		if alertDeliveryHasReceipt(data, receiptKey) || attempt.RetryAt.IsZero() {
 			continue
 		}
-		occurrence, episode, ok := findAlertDeliveryOccurrence(data, attempt.OccurrenceKey)
-		if ok && alertDeliveryOccurrenceActive(occurrence, episode) {
+		occurrence, episode, ok := findAlertDeliveryOccurrence(data, attempt.AuthorityScope, attempt.OccurrenceKey)
+		if ok && alertDeliveryOccurrenceCurrent(data, occurrence, episode) {
 			totals.RetryPending++
 		}
 	}
 	return totals
 }
 
-func findAlertDeliveryOccurrence(data *alertDeliveryData, occurrenceKey string) (*alertDeliveryOccurrence, *alertDeliveryEpisode, bool) {
+func findAlertDeliveryOccurrence(data *alertDeliveryData, authorityScope, occurrenceKey string) (*alertDeliveryOccurrence, *alertDeliveryEpisode, bool) {
 	if data == nil {
 		return nil, nil, false
 	}
 	occurrenceIndex := -1
 	for i := range data.Occurrences {
-		if data.Occurrences[i].OccurrenceKey == occurrenceKey {
+		if data.Occurrences[i].AuthorityScope == authorityScope && data.Occurrences[i].OccurrenceKey == occurrenceKey {
 			occurrenceIndex = i
 			break
 		}
@@ -1632,7 +1973,7 @@ func findAlertDeliveryOccurrence(data *alertDeliveryData, occurrenceKey string) 
 	}
 	episodeIndex := -1
 	for i := range data.Episodes {
-		if data.Episodes[i].EpisodeKey == data.Occurrences[occurrenceIndex].EpisodeKey {
+		if data.Episodes[i].AuthorityScope == authorityScope && data.Episodes[i].EpisodeKey == data.Occurrences[occurrenceIndex].EpisodeKey {
 			episodeIndex = i
 			break
 		}
@@ -1644,8 +1985,13 @@ func findAlertDeliveryOccurrence(data *alertDeliveryData, occurrenceKey string) 
 }
 
 func alertDeliveryOccurrenceActive(occurrence *alertDeliveryOccurrence, episode *alertDeliveryEpisode) bool {
-	return occurrence != nil && episode != nil && occurrence.OccurrenceKey == episode.CurrentOccurrenceKey &&
+	return occurrence != nil && episode != nil && occurrence.AuthorityScope == episode.AuthorityScope && occurrence.OccurrenceKey == episode.CurrentOccurrenceKey &&
 		episode.State != rpc.AlertEpisodeRecovered && occurrence.EndedAt.IsZero()
+}
+
+func alertDeliveryOccurrenceCurrent(data *alertDeliveryData, occurrence *alertDeliveryOccurrence, episode *alertDeliveryEpisode) bool {
+	return data != nil && occurrence != nil && episode != nil && occurrence.AuthorityScope == data.Snapshot.AuthorityScope &&
+		episode.AuthorityScope == data.Snapshot.AuthorityScope && alertDeliveryOccurrenceActive(occurrence, episode)
 }
 
 func alertDeliveryHasReceipt(data *alertDeliveryData, receiptKey string) bool {
@@ -1677,7 +2023,7 @@ func (s *Store) recomputeAlertDeliveryHealthLocked(data *alertDeliveryData, now 
 	}
 	lastAccepted := data.Health.LastAcceptedAt
 	for _, receipt := range data.Receipts {
-		if receipt.AcceptedAt.After(lastAccepted) {
+		if receipt.AuthorityScope == data.Snapshot.AuthorityScope && receipt.AcceptedAt.After(lastAccepted) {
 			lastAccepted = receipt.AcceptedAt
 		}
 	}
@@ -1693,6 +2039,9 @@ func (s *Store) recomputeAlertDeliveryHealthLocked(data *alertDeliveryData, now 
 	interrupted := false
 	latest := make(map[string]alertDeliveryAttempt)
 	for _, attempt := range data.Attempts {
+		if attempt.AuthorityScope != data.Snapshot.AuthorityScope {
+			continue
+		}
 		// Confirmed transport with an unknown outcome remains operationally
 		// relevant even if recovery or retirement happened afterward. It is
 		// intentional uncertainty, not a retry/rejection that can be dismissed
@@ -1709,8 +2058,8 @@ func (s *Store) recomputeAlertDeliveryHealthLocked(data *alertDeliveryData, now 
 		if !attempt.RetiredAt.IsZero() || !data.RetiredTargets[attempt.TargetRef].IsZero() {
 			continue
 		}
-		occurrence, episode, active := findAlertDeliveryOccurrence(data, attempt.OccurrenceKey)
-		if !active || !alertDeliveryOccurrenceActive(occurrence, episode) {
+		occurrence, episode, active := findAlertDeliveryOccurrence(data, attempt.AuthorityScope, attempt.OccurrenceKey)
+		if !active || !alertDeliveryOccurrenceCurrent(data, occurrence, episode) {
 			// A completed retry/rejection/exhaustion for an inactive occurrence is
 			// retained as history but can no longer describe current delivery.
 			continue
@@ -1752,9 +2101,23 @@ func latestAlertDeliveryAttempt(data *alertDeliveryData, receiptKey string) (ale
 	return alertDeliveryAttempt{}, false
 }
 
-func alertDeliveryDisplayID(occurrenceKey string) string {
+func alertDeliveryDisplayID(authorityScope, occurrenceKey string) string {
+	sum := sha256.Sum256([]byte("alert-display-v2\x00" + authorityScope + "\x00" + occurrenceKey))
+	return fmt.Sprintf("alert-%x", sum[:8])
+}
+
+func legacyAlertDeliveryDisplayID(occurrenceKey string) string {
 	sum := sha256.Sum256([]byte("alert-display-v1\x00" + occurrenceKey))
 	return fmt.Sprintf("alert-%x", sum[:8])
+}
+
+func alertPreviousContextDisplayID(authorityScope, priorDisplayID string, endedAt time.Time, archiveSeq uint64) string {
+	sum := sha256.Sum256(fmt.Appendf(nil, "alert-previous-context-v1\x00%s\x00%s\x00%s\x00%d", authorityScope, priorDisplayID, endedAt.UTC().Format(time.RFC3339Nano), archiveSeq))
+	return fmt.Sprintf("alert-previous-%x", sum[:8])
+}
+
+func alertDeliveryScopedKey(authorityScope, privateKey string) string {
+	return authorityScope + "\x00" + privateKey
 }
 
 func alertDeliveryAttemptID(receiptKey string, number int, at time.Time) string {
@@ -1762,7 +2125,11 @@ func alertDeliveryAttemptID(receiptKey string, number int, at time.Time) string 
 	return fmt.Sprintf("alert-attempt-%x", sum[:8])
 }
 
-func alertDeliveryReceiptKey(occurrenceKey, targetRef string) string {
+func alertDeliveryReceiptKey(authorityScope, occurrenceKey, targetRef string) string {
+	return alertDeliveryHash("receipt-v2", authorityScope, occurrenceKey, targetRef)
+}
+
+func legacyAlertDeliveryReceiptKey(occurrenceKey, targetRef string) string {
 	return alertDeliveryHash("receipt", occurrenceKey, targetRef)
 }
 
@@ -1802,8 +2169,10 @@ func cloneAlertDeliveryData(in *alertDeliveryData) *alertDeliveryData {
 	out := *in
 	out.Snapshot = cloneAlertSnapshot(in.Snapshot)
 	out.SourceWatermarks = cloneAlertSourceWatermarks(in.SourceWatermarks)
+	out.SourceWatermarksByScope = cloneAlertSourceWatermarksByScope(in.SourceWatermarksByScope)
 	out.Episodes = append([]alertDeliveryEpisode(nil), in.Episodes...)
 	out.Occurrences = append([]alertDeliveryOccurrence(nil), in.Occurrences...)
+	out.PreviousContexts = append([]alertDeliveryPreviousContext(nil), in.PreviousContexts...)
 	out.Attempts = append([]alertDeliveryAttempt(nil), in.Attempts...)
 	out.Receipts = append([]alertDeliveryReceipt(nil), in.Receipts...)
 	out.RetiredTargets = make(map[string]time.Time, len(in.RetiredTargets))
@@ -1840,13 +2209,22 @@ func cloneAlertSourceWatermarks(in map[rpc.AlertSource]time.Time) map[rpc.AlertS
 	return out
 }
 
+func cloneAlertSourceWatermarksByScope(in map[string]map[rpc.AlertSource]time.Time) map[string]map[rpc.AlertSource]time.Time {
+	out := make(map[string]map[rpc.AlertSource]time.Time, len(in))
+	for scope, watermarks := range in {
+		out[scope] = cloneAlertSourceWatermarks(watermarks)
+	}
+	return out
+}
+
 func (s *Store) validateAlertDeliveryState() error {
 	data := s.data.AlertDelivery
 	if data == nil {
 		return nil
 	}
 	s.initAlertDeliveryRuntime()
-	if data.Version != AlertDeliveryVersion || data.Generation == 0 {
+	legacyUnscoped := data.Version == legacyAlertDeliveryVersion && len(data.legacyUnscopedRaw) > 0
+	if (data.Version != AlertDeliveryVersion && !legacyUnscoped) || data.Generation == 0 {
 		return fmt.Errorf("%w: invalid alert delivery version or generation", ErrInvalidPersistedState)
 	}
 	if err := rpc.ValidateAlertCandidateSnapshot(data.Snapshot); err != nil {
@@ -1857,11 +2235,14 @@ func (s *Store) validateAlertDeliveryState() error {
 	if data.SourceWatermarks == nil {
 		data.SourceWatermarks = make(map[rpc.AlertSource]time.Time)
 	}
+	if data.SourceWatermarksByScope == nil {
+		return fmt.Errorf("%w: missing scoped alert delivery watermarks", ErrInvalidPersistedState)
+	}
 	if data.RetiredTargets == nil {
 		data.RetiredTargets = make(map[string]time.Time)
 	}
 	if len(data.Episodes) > s.alertDeliveryMaxItems || len(data.Occurrences) > s.alertDeliveryMaxItems ||
-		len(data.Attempts) > s.alertDeliveryMaxItems || len(data.Receipts) > s.alertDeliveryMaxItems || len(data.RetiredTargets) > s.alertDeliveryMaxItems {
+		len(data.PreviousContexts) > s.alertDeliveryMaxItems || len(data.Attempts) > s.alertDeliveryMaxItems || len(data.Receipts) > s.alertDeliveryMaxItems || len(data.RetiredTargets) > s.alertDeliveryMaxItems || len(data.SourceWatermarksByScope) > s.alertDeliveryMaxItems {
 		return fmt.Errorf("%w: alert delivery evidence exceeds capacity", ErrInvalidPersistedState)
 	}
 	if !validAlertDeliveryHealth(data.Health) {
@@ -1869,15 +2250,23 @@ func (s *Store) validateAlertDeliveryState() error {
 	}
 	episodes := make(map[string]alertDeliveryEpisode, len(data.Episodes))
 	for _, episode := range data.Episodes {
-		if _, duplicate := episodes[episode.EpisodeKey]; duplicate || episode.CurrentOccurrenceKey == "" || episode.FirstSeenAt.IsZero() || episode.LastSeenAt.IsZero() {
+		key := alertDeliveryScopedKey(episode.AuthorityScope, episode.EpisodeKey)
+		if err := rpc.ValidateAlertAuthorityScope(episode.AuthorityScope); err != nil {
+			return fmt.Errorf("%w: invalid alert delivery episode scope", ErrInvalidPersistedState)
+		}
+		if _, duplicate := episodes[key]; duplicate || episode.CurrentOccurrenceKey == "" || episode.FirstSeenAt.IsZero() || episode.LastSeenAt.IsZero() {
 			return fmt.Errorf("%w: invalid alert delivery episode", ErrInvalidPersistedState)
 		}
-		episodes[episode.EpisodeKey] = episode
+		episodes[key] = episode
 	}
 	displays := map[string]struct{}{}
 	occurrences := make(map[string]alertDeliveryOccurrence, len(data.Occurrences))
+	occurrencesByDisplay := make(map[string]alertDeliveryOccurrence, len(data.Occurrences))
 	unreadSeqs := make(map[uint64]struct{})
 	for _, occurrence := range data.Occurrences {
+		if err := rpc.ValidateAlertAuthorityScope(occurrence.AuthorityScope); err != nil {
+			return fmt.Errorf("%w: invalid alert delivery occurrence scope", ErrInvalidPersistedState)
+		}
 		candidate := rpc.AlertCandidate{
 			EpisodeKey: occurrence.EpisodeKey, OccurrenceKey: occurrence.OccurrenceKey,
 			EvidenceFingerprint: occurrence.EvidenceFingerprint, Source: occurrence.Source, Kind: occurrence.Kind,
@@ -1888,7 +2277,11 @@ func (s *Store) validateAlertDeliveryState() error {
 		if err := rpc.ValidateAlertCandidate(candidate); err != nil {
 			return fmt.Errorf("%w: invalid alert delivery occurrence: %v", ErrInvalidPersistedState, err)
 		}
-		if occurrence.DisplayID != alertDeliveryDisplayID(occurrence.OccurrenceKey) || occurrence.FirstSeenAt.IsZero() || occurrence.LastSeenAt.IsZero() || occurrence.AttentionSeq == 0 {
+		expectedDisplayID := alertDeliveryDisplayID(occurrence.AuthorityScope, occurrence.OccurrenceKey)
+		if legacyUnscoped {
+			expectedDisplayID = legacyAlertDeliveryDisplayID(occurrence.OccurrenceKey)
+		}
+		if occurrence.DisplayID != expectedDisplayID || occurrence.FirstSeenAt.IsZero() || occurrence.LastSeenAt.IsZero() || occurrence.AttentionSeq == 0 {
 			return fmt.Errorf("%w: invalid alert delivery occurrence metadata", ErrInvalidPersistedState)
 		}
 		if occurrence.FirstSeenAt.After(occurrence.LastSeenAt) || !occurrence.ObservedAt.Equal(occurrence.LastSeenAt) {
@@ -1908,7 +2301,8 @@ func (s *Store) validateAlertDeliveryState() error {
 				return fmt.Errorf("%w: invalid alert delivery occurrence end reason", ErrInvalidPersistedState)
 			}
 		}
-		if _, duplicate := occurrences[occurrence.OccurrenceKey]; duplicate {
+		occurrenceMapKey := alertDeliveryScopedKey(occurrence.AuthorityScope, occurrence.OccurrenceKey)
+		if _, duplicate := occurrences[occurrenceMapKey]; duplicate {
 			return fmt.Errorf("%w: duplicate alert delivery occurrence", ErrInvalidPersistedState)
 		}
 		if _, duplicate := displays[occurrence.DisplayID]; duplicate {
@@ -1923,15 +2317,57 @@ func (s *Store) validateAlertDeliveryState() error {
 			}
 			unreadSeqs[occurrence.AttentionSeq] = struct{}{}
 		}
-		occurrences[occurrence.OccurrenceKey] = occurrence
+		occurrences[occurrenceMapKey] = occurrence
+		occurrencesByDisplay[alertDeliveryScopedKey(occurrence.AuthorityScope, occurrence.DisplayID)] = occurrence
 		displays[occurrence.DisplayID] = struct{}{}
+	}
+	archiveSeqs := make(map[uint64]struct{}, len(data.PreviousContexts))
+	for _, previous := range data.PreviousContexts {
+		if err := rpc.ValidateAlertAuthorityScope(previous.AuthorityScope); err != nil {
+			return fmt.Errorf("%w: invalid previous alert context scope", ErrInvalidPersistedState)
+		}
+		origin, ok := occurrencesByDisplay[alertDeliveryScopedKey(previous.AuthorityScope, previous.PriorDisplayID)]
+		if !ok || origin.Source != previous.Source || origin.Kind != previous.Kind || !origin.FirstSeenAt.Equal(previous.FirstSeenAt) || origin.AttentionSeq != previous.OriginalAttention {
+			return fmt.Errorf("%w: previous alert context origin mismatch", ErrInvalidPersistedState)
+		}
+		if previous.State == rpc.AlertEpisodeRecovered || previous.EndReason != AlertDeliveryEndAuthorityScopeChanged || previous.EndedAt.IsZero() ||
+			previous.EndedAt.Before(previous.StateChangedAt) || previous.EndedAt.Before(previous.LastSeenAt) || previous.FirstSeenAt.After(previous.LastSeenAt) ||
+			previous.ArchiveSeq == 0 || previous.ArchiveSeq > data.PreviousContextHighWater ||
+			previous.DisplayID != alertPreviousContextDisplayID(previous.AuthorityScope, previous.PriorDisplayID, previous.EndedAt, previous.ArchiveSeq) || previous.OriginalAttention == 0 || previous.OriginalAttention > data.AttentionHighWaterSeq {
+			return fmt.Errorf("%w: invalid previous alert context lifecycle", ErrInvalidPersistedState)
+		}
+		if _, duplicate := archiveSeqs[previous.ArchiveSeq]; duplicate {
+			return fmt.Errorf("%w: duplicate previous alert context sequence", ErrInvalidPersistedState)
+		}
+		archiveSeqs[previous.ArchiveSeq] = struct{}{}
+		candidate := rpc.AlertCandidate{
+			EpisodeKey: origin.EpisodeKey, OccurrenceKey: origin.OccurrenceKey, EvidenceFingerprint: origin.EvidenceFingerprint,
+			Source: previous.Source, Kind: previous.Kind, State: previous.State, Severity: previous.Severity,
+			DeliveryPreference: previous.DeliveryPreference, EvidenceHealth: previous.EvidenceHealth, Destination: previous.Destination,
+			EvidenceAsOf: previous.EvidenceAsOf, StateChangedAt: previous.StateChangedAt, ObservedAt: previous.LastSeenAt,
+		}
+		if err := rpc.ValidateAlertCandidate(candidate); err != nil {
+			return fmt.Errorf("%w: invalid previous alert context projection: %v", ErrInvalidPersistedState, err)
+		}
+		if _, duplicate := displays[previous.DisplayID]; duplicate {
+			return fmt.Errorf("%w: duplicate previous alert context display id", ErrInvalidPersistedState)
+		}
+		displays[previous.DisplayID] = struct{}{}
+	}
+	for _, occurrence := range data.Occurrences {
+		if occurrence.AuthorityScope == data.Snapshot.AuthorityScope || !occurrence.EndedAt.IsZero() || occurrence.AttentionSeq <= data.AttentionReadThroughSeq {
+			continue
+		}
+		if _, ok := latestAlertDeliveryPreviousContext(data, occurrence.AuthorityScope, occurrence.DisplayID); !ok {
+			return fmt.Errorf("%w: dormant alert occurrence lacks previous-context projection", ErrInvalidPersistedState)
+		}
 	}
 	if data.AttentionReadThroughSeq > data.AttentionHighWaterSeq || uint64(len(unreadSeqs)) != data.AttentionHighWaterSeq-data.AttentionReadThroughSeq {
 		return fmt.Errorf("%w: invalid alert delivery attention cursor", ErrInvalidPersistedState)
 	}
 	for _, episode := range episodes {
-		occurrence, ok := occurrences[episode.CurrentOccurrenceKey]
-		if !ok || occurrence.EpisodeKey != episode.EpisodeKey || occurrence.Source != episode.Source || occurrence.Kind != episode.Kind || occurrence.State != episode.State {
+		occurrence, ok := occurrences[alertDeliveryScopedKey(episode.AuthorityScope, episode.CurrentOccurrenceKey)]
+		if !ok || occurrence.AuthorityScope != episode.AuthorityScope || occurrence.EpisodeKey != episode.EpisodeKey || occurrence.Source != episode.Source || occurrence.Kind != episode.Kind || occurrence.State != episode.State {
 			return fmt.Errorf("%w: alert delivery episode current state mismatch", ErrInvalidPersistedState)
 		}
 	}
@@ -1941,7 +2377,14 @@ func (s *Store) validateAlertDeliveryState() error {
 	acceptedByReceipt := map[string]time.Time{}
 	latestByReceipt := map[string]alertDeliveryAttempt{}
 	for _, attempt := range data.Attempts {
-		if !validAlertAttemptID(attempt.ID) || !validAlertHash(attempt.TargetRef) || attempt.ReceiptKey != alertDeliveryReceiptKey(attempt.OccurrenceKey, attempt.TargetRef) || attempt.AttemptNumber < 1 || attempt.AttemptNumber > 4 || attempt.ReservedAt.IsZero() || !validAlertDeliveryAttemptClass(attempt.Class) {
+		if err := rpc.ValidateAlertAuthorityScope(attempt.AuthorityScope); err != nil {
+			return fmt.Errorf("%w: invalid alert delivery attempt scope", ErrInvalidPersistedState)
+		}
+		expectedReceiptKey := alertDeliveryReceiptKey(attempt.AuthorityScope, attempt.OccurrenceKey, attempt.TargetRef)
+		if legacyUnscoped {
+			expectedReceiptKey = legacyAlertDeliveryReceiptKey(attempt.OccurrenceKey, attempt.TargetRef)
+		}
+		if !validAlertAttemptID(attempt.ID) || !validAlertHash(attempt.TargetRef) || attempt.ReceiptKey != expectedReceiptKey || attempt.AttemptNumber < 1 || attempt.AttemptNumber > 4 || attempt.ReservedAt.IsZero() || !validAlertDeliveryAttemptClass(attempt.Class) {
 			return fmt.Errorf("%w: invalid alert delivery attempt", ErrInvalidPersistedState)
 		}
 		expectedNumber := nextAttemptNumber[attempt.ReceiptKey] + 1
@@ -1960,7 +2403,7 @@ func (s *Store) validateAlertDeliveryState() error {
 				return fmt.Errorf("%w: invalid alert delivery attempt transition chain", ErrInvalidPersistedState)
 			}
 		}
-		if _, ok := occurrences[attempt.OccurrenceKey]; !ok {
+		if _, ok := occurrences[alertDeliveryScopedKey(attempt.AuthorityScope, attempt.OccurrenceKey)]; !ok {
 			return fmt.Errorf("%w: alert delivery attempt occurrence missing", ErrInvalidPersistedState)
 		}
 		if _, duplicate := attemptIDs[attempt.ID]; duplicate {
@@ -1982,10 +2425,17 @@ func (s *Store) validateAlertDeliveryState() error {
 	}
 	receiptKeys := map[string]struct{}{}
 	for _, receipt := range data.Receipts {
-		if !validAlertHash(receipt.TargetRef) || receipt.ReceiptKey != alertDeliveryReceiptKey(receipt.OccurrenceKey, receipt.TargetRef) || receipt.AcceptedAt.IsZero() {
+		if err := rpc.ValidateAlertAuthorityScope(receipt.AuthorityScope); err != nil {
+			return fmt.Errorf("%w: invalid alert delivery receipt scope", ErrInvalidPersistedState)
+		}
+		expectedReceiptKey := alertDeliveryReceiptKey(receipt.AuthorityScope, receipt.OccurrenceKey, receipt.TargetRef)
+		if legacyUnscoped {
+			expectedReceiptKey = legacyAlertDeliveryReceiptKey(receipt.OccurrenceKey, receipt.TargetRef)
+		}
+		if !validAlertHash(receipt.TargetRef) || receipt.ReceiptKey != expectedReceiptKey || receipt.AcceptedAt.IsZero() {
 			return fmt.Errorf("%w: invalid alert delivery receipt", ErrInvalidPersistedState)
 		}
-		if _, ok := occurrences[receipt.OccurrenceKey]; !ok {
+		if _, ok := occurrences[alertDeliveryScopedKey(receipt.AuthorityScope, receipt.OccurrenceKey)]; !ok {
 			return fmt.Errorf("%w: alert delivery receipt occurrence missing", ErrInvalidPersistedState)
 		}
 		if _, duplicate := receiptKeys[receipt.ReceiptKey]; duplicate {
@@ -2016,6 +2466,44 @@ func (s *Store) validateAlertDeliveryState() error {
 			return fmt.Errorf("%w: invalid alert delivery source watermark", ErrInvalidPersistedState)
 		}
 	}
+	for scope, watermarks := range data.SourceWatermarksByScope {
+		if err := rpc.ValidateAlertAuthorityScope(scope); err != nil || watermarks == nil {
+			return fmt.Errorf("%w: invalid scoped alert delivery watermarks", ErrInvalidPersistedState)
+		}
+		for source, watermark := range watermarks {
+			if !validAlertDeliverySource(source) || watermark.IsZero() {
+				return fmt.Errorf("%w: invalid scoped alert delivery source watermark", ErrInvalidPersistedState)
+			}
+		}
+	}
+	currentWatermarks, ok := data.SourceWatermarksByScope[data.Snapshot.AuthorityScope]
+	if !ok || !maps.Equal(data.SourceWatermarks, currentWatermarks) {
+		return fmt.Errorf("%w: current alert delivery watermarks mismatch authority scope", ErrInvalidPersistedState)
+	}
+	if legacyUnscoped {
+		return s.archiveLegacyUnscopedAlertDelivery(data)
+	}
+	return nil
+}
+
+func (s *Store) archiveLegacyUnscopedAlertDelivery(data *alertDeliveryData) error {
+	if data == nil || data.Version != legacyAlertDeliveryVersion || len(data.legacyUnscopedRaw) == 0 {
+		return errors.New("legacy unscoped alert delivery archive requires validated raw state")
+	}
+	raw := append(json.RawMessage(nil), data.legacyUnscopedRaw...)
+	if _, err := preserveAlertDeliveryQuarantine(filepath.Dir(s.path), raw); err != nil {
+		return fmt.Errorf("preserve legacy unscoped alert delivery: %w", err)
+	}
+	// A v1 ledger cannot be assigned to an account/mode after the fact. Preserve
+	// its exact audit evidence, then start v2 uninitialized so only the first
+	// daemon-authored scoped snapshot can establish live authority.
+	s.data.AlertDelivery = nil
+	if err := s.save(); err != nil {
+		s.data.AlertDelivery = data
+		return fmt.Errorf("retire legacy unscoped alert delivery: %w", err)
+	}
+	s.loadedAlertDeliveryRaw = nil
+	s.loadedAlertDeliveryDecodeErr = nil
 	return nil
 }
 

@@ -1,6 +1,6 @@
 # Mobile App
 
-Updated: 2026-07-18 21:37 CEST
+Updated: 2026-07-21 01:15 CEST
 
 The mobile app layer is served by `ibkr app`. It is a HyperServe process that
 serves the PWA, owns pairing, streams `/api/events`, and sends opt-in canary
@@ -85,18 +85,25 @@ first, then Add to Home Screen, so the install snapshot carries the cookie.
 Every auth outcome is logged as `ibkr app auth:` lines in
 `~/Library/Logs/ibkr/app.err.log`.
 
-Restart the supervised/shared app in remote mode:
+For an unsupervised app host, an app-only restart can switch remote mode on:
 
 ```sh
 ibkr restart --app --remote
 ```
 
-Install or refresh the macOS LaunchAgent in remote mode:
+Do not pass that override to a loaded LaunchAgent: supervised restart rejects
+runtime flag overrides because the loaded plist is authoritative. Install a
+new supervised host in remote mode with:
 
 ```sh
 ibkr setup app --remote
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.osauer.ibkr-app.plist
 ```
+
+To change an already-loaded LaunchAgent, run `ibkr setup app --remote`, unload
+the existing `gui/$(id -u)/com.osauer.ibkr-app` job, and bootstrap the rewritten
+plist again. Ordinary later restarts use `ibkr restart --app` with no `--remote`
+override; launchd preserves the plist configuration.
 
 Remote mode needs the Mac, TWS/Gateway, `ibkr app --remote`, and the Cloudflare
 Worker route to stay up. The app exposes relay connection state in
@@ -108,17 +115,24 @@ Worker route to stay up. The app exposes relay connection state in
 ibkr restart
 ```
 
-This restarts the shared daemon and manages the app. When the
+On the default daemon socket, this restarts a running app first and only then
+restarts the shared daemon. When the
 `com.osauer.ibkr-app` LaunchAgent is loaded, the app is restarted through
 `launchctl kickstart -k`: any unsupervised (orphaned) app process is stopped
 first so launchd can own the app again, and app flag overrides are rejected
-with a pointer to `ibkr setup app` because the plist arguments win. launchd
-may throttle the respawn for about ten seconds; the command waits for a
-stable supervised PID. Without a loaded LaunchAgent, the old behavior
+with a pointer to rewrite and reload `ibkr setup app` because the plist
+arguments win. The loaded job's executable must resolve to the current
+installed `ibkr` binary. launchd may throttle the respawn for about ten
+seconds; the command waits for a stable supervised PID. Without a loaded LaunchAgent, the unsupervised behavior
 applies: SIGTERM the running app, preserve its flags such as `--addr`,
 `--public-url`, `--remote`, and `--state-dir`, and start a detached
 replacement. If no app is running, plain `ibkr restart` leaves the app
 stopped.
+
+The ordered app and daemon stages are intentionally non-atomic. If the app
+cannot be restarted and verified, the daemon is not touched. If the later
+daemon restart fails, the successful app restart is not rolled back; correct
+the reported daemon failure and rerun `ibkr restart`.
 
 Use `ibkr restart --app` for app-only restart/start workflows, including cases
 where no app is running yet.

@@ -306,6 +306,15 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 	if m.Store == nil {
 		return nil, nil
 	}
+	established, ok := establishedAlertView(canary)
+	if !ok {
+		// A present projection comes from a new daemon and is a single atomic
+		// compatibility contract. Never fall back to the richer advisory result
+		// when that contract is malformed: doing so could change established
+		// paging cadence. Nil remains the explicit older-daemon skew path.
+		return nil, nil
+	}
+	canary = established.canary
 	fp := canary.Fingerprint.Key
 	if fp == "" {
 		fp = canary.Fingerprint.Version + ":" + canary.Action + ":" + string(canary.Severity)
@@ -324,7 +333,7 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 	// expires read previous-context history; a failed save only skips this
 	// round's compaction.
 	_ = m.Store.CompactAlertHistory(fp, account, tradingMode, now)
-	if !canaryOccurrenceEligible(canary) {
+	if !established.occurrenceEligible {
 		return nil, nil
 	}
 	modeBeforeRecord := m.Store.AlertSettings().Mode
@@ -343,7 +352,7 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 		m.afterRecord()
 	}
 	modeAfterRecord := m.Store.AlertSettings().Mode
-	if !ShouldAlert(modeBeforeRecord, canary) || !ShouldAlert(modeAfterRecord, canary) {
+	if !established.shouldAlert(modeBeforeRecord) || !established.shouldAlert(modeAfterRecord) {
 		return &rec, nil
 	}
 	payload := push.Payload{
@@ -366,17 +375,60 @@ func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.A
 	return &rec, attempts
 }
 
-func ShouldAlert(mode string, canary rpc.CanaryResult) bool {
+type establishedCanaryAlertView struct {
+	canary             rpc.CanaryResult
+	occurrenceEligible bool
+	actOnlyEligible    bool
+}
+
+// establishedAlertView resolves one immutable compatibility view for the
+// whole Observe call. New daemons stamp the exact pre-shadow Canary identity
+// and eligibility; older daemons have no projection and retain their existing
+// result semantics. A malformed present projection fails closed.
+func establishedAlertView(canary rpc.CanaryResult) (establishedCanaryAlertView, bool) {
+	projection := canary.EstablishedAlertProjection
+	if projection == nil {
+		return establishedCanaryAlertView{
+			canary:             canary,
+			occurrenceEligible: canaryOccurrenceEligible(canary),
+			actOnlyEligible:    canaryActEligible(canary),
+		}, true
+	}
+	if err := rpc.ValidateEstablishedAlertProjection(*projection); err != nil {
+		return establishedCanaryAlertView{}, false
+	}
+	relevant := projection.PortfolioRelevant
+	canary.Fingerprint = projection.CanonicalFingerprint
+	canary.Action = projection.Action
+	canary.MarketConfirmation = projection.MarketConfirmation
+	canary.Severity = projection.Severity
+	canary.PortfolioAlertRelevant = &relevant
+	return establishedCanaryAlertView{
+		canary:             canary,
+		occurrenceEligible: projection.OccurrenceEligible,
+		actOnlyEligible:    projection.ActOnlyEligible,
+	}, true
+}
+
+func (view establishedCanaryAlertView) shouldAlert(mode string) bool {
 	switch mode {
 	case state.AlertModeNone:
 		return false
 	case state.AlertModeActOnly:
-		return canaryOccurrenceEligible(canary) && canaryActEligible(canary)
+		return view.occurrenceEligible && view.actOnlyEligible
 	case state.AlertModeWatchAndAct, "":
-		return canaryOccurrenceEligible(canary)
+		return view.occurrenceEligible
 	default:
 		return false
 	}
+}
+
+func ShouldAlert(mode string, canary rpc.CanaryResult) bool {
+	view, ok := establishedAlertView(canary)
+	if !ok {
+		return false
+	}
+	return view.shouldAlert(mode)
 }
 
 func canaryOccurrenceEligible(canary rpc.CanaryResult) bool {

@@ -205,6 +205,8 @@ func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 		{rpc.MethodBreadthSPX, cliDefault},
 		{rpc.MethodGammaZeroSPX, cliDefault},
 		{rpc.MethodRegimeSnapshot, cliDefault},
+		{rpc.MethodAlertCandidates, cliDefault},
+		{rpc.MethodAlertShadowStatus, cliDefault},
 		{rpc.MethodBriefSnapshot, cliLong},
 		{rpc.MethodBriefAck, cliLong},
 		{rpc.MethodNudgesSnapshot, cliDefault},

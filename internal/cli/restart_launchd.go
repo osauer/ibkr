@@ -16,9 +16,10 @@ const appLaunchAgentLabel = "com.osauer.ibkr-app"
 
 // appSupervisor describes a loaded launchd job that owns the app process.
 type appSupervisor struct {
-	Target string   // launchctl target, e.g. gui/501/com.osauer.ibkr-app
-	PID    int      // supervised pid, 0 while launchd has no live process
-	Args   []string // plist ProgramArguments starting at "app"
+	Target     string   // launchctl target, e.g. gui/501/com.osauer.ibkr-app
+	PID        int      // supervised pid, 0 while launchd has no live process
+	Executable string   // leading plist ProgramArguments executable
+	Args       []string // plist ProgramArguments starting at "app"
 }
 
 var launchdPIDRe = regexp.MustCompile(`(?m)^\s*pid = (\d+)\b`)
@@ -42,13 +43,13 @@ func findAppLaunchAgent(ctx context.Context) (appSupervisor, bool) {
 			sup.PID = pid
 		}
 	}
-	sup.Args = launchdProgramArguments(string(out))
+	sup.Executable, sup.Args = launchdProgramArguments(string(out))
 	return sup, true
 }
 
-// launchdProgramArguments extracts the app args ("app", "--remote", ...)
-// from `launchctl print` output, dropping the leading binary path.
-func launchdProgramArguments(out string) []string {
+// launchdProgramArguments extracts both the leading executable and the app
+// args ("app", "--remote", ...) from `launchctl print` output.
+func launchdProgramArguments(out string) (string, []string) {
 	var args []string
 	inBlock := false
 	for line := range strings.SplitSeq(out, "\n") {
@@ -64,12 +65,15 @@ func launchdProgramArguments(out string) []string {
 		}
 		args = append(args, trimmed)
 	}
-	for i, arg := range args {
+	if len(args) == 0 {
+		return "", nil
+	}
+	for i, arg := range args[1:] {
 		if arg == "app" {
-			return args[i:]
+			return args[0], args[i+1:]
 		}
 	}
-	return nil
+	return args[0], nil
 }
 
 func kickstartLaunchAgent(ctx context.Context, target string) error {

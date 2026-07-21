@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -40,10 +42,10 @@ func recordingInstall(installed *bool) installFunc {
 	}
 }
 
-func recordingRestart(called *bool) restartFunc {
-	return func(pid int) error {
+func recordingRestart(called *bool) stackRestartFunc {
+	return func(context.Context, string, io.Writer, io.Writer) int {
 		*called = true
-		return nil
+		return 0
 	}
 }
 
@@ -78,13 +80,17 @@ func TestRunUpdateCore_Behind_Installs(t *testing.T) {
 	opts, out, _ := newOpts("v0.32.0")
 	opts.restart = true // suppress prompt
 	installed := false
+	restarted := false
 	exit := runUpdateCore(context.Background(), opts, fakeFetch("v9.9.9"),
-		recordingInstall(&installed), recordingRestart(new(bool)))
+		recordingInstall(&installed), recordingRestart(&restarted))
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0\nout:%s", exit, out.String())
 	}
 	if !installed {
 		t.Fatalf("installFunc not called")
+	}
+	if !restarted {
+		t.Fatalf("shared stack restart was not called")
 	}
 	if !strings.Contains(out.String(), "installing v9.9.9") {
 		t.Fatalf("output = %q, want 'installing v9.9.9'", out.String())
@@ -261,13 +267,9 @@ func TestRunUpdateCore_TTYPrompt_YesInstalls(t *testing.T) {
 	if !installed {
 		t.Fatal("install did not run")
 	}
-	// Note: restart is only attempted if a daemon is running.
-	// In test environment we can't guarantee that, so we don't
-	// assert on restarted — only the "yes" prompt branch is
-	// exercised, which feeds into doRestart=true; the actual
-	// restart call is gated by IsDaemonRunning which is
-	// host-dependent here.
-	_ = restarted
+	if !restarted {
+		t.Fatal("shared stack restart did not run after a yes answer")
+	}
 }
 
 func TestRunUpdateCore_TTYPrompt_NoSkipsRestart(t *testing.T) {
@@ -331,6 +333,72 @@ func TestRunUpdateCore_InstallInProgress(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "another ibkr update is already running") {
 		t.Fatalf("stderr = %q, want 'another ibkr update is already running'", errBuf.String())
+	}
+}
+
+func TestRunUpdateCore_RestartRunsAfterInstallAndPropagatesFailure(t *testing.T) {
+	installDir := t.TempDir()
+	t.Setenv("IBKR_INSTALL_DIR", installDir)
+	opts, _, errBuf := newOpts("v0.32.0")
+	opts.restart = true
+	var events []string
+	install := func(context.Context, *update.Plan) error {
+		events = append(events, "install")
+		return nil
+	}
+	var restartedExecutable string
+	restart := func(_ context.Context, executable string, _ io.Writer, _ io.Writer) int {
+		events = append(events, "stack-restart")
+		restartedExecutable = executable
+		return 1
+	}
+	exit := runUpdateCore(context.Background(), opts, fakeFetch("v9.9.9"), install, restart)
+	if exit != 1 {
+		t.Fatalf("exit = %d, want propagated restart failure", exit)
+	}
+	if got := strings.Join(events, ","); got != "install,stack-restart" {
+		t.Fatalf("events = %q, want install,stack-restart", got)
+	}
+	if want := filepath.Join(installDir, "ibkr"); restartedExecutable != want {
+		t.Fatalf("restart executable = %q, want installed path %q", restartedExecutable, want)
+	}
+	if !strings.Contains(errBuf.String(), "ordered but non-atomic") {
+		t.Fatalf("stderr missing non-atomic guidance: %s", errBuf.String())
+	}
+}
+
+func TestRestartInstalledStackAdapterPinsBothProcessesToInstalledExecutable(t *testing.T) {
+	t.Setenv("IBKR_SOCKET", "")
+	installedExecutable := filepath.Join(t.TempDir(), "installed", "ibkr")
+	var daemonExecutable, appExecutable string
+
+	daemonFactory := func(executable string) restartDeps {
+		daemonExecutable = executable
+		return restartDeps{
+			find: func(context.Context, string) (update.DaemonProcess, error) {
+				return update.DaemonProcess{}, update.ErrDaemonNotRunning
+			},
+		}
+	}
+	appFactory := func(executable string) appRestartDeps {
+		appExecutable = executable
+		return appRestartDeps{
+			find: func(context.Context) (appProcess, error) {
+				return appProcess{}, errAppNotRunning
+			},
+		}
+	}
+
+	var out, errBuf bytes.Buffer
+	exit := restartInstalledStackAdapterUsing(context.Background(), installedExecutable, &out, &errBuf, daemonFactory, appFactory)
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr=%s", exit, errBuf.String())
+	}
+	if daemonExecutable != installedExecutable {
+		t.Fatalf("daemon executable = %q, want installed path %q", daemonExecutable, installedExecutable)
+	}
+	if appExecutable != installedExecutable {
+		t.Fatalf("app executable = %q, want installed path %q", appExecutable, installedExecutable)
 	}
 }
 

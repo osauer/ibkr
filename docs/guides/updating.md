@@ -1,6 +1,6 @@
 # Updating
 
-Updated: 2026-07-18 21:37 CEST
+Updated: 2026-07-21 01:15 CEST
 
 Four things can affect data freshness: the **binary** (`ibkr` itself), the **Claude Desktop MCPB** when installed through Desktop Extensions, the **S&P 500 constituent list** the breadth indicator uses, and the embedded **official market calendars**. They update independently because they have different sources and cadences.
 
@@ -9,12 +9,15 @@ Four things can affect data freshness: the **binary** (`ibkr` itself), the **Cla
 Once you're on v1.0.0 or later, the next upgrade is one command:
 
 ```sh
-ibkr update            # fetch latest, prompt to restart daemon
+ibkr update            # fetch latest, prompt to restart the local app/daemon stack
 ```
 
 The CLI checks the [GitHub `/releases/latest`](https://api.github.com/repos/osauer/ibkr/releases/latest) endpoint, matches your OS/arch against the published tarballs, verifies the **PGP signature on `SHA256SUMS`** against the maintainer's public key embedded in your current `ibkr` binary, then SHA-verifies the tarball and atomically replaces `~/.local/bin/ibkr`. The prior binary is stashed as `~/.local/bin/ibkr.bak` for one-step rollback (`mv ~/.local/bin/ibkr.bak ~/.local/bin/ibkr`).
 
-A running daemon is asked to restart at the end; the daemon picks up the new binary on its next autospawn.
+At the end, the updater can restart the local processes that were already
+running. It uses the same app-first stack path as `ibkr restart`: a running app
+is restarted and verified on the installed binary before the daemon is touched.
+Processes that were stopped before the update remain stopped.
 
 ## Restarting local processes: `ibkr restart`
 
@@ -24,9 +27,20 @@ Use `ibkr restart` when you changed daemon-loaded config, installed a new binary
 ibkr restart
 ```
 
-The command verifies the pidfile holder is really an `ibkr daemon` process, sends SIGTERM, waits for cleanup, starts a fresh daemon, then reports the new PID and gateway health. It also refreshes an already-running `ibkr app` host, preserving app flags such as `--remote`; if no app host is running, it leaves the app stopped. If no daemon was running, it starts one and says so.
+On the default socket, the command first refreshes an already-running `ibkr
+app` host and verifies the replacement. It preserves unsupervised app flags
+such as `--remote`; a launchd-owned app is restarted from its loaded plist only
+after the plist executable is verified as the current installed binary. Only
+after that app stage succeeds does the command verify the daemon pidfile
+holder, stop it, start a fresh daemon, and report the new PID and gateway
+health. If no app host is running, it leaves the app stopped. Plain `ibkr
+restart` starts the daemon when none was running.
 
-`--force` is an explicit fallback for a daemon that ignores SIGTERM:
+The two process stages are ordered but not transactional. An app-stage failure
+leaves the daemon untouched. A later daemon-stage failure does not roll the
+already-restarted app back; fix the reported stage and rerun `ibkr restart`.
+
+`--force` is an explicit fallback for an app or daemon that ignores SIGTERM:
 
 ```sh
 ibkr restart --force          # escalate to SIGKILL only after graceful timeout
@@ -36,11 +50,18 @@ ibkr restart --app            # app-only restart/start for the HyperServe app pr
 ibkr app restart              # same app-only restart path, grouped under app commands
 ```
 
-JSON mode is for automation and CI. It avoids text parsing and includes the post-start `status.health` payload so a script can distinguish "process restarted but gateway offline" from "restart failed." When an app host was running, JSON also includes an `app` object with its old/new PID and preserved args.
+JSON mode is for automation and CI. It avoids text parsing and includes the post-start `status.health` payload so a script can distinguish "process restarted but gateway offline" from "restart failed." When an app host was running, JSON also includes an `app` object with its old/new PID and preserved args. If that app stage succeeds but the daemon stage fails, the command exits non-zero and still emits the partial structured result with the successful app stage and `started: false` for the daemon.
+
+When `IBKR_SOCKET` selects a non-default daemon scope, app process discovery
+cannot prove which scope a found app belongs to. The decision is therefore made
+before any process mutation: the app is left untouched and only the explicitly
+selected daemon is restarted. The result marks the app as
+`reason: "socket_overridden"`. If that stack also needs an app restart, run
+`ibkr restart --app` as a separate, explicit, non-atomic operation.
 
 `ibkr restart` restarts the shared daemon that CLI commands and MCP tools dial, plus any currently running local or remote app host. It does not restart the `ibkr mcp` stdio process itself; that process is owned by Claude Desktop, Cursor, Continue, or whichever MCP host launched it. Relaunch the host when you need it to respawn MCP from a new binary or MCPB bundle.
 
-`ibkr restart --app` targets only the long-running `ibkr app` HyperServe process. It finds a local `ibkr app` server process, sends SIGTERM so HyperServe can shut down gently, preserves the old app flags such as `--addr`, `--public-url`, or `--remote`, and then starts the app again. If launchd or another supervisor respawns the app after SIGTERM, the command reports that PID and does not start a duplicate. If no app is running, it starts `ibkr app` with default/env configuration.
+`ibkr restart --app` targets only the long-running `ibkr app` HyperServe process. It finds a local `ibkr app` server process, sends SIGTERM so HyperServe can shut down gently, preserves the old app flags such as `--addr`, `--public-url`, or `--remote`, and then starts the app again. A same-argv respawn is accepted only when it uses the current executable. When launchd owns the app, restart uses the loaded job's executable and plist arguments; change those arguments by rewriting and reloading the plist, not with restart flag overrides. If no app or supervisor is present, this explicit app-only form starts `ibkr app` with default/env configuration.
 
 In remote mode the hosted Cloudflare Worker is not restarted or redeployed by
 this command. The local app process restarts its outbound relay connector and
@@ -63,11 +84,16 @@ The MCPB container itself is not yet code-signed. Treat MCPB release integrity a
 In non-interactive contexts (cron, systemd timers, CI, stdin-redirected shells) the `[Y/n]` prompt would block. Pass an explicit restart decision:
 
 ```sh
-ibkr update --restart        # auto-restart daemon
-ibkr update --no-restart     # don't restart; print "restart pending" hint
+ibkr update --restart        # restart a running app first, then a running daemon
+ibkr update --no-restart     # leave both processes as-is; print a restart-pending hint
 ```
 
 Running `ibkr update` from a non-TTY *without* either flag exits non-zero with `ambiguous in non-interactive mode` and does not install. This is deliberate: silent default-to-N would be a footgun for systemd timers expecting auto-restart.
+
+`ibkr update --restart` preserves liveness: it does not wake an app or daemon
+that was absent. If both were stopped, the binary is updated and the desk stays
+stopped. If a restart stage fails, the same ordered, non-atomic rules above
+apply and the command points back to explicit `ibkr restart` recovery.
 
 ### Other flags
 

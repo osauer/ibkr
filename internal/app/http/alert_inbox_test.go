@@ -38,6 +38,7 @@ func TestAlertInboxV2RoutesRequireAuthAndBootstrapMatchesGET(t *testing.T) {
 	}
 
 	privateEpisode, privateOccurrence := alertInboxHTTPObserve(t, store, time.Date(2026, 7, 20, 18, 0, 0, 0, time.UTC))
+	privateScope := alertInboxHTTPAuthorityScope(t)
 	cookie := routeSessionCookie(t, handler)
 
 	getRequest := httptest.NewRequest(http.MethodGet, "/api/alert-inbox-v2", nil)
@@ -86,7 +87,7 @@ func TestAlertInboxV2RoutesRequireAuthAndBootstrapMatchesGET(t *testing.T) {
 	for _, forbidden := range []string{
 		`"source_watermarks"`, `"transport_eligible"`, `"attempt_totals"`, `"last_push_service_acceptance_at"`,
 		`"episode_key"`, `"occurrence_key"`, `"evidence_fingerprint"`, `"attempt_id"`, `"receipt_key"`,
-		`"target_ref"`, `"device_id"`, `"subscription_id"`, privateEpisode, privateOccurrence,
+		`"target_ref"`, `"device_id"`, `"subscription_id"`, `"authority_scope"`, privateScope, privateEpisode, privateOccurrence,
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("public alert inbox leaked %q: %s", forbidden, raw)
@@ -353,7 +354,7 @@ func alertInboxHTTPObserve(t *testing.T, store *state.Store, at time.Time) (stri
 		EvidenceAsOf: at, StateChangedAt: at, ObservedAt: at,
 	}
 	snapshot := rpc.AlertCandidateSnapshot{
-		SchemaVersion: rpc.AlertCandidateSnapshotVersion, AsOf: at, CurrentState: rpc.AlertSnapshotActive,
+		SchemaVersion: rpc.AlertCandidateSnapshotVersion, AuthorityScope: alertInboxHTTPAuthorityScope(t), AsOf: at, CurrentState: rpc.AlertSnapshotActive,
 		Coverage: rpc.AlertCoverage{
 			State: rpc.AlertCoverageComplete, Freshness: rpc.AlertCoverageCurrent, AsOf: at,
 			ExpectedSources: []rpc.AlertSource{rpc.AlertSourceCanary}, CoveredSources: []rpc.AlertSource{rpc.AlertSourceCanary},
@@ -364,6 +365,15 @@ func alertInboxHTTPObserve(t *testing.T, store *state.Store, at time.Time) (stri
 		t.Fatal(err)
 	}
 	return episode, occurrence
+}
+
+func alertInboxHTTPAuthorityScope(t *testing.T) string {
+	t.Helper()
+	scope, err := rpc.BuildAlertAuthorityScope("HTTP-PRIVATE-ACCOUNT", "paper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope
 }
 
 func assertAlertInboxV2ExactJSONKeys(t *testing.T, raw []byte) {

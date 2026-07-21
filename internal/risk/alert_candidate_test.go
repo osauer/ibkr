@@ -125,6 +125,32 @@ func TestBuildAlertOccurrenceKeySeparatesDaemonOccurrenceFromEpisodeAndEvidence(
 	}
 }
 
+func TestAlertOpaqueIdentityDomainsAreStableAcrossWireSchemaChanges(t *testing.T) {
+	authority, err := BuildAlertAuthorityScope(" du123 ", " PAPER ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	episode, err := BuildAlertEpisodeKey(AlertSourceCanary, AlertKindPortfolioRisk, "DU123", "paper", "portfolio_canary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	occurrence, err := BuildAlertOccurrenceKey(episode, "sequence:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"alert-authority-scope-v1:ec9e283b2fbc97b50e1c2ec31b84e0eec8e09f087945275c9cd25700179af4e7",
+		"alert-episode-v1:2a1770b3398ce40f3109db336ea570897505a39efe7fb5c12029ab4f696b337a",
+		"alert-occurrence-v1:a699174f7a3d1d4aa8ceb2e3be502c71f8d95cddf3cd807f670c27dbdfc23c5f",
+	}
+	if got := []string{authority, episode, occurrence}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("stable alert identities changed: got=%q want=%q", got, want)
+	}
+	if AlertCandidateSnapshotVersion == alertEpisodeIdentityVersion || AlertCandidateSnapshotVersion == alertOccurrenceIdentityVersion || AlertCandidateSnapshotVersion == alertAuthorityIdentityVersion {
+		t.Fatal("wire schema version is coupled to a stable identity domain")
+	}
+}
+
 func TestAlertOccurrenceKeyRotatesOnlyForDaemonOccurrenceDecisions(t *testing.T) {
 	now := time.Date(2026, time.July, 20, 20, 0, 0, 0, time.UTC)
 	opened := validAlertCandidate(t, now)
@@ -508,12 +534,16 @@ func completeAlertCoverage(now time.Time) AlertCoverage {
 }
 
 func validAlertSnapshot(now time.Time) AlertCandidateSnapshot {
+	authority, err := BuildAlertAuthorityScope("DU-TEST", "paper")
+	if err != nil {
+		panic(err)
+	}
 	return AlertCandidateSnapshot{
-		SchemaVersion: AlertCandidateSnapshotVersion,
-		AsOf:          now,
-		CurrentState:  AlertSnapshotClear,
-		Coverage:      completeAlertCoverage(now),
-		Candidates:    []AlertCandidate{},
+		SchemaVersion: AlertCandidateSnapshotVersion, AuthorityScope: authority,
+		AsOf:         now,
+		CurrentState: AlertSnapshotClear,
+		Coverage:     completeAlertCoverage(now),
+		Candidates:   []AlertCandidate{},
 	}
 }
 

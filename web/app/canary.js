@@ -553,9 +553,12 @@ function renderRegimePanel(snap) {
   const market = canary.market || {};
   const indicators = canary.market_indicators || [];
   const posture = regimePosture(snap, canary, market);
+  const authority = regimeAuthorityView(snap);
   const regimeStatus = marketRegimeStatusLine(snap, canary, market, indicators);
-  $("marketRegime").textContent = marketRegimeLabel(posture);
-  $("marketRegimeSummary").textContent = regimeStatus.summary;
+  $("marketRegime").textContent = regimeAuthorityLabel(posture, authority);
+  const summary = $("marketRegimeSummary");
+  summary.textContent = regimeStatus.summary;
+  summary.title = regimeStatus.title || regimeStatus.detail || regimeStatus.summary;
   // marketRegimeMix now lives in the expanded detail deck and shows only the
   // governed-severity note (a real policy downgrade disclosure) — not a
   // repeat of the freshness badge or the itemized data-gap list, both of
@@ -567,14 +570,131 @@ function renderRegimePanel(snap) {
     mixNote.textContent = governedNote;
     mixNote.title = governedNote;
   }
-  renderFreshnessTimestamp("regimeAsOf", latestRegimeTimestamp(canary, indicators), {
+  renderRegimeAuthorityTimestamp(snap, latestRegimeTimestamp(canary, indicators));
+  reconcileSignalPanelTimes();
+  renderMarketWeather(regimePresentationPosture(posture, authority));
+  renderRegimeDetail(indicators, snap, canary);
+}
+
+
+// Regime authority health is response/cache metadata, not market evidence.
+// The SPA therefore preserves the daemon-authored verdict and changes only
+// its data-quality treatment when either the authority or the app transport
+// says that the retained result is stale or unavailable.
+function regimeAuthorityView(snap = {}) {
+  const health = snap.regime?.authority_health || {};
+  const source = snap.sources?.regime || {};
+  const authorityStatus = String(health.status || "").toLowerCase();
+  const sourceState = String(source.state || "").toLowerCase();
+  let status = "legacy";
+  if (authorityStatus === "unavailable" || ["unavailable", "not_observed"].includes(sourceState) || source.error) {
+    status = "unavailable";
+  } else if (authorityStatus === "stale" || sourceState === "stale") {
+    status = "stale";
+  } else if (authorityStatus === "fresh" || sourceState === "current") {
+    status = "fresh";
+  }
+  const reasons = [];
+  if (["stale", "unavailable"].includes(authorityStatus)) {
+    reasons.push(regimeAuthorityReasonLabel(health.failure_code, "", authorityStatus));
+  }
+  if (["stale", "unavailable", "not_observed"].includes(sourceState) || source.error) {
+    reasons.push(regimeAuthorityReasonLabel("", source.reason, sourceState === "stale" ? "stale" : "unavailable"));
+  }
+  const reason = [...new Set(reasons.filter(Boolean))].join("; ") || regimeAuthorityReasonLabel("", "", status);
+  return {
+    status,
+    degraded: status === "stale" || status === "unavailable",
+    refreshing: health.refreshing === true,
+    lastSuccessAt: health.last_success_at || source.last_success_at || "",
+    reason,
+  };
+}
+
+function regimeAuthorityReasonLabel(failureCode, sourceReason, status) {
+  switch (String(failureCode || "")) {
+    case "no_last_good":
+      return "no last-good Regime read";
+    case "refresh_timeout":
+      return "refresh timed out";
+    case "refresh_incomplete":
+      return "refresh incomplete";
+    case "refresh_failed":
+      return "refresh failed";
+    case "publish_failed":
+      return "publication failed";
+    case "invalid_persisted_state":
+      return "persisted authority is invalid";
+    case "clock_invalid":
+      return "daemon clock is behind the last successful Regime commit";
+  }
+  switch (String(sourceReason || "")) {
+    case "poll_stale":
+      return "app observation is stale";
+    case "transport_unavailable":
+      return "daemon transport is unavailable";
+    case "producer_unavailable":
+      return "Regime producer is unavailable";
+    case "persistence_unavailable":
+      return "Regime persistence is unavailable";
+    case "not_observed":
+      return "authority has not been observed yet";
+  }
+  if (status === "stale") return "last complete read is outside its freshness window";
+  if (status === "unavailable") return "current authority is unavailable";
+  return "";
+}
+
+function regimePresentationPosture(posture = {}, authority = {}) {
+  if (!authority.degraded) return posture;
+  return { ...posture, tone: "data_quality" };
+}
+
+function regimeAuthorityLabel(posture = {}, authority = {}) {
+  const canonical = marketRegimeLabel(posture);
+  if (!authority.degraded) return canonical;
+  if (canonical !== "--") return `Last known · ${canonical}`;
+  return authority.status === "stale" ? "Regime stale" : "Regime unavailable";
+}
+
+function regimeAuthorityStatusLine(snap = {}, posture = {}) {
+  const authority = regimeAuthorityView(snap);
+  if (!authority.degraded) return null;
+  const hasVerdict = marketRegimeLabel(posture) !== "--";
+  const refresh = authority.refreshing ? "; refresh in progress" : "";
+  if (authority.status === "stale") {
+    return {
+      summary: `${hasVerdict ? "Last-known regime" : "Regime read"} · stale`,
+      detail: `The canonical last-good verdict is retained as context; ${authority.reason}${refresh}.`,
+      title: `Regime authority stale: ${authority.reason}${refresh}`,
+    };
+  }
+  return {
+    summary: `${hasVerdict ? "Last-known regime" : "Regime"} · authority unavailable`,
+    detail: hasVerdict
+      ? `The canonical last-known verdict is context only; ${authority.reason}${refresh}.`
+      : `No current Regime verdict is available; ${authority.reason}${refresh}.`,
+    title: `Regime authority unavailable: ${authority.reason}${refresh}`,
+  };
+}
+
+function renderRegimeAuthorityTimestamp(snap = {}, fallbackTimestamp = null) {
+  const authority = regimeAuthorityView(snap);
+  const timestamp = authority.lastSuccessAt || fallbackTimestamp;
+  renderFreshnessTimestamp("regimeAsOf", timestamp, {
     staleMinutes: regimeStaleBudgetMinutes(snap),
     compact: true,
     quietWhenFresh: true,
   });
-  reconcileSignalPanelTimes();
-  renderMarketWeather(posture);
-  renderRegimeDetail(indicators, snap, canary);
+  if (!authority.degraded) return;
+  const el = $("regimeAsOf");
+  if (!el) return;
+  const parsed = parseDate(timestamp);
+  const last = parsed ? ` · last ${shortTimeWithZone(parsed.toISOString())}` : "";
+  el.hidden = false;
+  el.textContent = `${authority.status}${last}`;
+  el.classList.add("stale");
+  el.title = `Market regime freshness · ${authority.reason}`;
 }
 
 
@@ -639,6 +759,11 @@ function marketSourceIssueLabels(snap = {}) {
     for (const part of marketSourceError.split("|")) {
       add(marketSourceErrorLabel(part));
     }
+  }
+
+  const regimeAuthority = regimeAuthorityView(snap);
+  if (regimeAuthority.degraded) {
+    add(`Regime authority ${regimeAuthority.status} (${regimeAuthority.reason})`);
   }
 
   return labels;
@@ -744,6 +869,8 @@ function marketRegimeLabel(posture = {}) {
 }
 
 function marketRegimeStatusLine(snap, canary, market, indicators) {
+  const authorityStatus = regimeAuthorityStatusLine(snap, regimePosture(snap, canary, market));
+  if (authorityStatus) return authorityStatus;
   const latest = latestRegimeRead(canary, indicators);
   const ranked = Number(market.ranked_clusters || 0);
   const unranked = Number(market.unranked_clusters || 0);
@@ -1213,4 +1340,4 @@ function heldStressFlagLabel(value) {
   return cleanDetail(value);
 }
 
-export { RULE_TONES, canaryDriverLabel, canaryDriverPriority, canaryDriverRow, canaryDriverRows, canaryDriverTone, canaryEmptyDriverRow, canaryExplanationCards, canaryHasProvisionalOnlyMarketWarning, canaryInputCheckBlocksAction, canaryInputCheckSentence, canaryInputIssueLabels, canaryInputIssueSummary, canaryNeedsInputCheck, canaryRowNeedsAttention, canaryStageLabel, canarySummaryText, clusterInputLabel, detailCard, firstClause, gatewayDataStatus, heldStressEvidence, heldStressFlagLabel, heldStressItems, heldStressReasonLabel, heldStressReasonLabels, heldStressRow, heldStressSummary, heldStressTone, humanList, humanizeStalenessSeconds, indicatorAsOfLabel, indicatorStatusClass, latestRegimeRead, latestRegimeTimestamp, latestRegimeTimestampFallback, legacyRegimeTone, marketExplanation, marketHasDataGaps, marketQuoteCell, marketQuoteChangeClass, marketQuoteErrorLabel, marketQuoteFallback, marketQuoteInterruptedLine, marketQuoteSourceLine, marketRegimeLabel, marketRegimeStatusLine, marketSourceErrorLabel, marketSourceIssueLabels, normalizeRegimePosture, portfolioExplanation, protectionCoverageCanaryLine, quoteBySymbol, quoteChange, quoteChangePct, quotePrevClose, quotePrice, quoteTime, reconcileSignalPanelTimes, regimeFallbackIndicators, regimeGovernedNote, regimeGovernorReasonLabel, regimePosture, regimePostureDetailTone, regimeStaleBudgetMinutes, regimeWeatherClass, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderHeldStress, renderMarketContext, renderMarketWeather, renderRegimeDetail, renderRegimePanel, renderRegimeQualityRemarks, renderRulesCard, renderRulesGrid, renderSignedPercent, ruleStatusLabel, ruleTone, sourceHealthMentions };
+export { RULE_TONES, canaryDriverLabel, canaryDriverPriority, canaryDriverRow, canaryDriverRows, canaryDriverTone, canaryEmptyDriverRow, canaryExplanationCards, canaryHasProvisionalOnlyMarketWarning, canaryInputCheckBlocksAction, canaryInputCheckSentence, canaryInputIssueLabels, canaryInputIssueSummary, canaryNeedsInputCheck, canaryRowNeedsAttention, canaryStageLabel, canarySummaryText, clusterInputLabel, detailCard, firstClause, gatewayDataStatus, heldStressEvidence, heldStressFlagLabel, heldStressItems, heldStressReasonLabel, heldStressReasonLabels, heldStressRow, heldStressSummary, heldStressTone, humanList, humanizeStalenessSeconds, indicatorAsOfLabel, indicatorStatusClass, latestRegimeRead, latestRegimeTimestamp, latestRegimeTimestampFallback, legacyRegimeTone, marketExplanation, marketHasDataGaps, marketQuoteCell, marketQuoteChangeClass, marketQuoteErrorLabel, marketQuoteFallback, marketQuoteInterruptedLine, marketQuoteSourceLine, marketRegimeLabel, marketRegimeStatusLine, marketSourceErrorLabel, marketSourceIssueLabels, normalizeRegimePosture, portfolioExplanation, protectionCoverageCanaryLine, quoteBySymbol, quoteChange, quoteChangePct, quotePrevClose, quotePrice, quoteTime, reconcileSignalPanelTimes, regimeAuthorityLabel, regimeAuthorityReasonLabel, regimeAuthorityStatusLine, regimeAuthorityView, regimeFallbackIndicators, regimeGovernedNote, regimeGovernorReasonLabel, regimePosture, regimePostureDetailTone, regimePresentationPosture, regimeStaleBudgetMinutes, regimeWeatherClass, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderHeldStress, renderMarketContext, renderMarketWeather, renderRegimeAuthorityTimestamp, renderRegimeDetail, renderRegimePanel, renderRegimeQualityRemarks, renderRulesCard, renderRulesGrid, renderSignedPercent, ruleStatusLabel, ruleTone, sourceHealthMentions };

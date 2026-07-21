@@ -314,6 +314,23 @@ func TestStateCASObservationsAndAppendOnly(t *testing.T) {
 	}
 }
 
+func TestStateCASCommitClockFloorRejectsBeforeMutation(t *testing.T) {
+	s, _ := openTestStore(t)
+	floor := time.Now().UTC().Add(time.Hour)
+	_, err := s.CompareAndSwapStateDocument(t.Context(), StateDocumentCAS{
+		ScopeKey: "market", Kind: "clock-floor", JSON: []byte(`{"ok":true}`), UpdatedAtNotBefore: floor,
+	})
+	if !errors.Is(err, ErrRollback) {
+		t.Fatalf("clock-floor error=%v, want ErrRollback", err)
+	}
+	if _, ok, readErr := s.GetStateDocument(t.Context(), "market", "clock-floor"); readErr != nil || ok {
+		t.Fatalf("clock-floor mutation survived: ok=%v err=%v", ok, readErr)
+	}
+	if health := s.Health(); !health.Ready {
+		t.Fatalf("expected clock floor must not poison SQLite health: %+v", health)
+	}
+}
+
 func TestPreviewTokenSingleWinnerAndMonotonicFloors(t *testing.T) {
 	s, path := openTestStore(t)
 	ctx := context.Background()

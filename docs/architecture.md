@@ -94,7 +94,7 @@ MCP side is JSON-RPC 2.0.
 | Human → CLI | `argv` / stdin; human text or JSON on stdout | One-shot local process. |
 | AI host → `ibkr mcp` | MCP JSON-RPC 2.0, newline-delimited over stdio | The host owns the process lifetime. |
 | CLI / MCP / app → daemon | Custom typed newline-delimited JSON request/response frames over a Unix domain socket | The envelope uses project fields such as `ok`, `frame`, `stream`, and `end`. It is not JSON-RPC 2.0. |
-| App live service → daemon | Periodic typed calls plus long-lived quote streams | Feeds one app snapshot/cache and its change fanout. |
+| App live service → daemon | Periodic typed calls plus long-lived quote streams | Feeds one app snapshot/cache and its change fanout. The source-neutral alert snapshot is ingested directly into the app's private inbox store and is excluded from the public live/SSE DTO. |
 | App request routes → daemon | Request-driven typed calls over the same Unix socket | Used where a route needs a fresh action, review, or settings response instead of the cached snapshot. |
 | Daemon → TWS / Gateway | Clean-room TWS wire protocol over TCP, optionally TLS | A primary interactive connection, plus a breadth connection with its own client ID and rate budget. |
 | Browser / PWA ↔ app | Public static assets and pairing/auth endpoints, then authenticated HTTP(S) JSON and `/api/events` Server-Sent Events | Local and LAN access reaches the app directly. Pairing-session creation is loopback-only. |
@@ -139,7 +139,7 @@ complete XML set.
 | Class | Default Location | Owner and Representative Contents |
 |---|---|---|
 | Operator configuration | `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`; policy defaults under `~/.config/ibkr/policies/` | Gateway/account/client pins, daemon/trading settings, protection/opportunity policy, the operator-authored `risk-policy.toml`, and the separate `flex-token` secret. The risk policy has no embedded default: missing approval stays unapproved. |
-| Daemon durable authority | `$XDG_STATE_HOME/ibkr/daemon.db` (SQLite, WAL), falling back to `~/.local/state/ibkr/daemon.db` | Sole live daemon authority for platform settings, risk-capital and governance state, trading readiness, purge state, orders and token tombstones, proposals and opportunities, decision/event history, retained observations, and statement projections. It is not delete-safe and never falls back to legacy files. |
+| Daemon durable authority | `$XDG_STATE_HOME/ibkr/daemon.db` (SQLite, WAL), falling back to `~/.local/state/ibkr/daemon.db` | Sole live daemon authority for platform settings, risk-capital and governance state, the last-good Regime publication and projection receipt, shadow alert episodes, trading readiness, purge state, orders and token tombstones, proposals and opportunities, decision/event history, retained observations, and statement projections. It is not delete-safe and never falls back to legacy files. |
 | Original broker evidence | `$XDG_STATE_HOME/ibkr/statements/flex-*.xml` | Immutable retained Flex statements. SQLite stores a complete current inventory, immutable file/equity versions, and current per-day winners derived transactionally from this set; it does not replace the XML evidence claim. |
 | Recovery artifacts | `$XDG_STATE_HOME/ibkr/backups/`, `$XDG_STATE_HOME/ibkr/legacy-sealed/<cutover-id>/`, and `$XDG_STATE_HOME/ibkr/daemon.db.head` | Verified database backups, hashed pre-cutover artifacts, and the external monotonic-head watermark. They are recovery and anti-rollback material only, never normal read fallbacks or dual-write targets. |
 | Private signer key | `$XDG_STATE_HOME/ibkr/order-preview-key-v2` | Private token-signing material bound to the current authority generation. It is deliberately outside ordinary database state. |
@@ -180,6 +180,33 @@ are a separate operational procedure.
 Never persist broker market-data entitlements. Expose observed data type,
 quality, freshness, and warnings on typed read surfaces instead.
 
+The current Regime result is one immutable, daemon-owned last-good document.
+Its typed authority health distinguishes fresh, stale, refreshing, and cold
+unavailable state. Streak, rule-stage, and decision-event projections bind to
+the exact publication revision, commit time, and semantic fingerprint; a
+separate receipt makes the single-revision crash window replayable before the
+RPC socket or a later publication is allowed. An unreceipted revision is
+withheld atomically from Regime consumers. A clock behind the retained commit
+is explicit `clock_invalid` stale context and cannot publish a refresh or
+relax the rulebook until it catches up.
+
+The daemon's alert registry is likewise source-neutral and durable, but its
+unified delivery authority is deliberately inactive. It stores opaque
+account/mode-scoped episode and occurrence identities and typed source
+coverage; the app keeps a separate private inbox/delivery ledger. During
+shadow commissioning, `alerts.shadow_status` reports redacted coverage and
+lifecycle measurements with `authority=shadow` and
+`delivery_active=false`. Existing Canary, governance, and order-integrity
+delivery owners remain authoritative. The richer Regime and MarketEvents
+health carried by Canary is advisory during this phase; a versioned
+producer-authored established-alert projection freezes the pre-program Canary
+fingerprint and mode eligibility consumed by its legacy monitor. This keeps
+new health visible without letting a shadow source alter existing unread or
+push cadence. Scope changes create only bounded, generic previous-context
+audit rows in the app; they are not recovery, clear, attention, or delivery
+events. See
+[Alerts and Regime production commissioning](design/alert-regime-production.md).
+
 ## Deployment Scopes and Multiple Instances
 
 The default topology is one daemon shared by the CLI, all local MCP adapter
@@ -215,7 +242,8 @@ through the Worker.
 ## Observability
 
 The observability layer is thin on purpose: text logs, one health surface,
-and typed database evidence. There are no metrics and no tracing.
+typed database evidence, and bounded typed shadow-calibration counters. There
+is no external metrics stack and no tracing.
 
 - The daemon writes structured text logs through `log/slog`. The `log_level`
   config key sets the level; the default is `info`. The log lives at

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -38,6 +39,15 @@ type regimeDecisionLine struct {
 	TS          time.Time `json:"ts"`
 	SessionKey  string    `json:"session_key"`
 	Fingerprint string    `json:"fingerprint"`
+	// SnapshotRevision binds a due journal event to the authoritative Regime
+	// publication that produced it. Zero is retained only for legacy/import
+	// helpers; runtime events use a stable per-revision event key.
+	SnapshotRevision int64 `json:"snapshot_revision,omitempty"`
+	// Runtime revisions carry the complete authoritative tuple. Fingerprint
+	// remains below as the legacy/history-index key, while this typed value
+	// preserves both fingerprint version and key.
+	SnapshotPublishedAt time.Time       `json:"snapshot_published_at"`
+	SnapshotFingerprint rpc.Fingerprint `json:"snapshot_fingerprint"`
 	// TapeSession discloses the official-calendar classification the tape
 	// terms ran under ("trading_date"/"closed_date"; empty outside embedded
 	// coverage), so weekend/holiday journal lines are self-explaining in
@@ -73,18 +83,32 @@ type regimeDecisionIndicator struct {
 // journaling must never fail a snapshot. Disabled via
 // `ibkr settings set regime.journal.enabled=false`.
 func (s *Server) journalRegimeDecision(res *rpc.RegimeSnapshotResult) {
+	_ = s.journalRegimeDecisionContext(context.Background(), res)
+}
+
+func (s *Server) journalRegimeDecisionContext(ctx context.Context, res *rpc.RegimeSnapshotResult) error {
+	return s.journalRegimeDecisionPublicationContext(ctx, res, regimeSnapshotPublication{PublishedAt: time.Now().UTC()})
+}
+
+func (s *Server) journalRegimeDecisionPublicationContext(ctx context.Context, res *rpc.RegimeSnapshotResult, publication regimeSnapshotPublication) error {
 	if s == nil || s.regimeDecisions == nil || res == nil {
-		return
+		return nil
 	}
 	if !s.regimeJournalEnabled() {
-		return
+		return nil
 	}
-	if err := s.regimeDecisions.append(time.Now(), res); err != nil {
+	when := publication.PublishedAt.UTC()
+	if when.IsZero() {
+		when = time.Now().UTC()
+	}
+	if err := s.regimeDecisions.appendPublicationContext(ctx, when, res, publication); err != nil {
 		s.logger.Warnf("regime: decisions journal append failed: %v", err)
+		return err
 	}
 	// Wake the history-index ingester unconditionally (not gated on the
 	// append outcome): the kick carries no data, only "look at the file".
 	s.kickHistoryIndex()
+	return nil
 }
 
 func (s *Server) regimeJournalEnabled() bool {
@@ -104,33 +128,39 @@ func (s *Server) regimeJournalEnabled() bool {
 // rename is invisible to an open-per-append writer only while no append
 // is in flight).
 func (j *regimeDecisionJournal) append(now time.Time, res *rpc.RegimeSnapshotResult) error {
+	return j.appendContext(context.Background(), now, res)
+}
+
+func (j *regimeDecisionJournal) appendContext(ctx context.Context, now time.Time, res *rpc.RegimeSnapshotResult) error {
+	return j.appendPublicationContext(ctx, now, res, regimeSnapshotPublication{})
+}
+
+func (j *regimeDecisionJournal) appendPublicationContext(ctx context.Context, now time.Time, res *rpc.RegimeSnapshotResult, publication regimeSnapshotPublication) error {
 	if j == nil || res == nil {
 		return nil
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if publication.Revision > 0 {
+		publication.PublishedAt = publication.PublishedAt.UTC()
+		if err := validateRegimeSnapshotPublication(publication); err != nil {
+			return err
+		}
+		if res.Fingerprint != publication.Fingerprint {
+			return fmt.Errorf("regime decision snapshot fingerprint does not match publication revision %d", publication.Revision)
+		}
+		now = publication.PublishedAt
+	}
 	fp := res.Fingerprint.Key
-	if fp != "" && fp == j.lastFingerprint && now.Sub(j.lastWrite) < regimeDecisionHeartbeat {
+	// Authoritative publications use a revision-stable event key and must
+	// project every accepted revision. Fingerprint heartbeat deduplication is
+	// retained only for legacy/import callers that have no publication
+	// identity; otherwise a projection receipt could claim revision N while
+	// the decision journal contained only an older, equal-fingerprint event.
+	if publication.Revision == 0 && fp != "" && fp == j.lastFingerprint && now.Sub(j.lastWrite) < regimeDecisionHeartbeat {
 		return nil
 	}
-	line := regimeDecisionLine{
-		V:           1,
-		TS:          now,
-		SessionKey:  nyTradingSessionKey(nyTime(now)),
-		Fingerprint: fp,
-		TapeSession: res.TapeSessionState,
-		Stage:       res.Lifecycle.Stage,
-		Severity:    res.Lifecycle.Severity,
-		Readiness:   res.Lifecycle.Readiness,
-		Confidence:  res.Lifecycle.Confidence,
-		Verdict:     res.Composite.Verdict,
-		ConfirmedBy: res.Lifecycle.ConfirmedBy,
-		Unconfirmed: res.Lifecycle.Unconfirmed,
-		Governors:   res.Lifecycle.Governors,
-		Composite:   res.Composite,
-		Indicators:  regimeDecisionIndicators(res),
-		DataQuality: res.DataQuality,
-	}
+	line := buildRegimeDecisionLine(now, res, publication)
 	b, err := json.Marshal(line)
 	if err != nil {
 		return err
@@ -155,19 +185,28 @@ func (j *regimeDecisionJournal) append(now time.Time, res *rpc.RegimeSnapshotRes
 				Latched: value.Latched, ThresholdsLabel: value.ThresholdsLabel,
 			})
 		}
-		key, err := coreStoreEventKey(context.Background(), j.core, coreEventRegimeDecision, now, b, 0)
-		if err != nil {
-			return err
+		key := ""
+		if publication.Revision > 0 {
+			key = fmt.Sprintf("%s:snapshot:%020d", coreEventRegimeDecision, publication.Revision)
+		} else {
+			var err error
+			key, err = coreStoreEventKey(ctx, j.core, coreEventRegimeDecision, now, b, 0)
+			if err != nil {
+				return err
+			}
 		}
-		_, err = j.core.AppendEvents(context.Background(), []corestore.EventInput{{
-			ScopeKey: daemonStateScope, EventKey: key, Type: coreEventRegimeDecision,
-			Action: coreEventActionRecord, Origin: coreEventOriginDaemon,
-			OccurredAt: now, PayloadJSON: b,
-			Projection: corestore.EventProjection{RegimeDecision: &corestore.RegimeDecisionProjection{
+		projection := corestore.EventProjection{}
+		if line.Stage != "" {
+			projection.RegimeDecision = &corestore.RegimeDecisionProjection{
 				DecisionKey: key, Stage: line.Stage, Severity: line.Severity,
 				Readiness: line.Readiness, Confidence: line.Confidence,
 				Verdict: line.Verdict, Fingerprint: line.Fingerprint, Indicators: indicators,
-			}},
+			}
+		}
+		_, err = j.core.AppendEvents(ctx, []corestore.EventInput{{
+			ScopeKey: daemonStateScope, EventKey: key, Type: coreEventRegimeDecision,
+			Action: coreEventActionRecord, Origin: coreEventOriginDaemon,
+			OccurredAt: now, PayloadJSON: b, Projection: projection,
 		}})
 		if err != nil {
 			return err
@@ -189,6 +228,33 @@ func (j *regimeDecisionJournal) append(now time.Time, res *rpc.RegimeSnapshotRes
 		return err
 	}
 	return f.Close()
+}
+
+func buildRegimeDecisionLine(now time.Time, res *rpc.RegimeSnapshotResult, publication regimeSnapshotPublication) regimeDecisionLine {
+	line := regimeDecisionLine{
+		V:                1,
+		TS:               now,
+		SessionKey:       nyTradingSessionKey(nyTime(now)),
+		Fingerprint:      res.Fingerprint.Key,
+		SnapshotRevision: publication.Revision,
+		TapeSession:      res.TapeSessionState,
+		Stage:            res.Lifecycle.Stage,
+		Severity:         res.Lifecycle.Severity,
+		Readiness:        res.Lifecycle.Readiness,
+		Confidence:       res.Lifecycle.Confidence,
+		Verdict:          res.Composite.Verdict,
+		ConfirmedBy:      res.Lifecycle.ConfirmedBy,
+		Unconfirmed:      res.Lifecycle.Unconfirmed,
+		Governors:        res.Lifecycle.Governors,
+		Composite:        res.Composite,
+		Indicators:       regimeDecisionIndicators(res),
+		DataQuality:      res.DataQuality,
+	}
+	if publication.Revision > 0 {
+		line.SnapshotPublishedAt = publication.PublishedAt.UTC()
+		line.SnapshotFingerprint = publication.Fingerprint
+	}
+	return line
 }
 
 func regimeDecisionIndicators(res *rpc.RegimeSnapshotResult) map[string]regimeDecisionIndicator {

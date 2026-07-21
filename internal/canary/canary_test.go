@@ -1417,6 +1417,289 @@ func TestComputeCanaryStaleAccountBlocksMarginAction(t *testing.T) {
 	}
 }
 
+func TestComputeCanaryStaleRegimeAuthorityCannotLookClear(t *testing.T) {
+	t.Parallel()
+	now := canaryTestNow
+	regime := healthyCanaryRegime()
+	regime.AsOf = now
+	lastSuccess := now.Add(-10 * time.Minute)
+	ageSeconds := int64((10 * time.Minute) / time.Second)
+	regime.AuthorityHealth = &rpc.RegimeAuthorityHealth{
+		Status: rpc.RegimeAuthorityStale, LastSuccessAt: &lastSuccess,
+		LastSuccessAgeSeconds: &ageSeconds, FailureCode: rpc.RegimeAuthorityFailureRefreshFailed,
+	}
+
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(), Positions: freshCanaryPositions(), Regime: regime, Now: now,
+	})
+	if res.Direction != risk.DirectionDataQuality || res.Severity != risk.SeverityWatch || res.Action != canaryActionConfirmInputs {
+		t.Fatalf("decision=%s/%s action=%s, want data_quality/watch confirm_inputs", res.Direction, res.Severity, res.Action)
+	}
+	if res.InputHealth != canaryInputDegraded || res.PlannerReadiness != risk.PlannerReadinessBlocked {
+		t.Fatalf("input/readiness=%s/%s, want degraded/blocked", res.InputHealth, res.PlannerReadiness)
+	}
+	signal, ok := findSignal(res.Signals, risk.SignalRiskDataDegraded)
+	if !ok || !containsString(signal.BlockedBy, "regime") {
+		t.Fatalf("missing Regime authority data-quality signal: %+v", res.Signals)
+	}
+	health := findSourceHealth(res.SourceHealth, "regime")
+	if health == nil || health.Status != rpc.RegimeStatusStale {
+		t.Fatalf("regime source health=%+v, want stale", health)
+	}
+	if notes := strings.Join(health.Notes, "\n"); !strings.Contains(notes, "regime last-good authority stale (refresh_failed)") {
+		t.Fatalf("regime source notes=%q", notes)
+	}
+}
+
+func TestComputeCanaryEstablishedAlertProjectionPreservesActAcrossAuthorityHealth(t *testing.T) {
+	t.Parallel()
+	now := canaryTestNow
+	regime := healthyCanaryRegime()
+	regime.AsOf = now
+	regime.Composite = rpc.RegimeComposite{
+		ClusterGreenCount:       4,
+		ClusterRedCount:         2,
+		ClusterEligibleRedCount: 2,
+		ClusterRankedCount:      6,
+	}
+	regime.VIXTermStructure.Band = "red"
+	regime.VIXTermStructure.Eligibility = &rpc.RegimeEligibility{Eligible: true}
+	regime.VolOfVol.Band = "red"
+	regime.VolOfVol.Eligibility = &rpc.RegimeEligibility{Eligible: true}
+	regime.HYGSPYDivergence.Band = "red"
+	regime.HYGSPYDivergence.Eligibility = &rpc.RegimeEligibility{Eligible: true}
+	regime.CreditSpreads.Band = "red"
+	regime.CreditSpreads.Eligibility = &rpc.RegimeEligibility{Eligible: true}
+	account := baseCanaryAccount()
+	account.AsOf = now
+	account.GrossPositionValue = 110_000
+	positions := freshCanaryPositions()
+
+	lastSuccess := now
+	ageSeconds := int64(0)
+	freshRegime := regime
+	freshRegime.AuthorityHealth = &rpc.RegimeAuthorityHealth{
+		Status:                rpc.RegimeAuthorityFresh,
+		LastSuccessAt:         &lastSuccess,
+		LastSuccessAgeSeconds: &ageSeconds,
+	}
+	fresh := ComputeCanary(CanaryInput{Account: account, Positions: positions, Regime: freshRegime, Now: now})
+	if fresh.Action != canaryActionDefend || fresh.Severity != risk.SeverityAct {
+		t.Fatalf("fresh main decision=%s/%s, want defend/act", fresh.Action, fresh.Severity)
+	}
+	if fresh.EstablishedAlertProjection == nil {
+		t.Fatal("fresh result missing established alert projection")
+	}
+	if err := rpc.ValidateEstablishedAlertProjection(*fresh.EstablishedAlertProjection); err != nil {
+		t.Fatalf("fresh established projection invalid: %v", err)
+	}
+	if !fresh.EstablishedAlertProjection.OccurrenceEligible || !fresh.EstablishedAlertProjection.ActOnlyEligible {
+		t.Fatalf("fresh established eligibility=%+v, want occurrence and act-only eligible", fresh.EstablishedAlertProjection)
+	}
+	if got, want := fresh.EstablishedAlertProjection.CanonicalFingerprint.Key, "sha256:6a6e879570bc1a4d98c9cf45deca585c45c64ec3d46b4a99843a31282b1ee45c"; got != want {
+		t.Fatalf("established act fingerprint=%s, want ad5b77b golden %s", got, want)
+	}
+
+	for _, test := range []struct {
+		name   string
+		health *rpc.RegimeAuthorityHealth
+		status string
+	}{
+		{
+			name: "stale",
+			health: &rpc.RegimeAuthorityHealth{
+				Status:                rpc.RegimeAuthorityStale,
+				LastSuccessAt:         &lastSuccess,
+				LastSuccessAgeSeconds: &ageSeconds,
+				FailureCode:           rpc.RegimeAuthorityFailureRefreshFailed,
+			},
+			status: rpc.RegimeStatusStale,
+		},
+		{
+			name: "unavailable",
+			health: &rpc.RegimeAuthorityHealth{
+				Status:      rpc.RegimeAuthorityUnavailable,
+				FailureCode: rpc.RegimeAuthorityFailureNoLastGood,
+			},
+			status: rpc.RegimeStatusUnavailable,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			changedRegime := regime
+			changedRegime.AuthorityHealth = test.health
+			changed := ComputeCanary(CanaryInput{Account: account, Positions: positions, Regime: changedRegime, Now: now})
+			health := findSourceHealth(changed.SourceHealth, "regime")
+			if health == nil || health.Status != test.status {
+				t.Fatalf("main regime source health=%+v, want %s", health, test.status)
+			}
+			if changed.InputHealth != canaryInputDegraded {
+				t.Fatalf("main input health=%s, want degraded", changed.InputHealth)
+			}
+			if changed.EstablishedAlertProjection == nil || *changed.EstablishedAlertProjection != *fresh.EstablishedAlertProjection {
+				t.Fatalf("authority health changed established projection:\nfresh=%+v\nchanged=%+v", fresh.EstablishedAlertProjection, changed.EstablishedAlertProjection)
+			}
+		})
+	}
+}
+
+func TestComputeCanaryEstablishedAlertProjectionIgnoresNewMarketEventRequirements(t *testing.T) {
+	t.Parallel()
+	now := canaryTestNow
+	account := baseCanaryAccount()
+	account.AsOf = now
+	positions := rpc.PositionsResult{
+		AsOf:   now,
+		Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: 100}},
+	}
+	events := healthyCanaryMarketEvents(now, "XYZ")
+	events.Fingerprint = rpc.BuildMarketEventsFingerprint(&events)
+	baseline := ComputeCanary(CanaryInput{
+		Account: account, Positions: positions, Regime: healthyCanaryRegime(), MarketEvents: events, Now: now,
+	})
+	if baseline.EstablishedAlertProjection == nil {
+		t.Fatal("baseline missing established alert projection")
+	}
+	if got, want := baseline.EstablishedAlertProjection.CanonicalFingerprint.Key, "sha256:4c84336687746ce418ce19bda97c1209e3c3731fdd85ab06820288be5a1b6c42"; got != want {
+		t.Fatalf("established MarketEvents fingerprint=%s, want ad5b77b golden %s", got, want)
+	}
+
+	partial := events
+	partial.SourceHealth = slices.Clone(events.SourceHealth)
+	for i := range partial.SourceHealth {
+		if partial.SourceHealth[i].Source == "trading_halts" {
+			partial.SourceHealth[i].Status = rpc.SourceStatusPartial
+		}
+	}
+	// The daemon-authored semantic fingerprint is held constant to isolate the
+	// new required-source interpretation from a genuinely changed source
+	// fingerprint. ad5b77b treated a provided partial child as healthy.
+	partial.Fingerprint = events.Fingerprint
+
+	missingRequiredChild := events
+	missingRequiredChild.SourceHealth = slices.DeleteFunc(slices.Clone(events.SourceHealth), func(health rpc.SourceHealth) bool {
+		return health.Source == "trading_halts"
+	})
+	missingRequiredChild.Fingerprint = events.Fingerprint
+
+	for _, test := range []struct {
+		name       string
+		events     rpc.MarketEventsResult
+		wantStatus string
+	}{
+		{name: "partial_child", events: partial, wantStatus: rpc.SourceStatusPartial},
+		{name: "missing_required_child", events: missingRequiredChild, wantStatus: rpc.SourceStatusUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			changed := ComputeCanary(CanaryInput{
+				Account: account, Positions: positions, Regime: healthyCanaryRegime(), MarketEvents: test.events, Now: now,
+			})
+			health := findSourceHealth(changed.SourceHealth, "market_events")
+			if health == nil || health.Status != test.wantStatus {
+				t.Fatalf("main market-events source health=%+v, want %s", health, test.wantStatus)
+			}
+			if changed.Action != canaryActionConfirmInputs || changed.InputHealth != canaryInputDegraded {
+				t.Fatalf("main decision=%s input=%s, want confirm_inputs/degraded", changed.Action, changed.InputHealth)
+			}
+			if changed.EstablishedAlertProjection == nil || *changed.EstablishedAlertProjection != *baseline.EstablishedAlertProjection {
+				t.Fatalf("new MarketEvents interpretation changed established projection:\nbaseline=%+v\nchanged=%+v", baseline.EstablishedAlertProjection, changed.EstablishedAlertProjection)
+			}
+		})
+	}
+}
+
+func TestComputeCanaryEstablishedAlertProjectionKeepsMissingMarketEventsAdvisory(t *testing.T) {
+	t.Parallel()
+	account := baseCanaryAccount()
+	account.AsOf = canaryTestNow
+	res := ComputeCanary(CanaryInput{
+		Account: account,
+		Positions: rpc.PositionsResult{
+			AsOf:   canaryTestNow,
+			Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: 100}},
+		},
+		Regime: healthyCanaryRegime(),
+		Now:    canaryTestNow,
+	})
+	if res.Action != canaryActionConfirmInputs || res.InputHealth != canaryInputDegraded {
+		t.Fatalf("main decision=%s input=%s, want missing MarketEvents to remain confirm_inputs/degraded", res.Action, res.InputHealth)
+	}
+	health := findSourceHealth(res.SourceHealth, "market_events")
+	if health == nil || health.Status != rpc.SourceStatusUnknown {
+		t.Fatalf("main market-events source health=%+v, want unknown", health)
+	}
+	projection := res.EstablishedAlertProjection
+	if projection == nil {
+		t.Fatal("missing established alert projection")
+	}
+	if projection.Action != canaryActionStandDown || projection.Severity != risk.SeverityObserve || projection.OccurrenceEligible || projection.ActOnlyEligible {
+		t.Fatalf("established projection=%+v, want ad5 stand_down/observe/ineligible", projection)
+	}
+}
+
+func TestComputeCanaryEstablishedAlertProjectionExcludesNewMissingAccountTimestampIssue(t *testing.T) {
+	t.Parallel()
+	account := baseCanaryAccount()
+	account.AsOf = time.Time{}
+	res := ComputeCanary(CanaryInput{
+		Account: account, Positions: freshCanaryPositions(), Regime: healthyCanaryRegime(), Now: canaryTestNow,
+	})
+	if res.Action != canaryActionConfirmInputs || res.InputHealth != canaryInputDegraded {
+		t.Fatalf("main decision=%s input=%s, want confirm_inputs/degraded", res.Action, res.InputHealth)
+	}
+	projection := res.EstablishedAlertProjection
+	if projection == nil {
+		t.Fatal("missing established alert projection")
+	}
+	if projection.Action != canaryActionStandDown || projection.Severity != risk.SeverityObserve || projection.OccurrenceEligible || projection.ActOnlyEligible {
+		t.Fatalf("established projection=%+v, want ad5 stand_down/observe/ineligible", projection)
+	}
+}
+
+func TestComputeCanaryEstablishedAlertProjectionKeepsAccountAndPositionsConfirmInputsEligible(t *testing.T) {
+	t.Parallel()
+	now := canaryTestNow
+	staleAccount := baseCanaryAccount()
+	staleAccount.AsOf = now.Add(-2 * time.Hour)
+	staleAccount.Cushion = 0.07
+	freshAccount := baseCanaryAccount()
+	freshAccount.AsOf = now
+	for _, test := range []struct {
+		name      string
+		account   rpc.AccountResult
+		positions rpc.PositionsResult
+		wantKey   string
+	}{
+		{
+			name: "stale_account", account: staleAccount, positions: freshCanaryPositions(),
+			wantKey: "sha256:183f4f116827746d7b1f8823112b5b3f8a3d4b3d3f73f6231677dcbdca196ecb",
+		},
+		{
+			name: "missing_positions", account: freshAccount,
+			wantKey: "sha256:98e6947dafd31135972ef90ea9767575cecfdba3c37ed619de453da7f1a4dde7",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			res := ComputeCanary(CanaryInput{
+				Account: test.account, Positions: test.positions, Regime: healthyCanaryRegime(), Now: now,
+			})
+			projection := res.EstablishedAlertProjection
+			if projection == nil {
+				t.Fatal("missing established alert projection")
+			}
+			if projection.Action != canaryActionConfirmInputs || projection.Severity != risk.SeverityWatch ||
+				!projection.OccurrenceEligible || !projection.ActOnlyEligible || !projection.PortfolioRelevant {
+				t.Fatalf("established projection=%+v, want confirm_inputs/watch and both delivery modes eligible", projection)
+			}
+			if projection.CanonicalFingerprint.Key != test.wantKey {
+				t.Fatalf("established fingerprint=%s, want ad5b77b golden %s", projection.CanonicalFingerprint.Key, test.wantKey)
+			}
+		})
+	}
+}
+
 func TestComputeCanaryStalePositionsBlocksRebalanceAction(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 29, 16, 0, 0, 0, time.UTC)

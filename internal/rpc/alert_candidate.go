@@ -98,6 +98,17 @@ func BuildAlertOccurrenceKey(episodeKey string, identityParts ...string) (string
 	return risk.BuildAlertOccurrenceKey(episodeKey, identityParts...)
 }
 
+// BuildAlertAuthorityScope returns the opaque account/mode authority carried
+// by private candidate snapshots. Raw account and mode values do not cross the
+// RPC boundary.
+func BuildAlertAuthorityScope(account, mode string) (string, error) {
+	return risk.BuildAlertAuthorityScope(account, mode)
+}
+
+func ValidateAlertAuthorityScope(value string) error {
+	return risk.ValidateAlertAuthorityScope(value)
+}
+
 func ValidateAlertCandidate(candidate AlertCandidate) error {
 	return candidate.Validate()
 }

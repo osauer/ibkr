@@ -62,6 +62,9 @@ func New(opts Options) (*App, error) {
 		opts.PollEvery,
 		opts.CanaryEvery,
 	)
+	if err := liveSvc.SetAlertSnapshotStore(store); err != nil {
+		return nil, fmt.Errorf("prime alert shadow state: %w", err)
+	}
 	relayClient, err := newRelayClient(opts, store)
 	if err != nil {
 		return nil, err

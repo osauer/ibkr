@@ -1,5 +1,7 @@
 import { state } from "./state.js";
 
+const $ = (id) => globalThis.document?.getElementById(id) || null;
+
 const SCHEMA_VERSION = "alert-inbox-v2";
 const SHADOW_AUTHORITY = "shadow";
 
@@ -20,13 +22,14 @@ const DESTINATIONS = new Set(["monitor", "alerts", "brief"]);
 const COVERAGE_STATES = new Set(["complete", "partial", "unavailable"]);
 const COVERAGE_FRESHNESS = new Set(["current", "stale", "unknown"]);
 const CURRENT_STATES = new Set(["clear", "active", "unknown"]);
-const END_REASONS = new Set(["recovered", "authoritative_omission", "qualified_escalation"]);
+const END_REASONS = new Set(["recovered", "authoritative_omission", "qualified_escalation", "authority_scope_changed"]);
 const DELIVERY_HEALTH_STATES = new Set(["shadow", "healthy", "degraded", "unavailable", "overflow"]);
 const DELIVERY_HEALTH_CLASSES = new Set([
   "", "policy_unapproved", "retry_pending", "transport_rejected", "interrupted_uncertain",
   "state_write_failure", "capacity_overflow", "retry_exhausted", "no_active_subscription",
   "signing_keys_unavailable", "sender_unavailable", "invalid_persisted_state",
 ]);
+const MAX_RENDERED_OCCURRENCES = 24;
 
 const TOP_LEVEL_KEYS = [
   "schema_version", "authority", "initialized", "generation", "as_of", "current_state",
@@ -185,8 +188,8 @@ function validateOccurrence(occurrence, index) {
     if (occurrence.evidence_health !== "current" || occurrence.ended_at === null || !["recovered", "authoritative_omission"].includes(occurrence.end_reason)) {
       fail(path, "recovered state requires current evidence and a coherent recovery end");
     }
-  } else if (occurrence.ended_at !== null && occurrence.end_reason !== "qualified_escalation") {
-    fail(path, "active lifecycle state can end only through qualified escalation");
+  } else if (occurrence.ended_at !== null && !["qualified_escalation", "authority_scope_changed"].includes(occurrence.end_reason)) {
+    fail(path, "active lifecycle state can end only through qualified escalation or authority scope change");
   }
   safeInteger(occurrence.attention_seq, `${path}.attention_seq`, { positive: true });
 }
@@ -374,10 +377,250 @@ function alertInboxV2CanAssertClear(value = state.alertInboxV2) {
     value.coverage?.state === "complete" && value.coverage?.freshness === "current";
 }
 
+function alertInboxV2OccurrenceView(occurrence = {}) {
+  const timestamps = [
+    { label: "Evidence", value: occurrence.evidence_as_of },
+    { label: "State changed", value: occurrence.state_changed_at },
+    { label: "First seen", value: occurrence.first_seen_at },
+    { label: "Last seen", value: occurrence.last_seen_at },
+  ];
+  if (occurrence.ended_at) timestamps.push({ label: "Ended", value: occurrence.ended_at });
+  return {
+    source: occurrence.source,
+    kind: occurrence.kind,
+    severity: occurrence.severity,
+    evidenceHealth: occurrence.evidence_health,
+    previousContext: occurrence.end_reason === "authority_scope_changed",
+    timestamps,
+  };
+}
+
+function alertInboxV2RenderedOccurrences(occurrences = [], limit = MAX_RENDERED_OCCURRENCES) {
+  const bounded = Number.isSafeInteger(limit) && limit >= 0 ? limit : MAX_RENDERED_OCCURRENCES;
+  return occurrences
+    .map((occurrence, index) => ({ occurrence, index }))
+    .sort((left, right) => {
+      const byLastSeen = timestampOrderKey(right.occurrence.last_seen_at).localeCompare(timestampOrderKey(left.occurrence.last_seen_at));
+      return byLastSeen || right.index - left.index;
+    })
+    .slice(0, bounded)
+    .map(({ occurrence }) => alertInboxV2OccurrenceView(occurrence));
+}
+
+function alertInboxV2EvidenceView(value) {
+  const total = value?.initialized && Array.isArray(value.occurrences) ? value.occurrences.length : 0;
+  const occurrences = total > 0 ? alertInboxV2RenderedOccurrences(value.occurrences) : [];
+  return {
+    occurrenceCount: total,
+    shownOccurrenceCount: occurrences.length,
+    occurrences,
+  };
+}
+
+function alertInboxV2CoverageView(coverage, retained = false) {
+  if (!coverage) return null;
+  return {
+    state: coverage.state,
+    freshness: coverage.freshness,
+    asOf: coverage.as_of,
+    expectedSources: [...coverage.expected_sources],
+    coveredSources: [...coverage.covered_sources],
+    summary: `${retained ? "Last-valid " : ""}${alertInboxV2Label(coverage.state)} coverage · ${alertInboxV2Label(coverage.freshness)} · ${coverage.covered_sources.length}/${coverage.expected_sources.length} sources`,
+  };
+}
+
+function alertInboxV2View(value = state.alertInboxV2, feedValid = state.alertInboxV2FeedValid) {
+  let accepted = null;
+  if (value) {
+    try {
+      accepted = validateAlertInboxV2(value);
+    } catch {
+      // A caller can ask for a view before lifecycle ingestion. The visible
+      // result still fails closed without echoing validation or payload text.
+    }
+  }
+
+  const persistedInvalid = accepted?.delivery_health?.class === "invalid_persisted_state";
+  if (feedValid === false || (value && !accepted) || persistedInvalid) {
+    const retained = accepted?.initialized === true;
+    const evidence = retained ? alertInboxV2EvidenceView(accepted) : alertInboxV2EvidenceView(null);
+    return {
+      state: "invalid",
+      label: "Invalid",
+      tone: "warn",
+      summary: "The latest shadow measurement is invalid. No delivery is active; retained evidence is last-valid context only.",
+      asOf: retained ? accepted.as_of : null,
+      coverage: retained ? alertInboxV2CoverageView(accepted.coverage, true) : null,
+      ...evidence,
+    };
+  }
+
+  if (!accepted || !accepted.initialized) {
+    const unavailable = accepted?.delivery_health?.class === "state_write_failure";
+    return {
+      state: "uninitialized",
+      label: "Uninitialized",
+      tone: unavailable ? "warn" : "neutral",
+      summary: unavailable
+        ? "Shadow measurement could not initialize its record-only state. No delivery is active."
+        : "Shadow measurement has not initialized yet. No delivery is active.",
+      asOf: null,
+      coverage: null,
+      occurrenceCount: 0,
+      shownOccurrenceCount: 0,
+      occurrences: [],
+    };
+  }
+
+  const evidence = alertInboxV2EvidenceView(accepted);
+  const expectedShadowHealth = accepted.delivery_health.state === "shadow" && accepted.delivery_health.class === "policy_unapproved";
+  if (!expectedShadowHealth) {
+    return {
+      state: "unknown",
+      label: "Unknown",
+      tone: "warn",
+      summary: "Shadow delivery health is outside the expected record-only state. This view cannot assert current advisory state or operator all-clear; no delivery is active.",
+      asOf: accepted.as_of,
+      coverage: alertInboxV2CoverageView(accepted.coverage, true),
+      ...evidence,
+    };
+  }
+
+  const currentState = accepted.current_state;
+  const summaries = {
+    active: "Shadow measurement observed active advisory evidence. No delivery is active; established alert delivery is unchanged.",
+    unknown: "Shadow measurement cannot determine the current advisory state from available coverage. No delivery is active.",
+    clear: "Shadow measurement found no active advisory evidence, but this shadow measurement cannot assert operator all-clear. No delivery is active.",
+  };
+  const labels = { active: "Active measurement", unknown: "Unknown", clear: "Clear measurement" };
+  return {
+    state: currentState,
+    label: labels[currentState],
+    tone: currentState === "clear" ? "neutral" : "warn",
+    summary: summaries[currentState],
+    asOf: accepted.as_of,
+    coverage: alertInboxV2CoverageView(accepted.coverage),
+    ...evidence,
+  };
+}
+
+function alertInboxV2TimestampLabel(value) {
+  if (!value) return "--";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "--";
+  return parsed.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
+function alertInboxV2Label(value) {
+  return String(value || "")
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "--";
+}
+
+function alertInboxV2OccurrenceElement(occurrence) {
+  const row = document.createElement("article");
+  row.className = `shadow-advisory-row shadow-advisory-row--${occurrence.severity}`;
+
+  const head = document.createElement("div");
+  head.className = "shadow-advisory-row__head";
+  const kind = document.createElement("b");
+  kind.textContent = alertInboxV2Label(occurrence.kind);
+  const source = document.createElement("span");
+  source.textContent = alertInboxV2Label(occurrence.source);
+  head.append(kind, source);
+
+  const evidence = document.createElement("div");
+  evidence.className = "shadow-advisory-row__evidence";
+  const severity = document.createElement("span");
+  severity.textContent = `Severity · ${alertInboxV2Label(occurrence.severity)}`;
+  const health = document.createElement("span");
+  health.textContent = `Evidence · ${alertInboxV2Label(occurrence.evidenceHealth)}`;
+  evidence.append(severity, health);
+  row.append(head, evidence);
+
+  if (occurrence.previousContext) {
+    const context = document.createElement("p");
+    context.className = "shadow-advisory-row__context";
+    context.textContent = "Previous account/mode context";
+    row.appendChild(context);
+  }
+
+  const timestamps = document.createElement("div");
+  timestamps.className = "shadow-advisory-row__times";
+  for (const timestamp of occurrence.timestamps) {
+    const item = document.createElement("time");
+    item.dateTime = timestamp.value;
+    item.title = timestamp.value;
+    item.textContent = `${timestamp.label} · ${alertInboxV2TimestampLabel(timestamp.value)}`;
+    timestamps.appendChild(item);
+  }
+  row.appendChild(timestamps);
+  return row;
+}
+
+function renderAlertInboxV2() {
+  const view = alertInboxV2View();
+  const section = $("alertInboxV2Section");
+  if (!section) return view;
+  section.dataset.state = view.state;
+  section.classList.remove("shadow-advisory--warn", "shadow-advisory--neutral");
+  section.classList.add(`shadow-advisory--${view.tone}`);
+  $("alertInboxV2State").textContent = view.label;
+  $("alertInboxV2Summary").textContent = view.summary;
+
+  const coverage = $("alertInboxV2Coverage");
+  const coverageSources = $("alertInboxV2CoverageSources");
+  const asOf = $("alertInboxV2AsOf");
+  const occurrenceCount = $("alertInboxV2OccurrenceCount");
+  coverage.hidden = !view.coverage;
+  coverage.textContent = view.coverage?.summary || "";
+  coverageSources.hidden = !view.coverage;
+  coverageSources.textContent = view.coverage
+    ? (view.coverage.coveredSources.length > 0
+      ? `Observed sources · ${view.coverage.coveredSources.map(alertInboxV2Label).join(" · ")}`
+      : "No sources currently covered")
+    : "";
+  asOf.hidden = !view.asOf;
+  asOf.dateTime = view.asOf || "";
+  asOf.title = view.asOf || "";
+  asOf.textContent = view.asOf ? `Measurement · ${alertInboxV2TimestampLabel(view.asOf)}` : "";
+  occurrenceCount.hidden = view.occurrenceCount === 0;
+  occurrenceCount.textContent = view.occurrenceCount > 0
+    ? `Showing ${view.shownOccurrenceCount} of ${view.occurrenceCount} ${view.shownOccurrenceCount < view.occurrenceCount ? "latest " : ""}public occurrences`
+    : "";
+
+  const list = $("alertInboxV2List");
+  list.replaceChildren(...view.occurrences.map(alertInboxV2OccurrenceElement));
+  const empty = $("alertInboxV2Empty");
+  empty.hidden = view.occurrences.length > 0;
+  empty.textContent = view.state === "clear"
+    ? "No active shadow occurrence evidence in this measurement."
+    : view.state === "uninitialized"
+      ? "No shadow evidence has been measured yet."
+      : "No public shadow occurrence evidence is available.";
+  return view;
+}
+
 export {
   AlertInboxV2ContractError,
   alertInboxV2CanAssertClear,
+  alertInboxV2CoverageView,
+  alertInboxV2Label,
+  alertInboxV2OccurrenceElement,
+  alertInboxV2OccurrenceView,
+  alertInboxV2RenderedOccurrences,
+  alertInboxV2TimestampLabel,
+  alertInboxV2View,
   ingestAlertInboxV2,
   ingestAlertInboxV2Event,
+  renderAlertInboxV2,
   validateAlertInboxV2,
 };

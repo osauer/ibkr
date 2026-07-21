@@ -67,7 +67,10 @@ type Real struct {
 
 const appQuoteSnapshotTimeout = 2500 * time.Millisecond
 
-var ErrInvalidNudgesCutoverReviewResult = errors.New("invalid nudges cutover-review result")
+var (
+	ErrInvalidNudgesCutoverReviewResult = errors.New("invalid nudges cutover-review result")
+	ErrInvalidAlertCandidateSnapshot    = errors.New("invalid alert candidate snapshot")
+)
 
 func (c Real) Status(ctx context.Context) (*rpc.HealthResult, error) {
 	var out rpc.HealthResult
@@ -170,6 +173,24 @@ func (c Real) CanaryWithRegime(ctx context.Context) (*rpc.CanaryResult, *rpc.Reg
 	}
 	monitor := rpc.CompactRegimeMonitor(&regime)
 	return &canaryResult, &monitor, nil
+}
+
+// AlertCandidates is an optional capability rather than part of Client so
+// app adapters compiled against older daemon surfaces continue to work. The
+// live service discovers it explicitly and keeps failures fail-closed.
+func (c Real) AlertCandidates(ctx context.Context) (*rpc.AlertCandidateSnapshot, error) {
+	return alertCandidates(ctx, c.call)
+}
+
+func alertCandidates(ctx context.Context, call func(context.Context, string, any, any) error) (*rpc.AlertCandidateSnapshot, error) {
+	var out rpc.AlertCandidateSnapshot
+	if err := call(ctx, rpc.MethodAlertCandidates, rpc.AlertCandidatesParams{}, &out); err != nil {
+		return nil, err
+	}
+	if err := rpc.ValidateAlertCandidateSnapshot(out); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidAlertCandidateSnapshot, err)
+	}
+	return &out, nil
 }
 
 func (c Real) Rules(ctx context.Context) (*rpc.RulesResult, error) {

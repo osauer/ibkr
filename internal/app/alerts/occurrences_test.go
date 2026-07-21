@@ -26,7 +26,7 @@ func TestOccurrenceObservePersistsSnapshotWhenWakeAlreadyFull(t *testing.T) {
 	}
 	at := time.Date(2026, time.July, 20, 22, 0, 0, 0, time.UTC)
 	candidate := occurrenceCandidate(t, at)
-	snapshot := occurrenceSnapshot(at, candidate)
+	snapshot := occurrenceSnapshot(t, at, candidate)
 	dispatcher := &OccurrenceDispatcher{Store: store, Now: func() time.Time { return at }}
 	dispatcher.signalWake()
 
@@ -112,7 +112,7 @@ func TestOccurrenceDispatchNoDueAndProductionNilEligibilityNeverReachSender(t *t
 		at := time.Date(2026, time.July, 20, 22, 20, 0, 0, time.UTC)
 		candidate := occurrenceCandidate(t, at)
 		candidate.DeliveryPreference = rpc.AlertDeliveryPage
-		if _, err := store.ObserveAlertSnapshot(occurrenceSnapshot(at, candidate)); err != nil {
+		if _, err := store.ObserveAlertSnapshot(occurrenceSnapshot(t, at, candidate)); err != nil {
 			t.Fatal(err)
 		}
 		sender := &recordingOccurrenceSender{}
@@ -493,11 +493,17 @@ func occurrenceCandidate(t *testing.T, at time.Time) rpc.AlertCandidate {
 	return candidate
 }
 
-func occurrenceSnapshot(at time.Time, candidates ...rpc.AlertCandidate) rpc.AlertCandidateSnapshot {
+func occurrenceSnapshot(t *testing.T, at time.Time, candidates ...rpc.AlertCandidate) rpc.AlertCandidateSnapshot {
+	t.Helper()
+	authorityScope, err := rpc.BuildAlertAuthorityScope("OCCURRENCE-TEST", rpc.AccountModePaper)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return rpc.AlertCandidateSnapshot{
-		SchemaVersion: rpc.AlertCandidateSnapshotVersion,
-		AsOf:          at,
-		CurrentState:  rpc.AlertSnapshotActive,
+		SchemaVersion:  rpc.AlertCandidateSnapshotVersion,
+		AsOf:           at,
+		AuthorityScope: authorityScope,
+		CurrentState:   rpc.AlertSnapshotActive,
 		Coverage: rpc.AlertCoverage{
 			State: rpc.AlertCoverageComplete, Freshness: rpc.AlertCoverageCurrent, AsOf: at,
 			ExpectedSources: []rpc.AlertSource{rpc.AlertSourceCanary}, CoveredSources: []rpc.AlertSource{rpc.AlertSourceCanary},

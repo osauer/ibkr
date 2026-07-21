@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"slices"
@@ -331,5 +332,30 @@ func TestCompactRegimeMonitorDropsFullIndicatorObjects(t *testing.T) {
 		if strings.Contains(wire, absent) {
 			t.Fatalf("compact regime monitor should omit %s: %s", absent, wire)
 		}
+	}
+}
+
+func TestCompactRegimeMonitorCarriesAuthorityHealth(t *testing.T) {
+	t.Parallel()
+	lastSuccess := time.Date(2026, 7, 20, 18, 30, 0, 0, time.UTC)
+	age := int64(420)
+	regime := RegimeSnapshotResult{
+		AsOf: lastSuccess,
+		AuthorityHealth: &RegimeAuthorityHealth{
+			Status: RegimeAuthorityStale, Refreshing: true,
+			LastSuccessAt: &lastSuccess, LastSuccessAgeSeconds: &age,
+			FailureCode: RegimeAuthorityFailureRefreshIncomplete,
+		},
+	}
+	got := CompactRegimeMonitor(&regime)
+	if got.AuthorityHealth == nil || got.AuthorityHealth.Status != RegimeAuthorityStale || !got.AuthorityHealth.Refreshing || got.AuthorityHealth.LastSuccessAgeSeconds == nil || *got.AuthorityHealth.LastSuccessAgeSeconds != age {
+		t.Fatalf("compact authority health = %#v", got.AuthorityHealth)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"authority_health"`)) {
+		t.Fatalf("compact JSON dropped authority health: %s", raw)
 	}
 }

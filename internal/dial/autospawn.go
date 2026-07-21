@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -99,6 +100,56 @@ func AutospawnAndConnectContext(ctx context.Context, socketPath string) (*Conn, 
 	return nil, errors.New(msg)
 }
 
+// AutospawnAndConnectContextFromExecutable starts exactly executable and then
+// verifies that the spawned PID owns the daemon lock before returning a
+// connection. It is intentionally stricter than the ordinary autospawn path:
+// callers use it after replacing an installed binary and stopping the prior
+// daemon, so connecting to a concurrently started daemon from an unknown
+// executable would be a false-success cutover.
+func AutospawnAndConnectContextFromExecutable(ctx context.Context, socketPath, executable string) (*Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	executable = strings.TrimSpace(executable)
+	if executable == "" {
+		return nil, errors.New("daemon executable is empty")
+	}
+
+	lockPath := LockPath(socketPath)
+	if pid := LockHolderPID(lockPath); pid > 0 && IsProcessAlive(pid) {
+		return nil, fmt.Errorf("refusing exact-executable daemon start: pid %d already owns %s", pid, lockPath)
+	}
+	if conn, err := Connect(socketPath); err == nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("refusing exact-executable daemon start: %s is already serving without a verified live lock owner", socketPath)
+	} else if !errors.Is(err, ErrSocketMissing) {
+		return nil, err
+	}
+
+	spawnedPID, err := spawnDaemonFromExecutable(executable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start daemon from %s: %w", executable, err)
+	}
+	conn, waitErr := WaitForSocketContext(ctx, socketPath, AutospawnTimeout)
+	if waitErr != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		msg := waitErr.Error()
+		if tail := TailLastLine(DefaultLogPath(), 0); tail != "" {
+			msg = fmt.Sprintf("%s\n  last daemon log: %s", msg, tail)
+		}
+		return nil, errors.New(msg)
+	}
+
+	holderPID := LockHolderPID(lockPath)
+	if holderPID != spawnedPID || !IsProcessAlive(holderPID) {
+		_ = conn.Close()
+		return nil, fmt.Errorf("daemon executable verification failed: spawned pid %d but live lock owner is pid %d", spawnedPID, holderPID)
+	}
+	return conn, nil
+}
+
 // waitForSocketOrPIDDeath polls for two outcomes in parallel: the socket
 // becoming available (return conn, true) or the watched PID dying
 // (return nil, false). On budget exhaustion returns (nil, false) too —
@@ -137,22 +188,31 @@ func spawnDaemon() error {
 	if err != nil {
 		return fmt.Errorf("locate self: %w", err)
 	}
+	_, err = spawnDaemonFromExecutable(bin)
+	return err
+}
+
+func spawnDaemonFromExecutable(bin string) (int, error) {
+	bin = strings.TrimSpace(bin)
+	if bin == "" {
+		return 0, errors.New("daemon executable is empty")
+	}
 	cmd := exec.Command(bin, "daemon")
 	cmd.Stdin = nil
 
 	logPath := DefaultLogPath()
 	logDir := filepath.Dir(logPath)
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
-		return fmt.Errorf("create daemon log dir: %w", err)
+		return 0, fmt.Errorf("create daemon log dir: %w", err)
 	}
 	if err := os.Chmod(logDir, 0o700); err != nil {
-		return fmt.Errorf("secure daemon log dir: %w", err)
+		return 0, fmt.Errorf("secure daemon log dir: %w", err)
 	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err == nil {
 		if err := logFile.Chmod(0o600); err != nil {
 			_ = logFile.Close()
-			return fmt.Errorf("secure daemon log file: %w", err)
+			return 0, fmt.Errorf("secure daemon log file: %w", err)
 		}
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
@@ -160,7 +220,7 @@ func spawnDaemon() error {
 	} else {
 		devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 		if err != nil {
-			return fmt.Errorf("open /dev/null for daemon stdio: %w", err)
+			return 0, fmt.Errorf("open /dev/null for daemon stdio: %w", err)
 		}
 		cmd.Stdout = devnull
 		cmd.Stderr = devnull
@@ -169,8 +229,9 @@ func spawnDaemon() error {
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return err
+		return 0, err
 	}
+	pid := cmd.Process.Pid
 	go func() { _ = cmd.Process.Release() }()
-	return nil
+	return pid, nil
 }

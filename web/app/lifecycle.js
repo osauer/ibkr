@@ -1,5 +1,5 @@
 import { applyAttention, applyGovernanceCutoverOverlay, handleAttentionContextChange, refreshAlerts, refreshGovernance, refreshPushState, scheduleGovernanceRefresh } from "./alerts.js";
-import { ingestAlertInboxV2, ingestAlertInboxV2Event } from "./alert-inbox-v2.js";
+import { ingestAlertInboxV2, ingestAlertInboxV2Event, renderAlertInboxV2 } from "./alert-inbox-v2.js";
 import { renderAll } from "./app.js";
 import { tryDeviceLogin } from "./auth.js";
 import { refreshOpenOrders } from "./orders.js";
@@ -112,6 +112,7 @@ function connectEvents() {
     es.addEventListener(type, (event) => {
       if (type === "alert_inbox_v2") {
         ingestAlertInboxV2Event(event.data);
+        renderAlertInboxV2();
         state.lastEventAt = Date.now();
         setConnection("Connected", true);
         return;

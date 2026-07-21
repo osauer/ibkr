@@ -57,16 +57,17 @@ type CanaryAlertFlag struct {
 }
 
 type RegimeMonitorResult struct {
-	AsOf           time.Time                `json:"as_of"`
-	Fingerprint    Fingerprint              `json:"fingerprint"`
-	Lifecycle      LifecycleState           `json:"lifecycle,omitzero"`
-	Summary        RegimeSummary            `json:"summary"`
-	Posture        RegimePosture            `json:"posture,omitzero"`
-	Composite      RegimeComposite          `json:"composite"`
-	WarningDetails []RegimeWarning          `json:"warning_details,omitempty"`
-	DataQuality    []DataQualityHealth      `json:"data_quality,omitempty"`
-	SourceHealth   []CompactSourceHealth    `json:"source_health,omitempty"`
-	Indicators     []RegimeMonitorIndicator `json:"indicators"`
+	AsOf            time.Time                `json:"as_of"`
+	AuthorityHealth *RegimeAuthorityHealth   `json:"authority_health,omitempty"`
+	Fingerprint     Fingerprint              `json:"fingerprint"`
+	Lifecycle       LifecycleState           `json:"lifecycle,omitzero"`
+	Summary         RegimeSummary            `json:"summary"`
+	Posture         RegimePosture            `json:"posture,omitzero"`
+	Composite       RegimeComposite          `json:"composite"`
+	WarningDetails  []RegimeWarning          `json:"warning_details,omitempty"`
+	DataQuality     []DataQualityHealth      `json:"data_quality,omitempty"`
+	SourceHealth    []CompactSourceHealth    `json:"source_health,omitempty"`
+	Indicators      []RegimeMonitorIndicator `json:"indicators"`
 }
 
 type CompactSourceHealth struct {
@@ -193,15 +194,16 @@ func CompactRegimeMonitor(r *RegimeSnapshotResult) RegimeMonitorResult {
 		posture = BuildRegimePosture(r)
 	}
 	return RegimeMonitorResult{
-		AsOf:           r.AsOf,
-		Fingerprint:    r.Fingerprint,
-		Lifecycle:      r.Lifecycle,
-		Summary:        r.Summary,
-		Posture:        posture,
-		Composite:      r.Composite,
-		WarningDetails: r.WarningDetails,
-		DataQuality:    r.DataQuality,
-		SourceHealth:   compactSourceHealth(r.SourceHealth),
+		AsOf:            r.AsOf,
+		AuthorityHealth: r.AuthorityHealth,
+		Fingerprint:     r.Fingerprint,
+		Lifecycle:       r.Lifecycle,
+		Summary:         r.Summary,
+		Posture:         posture,
+		Composite:       r.Composite,
+		WarningDetails:  r.WarningDetails,
+		DataQuality:     r.DataQuality,
+		SourceHealth:    compactSourceHealth(r.SourceHealth),
 		Indicators: []RegimeMonitorIndicator{
 			{Name: "VIX/VIX3M", Status: r.VIXTermStructure.Status, Band: r.VIXTermStructure.Band, AsOf: r.VIXTermStructure.AsOf, Reading: readingJoin(formatPtr("ratio", r.VIXTermStructure.Ratio), formatPtr("VIX", r.VIXTermStructure.VIX), formatPtr("VIX3M", r.VIXTermStructure.VIX3M)), Eligibility: r.VIXTermStructure.Eligibility, FreshnessClass: freshnessClass(r.VIXTermStructure.Freshness)},
 			{Name: "VVIX", Status: r.VolOfVol.Status, Band: r.VolOfVol.Band, AsOf: regimeAsOf(r.VolOfVol.AsOf, r.VolOfVol.AsOfDate), Reading: readingJoin(formatPtr("last", r.VolOfVol.Last), formatPtr("20d", r.VolOfVol.Change20D)), Eligibility: r.VolOfVol.Eligibility, FreshnessClass: freshnessClass(r.VolOfVol.Freshness)},

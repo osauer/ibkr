@@ -73,6 +73,112 @@ func TestShouldAlertModes(t *testing.T) {
 	}
 }
 
+func TestShouldAlertUsesEstablishedProjectionAtomically(t *testing.T) {
+	t.Parallel()
+
+	advisoryOnly := rpc.CanaryResult{
+		Action: "confirm_inputs", Severity: risk.SeverityWatch,
+		EstablishedAlertProjection: testEstablishedAlertProjection("a", "stand_down", risk.SeverityObserve, true),
+	}
+	if ShouldAlert(state.AlertModeActOnly, advisoryOnly) || ShouldAlert(state.AlertModeWatchAndAct, advisoryOnly) {
+		t.Fatal("advisory-only health escaped the established projection")
+	}
+
+	establishedAct := rpc.CanaryResult{
+		Action: "confirm_inputs", Severity: risk.SeverityWatch,
+		EstablishedAlertProjection: testEstablishedAlertProjection("b", "defend", risk.SeverityAct, true),
+	}
+	if !ShouldAlert(state.AlertModeActOnly, establishedAct) || !ShouldAlert(state.AlertModeWatchAndAct, establishedAct) {
+		t.Fatal("established act was suppressed by the richer advisory result")
+	}
+
+	malformed := establishedAct
+	bad := *malformed.EstablishedAlertProjection
+	bad.SchemaVersion = "unknown"
+	malformed.EstablishedAlertProjection = &bad
+	if ShouldAlert(state.AlertModeWatchAndAct, malformed) {
+		t.Fatal("malformed present established projection did not fail closed")
+	}
+}
+
+func TestObserveAdvisoryOnlyProjectionCreatesNoLegacyAttentionOrPush(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{state.AlertModeActOnly, state.AlertModeWatchAndAct} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			store := governanceStore(t, mode)
+			if err := store.AddPushSubscription(state.PushSubscription{
+				ID: "sub-1", DeviceID: "device-1", Endpoint: "https://push.example/sub", P256DH: "p256dh", Auth: "auth",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			sender := &recordingSender{}
+			monitor := Monitor{Store: store, Sender: sender}
+			advisory := rpc.CanaryResult{
+				Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:" + strings.Repeat("f", 64)},
+				Action:      "confirm_inputs", Severity: risk.SeverityWatch, MarketConfirmation: "blocked",
+				EstablishedAlertProjection: testEstablishedAlertProjection("a", "stand_down", risk.SeverityObserve, true),
+			}
+			record, attempts := monitor.Observe(t.Context(), advisory)
+			if record != nil || len(attempts) != 0 || len(sender.payloads) != 0 || len(store.AlertHistory(10)) != 0 {
+				t.Fatalf("mode=%s record=%+v attempts=%d sends=%d history=%+v", mode, record, len(attempts), len(sender.payloads), store.AlertHistory(10))
+			}
+			attention := store.Attention()
+			if attention.HighWaterSeq != 0 || attention.UnreadCount != 0 || len(attention.UnreadRefs) != 0 {
+				t.Fatalf("mode=%s advisory changed legacy attention: %+v", mode, attention)
+			}
+		})
+	}
+}
+
+func TestObserveEstablishedProjectionPreservesActAndDedupeIdentity(t *testing.T) {
+	t.Parallel()
+	store := governanceStore(t, state.AlertModeActOnly)
+	if err := store.AddPushSubscription(state.PushSubscription{
+		ID: "sub-1", DeviceID: "device-1", Endpoint: "https://push.example/sub", P256DH: "p256dh", Auth: "auth",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sender := &recordingSender{}
+	monitor := Monitor{Store: store, Sender: sender}
+	projection := testEstablishedAlertProjection("b", "defend", risk.SeverityAct, true)
+
+	first := rpc.CanaryResult{
+		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:" + strings.Repeat("c", 64)},
+		Action:      "confirm_inputs", Severity: risk.SeverityWatch, MarketConfirmation: "blocked",
+		EstablishedAlertProjection: projection,
+	}
+	record, attempts := monitor.Observe(t.Context(), first)
+	if record == nil || record.Action != "defend" || record.Severity != string(risk.SeverityAct) || len(attempts) != 1 || len(sender.payloads) != 1 {
+		t.Fatalf("established act record=%+v attempts=%d sends=%d", record, len(attempts), len(sender.payloads))
+	}
+
+	second := first
+	second.Fingerprint.Key = "sha256:" + strings.Repeat("d", 64)
+	second.Action = "watch"
+	second.Severity = risk.SeverityUrgent
+	record, attempts = monitor.Observe(t.Context(), second)
+	if record != nil || len(attempts) != 0 || len(sender.payloads) != 1 || len(store.AlertHistory(10)) != 1 {
+		t.Fatalf("advisory churn bypassed established dedupe: record=%+v attempts=%d sends=%d history=%+v", record, len(attempts), len(sender.payloads), store.AlertHistory(10))
+	}
+}
+
+func TestObserveMalformedEstablishedProjectionFailsClosed(t *testing.T) {
+	t.Parallel()
+	store := governanceStore(t, state.AlertModeWatchAndAct)
+	sender := &recordingSender{}
+	projection := testEstablishedAlertProjection("e", "watch", risk.SeverityWatch, true)
+	projection.OccurrenceEligible = false
+	canary := rpc.CanaryResult{
+		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:" + strings.Repeat("f", 64)},
+		Action:      "defend", Severity: risk.SeverityAct, EstablishedAlertProjection: projection,
+	}
+	record, attempts := (Monitor{Store: store, Sender: sender}).Observe(t.Context(), canary)
+	if record != nil || len(attempts) != 0 || len(sender.payloads) != 0 || len(store.AlertHistory(10)) != 0 || store.Attention().UnreadCount != 0 {
+		t.Fatalf("malformed projection created legacy state: record=%+v attempts=%d sends=%d", record, len(attempts), len(sender.payloads))
+	}
+}
+
 func TestWatchAndActIncludesEveryActOnlyCanary(t *testing.T) {
 	t.Parallel()
 	cases := []rpc.CanaryResult{
@@ -1104,6 +1210,25 @@ func governanceStore(t *testing.T, mode string) *state.Store {
 	}
 	ensureGovernanceKeys(t, store)
 	return store
+}
+
+func testEstablishedAlertProjection(hexDigit, action string, severity risk.SignalSeverity, relevant bool) *rpc.EstablishedAlertProjection {
+	actEligible := severity == risk.SeverityAct || severity == risk.SeverityUrgent ||
+		action == "defend" || action == "rebalance" || action == "confirm_inputs"
+	occurrenceEligible := relevant && (severity == risk.SeverityWatch || severity == risk.SeverityAct || severity == risk.SeverityUrgent || actEligible)
+	return &rpc.EstablishedAlertProjection{
+		SchemaVersion: rpc.EstablishedAlertProjectionSchemaVersion,
+		CanonicalFingerprint: rpc.Fingerprint{
+			Version: rpc.CanaryFingerprintVersion,
+			Key:     "sha256:" + strings.Repeat(hexDigit, 64),
+		},
+		OccurrenceEligible: occurrenceEligible,
+		ActOnlyEligible:    occurrenceEligible && actEligible,
+		Action:             action,
+		MarketConfirmation: "none",
+		Severity:           severity,
+		PortfolioRelevant:  relevant,
+	}
 }
 
 func ensureGovernanceKeys(t *testing.T, store *state.Store) {

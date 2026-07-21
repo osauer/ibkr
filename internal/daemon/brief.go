@@ -488,7 +488,7 @@ func (s *Server) composeBrief(ctx context.Context) (*rpc.BriefResult, *rpc.Rules
 
 	acct, acctErr := s.buildAccountSummary(ctx, false)
 	pos, posErr := s.handlePositionsList(ctx, &rpc.Request{})
-	regime, regimeErr := s.briefRegimeSnapshot()
+	regime, regimeErr := s.briefRegimeSnapshotContext(ctx)
 	breadth, breadthErr := s.buildBreadthSPX(&rpc.Request{}, false)
 	gamma := s.briefGammaSnapshot()
 	cal, calErr := s.handleMarketCalendar(&rpc.Request{Params: briefJSON(rpc.MarketCalendarParams{Market: "us", At: now, Days: 1})})
@@ -578,16 +578,14 @@ func (s *Server) briefGammaSnapshot() *rpc.GammaZeroSPXResult {
 }
 
 func (s *Server) briefRegimeSnapshot() (*rpc.RegimeSnapshotResult, error) {
+	return s.briefRegimeSnapshotContext(s.regimeConsumerContext())
+}
+
+func (s *Server) briefRegimeSnapshotContext(ctx context.Context) (*rpc.RegimeSnapshotResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("regime snapshot unavailable")
 	}
-	s.lastRegimeSnapshotMu.Lock()
-	defer s.lastRegimeSnapshotMu.Unlock()
-	if s.lastRegimeSnapshot == nil {
-		return nil, fmt.Errorf("no daemon regime snapshot has completed yet")
-	}
-	copyResult := *s.lastRegimeSnapshot
-	return &copyResult, nil
+	return s.currentDecisionReadyRegimeSnapshot(ctx)
 }
 
 func (s *Server) briefPolicyResult(acct *rpc.AccountResult, acctErr error, now time.Time) *rpc.RiskPolicyResult {
@@ -743,6 +741,20 @@ func composeBriefMarket(now time.Time, acct *rpc.AccountResult, pos *rpc.Positio
 		out.Regime.Verdict = regime.Composite.Verdict
 		if len(regime.WarningDetails) > 0 || out.Regime.Stage == "" || out.Regime.Verdict == "" {
 			out.Regime.BriefRowState = briefDegraded("regime returned partial or unclassified evidence")
+		}
+		if health := regime.AuthorityHealth; health != nil {
+			switch health.Status {
+			case rpc.RegimeAuthorityUnavailable:
+				out.Regime.BriefRowState = briefUnavailable("daemon Regime last-good authority is unavailable")
+			case rpc.RegimeAuthorityStale:
+				out.Regime.BriefRowState = briefDegraded("daemon Regime verdict is retained stale last-good context")
+			case rpc.RegimeAuthorityFresh:
+				if health.FailureCode != rpc.RegimeAuthorityFailureNone {
+					out.Regime.BriefRowState = briefDegraded("daemon Regime last-good is fresh but its latest authority operation failed")
+				}
+			default:
+				out.Regime.BriefRowState = briefUnavailable("daemon Regime authority health is invalid")
+			}
 		}
 	}
 	if breadthErr != nil || breadth == nil {

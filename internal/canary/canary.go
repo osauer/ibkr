@@ -31,6 +31,18 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	if now.IsZero() {
 		now = time.Now()
 	}
+	res := computeCanary(in, now, canarySourceIssues(in, now), false)
+	established := computeCanary(in, now, canaryEstablishedSourceIssues(in, now), true)
+	projection := canaryEstablishedAlertProjection(established)
+	res.EstablishedAlertProjection = &projection
+	return res
+}
+
+// computeCanary owns the one Canary decision implementation. The established
+// mode freezes only the source-interpretation and source-health behavior that
+// existed at ad5b77b; account, positions, market clusters, Regime data quality,
+// and every underlying risk calculation continue through the same producer.
+func computeCanary(in CanaryInput, now time.Time, sourceIssues []canarySourceIssue, established bool) CanaryResult {
 	accountFingerprint := rpc.BuildAccountFingerprint(&in.Account)
 	positionsFingerprint := rpc.BuildPositionsFingerprint(&in.Positions, in.Account.NetLiquidation)
 	regimeFingerprint := in.Regime.Fingerprint
@@ -59,8 +71,6 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 		MarketIndicators:   canaryMarketIndicators(in.Regime, now),
 		NotExecution:       "Read-only canary snapshot; no orders are placed by ibkr.",
 	}
-	sourceIssues := canarySourceIssues(in, now)
-
 	rows := []CanaryRow{
 		canaryMarginRow(res.Portfolio),
 		canaryPnLShockRow(res.Portfolio),
@@ -75,7 +85,11 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	}
 	res.Signals = canarySignals(res.Portfolio, in.Positions, res.Market, in.Regime)
 	res.Signals = canaryApplySourceBlocks(res.Signals, sourceIssues)
-	res.Signals = append(res.Signals, canarySourceDataQualitySignals(sourceIssues)...)
+	if established {
+		res.Signals = append(res.Signals, canaryEstablishedSourceDataQualitySignals(sourceIssues)...)
+	} else {
+		res.Signals = append(res.Signals, canarySourceDataQualitySignals(sourceIssues)...)
+	}
 	res.MarketConfirmation = canaryMarketConfirmation(res.Market)
 	res.PortfolioFit = canaryPortfolioFit(res.Portfolio, res.Signals)
 	res.PortfolioAlertRelevant = new(canaryPortfolioAlertRelevant(&res))
@@ -89,10 +103,34 @@ func ComputeCanary(in CanaryInput) CanaryResult {
 	overall := canaryOverallRow(res.Direction, res.Severity, res.Summary, res.Market, res.Portfolio)
 	res.Rows = append([]CanaryRow{overall}, rows...)
 	res.Warnings = canaryWarnings(res.Market, in.Regime, now)
-	res.Warnings = append(res.Warnings, canaryMarketEventWarnings(sourceIssues)...)
-	res.SourceHealth = canarySourceHealth(in, now, accountFingerprint, positionsFingerprint, regimeFingerprint, marketEventsFingerprint, res.InputHealth, res.Market)
+	if established {
+		res.SourceHealth = canaryEstablishedSourceHealth(in, now, accountFingerprint, positionsFingerprint, regimeFingerprint, marketEventsFingerprint, res.InputHealth, res.Market)
+	} else {
+		res.Warnings = append(res.Warnings, canaryMarketEventWarnings(sourceIssues)...)
+		res.SourceHealth = canarySourceHealth(in, now, accountFingerprint, positionsFingerprint, regimeFingerprint, marketEventsFingerprint, res.InputHealth, res.Market)
+	}
 	res.Fingerprint = rpc.BuildCanaryFingerprint(&res)
 	return res
+}
+
+func canaryEstablishedAlertProjection(result CanaryResult) rpc.EstablishedAlertProjection {
+	portfolioRelevant := result.PortfolioAlertRelevant != nil && *result.PortfolioAlertRelevant
+	actionEligible := severityRankAtLeast(result.Severity, risk.SeverityAct) ||
+		result.Action == canaryActionDefend ||
+		result.Action == canaryActionRebalance ||
+		result.Action == canaryActionConfirmInputs
+	occurrenceEligible := portfolioRelevant &&
+		(severityRankAtLeast(result.Severity, risk.SeverityWatch) || actionEligible)
+	return rpc.EstablishedAlertProjection{
+		SchemaVersion:        rpc.EstablishedAlertProjectionSchemaVersion,
+		CanonicalFingerprint: result.Fingerprint,
+		OccurrenceEligible:   occurrenceEligible,
+		ActOnlyEligible:      occurrenceEligible && actionEligible,
+		Action:               result.Action,
+		MarketConfirmation:   result.MarketConfirmation,
+		Severity:             result.Severity,
+		PortfolioRelevant:    portfolioRelevant,
+	}
 }
 
 func summarizeCanaryPortfolio(acct rpc.AccountResult, pos rpc.PositionsResult, marketEvents rpc.MarketEventsResult, now time.Time) CanaryPortfolioSummary {
@@ -1896,8 +1934,51 @@ func canarySourceIssues(in CanaryInput, now time.Time) []canarySourceIssue {
 	case canarySourceStale(in.Positions.AsOf, now):
 		issues = append(issues, canarySourceIssue{Source: "positions", Status: rpc.RegimeStatusStale, Reason: "positions snapshot stale"})
 	}
+	if issue, ok := canaryRegimeAuthorityIssue(in.Regime); ok {
+		issues = append(issues, issue)
+	}
 	issues = append(issues, canaryMarketEventSourceIssues(in.Positions, in.MarketEvents, now)...)
 	return issues
+}
+
+// canaryEstablishedSourceIssues is the exact ad5b77b source-decision
+// boundary. In particular, a missing account timestamp, Regime authority
+// health, and MarketEvents required-source health were not delivery inputs.
+// Keep this frozen unless the operator explicitly approves a new established
+// Canary paging policy.
+func canaryEstablishedSourceIssues(in CanaryInput, now time.Time) []canarySourceIssue {
+	issues := []canarySourceIssue{}
+	if canarySourceStale(in.Account.AsOf, now) {
+		issues = append(issues, canarySourceIssue{Source: "account", Status: rpc.RegimeStatusStale, Reason: "account snapshot stale"})
+	}
+	switch {
+	case in.Positions.AsOf.IsZero() && in.Account.NetLiquidation > 0:
+		issues = append(issues, canarySourceIssue{Source: "positions", Status: rpc.RegimeStatusUnavailable, Reason: "positions snapshot never fetched"})
+	case canarySourceStale(in.Positions.AsOf, now):
+		issues = append(issues, canarySourceIssue{Source: "positions", Status: rpc.RegimeStatusStale, Reason: "positions snapshot stale"})
+	}
+	return issues
+}
+
+func canaryRegimeAuthorityIssue(regime rpc.RegimeSnapshotResult) (canarySourceIssue, bool) {
+	if regime.AuthorityHealth == nil {
+		return canarySourceIssue{}, false
+	}
+	health := regime.AuthorityHealth
+	reason := "regime last-good authority " + string(health.Status)
+	if health.FailureCode != rpc.RegimeAuthorityFailureNone {
+		reason += " (" + string(health.FailureCode) + ")"
+	}
+	switch health.Status {
+	case rpc.RegimeAuthorityFresh:
+		return canarySourceIssue{}, false
+	case rpc.RegimeAuthorityStale:
+		return canarySourceIssue{Source: "regime", Status: rpc.RegimeStatusStale, Reason: reason}, true
+	case rpc.RegimeAuthorityUnavailable:
+		return canarySourceIssue{Source: "regime", Status: rpc.RegimeStatusUnavailable, Reason: reason}, true
+	default:
+		return canarySourceIssue{Source: "regime", Status: rpc.RegimeStatusUnavailable, Reason: "regime authority status invalid"}, true
+	}
 }
 
 func canaryMarketEventSourceIssues(pos rpc.PositionsResult, events rpc.MarketEventsResult, now time.Time) []canarySourceIssue {
@@ -2191,6 +2272,30 @@ func canarySourceDataQualitySignals(issues []canarySourceIssue) []risk.Signal {
 	}}
 }
 
+// canaryEstablishedSourceDataQualitySignals preserves the exact classified
+// signal fields hashed by the ad5b77b canary-fp-v1 implementation.
+func canaryEstablishedSourceDataQualitySignals(issues []canarySourceIssue) []risk.Signal {
+	if len(issues) == 0 {
+		return nil
+	}
+	blockedBy := []string{}
+	for _, issue := range issues {
+		blockedBy = appendUniqueString(blockedBy, issue.Source)
+	}
+	observed := float64(len(blockedBy))
+	return []risk.Signal{{
+		ID:               risk.SignalRiskDataDegraded,
+		Direction:        risk.DirectionDataQuality,
+		Severity:         risk.SeverityWatch,
+		Metric:           "stale_sources",
+		Observed:         &observed,
+		Evidence:         "stale sources: " + strings.Join(blockedBy, ","),
+		Confidence:       "medium-low",
+		ConfidenceImpact: "requires fresh account/position source before acting on dependent signals",
+		BlockedBy:        blockedBy,
+	}}
+}
+
 func signalSeverityRank(s risk.SignalSeverity) int {
 	switch s {
 	case risk.SeverityUrgent:
@@ -2344,11 +2449,77 @@ func canaryRegimeWarningCluster(w rpc.RegimeWarning) string {
 	}
 }
 
+// canaryEstablishedSourceHealth preserves the exact ad5b77b source-health
+// projection that participates in canary-fp-v1. New authority and
+// required-source interpretations stay on the main Canary result only.
+func canaryEstablishedSourceHealth(in CanaryInput, now time.Time, accountFP, positionsFP, regimeFP, marketEventsFP rpc.Fingerprint, inputHealth string, m CanaryMarketSummary) []rpc.SourceHealth {
+	out := []rpc.SourceHealth{
+		canaryTimedSourceHealth("account", in.Account.AsOf, now, accountFP, canaryAccountSourceStatus(in.Account, now), canaryAccountSourceConfidence(in.Account)),
+		canaryTimedSourceHealth("positions", in.Positions.AsOf, now, positionsFP, canaryPositionsSourceStatus(in.Positions, now), canaryPositionsSourceConfidence(in.Positions)),
+		canaryEstablishedRegimeSourceHealth(in.Regime.AsOf, now, regimeFP, canaryInputHealthConfidence(inputHealth), m),
+	}
+	if canaryHasMarketEventsInput(in.MarketEvents) {
+		out = append(out, canaryEstablishedMarketEventsSourceHealth(in.MarketEvents, now, marketEventsFP))
+	}
+	return out
+}
+
+func canaryEstablishedRegimeSourceHealth(asOf, now time.Time, fp rpc.Fingerprint, dataConfidence string, m CanaryMarketSummary) rpc.SourceHealth {
+	status := rpc.RegimeStatusOK
+	notes := []string{}
+	if len(m.StaleClusters) > 0 {
+		notes = append(notes, "stale clusters: "+strings.Join(m.StaleClusters, ","))
+	}
+	if len(m.DegradedClusters) > 0 {
+		notes = append(notes, "degraded clusters: "+strings.Join(m.DegradedClusters, ","))
+	}
+	if len(m.PartialClusters) > 0 || len(m.AmbiguousClusters) > 0 {
+		notes = append(notes, canaryAmbiguityEvidence(m))
+	}
+	switch {
+	case len(m.PartialClusters) > 0 || len(m.AmbiguousClusters) > 0:
+		status = "partial"
+	case len(m.DegradedClusters) > 0:
+		status = "degraded"
+	case len(m.StaleClusters) > 0:
+		status = rpc.RegimeStatusStale
+	}
+	health := canaryTimedSourceHealth("regime", asOf, now, fp, status, dataConfidence)
+	health.Notes = notes
+	return health
+}
+
+func canaryEstablishedMarketEventsSourceHealth(events rpc.MarketEventsResult, now time.Time, fp rpc.Fingerprint) rpc.SourceHealth {
+	status := rpc.RegimeStatusOK
+	confidence := "medium"
+	notes := []string{}
+	if len(events.Flags) > 0 {
+		notes = append(notes, fmt.Sprintf("%d active/recent market-event flags", len(events.Flags)))
+	}
+	if len(events.WarningDetails) > 0 {
+		status = "degraded"
+		confidence = "medium-low"
+		notes = append(notes, "one or more market-event sources are unavailable")
+	}
+	for _, health := range events.SourceHealth {
+		switch health.Status {
+		case rpc.MarketEventStatusUnknown, rpc.MarketEventStatusStale, rpc.MarketEventStatusDegraded, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
+			if status == rpc.RegimeStatusOK {
+				status = "degraded"
+				confidence = "medium-low"
+			}
+		}
+	}
+	health := canaryTimedSourceHealth("market_events", events.AsOf, now, fp, status, confidence)
+	health.Notes = notes
+	return health
+}
+
 func canarySourceHealth(in CanaryInput, now time.Time, accountFP, positionsFP, regimeFP, marketEventsFP rpc.Fingerprint, inputHealth string, m CanaryMarketSummary) []rpc.SourceHealth {
 	out := []rpc.SourceHealth{
 		canaryTimedSourceHealth("account", in.Account.AsOf, now, accountFP, canaryAccountSourceStatus(in.Account, now), canaryAccountSourceConfidence(in.Account)),
 		canaryTimedSourceHealth("positions", in.Positions.AsOf, now, positionsFP, canaryPositionsSourceStatus(in.Positions, now), canaryPositionsSourceConfidence(in.Positions)),
-		canaryRegimeSourceHealth(in.Regime.AsOf, now, regimeFP, canaryInputHealthConfidence(inputHealth), m),
+		canaryRegimeSourceHealth(in.Regime, now, regimeFP, canaryInputHealthConfidence(inputHealth), m),
 	}
 	if canaryHasMarketEventsInput(in.MarketEvents) || len(canaryMarketEventSymbols(in.Positions)) > 0 {
 		out = append(out, canaryMarketEventsSourceHealth(in.Positions, in.MarketEvents, now, marketEventsFP))
@@ -2419,7 +2590,7 @@ func canaryTimedSourceHealth(source string, asOf, now time.Time, fp rpc.Fingerpr
 	}
 }
 
-func canaryRegimeSourceHealth(asOf, now time.Time, fp rpc.Fingerprint, dataConfidence string, m CanaryMarketSummary) rpc.SourceHealth {
+func canaryRegimeSourceHealth(regime rpc.RegimeSnapshotResult, now time.Time, fp rpc.Fingerprint, dataConfidence string, m CanaryMarketSummary) rpc.SourceHealth {
 	status := rpc.RegimeStatusOK
 	notes := []string{}
 	if len(m.StaleClusters) > 0 {
@@ -2439,7 +2610,13 @@ func canaryRegimeSourceHealth(asOf, now time.Time, fp rpc.Fingerprint, dataConfi
 	case len(m.StaleClusters) > 0:
 		status = rpc.RegimeStatusStale
 	}
-	health := canaryTimedSourceHealth("regime", asOf, now, fp, status, dataConfidence)
+	if issue, ok := canaryRegimeAuthorityIssue(regime); ok {
+		if canaryMarketEventHealthRank(issue.Status) > canaryMarketEventHealthRank(status) {
+			status = issue.Status
+		}
+		notes = append(notes, issue.Reason)
+	}
+	health := canaryTimedSourceHealth("regime", regime.AsOf, now, fp, status, dataConfidence)
 	health.Notes = notes
 	return health
 }

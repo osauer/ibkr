@@ -1151,6 +1151,20 @@ func TestClassifyError(t *testing.T) {
 	}
 }
 
+func TestClassifyErrorPrefersRegimeUnavailableOverWrappedCause(t *testing.T) {
+	t.Parallel()
+	for _, cause := range []error{ibkrlib.ErrIBKRUnavailable, context.DeadlineExceeded, errRegimeSnapshotRefreshIncomplete} {
+		err := &regimeSnapshotCacheUnavailableError{cause: cause}
+		code, message := classifyError(err)
+		if code != rpc.CodeRegimeUnavailable {
+			t.Fatalf("cause %v: code=%q, want %q", cause, code, rpc.CodeRegimeUnavailable)
+		}
+		if message != "regime snapshot last-good is unavailable" {
+			t.Fatalf("cause %v: leaked/changed message %q", cause, message)
+		}
+	}
+}
+
 func assertGatewayUnavailable(t *testing.T, err error) {
 	t.Helper()
 	if err == nil {

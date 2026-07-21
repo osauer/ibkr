@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,8 @@ import (
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
+const regimeProjectionConsumerRepairTimeout = 2 * time.Second
+
 func (s *Server) statusDataQuality() []rpc.DataQualityHealth {
 	out := []rpc.DataQualityHealth{}
 	if s.zeroGamma != nil {
@@ -16,17 +19,99 @@ func (s *Server) statusDataQuality() []rpc.DataQualityHealth {
 			out = append(out, q)
 		}
 	}
-	s.lastRegimeQualityMu.Lock()
-	out = append(out, s.lastRegimeQuality...)
-	s.lastRegimeQualityMu.Unlock()
+	if s.regimeSnapshots != nil {
+		if snapshot, err := s.currentDecisionReadyRegimeSnapshot(s.regimeConsumerContext()); err == nil {
+			out = append(out, regimeStatusQuality(snapshot)...)
+		} else {
+			pending, _ := s.regimeSnapshots.projectionFailure()
+			quality := rpc.DataQualityHealth{
+				Surface:         "regime",
+				Status:          "unavailable",
+				Summary:         "unavailable: no completed regime snapshot",
+				PartialClusters: []string{"authority"},
+			}
+			if pending {
+				quality.Status = "partial"
+				quality.Summary = "partial: snapshot projection repair pending"
+				quality.PartialClusters = []string{"projection"}
+			}
+			// The pending snapshot itself is not exposed as decision evidence,
+			// but its observation timestamp still tells the operator which
+			// publication is awaiting repair.
+			if view, readErr := s.regimeSnapshots.current(); readErr == nil && view.Snapshot != nil {
+				quality.AsOf = view.Snapshot.AsOf
+			}
+			out = append(out, quality)
+		}
+	}
 	return out
 }
 
-func (s *Server) updateRegimeStatusQuality(r *rpc.RegimeSnapshotResult) {
-	q := regimeStatusQuality(r)
-	s.lastRegimeQualityMu.Lock()
-	s.lastRegimeQuality = q
-	s.lastRegimeQualityMu.Unlock()
+func (s *Server) regimeConsumerContext() context.Context {
+	if s == nil {
+		return context.Background()
+	}
+	s.mu.Lock()
+	ctx := s.serverCtx
+	s.mu.Unlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+// currentDecisionReadyRegimeSnapshot is the non-triggering read boundary for
+// daemon consumers whose output can affect a risk decision. A successful
+// snapshot CAS can briefly be ahead of its streak, rule-stage, or decision
+// journal projection. Such a revision is repaired under a small caller- or
+// daemon-bounded context before it is returned; when repair cannot complete,
+// callers must withhold the snapshot. This helper calls current, never serve,
+// so a brief, canary journal tick, or status poll cannot start market-data work.
+func (s *Server) currentDecisionReadyRegimeSnapshot(ctx context.Context) (*rpc.RegimeSnapshotResult, error) {
+	if s == nil || s.regimeSnapshots == nil {
+		return nil, fmt.Errorf("no daemon regime snapshot has completed yet")
+	}
+	cache := s.regimeSnapshots
+	view, err := cache.current()
+	if err != nil {
+		return nil, err
+	}
+	if view.Snapshot == nil {
+		return nil, fmt.Errorf("no daemon regime snapshot has completed yet")
+	}
+
+	pending, pendingRevision := cache.projectionFailure()
+	if !pending || view.Revision < pendingRevision {
+		// If a newer pending revision landed after current(), this detached
+		// view is still the fully projected prior last-good and remains safe.
+		return view.Snapshot, nil
+	}
+	if pendingRevision <= 0 || view.Revision != pendingRevision {
+		return nil, fmt.Errorf("regime snapshot projection identity is inconsistent")
+	}
+
+	parent := ctx
+	if parent == nil {
+		parent = s.regimeConsumerContext()
+	}
+	repairCtx, cancel := context.WithTimeout(parent, regimeProjectionConsumerRepairTimeout)
+	defer cancel()
+	if err := s.repairRegimeSnapshotProjections(repairCtx); err != nil {
+		return nil, err
+	}
+
+	view, err = cache.current()
+	if err != nil {
+		return nil, err
+	}
+	if view.Snapshot == nil {
+		return nil, fmt.Errorf("no daemon regime snapshot has completed yet")
+	}
+	pending, pendingRevision = cache.projectionFailure()
+	if pending && view.Revision >= pendingRevision {
+		return nil, fmt.Errorf("regime snapshot projection revision %d remains pending", pendingRevision)
+	}
+	return view.Snapshot, nil
 }
 
 func statusDataFarms(farms []ibkrlib.DataFarmStatus) []rpc.DataFarmHealth {
@@ -175,6 +260,28 @@ func regimeStatusQuality(r *rpc.RegimeSnapshotResult) []rpc.DataQualityHealth {
 	}
 	stale := staleRegimeClusters(r)
 	partial := partialRegimeClusters(r)
+	authoritySummary := ""
+	if health := r.AuthorityHealth; health != nil {
+		switch health.Status {
+		case rpc.RegimeAuthorityStale:
+			stale = append(stale, "authority")
+			authoritySummary = "authority: stale last-good"
+		case rpc.RegimeAuthorityUnavailable:
+			partial = append(partial, "authority")
+			authoritySummary = "authority: unavailable"
+		case rpc.RegimeAuthorityFresh:
+			if health.FailureCode != rpc.RegimeAuthorityFailureNone {
+				partial = append(partial, "authority")
+				authoritySummary = "authority: latest operation failed"
+			}
+		default:
+			partial = append(partial, "authority")
+			authoritySummary = "authority: invalid health"
+		}
+		if authoritySummary != "" && health.FailureCode != rpc.RegimeAuthorityFailureNone {
+			authoritySummary += " (" + string(health.FailureCode) + ")"
+		}
+	}
 	if len(stale) == 0 && len(partial) == 0 {
 		return nil
 	}
@@ -186,6 +293,9 @@ func regimeStatusQuality(r *rpc.RegimeSnapshotResult) []rpc.DataQualityHealth {
 	}
 	if len(stale) > 0 {
 		summary = append(summary, "stale: "+strings.Join(stale, ", "))
+	}
+	if authoritySummary != "" {
+		summary = append(summary, authoritySummary)
 	}
 	q := rpc.DataQualityHealth{
 		Surface:         "regime",

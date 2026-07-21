@@ -67,8 +67,15 @@ func TestAlertCandidateRPCJSONUsesRiskValidation(t *testing.T) {
 	}
 	snapshot := AlertCandidateSnapshot{
 		SchemaVersion: AlertCandidateSnapshotVersion,
-		AsOf:          now,
-		CurrentState:  AlertSnapshotActive,
+		AuthorityScope: func() string {
+			scope, err := BuildAlertAuthorityScope("DU-TEST", "paper")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return scope
+		}(),
+		AsOf:         now,
+		CurrentState: AlertSnapshotActive,
 		Coverage: AlertCoverage{
 			State:           AlertCoverageComplete,
 			Freshness:       AlertCoverageCurrent,

@@ -159,7 +159,8 @@ type Server struct {
 	// serverCtx is captured at Start time so handlers can launch
 	// reconnect goroutines whose lifetime tracks the daemon, not the
 	// short-lived request ctx that triggered the rediscover.
-	serverCtx context.Context
+	serverCtx    context.Context
+	serverCancel context.CancelFunc
 
 	orderLifecycleHandlersMu sync.Mutex
 	orderLifecycleHandlers   map[*ibkrlib.Connector]struct{}
@@ -476,18 +477,16 @@ type Server struct {
 	// and USD/JPY weekly change; transient HMDS failures must not make
 	// the high-impact regime surface flap between ranked and unranked.
 	regimeHistory *regimeHistoryCache
-	// lastRegimeQuality latches the cluster-level data-quality summary
-	// from the most recent regime snapshot. status.health reads this
-	// without re-running the regime fan-out, so `ibkr status` can disclose
-	// stale ranked clusters after regime/canary has observed them while
-	// staying a cheap health call.
-	lastRegimeQualityMu sync.Mutex
-	lastRegimeQuality   []rpc.DataQualityHealth
-	// lastRegimeSnapshot is the most recent fully composed regime result.
-	// brief.snapshot reads this cache so it cannot tick streaks, persist the
-	// rulebook stage, journal a regime decision, or kick gamma work.
-	lastRegimeSnapshotMu sync.Mutex
-	lastRegimeSnapshot   *rpc.RegimeSnapshotResult
+	// regimeSnapshots is the daemon-owned, daemon.db-backed last-good regime
+	// authority. All RPC, brief, rulebook, proposal, Canary, and alert reads
+	// converge here; only a complete fan-out may publish into it.
+	regimeSnapshots          *regimeSnapshotCache
+	regimeProjectionRepairMu sync.Mutex
+	// alertShadow is the daemon-owned, record-only alert measurement path.
+	// It persists lifecycle through alertEpisodes but has no sender, delivery
+	// eligibility, page policy, badge, or service-worker authority.
+	alertEpisodes *alertEpisodeRegistry
+	alertShadow   *alertShadowComposer
 	// postConnectSetupDone latches true at the end of the first
 	// successful postConnectSetup. Gates the Connected field of
 	// handleStatusHealth so an `ibkr status` that lands between
@@ -1177,12 +1176,28 @@ func (s *Server) Start(ctx context.Context) error {
 	// once Start returns — including the idle-shutdown path where the
 	// caller ctx itself isn't cancelled.
 	serverCtx, serverCancel := context.WithCancel(ctx)
-	defer serverCancel()
+
+	s.mu.Lock()
+	s.serverCtx = serverCtx
+	s.serverCancel = serverCancel
+	s.mu.Unlock()
+	// Registered after closeCoreStore's defer, so daemon cancellation and any
+	// in-flight Regime publication always drain before SQLite is closed.
+	defer s.stopServerContextAndWait()
+	if err := s.attachRegimeSnapshotAuthority(ctx, serverCtx); err != nil {
+		s.lock.Release()
+		s.lock = nil
+		return fmt.Errorf("attach regime snapshot authority: %w", err)
+	}
+	if err := s.attachAlertShadowAuthority(ctx); err != nil {
+		s.lock.Release()
+		s.lock = nil
+		return fmt.Errorf("attach alert shadow authority: %w", err)
+	}
 
 	ep, derr := discover.Resolve(serverCtx, partialFromConfig(s.cfg.Gateway))
 	s.mu.Lock()
 	s.endpoint = ep
-	s.serverCtx = serverCtx
 	if derr != nil {
 		s.lastConnectError = derr.Error()
 	}
@@ -1311,6 +1326,10 @@ func (s *Server) Stop() {
 		_ = l.Close()
 		_ = os.Remove(s.socketPath)
 	}
+	// Stop daemon-owned work before closing its persistence authority. Regime
+	// publication is explicitly drained because it performs a SQLite CAS and
+	// post-publish projections after an observing RPC may already have gone.
+	s.stopServerContextAndWait()
 	// Capture the last minute of contract resolutions before tearing
 	// the connectors down. The save loop runs every 60s; without this
 	// final flush, anything resolved in the trailing tick would be
@@ -1674,6 +1693,9 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	}
 	if s.zeroGamma != nil {
 		s.zeroGamma.resetRetryBackoff()
+	}
+	if s.regimeSnapshots != nil {
+		s.regimeSnapshots.allowRefreshNow()
 	}
 	// Start the streaming account+portfolio subscription so position
 	// rows carry live mark/value/P&L. The discovered session account can
@@ -2456,6 +2478,10 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleGammaZeroSPX(ctx, req) })
 	case rpc.MethodRegimeSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleRegimeSnapshot(ctx, req) })
+	case rpc.MethodAlertCandidates:
+		s.unary(req, enc, func() (any, error) { return s.handleAlertCandidates(ctx, req) })
+	case rpc.MethodAlertShadowStatus:
+		s.unary(req, enc, func() (any, error) { return s.handleAlertShadowStatus(ctx, req) })
 	case rpc.MethodRegimeHistory:
 		s.unary(req, enc, func() (any, error) { return s.handleRegimeHistory(req) })
 	case rpc.MethodRulesHistory:
@@ -2615,7 +2641,7 @@ func unaryDeadline(method string) time.Duration {
 		return 30 * time.Second
 	case rpc.MethodTechnical:
 		return 75 * time.Second
-	case rpc.MethodMarketCalendar, rpc.MethodBreadthSPX:
+	case rpc.MethodMarketCalendar, rpc.MethodBreadthSPX, rpc.MethodAlertCandidates, rpc.MethodAlertShadowStatus:
 		// 2 s — both handlers are pure projections of in-process data.
 		// handleMarketCalendar reads embedded official schedules;
 		// handleBreadthSPX reads in-memory engine state (Get() +
@@ -2633,13 +2659,12 @@ func unaryDeadline(method string) time.Duration {
 		// the deadline ticks, not a socket timeout.
 		return 55 * time.Second
 	case rpc.MethodRegimeSnapshot:
-		// 45 s — the regime aggregator fans out 5 fetches concurrently;
-		// slowest leg bounds the wall clock. VIX/HYG/SPY/USD-JPY spot
-		// snapshots run at 5 s each, HYG's 50-day SMA history pulls in
-		// ~10-15 s on a cold cache, gamma returns from its own cache
-		// instantly after the first call of the day. 45 s leaves slack
-		// for the historical-bars worst-case on first call.
-		return 45 * time.Second
+		// 50 s — the daemon-owned acquisition retains its established 45 s
+		// upper bound. Five seconds of response headroom lets a cold caller
+		// receive the cache's typed regime_unavailable classification after a
+		// timed-out/incomplete refresh instead of racing into a generic socket
+		// timeout. Still below the CLI's 60 s ceiling.
+		return 50 * time.Second
 	case rpc.MethodBriefSnapshot, rpc.MethodBriefAck:
 		// Brief composition fans out across the same gateway-heavy account,
 		// positions, regime, market-event, and rulebook reads as canary.
@@ -2717,7 +2742,10 @@ func classifyError(err error) (string, string) {
 	var bad *badRequestError
 	var contractTimeout *chainContractTimeoutError
 	var mdAbsent *ibkrlib.MarketDataAbsenceError
+	var regimeUnavailable *regimeSnapshotCacheUnavailableError
 	switch {
+	case errors.As(err, &regimeUnavailable):
+		return rpc.CodeRegimeUnavailable, regimeUnavailable.Error()
 	case errors.As(err, &bad):
 		return rpc.CodeBadRequest, err.Error()
 	case errors.As(err, &contractTimeout):
@@ -2820,6 +2848,9 @@ func (s *Server) backgroundTasks() []rpc.BackgroundTaskStatus {
 	}
 	if s.regimePrewarming.Load() {
 		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "regime-prewarm", Status: "computing"})
+	}
+	if s.regimeSnapshots != nil && s.regimeSnapshots.refreshing() {
+		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "regime-refresh", Status: "computing"})
 	}
 	if scoped, total := s.openBrokerOrderCounts(); total > 0 {
 		// A daemon that idle-exits while protective stops are working goes

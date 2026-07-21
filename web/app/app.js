@@ -1,4 +1,5 @@
 import { clearAlerts, dismissCurrentSignals, enablePush, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility } from "./alerts.js";
+import { renderAlertInboxV2 } from "./alert-inbox-v2.js";
 import { completePairing } from "./auth.js";
 import { renderBriefCard, setupBriefVisibility } from "./brief.js";
 import { canaryStageLabel, canarySummaryText, firstClause, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderMarketContext, renderRegimePanel, renderRulesCard } from "./canary.js";
@@ -169,6 +170,7 @@ function renderAll() {
   renderAlertMode();
   renderAttention();
   renderAlerts();
+  renderAlertInboxV2();
   renderGovernance();
   renderSettings();
   renderTabs();

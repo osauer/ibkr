@@ -441,7 +441,7 @@ ibkr app pair</code></pre>
         <li>Run <code>ibkr app --remote</code>. The app opens an outbound connector to the relay; you do not expose an inbound port on your Mac.</li>
         <li>Run <code>ibkr app pair</code> and open the printed URL on the phone. The URL includes a short-lived pairing id, nonce, and relay route.</li>
         <li>Use the Monitor, Positions, Alerts, and Settings tabs from the PWA. Market and account values still come from your local IBKR session.</li>
-        <li>For a supervised app host, restart in remote mode with <code>ibkr restart --app --remote</code>.</li>
+        <li>For a supervised app host, configure remote mode with <code>ibkr setup app --remote</code>, reload the LaunchAgent, then use <code>ibkr restart --app</code> without flag overrides.</li>
       </ol>
     </section>
 

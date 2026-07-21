@@ -432,6 +432,24 @@
                 <button class="text-button" id="clearAlertsButton" type="button">Clear history</button>
               </div>
             </details>
+            <section class="shadow-advisory shadow-advisory--neutral" id="alertInboxV2Section" data-state="uninitialized" aria-labelledby="alertInboxV2Heading">
+              <div class="shadow-advisory__head">
+                <div>
+                  <span id="alertInboxV2Heading">Shadow advisory · no delivery</span>
+                  <b>Source-neutral measurement</b>
+                </div>
+                <span class="shadow-advisory__state" id="alertInboxV2State">Uninitialized</span>
+              </div>
+              <p class="shadow-advisory__summary" id="alertInboxV2Summary">Shadow measurement has not initialized yet. No delivery is active.</p>
+              <div class="shadow-advisory__meta">
+                <p id="alertInboxV2Coverage" hidden></p>
+                <p id="alertInboxV2CoverageSources" hidden></p>
+                <time id="alertInboxV2AsOf" hidden></time>
+                <p id="alertInboxV2OccurrenceCount" hidden></p>
+              </div>
+              <div class="shadow-advisory__list" id="alertInboxV2List"></div>
+              <p class="shadow-advisory__empty" id="alertInboxV2Empty">No shadow evidence has been measured yet.</p>
+            </section>
             <section class="governance-section" aria-labelledby="governanceHeading">
               <div class="governance-heading">
                 <div>

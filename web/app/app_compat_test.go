@@ -963,6 +963,163 @@ func TestAppJSMoneyFormattersNeverDefaultToUSD(t *testing.T) {
 	}
 }
 
+func TestRegimeAuthorityHealthControlsVisibleDataQualityPosture(t *testing.T) {
+	t.Parallel()
+	js := embeddedSPASource(t)
+	render := jsFunctionBlock(t, js, "renderRegimePanel")
+	for _, want := range []string{
+		`regimeAuthorityLabel(posture, authority)`,
+		`regimePresentationPosture(posture, authority)`,
+		`renderRegimeAuthorityTimestamp(snap, latestRegimeTimestamp(canary, indicators))`,
+	} {
+		if !strings.Contains(render, want) {
+			t.Fatalf("renderRegimePanel missing authority-health presentation contract %q", want)
+		}
+	}
+	view := jsFunctionBlock(t, js, "regimeAuthorityView")
+	for _, want := range []string{
+		`snap.regime?.authority_health`,
+		`snap.sources?.regime`,
+		`authorityStatus === "unavailable"`,
+		`authorityStatus === "stale"`,
+		`sourceState === "stale"`,
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("regimeAuthorityView missing typed health contract %q", want)
+		}
+	}
+	label := jsFunctionBlock(t, js, "regimeAuthorityLabel")
+	if !strings.Contains(label, "Last known · ${canonical}") {
+		t.Fatal("degraded Regime label must qualify the retained canonical verdict")
+	}
+	presentation := jsFunctionBlock(t, js, "regimePresentationPosture")
+	if !strings.Contains(presentation, `tone: "data_quality"`) {
+		t.Fatal("degraded Regime authority must render with data-quality tone")
+	}
+	timestamp := jsFunctionBlock(t, js, "renderRegimeAuthorityTimestamp")
+	for _, want := range []string{`if (!authority.degraded) return;`, `el.hidden = false`, `el.classList.add("stale")`} {
+		if !strings.Contains(timestamp, want) {
+			t.Fatalf("Regime authority timestamp must surface typed degradation immediately: missing %q", want)
+		}
+	}
+}
+
+func TestAlertInboxV2ShadowAdvisoryIsBoundedReadOnlyEvidence(t *testing.T) {
+	t.Parallel()
+	modules := embeddedSPAModuleSources(t)
+	alertJS := modules["alert-inbox-v2.js"]
+	lifecycle := modules["lifecycle.js"]
+	app := modules["app.js"]
+	serviceWorkerData, err := Files.ReadFile("service-worker.js")
+	if err != nil {
+		t.Fatalf("read service-worker.js: %v", err)
+	}
+	htmlData, err := Files.ReadFile("index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	cssData, err := Files.ReadFile("styles.css")
+	if err != nil {
+		t.Fatalf("read styles.css: %v", err)
+	}
+	html, css := string(htmlData), string(cssData)
+	start := strings.Index(html, `<section class="shadow-advisory`)
+	end := strings.Index(html, `<section class="governance-section`)
+	if start < 0 || end <= start {
+		t.Fatal("index.html missing operator-visible shadow advisory section")
+	}
+	section := html[start:end]
+	for _, want := range []string{
+		`Shadow advisory · no delivery`,
+		`id="alertInboxV2State"`,
+		`id="alertInboxV2Summary"`,
+		`id="alertInboxV2Coverage"`,
+		`id="alertInboxV2OccurrenceCount"`,
+		`id="alertInboxV2List"`,
+	} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("shadow advisory section missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"<button", "<details", "<input", " href="} {
+		if strings.Contains(section, forbidden) {
+			t.Fatalf("shadow advisory section must be read-only; found %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		".shadow-advisory",
+		".shadow-advisory--warn",
+		".shadow-advisory-row",
+		".shadow-advisory-row__times",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("styles.css missing shadow advisory style %q", want)
+		}
+	}
+
+	view := jsFunctionBlock(t, alertJS, "alertInboxV2View")
+	for _, want := range []string{
+		`state: "invalid"`,
+		`state: "uninitialized"`,
+		`state: "unknown"`,
+		`currentState === "clear" ? "neutral"`,
+		`cannot assert operator all-clear`,
+		`expectedShadowHealth`,
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("alertInboxV2View missing fail-closed state contract %q", want)
+		}
+	}
+	occurrenceView := jsFunctionBlock(t, alertJS, "alertInboxV2OccurrenceView")
+	for _, want := range []string{"source:", "kind:", "severity:", "evidenceHealth:", "timestamps", `end_reason === "authority_scope_changed"`} {
+		if !strings.Contains(occurrenceView, want) {
+			t.Fatalf("shadow occurrence view missing allowlisted evidence %q", want)
+		}
+	}
+	for _, forbidden := range []string{"display_id:", "destination:", "delivery_preference:", "attention_seq:"} {
+		if strings.Contains(occurrenceView, forbidden) {
+			t.Fatalf("shadow occurrence view exposes non-rendered field %q", forbidden)
+		}
+	}
+	renderOccurrences := jsFunctionBlock(t, alertJS, "alertInboxV2RenderedOccurrences")
+	for _, want := range []string{"MAX_RENDERED_OCCURRENCES", "last_seen_at", ".slice(0, bounded)"} {
+		if !strings.Contains(renderOccurrences, want) {
+			t.Fatalf("shadow occurrence renderer missing deterministic bound %q", want)
+		}
+	}
+	renderShadow := jsFunctionBlock(t, alertJS, "renderAlertInboxV2")
+	for _, forbidden := range []string{"alertUnreadBadge", "renderAttention", "Notification", "serviceWorker", "setAppBadge", "fetch("} {
+		if strings.Contains(renderShadow, forbidden) {
+			t.Fatalf("shadow renderer must not affect delivery or attention: found %q", forbidden)
+		}
+	}
+	if !strings.Contains(app, "renderAlertInboxV2();") {
+		t.Fatal("renderAll must render the shadow advisory after bootstrap/snapshot updates")
+	}
+	eventStart := strings.Index(lifecycle, `if (type === "alert_inbox_v2") {`)
+	if eventStart < 0 {
+		t.Fatal("lifecycle.js missing isolated alert_inbox_v2 SSE branch")
+	}
+	eventEnd := strings.Index(lifecycle[eventStart:], "const data =")
+	if eventEnd < 0 {
+		t.Fatal("lifecycle.js alert_inbox_v2 SSE branch has no bounded end")
+	}
+	eventBranch := lifecycle[eventStart : eventStart+eventEnd]
+	for _, want := range []string{"ingestAlertInboxV2Event(event.data);", "renderAlertInboxV2();"} {
+		if !strings.Contains(eventBranch, want) {
+			t.Fatalf("alert_inbox_v2 SSE branch missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"renderAll();", "renderAttention", "handleAttentionContextChange", "refreshPushState"} {
+		if strings.Contains(eventBranch, forbidden) {
+			t.Fatalf("alert_inbox_v2 SSE branch must stay presentation-only: found %q", forbidden)
+		}
+	}
+	if strings.Contains(string(serviceWorkerData), "alert_inbox_v2") || strings.Contains(string(serviceWorkerData), "alert-inbox-v2") {
+		t.Fatal("shadow advisory must not enter the service-worker delivery path")
+	}
+}
+
 func embeddedSPASource(t *testing.T) string {
 	t.Helper()
 	modules := embeddedSPAModuleSources(t)

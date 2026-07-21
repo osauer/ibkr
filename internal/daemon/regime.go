@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -36,13 +37,60 @@ import (
 // Status="unavailable" depending on classifySymbol coverage at
 // snapshot time — see the per-indicator notes for the disposition.
 func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc.RegimeSnapshotResult, error) {
+	if s.regimeSnapshots != nil {
+		if err := s.repairRegimeSnapshotProjections(ctx); err != nil {
+			return nil, &regimeSnapshotCacheUnavailableError{cause: err}
+		}
+		view, err := s.regimeSnapshots.serve(ctx, s.acquireRegimeSnapshot)
+		if err != nil {
+			return nil, err
+		}
+		if view.Snapshot == nil {
+			return nil, &regimeSnapshotCacheUnavailableError{cause: errRegimeSnapshotRefreshIncomplete}
+		}
+		return view.Snapshot, nil
+	}
+
+	// Legacy unit fixtures may construct Server directly without attaching
+	// daemon.db. They still exercise acquisition, but production never reaches
+	// this branch because Start binds the authority before publishing the RPC
+	// socket.
+	res, complete, afterPublish, err := s.acquireRegimeSnapshot(ctx)
+	if err == nil && complete && afterPublish != nil {
+		err = afterPublish(ctx, regimeSnapshotPublication{PublishedAt: res.AsOf, Fingerprint: res.Fingerprint})
+	}
+	return res, err
+}
+
+func (s *Server) repairRegimeSnapshotProjections(ctx context.Context) error {
+	pending, _ := s.regimeSnapshots.projectionFailure()
+	if !pending {
+		return nil
+	}
+	s.regimeProjectionRepairMu.Lock()
+	defer s.regimeProjectionRepairMu.Unlock()
+	pending, revision := s.regimeSnapshots.projectionFailure()
+	if !pending {
+		return nil
+	}
+	if err := s.reconcileRegimeSnapshotProjections(ctx, s.regimeSnapshots); err != nil {
+		return fmt.Errorf("repair regime snapshot projection revision %d: %w", revision, err)
+	}
+	return s.regimeSnapshots.markProjectionRepaired(revision)
+}
+
+// acquireRegimeSnapshot performs one market-data fan-out and finalizes its
+// classified semantics. It is the only path allowed to tick streaks, latch
+// rulebook state, journal a decision, or update status quality, and it does so
+// only after all eight workers returned before the acquisition deadline.
+func (s *Server) acquireRegimeSnapshot(ctx context.Context) (*rpc.RegimeSnapshotResult, bool, regimeSnapshotAfterPublishFunc, error) {
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, s.gatewayUnavailableError()
+		return nil, false, nil, s.gatewayUnavailableError()
 	}
 
 	deps := productionRegimeDeps(c, s.logger.Warnf, s.regimeSeries, s.regimeHistory)
-	res := runRegimeFanout(
+	outcome := runRegimeFanoutOutcome(
 		ctx,
 		func(c context.Context) rpc.RegimeVIXTerm { return fetchRegimeVIXTerm(c, deps) },
 		func(c context.Context) rpc.RegimeVolOfVol { return fetchRegimeVolOfVol(c, deps) },
@@ -54,6 +102,10 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 		func(c context.Context) rpc.RegimeBreadth { return fetchRegimeBreadth(c, s) },
 		s.regimeContentionMessage,
 	)
+	res := outcome.Snapshot
+	if !outcome.Complete {
+		return res, false, nil, nil
+	}
 	// Official-calendar tape session, stamped once from the snapshot clock so
 	// lifecycle gating, the decisions journal, and every serve surface read
 	// the same classification. Closed dates bar frozen SPY/VIX prints from
@@ -64,7 +116,11 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	// eligibility per row. Every downstream consumer — composite,
 	// lifecycle, CLI, canary, SPA — reads the served results
 	// (docs/design/regime-calibration.md).
-	policies := s.populateStreaks(res)
+	evaluatedStreaks := s.streaks
+	if s.streaks != nil {
+		evaluatedStreaks = s.streaks.cloneForRegimeEvaluation()
+	}
+	policies := s.populateStreaksWithStore(res, evaluatedStreaks)
 	annotateRegimeMetadata(res, policies)
 	// Cluster tallies via the shared rpc combination. The verdict needs
 	// the lifecycle stage (single wording table), so it is assigned after
@@ -79,14 +135,23 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	res.Summary.Label = res.Composite.Verdict
 	res.Posture = rpc.BuildRegimePosture(res)
 	res.Fingerprint = rpc.BuildRegimeFingerprint(res)
-	s.updateRegimeStatusQuality(res)
-	s.latchRulesRegimeStage(res)
-	s.journalRegimeDecision(res)
-	s.lastRegimeSnapshotMu.Lock()
-	copyResult := *res
-	s.lastRegimeSnapshot = &copyResult
-	s.lastRegimeSnapshotMu.Unlock()
-	return res, nil
+	afterPublish := func(publishContext context.Context, publication regimeSnapshotPublication) error {
+		if publication.Revision > 0 {
+			return s.commitRegimeSnapshotProjections(publishContext, res, evaluatedStreaks, publication)
+		}
+		// Revision zero is confined to legacy unit/import helpers which do not
+		// own the SQLite snapshot/receipt barrier.
+		var projectionErrors []error
+		if s.streaks != nil && evaluatedStreaks != nil {
+			projectionErrors = append(projectionErrors, s.streaks.commitLegacyRegimeEvaluation(publishContext, evaluatedStreaks, publication.PublishedAt))
+		}
+		projectionErrors = append(projectionErrors,
+			s.projectRulesRegimeStageAt(publishContext, res, publication.PublishedAt),
+			s.journalRegimeDecisionPublicationContext(publishContext, res, publication),
+		)
+		return errors.Join(projectionErrors...)
+	}
+	return res, true, afterPublish, nil
 }
 
 // regimeRowPolicy is one row's classification + confirmation-policy output:
@@ -105,6 +170,10 @@ type regimeRowPolicy struct {
 // store side (no persistence ⇒ no hysteresis/latch, eligibility evaluated at
 // sessions=1) and on the band side (Tick freezes the counter when band="").
 func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) map[string]regimeRowPolicy {
+	return s.populateStreaksWithStore(res, s.streaks)
+}
+
+func (s *Server) populateStreaksWithStore(res *rpc.RegimeSnapshotResult, streaks *StreakStore) map[string]regimeRowPolicy {
 	policies := make(map[string]regimeRowPolicy, len(streakIndicators))
 	if res == nil {
 		return policies
@@ -118,8 +187,8 @@ func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) map[string]regim
 		// exit threshold clears, so boundary wobble can't flap the band
 		// (and reset the streak) at the entry threshold.
 		held := false
-		if s.streaks != nil && band != "" && band != "red" &&
-			s.streaks.PrevBand(key) == "red" && ind.exitHoldsRed(res) {
+		if streaks != nil && band != "" && band != "red" &&
+			streaks.PrevBand(key) == "red" && ind.exitHoldsRed(res) {
 			band = "red"
 			held = true
 		}
@@ -127,8 +196,8 @@ func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) map[string]regim
 			display = "red"
 		}
 		var streak *rpc.StreakInfo
-		if s.streaks != nil {
-			streak = s.streaks.Tick(key, value, band, now)
+		if streaks != nil {
+			streak = streaks.Tick(key, value, band, now)
 			if band == "" {
 				// Freeze the persisted counter internally, but do not attach a
 				// stale prior-band streak to today's unranked row. JSON/MCP
@@ -154,13 +223,13 @@ func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) map[string]regim
 			latched := false
 			if streak != nil && streak.Band == "red" {
 				sessions = streak.Sessions
-			} else if s.streaks != nil {
-				if prev := s.streaks.Get(key); prev != nil && prev.Band == "red" {
+			} else if streaks != nil {
+				if prev := streaks.Get(key); prev != nil && prev.Band == "red" {
 					sessions = prev.Sessions
 				}
 			}
-			if s.streaks != nil {
-				latched = s.streaks.Latched(key)
+			if streaks != nil {
+				latched = streaks.Latched(key)
 			}
 			elig = rpc.EvaluateRegimeEligibility(rpc.RegimeEligibilityInput{
 				Indicator:      key,
@@ -170,8 +239,8 @@ func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) map[string]regim
 				Fresh:          fresh,
 				Latched:        latched,
 			})
-			if elig != nil && elig.Eligible && s.streaks != nil && band == "red" {
-				s.streaks.Latch(key)
+			if elig != nil && elig.Eligible && streaks != nil && band == "red" {
+				streaks.Latch(key)
 			}
 		}
 		policies[key] = regimeRowPolicy{band: display, eligibility: elig, freshness: freshness}
@@ -192,12 +261,17 @@ func (s *Server) populateStreaks(res *rpc.RegimeSnapshotResult) map[string]regim
 // somewhere else (rate-limit headroom, market-data farm).
 func (s *Server) regimeContentionMessage() string {
 	tasks := s.backgroundTasks()
-	if len(tasks) == 0 {
-		return "regime fan-out exceeded handler deadline (gateway-side timeout; no daemon-internal contention detected)"
+	names := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		// The current acquisition is itself advertised so the idle watcher
+		// keeps the daemon alive. It is not contention with itself and must not
+		// appear in its own timeout diagnosis.
+		if task.Name != "regime-refresh" {
+			names = append(names, task.Name)
+		}
 	}
-	names := make([]string, len(tasks))
-	for i, t := range tasks {
-		names[i] = t.Name
+	if len(names) == 0 {
+		return "regime fan-out exceeded handler deadline (gateway-side timeout; no daemon-internal contention detected)"
 	}
 	return fmt.Sprintf("regime fan-out exceeded handler deadline (contended with daemon-internal task(s): %s)", strings.Join(names, ", "))
 }
@@ -233,6 +307,14 @@ func (s *Server) regimeContentionMessage() string {
 // can drive it without constructing a full Server fixture — see
 // TestRunRegimeFanout_ReturnsOnCtxDoneWithPartialEnvelope and
 // TestRunRegimeFanout_PartialEnvelopeUsesContentionMessage.
+type regimeFanoutOutcome struct {
+	Snapshot *rpc.RegimeSnapshotResult
+	Complete bool
+}
+
+// runRegimeFanout preserves the package-private test seam used by the row
+// orchestration tests. Publication paths must use runRegimeFanoutOutcome so a
+// deadline-filled envelope can never be mistaken for a complete observation.
 func runRegimeFanout(
 	ctx context.Context,
 	vix func(context.Context) rpc.RegimeVIXTerm,
@@ -245,6 +327,21 @@ func runRegimeFanout(
 	breadth func(context.Context) rpc.RegimeBreadth,
 	contentionMsg func() string,
 ) *rpc.RegimeSnapshotResult {
+	return runRegimeFanoutOutcome(ctx, vix, volOfVol, hyg, creditSpreads, fundingStress, usdjpy, gamma, breadth, contentionMsg).Snapshot
+}
+
+func runRegimeFanoutOutcome(
+	ctx context.Context,
+	vix func(context.Context) rpc.RegimeVIXTerm,
+	volOfVol func(context.Context) rpc.RegimeVolOfVol,
+	hyg func(context.Context) rpc.RegimeHYGSPYDivergence,
+	creditSpreads func(context.Context) rpc.RegimeCreditSpreads,
+	fundingStress func(context.Context) rpc.RegimeFundingStress,
+	usdjpy func(context.Context) rpc.RegimeUSDJPY,
+	gamma func(context.Context) rpc.RegimeGammaZero,
+	breadth func(context.Context) rpc.RegimeBreadth,
+	contentionMsg func() string,
+) regimeFanoutOutcome {
 	res := &rpc.RegimeSnapshotResult{
 		SpecDoc: "docs/specs/risk-regime-dashboard.md",
 	}
@@ -332,7 +429,7 @@ func runRegimeFanout(
 	}
 
 	res.AsOf = time.Now()
-	return res
+	return regimeFanoutOutcome{Snapshot: res, Complete: !deadlineFired && len(received) == 8}
 }
 
 // regimeDeps is the dependency surface the three quote-and-history

@@ -15,6 +15,14 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
+var defaultTestAlertAuthorityScope = func() string {
+	scope, err := rpc.BuildAlertAuthorityScope("TEST-ACCOUNT", "paper")
+	if err != nil {
+		panic(err)
+	}
+	return scope
+}()
+
 func TestAlertDeliveryShadowIdentityRedactionAndLegacyIsolation(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)
@@ -79,6 +87,129 @@ func TestAlertDeliveryShadowIdentityRedactionAndLegacyIsolation(t *testing.T) {
 		if !strings.Contains(string(persisted), private) {
 			t.Fatalf("durable private ledger omitted %q", private)
 		}
+	}
+}
+
+func TestAlertDeliveryAuthorityScopeChangeRetiresPreviousContextWithoutRecoveryOrClear(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopeA, err := rpc.BuildAlertAuthorityScope("ACCOUNT-A", "paper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopeB, err := rpc.BuildAlertAuthorityScope("ACCOUNT-B", "live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 21, 7, 0, 0, 0, time.UTC)
+	oldCandidate := testAlertCandidate(t, rpc.AlertSourceCanary, rpc.AlertKindPortfolioRisk, "scope-a", "open-a", base)
+	oldSnapshot := testAlertSnapshot(base, []rpc.AlertSource{rpc.AlertSourceCanary}, []rpc.AlertSource{rpc.AlertSourceCanary}, rpc.AlertCoverageCurrent, oldCandidate)
+	oldSnapshot.AuthorityScope = scopeA
+	oldView, err := store.ObserveAlertSnapshot(oldSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDisplay := oldView.Occurrences[0].DisplayID
+	oldAttentionHighWater := oldView.Attention.HighWaterSeq
+
+	// The first view for the new authority is unavailable. It must publish an
+	// immutable boundary record without changing the producer-owned A lifecycle.
+	changedAt := base.Add(time.Minute)
+	newUnknown := testAlertSnapshot(changedAt, []rpc.AlertSource{rpc.AlertSourceCanary}, nil, rpc.AlertCoverageUnknown)
+	newUnknown.AuthorityScope = scopeB
+	view, err := store.ObserveAlertSnapshot(newUnknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.AuthorityScope != scopeB || view.CurrentState != rpc.AlertSnapshotUnknown || view.Coverage.Freshness != rpc.AlertCoverageUnknown {
+		t.Fatalf("new scope did not start unknown and clean: %+v", view)
+	}
+	if len(view.Occurrences) != 1 {
+		t.Fatalf("dormant live occurrence escaped instead of one previous-context row: %+v", view.Occurrences)
+	}
+	previous := view.Occurrences[0]
+	if previous.DisplayID == oldDisplay || previous.AttentionSeq != 0 || view.Attention.HighWaterSeq != oldAttentionHighWater {
+		t.Fatalf("scope archive changed live identity or v2 attention: occurrence=%+v attention=%+v", previous, view.Attention)
+	}
+	if previous.State != rpc.AlertEpisodeOpen || previous.EndReason != AlertDeliveryEndAuthorityScopeChanged || !previous.EndedAt.Equal(changedAt) {
+		t.Fatalf("previous scope was recovered/cleared instead of archived: %+v", previous)
+	}
+	privateA, privateAEpisode, ok := findAlertDeliveryOccurrence(store.data.AlertDelivery, scopeA, oldCandidate.OccurrenceKey)
+	if !ok || !alertDeliveryOccurrenceActive(privateA, privateAEpisode) || !privateA.EndedAt.IsZero() || privateA.EndReason != "" {
+		t.Fatalf("scope archive mutated producer lifecycle: occurrence=%+v episode=%+v", privateA, privateAEpisode)
+	}
+	if len(view.SourceWatermarks) != 0 || len(store.AlertDeliveriesDue(changedAt)) != 0 {
+		t.Fatalf("previous scope retained authority or delivery work: watermarks=%+v due=%+v", view.SourceWatermarks, store.AlertDeliveriesDue(changedAt))
+	}
+	public, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{`"authority_scope"`, scopeA, scopeB} {
+		if strings.Contains(string(public), forbidden) {
+			t.Fatalf("public view leaked authority scope %q: %s", forbidden, public)
+		}
+	}
+
+	currentAt := changedAt.Add(time.Minute)
+	// Reuse the exact producer keys in B. Scope partitioning, not an accidental
+	// global uniqueness assumption, must keep both live occurrences independent.
+	currentCandidate := reviseAlertCandidate(oldCandidate, currentAt, "b", rpc.AlertEpisodeOpen, rpc.AlertSeverityWatch)
+	currentSnapshot := testAlertSnapshot(currentAt, []rpc.AlertSource{rpc.AlertSourceCanary}, []rpc.AlertSource{rpc.AlertSourceCanary}, rpc.AlertCoverageCurrent, currentCandidate)
+	currentSnapshot.AuthorityScope = scopeB
+	view, err = store.ObserveAlertSnapshot(currentSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.CurrentState != rpc.AlertSnapshotActive || len(view.Occurrences) != 2 {
+		t.Fatalf("current scope did not start independently: %+v", view)
+	}
+	previous = occurrenceByDisplay(t, view, previous.DisplayID)
+	if previous.State != rpc.AlertEpisodeOpen || previous.EndReason != AlertDeliveryEndAuthorityScopeChanged {
+		t.Fatalf("later current coverage reinterpreted previous context: %+v", previous)
+	}
+	currentBDisplay := alertDeliveryDisplayID(scopeB, currentCandidate.OccurrenceKey)
+	if currentBDisplay == oldDisplay || occurrenceByDisplay(t, view, currentBDisplay).EndReason != "" || view.Attention.HighWaterSeq != oldAttentionHighWater+1 {
+		t.Fatalf("scope B did not receive an independent live identity: %+v", view)
+	}
+
+	// A -> B -> A resumes A's still-open daemon occurrence rather than rejecting
+	// key reuse, inventing recovery, or minting another attention sequence.
+	returnAt := currentAt.Add(time.Minute)
+	resumedA := reviseAlertCandidate(oldCandidate, returnAt, "c", rpc.AlertEpisodeOpen, rpc.AlertSeverityWatch)
+	returnSnapshot := testAlertSnapshot(returnAt, []rpc.AlertSource{rpc.AlertSourceCanary}, []rpc.AlertSource{rpc.AlertSourceCanary}, rpc.AlertCoverageCurrent, resumedA)
+	returnSnapshot.AuthorityScope = scopeA
+	view, err = store.ObserveAlertSnapshot(returnSnapshot)
+	if err != nil {
+		t.Fatalf("A -> B -> A re-entry rejected producer occurrence: %v", err)
+	}
+	currentA := occurrenceByDisplay(t, view, oldDisplay)
+	if currentA.State != rpc.AlertEpisodeOpen || !currentA.EndedAt.IsZero() || currentA.EndReason != "" || view.Attention.HighWaterSeq != oldAttentionHighWater+1 {
+		t.Fatalf("scope A lifecycle was not resumed intact: occurrence=%+v attention=%+v", currentA, view.Attention)
+	}
+	if len(view.Occurrences) != 3 || len(view.Attention.UnreadRefs) != 2 {
+		t.Fatalf("re-entry did not preserve bounded context and coherent attention: %+v", view)
+	}
+	publicDisplays := make(map[string]bool, len(view.Occurrences))
+	for _, occurrence := range view.Occurrences {
+		publicDisplays[occurrence.DisplayID] = true
+	}
+	for _, ref := range view.Attention.UnreadRefs {
+		if !publicDisplays[ref.DisplayID] {
+			t.Fatalf("attention references hidden dormant identity: ref=%+v occurrences=%+v", ref, view.Occurrences)
+		}
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := reopened.AlertDelivery(returnAt)
+	if durable.AuthorityScope != scopeA || occurrenceByDisplay(t, durable, oldDisplay).EndReason != "" || durable.Attention.HighWaterSeq != oldAttentionHighWater+1 {
+		t.Fatalf("scope partition and re-entry were not durable: %+v", durable)
 	}
 }
 
@@ -148,7 +279,7 @@ func TestAlertDeliveryAuthorityRecoveryReopenAndEscalation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(view.Occurrences) != 3 || view.Attention.HighWaterSeq != 3 || occurrenceByDisplay(t, view, alertDeliveryDisplayID(reopened.OccurrenceKey)).Severity != rpc.AlertSeverityAct {
+	if len(view.Occurrences) != 3 || view.Attention.HighWaterSeq != 3 || occurrenceByDisplay(t, view, alertDeliveryDisplayID(defaultTestAlertAuthorityScope, reopened.OccurrenceKey)).Severity != rpc.AlertSeverityAct {
 		t.Fatalf("evidence revision created attention/send identity churn: %+v", view)
 	}
 
@@ -170,7 +301,7 @@ func TestAlertDeliveryAuthorityRecoveryReopenAndEscalation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(view.Occurrences) != 4 || view.Attention.HighWaterSeq != 4 || occurrenceByDisplay(t, view, alertDeliveryDisplayID(reopened.OccurrenceKey)).EndReason != AlertDeliveryEndSuperseded {
+	if len(view.Occurrences) != 4 || view.Attention.HighWaterSeq != 4 || occurrenceByDisplay(t, view, alertDeliveryDisplayID(defaultTestAlertAuthorityScope, reopened.OccurrenceKey)).EndReason != AlertDeliveryEndSuperseded {
 		t.Fatalf("qualified escalation lifecycle incorrect: %+v", view)
 	}
 	stableGeneration := view.Generation
@@ -453,7 +584,7 @@ func TestAlertDeliveryRetiredFailuresRemainHistoryButLeaveCurrentHealth(t *testi
 			if view.DeliveryHealth.State != AlertDeliveryHealthHealthy || view.DeliveryHealth.Class != "" {
 				t.Fatalf("retired failure still degraded current health: %+v", view.DeliveryHealth)
 			}
-			stored, ok := latestAlertDeliveryAttempt(store.data.AlertDelivery, alertDeliveryReceiptKey(candidate.OccurrenceKey, target))
+			stored, ok := latestAlertDeliveryAttempt(store.data.AlertDelivery, alertDeliveryReceiptKey(defaultTestAlertAuthorityScope, candidate.OccurrenceKey, target))
 			if !ok || stored.Class != tt.wantClass || stored.RetiredAt.IsZero() {
 				t.Fatalf("retired failure history was not preserved: %+v", stored)
 			}
@@ -587,7 +718,7 @@ func TestAlertDeliveryReserveConfirmRetryReceiptAndActiveRecheck(t *testing.T) {
 	}
 	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
 	receipt := store.data.AlertDelivery.Receipts[0]
-	if receipt.ReceiptKey != alertDeliveryReceiptKey(candidate.OccurrenceKey, target) || strings.Contains(receipt.ReceiptKey, alertDeliveryDisplayID(candidate.OccurrenceKey)) {
+	if receipt.ReceiptKey != alertDeliveryReceiptKey(defaultTestAlertAuthorityScope, candidate.OccurrenceKey, target) || strings.Contains(receipt.ReceiptKey, alertDeliveryDisplayID(defaultTestAlertAuthorityScope, candidate.OccurrenceKey)) {
 		t.Fatalf("receipt was not internally keyed by private occurrence+target: %+v", receipt)
 	}
 
@@ -626,7 +757,7 @@ func TestAlertDeliveryReserveConfirmRetryReceiptAndActiveRecheck(t *testing.T) {
 		t.Fatalf("uncertain-window reservation send=%v err=%v", send, err)
 	}
 	confirmedView, confirmed, err := store.ConfirmAlertTransport(uncertain.AttemptID, reopenAt.Add(2*time.Second))
-	if err != nil || !confirmed || confirmedView.DisplayID != uncertain.DisplayID || uncertain.DisplayID != alertDeliveryDisplayID(reopened.OccurrenceKey) {
+	if err != nil || !confirmed || confirmedView.DisplayID != uncertain.DisplayID || uncertain.DisplayID != alertDeliveryDisplayID(defaultTestAlertAuthorityScope, reopened.OccurrenceKey) {
 		t.Fatalf("confirmed transport lost stable display tag: begin=%+v confirm=%+v confirmed=%v err=%v", uncertain, confirmedView, confirmed, err)
 	}
 	recoveredAgain := reviseAlertCandidate(reopened, reopenAt.Add(time.Minute), "a", rpc.AlertEpisodeRecovered, reopened.Severity)
@@ -1693,7 +1824,7 @@ func newAlertDeliveryAttemptValidationFixture(t *testing.T, class string, number
 		t.Fatal(err)
 	}
 	target := AlertDeliveryTargetRef("validator-device", "validator-subscription")
-	receiptKey := alertDeliveryReceiptKey(candidate.OccurrenceKey, target)
+	receiptKey := alertDeliveryReceiptKey(defaultTestAlertAuthorityScope, candidate.OccurrenceKey, target)
 	reservedAt := base.Add(time.Second)
 	attempts := make([]alertDeliveryAttempt, 0, number)
 	for attemptNumber := 1; attemptNumber < number; attemptNumber++ {
@@ -1703,7 +1834,8 @@ func newAlertDeliveryAttemptValidationFixture(t *testing.T, class string, number
 			t.Fatalf("invalid predecessor number %d", attemptNumber)
 		}
 		attempts = append(attempts, alertDeliveryAttempt{
-			ID: alertDeliveryAttemptID(receiptKey, attemptNumber, reservedAt), OccurrenceKey: candidate.OccurrenceKey,
+			AuthorityScope: defaultTestAlertAuthorityScope,
+			ID:             alertDeliveryAttemptID(receiptKey, attemptNumber, reservedAt), OccurrenceKey: candidate.OccurrenceKey,
 			TargetRef: target, ReceiptKey: receiptKey, AttemptNumber: attemptNumber, ReservedAt: reservedAt,
 			CompletedAt: completedAt, Class: AlertDeliveryAttemptRetry, Disposition: AlertDeliveryCompletionApplied,
 			RetryAt: completedAt.Add(delay),
@@ -1711,7 +1843,8 @@ func newAlertDeliveryAttemptValidationFixture(t *testing.T, class string, number
 		reservedAt = completedAt.Add(delay)
 	}
 	final := alertDeliveryAttempt{
-		ID: alertDeliveryAttemptID(receiptKey, number, reservedAt), OccurrenceKey: candidate.OccurrenceKey,
+		AuthorityScope: defaultTestAlertAuthorityScope,
+		ID:             alertDeliveryAttemptID(receiptKey, number, reservedAt), OccurrenceKey: candidate.OccurrenceKey,
 		TargetRef: target, ReceiptKey: receiptKey, AttemptNumber: number, ReservedAt: reservedAt,
 		Class: class, Disposition: disposition,
 	}
@@ -1760,7 +1893,8 @@ func newAlertDeliveryAttemptValidationFixture(t *testing.T, class string, number
 	store.data.AlertDelivery.Receipts = nil
 	if class == AlertDeliveryAttemptAccepted {
 		store.data.AlertDelivery.Receipts = []alertDeliveryReceipt{{
-			OccurrenceKey: candidate.OccurrenceKey, TargetRef: target, ReceiptKey: receiptKey,
+			AuthorityScope: defaultTestAlertAuthorityScope,
+			OccurrenceKey:  candidate.OccurrenceKey, TargetRef: target, ReceiptKey: receiptKey,
 			AcceptedAt: final.CompletedAt, RetiredAt: final.RetiredAt,
 		}}
 	}
@@ -1845,7 +1979,7 @@ func testAlertSnapshot(at time.Time, expected, covered []rpc.AlertSource, freshn
 		current = rpc.AlertSnapshotClear
 	}
 	return rpc.AlertCandidateSnapshot{
-		SchemaVersion: rpc.AlertCandidateSnapshotVersion, AsOf: at, CurrentState: current,
+		SchemaVersion: rpc.AlertCandidateSnapshotVersion, AuthorityScope: defaultTestAlertAuthorityScope, AsOf: at, CurrentState: current,
 		Coverage:   rpc.AlertCoverage{State: state, Freshness: freshness, AsOf: at, ExpectedSources: append([]rpc.AlertSource{}, expected...), CoveredSources: append([]rpc.AlertSource{}, covered...)},
 		Candidates: append([]rpc.AlertCandidate{}, candidates...),
 	}

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,10 +46,13 @@ type StreakEntry struct {
 // posture, accepted because streak persistence requires a stable
 // daemon-side classification).
 type streakStoreFile struct {
-	Version int                    `json:"version"`
-	AsOf    time.Time              `json:"as_of"`
-	Notes   string                 `json:"notes"`
-	Entries map[string]StreakEntry `json:"entries"`
+	Version             int                    `json:"version"`
+	AsOf                time.Time              `json:"as_of"`
+	SnapshotRevision    int64                  `json:"snapshot_revision,omitempty"`
+	SnapshotPublishedAt time.Time              `json:"snapshot_published_at"`
+	SnapshotFingerprint rpc.Fingerprint        `json:"snapshot_fingerprint"`
+	Notes               string                 `json:"notes"`
+	Entries             map[string]StreakEntry `json:"entries"`
 }
 
 const (
@@ -75,10 +79,21 @@ const (
 type StreakStore struct {
 	dir       string // sealed legacy cache; never used after UseCoreStore
 	authority *corestore.Store
+	// volatile marks a detached evaluation clone. It applies the exact Tick
+	// and latch semantics in memory but cannot publish until the enclosing
+	// regime snapshot wins its authoritative SQLite compare-and-swap.
+	volatile bool
 
 	mu      sync.Mutex
 	entries map[string]StreakEntry
 	loaded  bool
+	asOf    time.Time
+	// publication is the exact authoritative snapshot tuple carried by the
+	// current SQLite projection. Revision zero is confined to legacy file and
+	// unit-helper writes which predate the snapshot publication barrier.
+	publication regimeSnapshotPublication
+	stateExists bool
+	loadErr     error
 }
 
 // NewStreakStore returns a store rooted at dir. Construction is lazy
@@ -106,6 +121,10 @@ func (s *StreakStore) UseCoreStore(store *corestore.Store) error {
 	s.authority = store
 	s.entries = map[string]StreakEntry{}
 	s.loaded = false
+	s.asOf = time.Time{}
+	s.publication = regimeSnapshotPublication{}
+	s.stateExists = false
+	s.loadErr = nil
 	return nil
 }
 
@@ -126,9 +145,14 @@ func (s *StreakStore) loadLocked() {
 		var ok bool
 		var err error
 		data, ok, err = loadMarketState(s.authority, streakAuthorityScope, streakStateKind)
-		if err != nil || !ok {
+		if err != nil {
+			s.loadErr = fmt.Errorf("load regime streak state: %w", err)
 			return
 		}
+		if !ok {
+			return
+		}
+		s.stateExists = true
 	} else {
 		path := filepath.Join(s.dir, streakStoreFileN)
 		var err error
@@ -144,10 +168,31 @@ func (s *StreakStore) loadLocked() {
 	}
 	var f streakStoreFile
 	if err := json.Unmarshal(data, &f); err != nil {
+		if s.authority != nil {
+			s.loadErr = fmt.Errorf("decode regime streak state: %w", err)
+		}
 		return
 	}
 	if f.Version != streakStoreVersion {
+		if s.authority != nil {
+			s.loadErr = fmt.Errorf("decode regime streak state: unsupported version %d", f.Version)
+		}
 		return
+	}
+	s.asOf = f.AsOf.UTC()
+	publication := regimeSnapshotPublication{
+		Revision: f.SnapshotRevision, PublishedAt: f.SnapshotPublishedAt.UTC(), Fingerprint: f.SnapshotFingerprint,
+	}
+	if hasAnyRegimeSnapshotPublicationIdentity(publication) {
+		if err := validateRegimeSnapshotPublication(publication); err != nil {
+			s.loadErr = fmt.Errorf("decode regime streak publication: %w", err)
+			return
+		}
+		if !s.asOf.Equal(publication.PublishedAt) {
+			s.loadErr = fmt.Errorf("decode regime streak publication: as_of %s does not match snapshot_published_at %s", s.asOf, publication.PublishedAt)
+			return
+		}
+		s.publication = publication
 	}
 	if f.Entries != nil {
 		s.entries = f.Entries
@@ -155,16 +200,48 @@ func (s *StreakStore) loadLocked() {
 }
 
 // saveLocked writes the entries map atomically. Caller MUST hold s.mu.
-// Best-effort: I/O errors are returned but the in-memory state stays
-// authoritative — a failed write just means the next daemon restart
-// loses the streak counters and they bootstrap fresh.
+// Legacy helpers may choose to ignore its returned error. Runtime Regime
+// publication treats an exact-tuple write failure as a projection-barrier
+// failure and withholds the snapshot until recovery succeeds.
 func (s *StreakStore) saveLocked() error {
-	now := time.Now().UTC()
+	return s.saveLockedContext(context.Background())
+}
+
+func (s *StreakStore) saveLockedContext(ctx context.Context) error {
+	return s.saveLockedContextAt(ctx, time.Now().UTC())
+}
+
+func (s *StreakStore) saveLockedContextAt(ctx context.Context, now time.Time) error {
+	return s.saveLockedContextPublication(ctx, regimeSnapshotPublication{PublishedAt: now})
+}
+
+// saveLockedContextPublication persists both streak content and, for runtime
+// projections, the exact authoritative snapshot tuple. Revision-zero callers
+// retain the legacy helper contract and carry only as_of.
+func (s *StreakStore) saveLockedContextPublication(ctx context.Context, publication regimeSnapshotPublication) error {
+	if s.volatile {
+		return nil
+	}
+	now := publication.PublishedAt.UTC()
+	if now.IsZero() {
+		return errors.New("regime streak projection timestamp is required")
+	}
+	if publication.Revision > 0 {
+		publication.PublishedAt = now
+		if err := validateRegimeSnapshotPublication(publication); err != nil {
+			return err
+		}
+	} else {
+		publication = regimeSnapshotPublication{}
+	}
 	file := streakStoreFile{
-		Version: streakStoreVersion,
-		AsOf:    now,
-		Notes:   streakStoreNotes,
-		Entries: s.entries,
+		Version:             streakStoreVersion,
+		AsOf:                now,
+		SnapshotRevision:    publication.Revision,
+		SnapshotPublishedAt: publication.PublishedAt,
+		SnapshotFingerprint: publication.Fingerprint,
+		Notes:               streakStoreNotes,
+		Entries:             s.entries,
 	}
 	if s.authority != nil {
 		payload, err := json.Marshal(file)
@@ -172,22 +249,34 @@ func (s *StreakStore) saveLocked() error {
 			return fmt.Errorf("encode streak state: %w", err)
 		}
 		metadata, err := json.Marshal(struct {
-			Version    int       `json:"version"`
-			AsOf       time.Time `json:"as_of"`
-			EntryCount int       `json:"entry_count"`
-			Method     string    `json:"method"`
+			Version             int             `json:"version"`
+			AsOf                time.Time       `json:"as_of"`
+			SnapshotRevision    int64           `json:"snapshot_revision,omitempty"`
+			SnapshotPublishedAt time.Time       `json:"snapshot_published_at"`
+			SnapshotFingerprint rpc.Fingerprint `json:"snapshot_fingerprint"`
+			EntryCount          int             `json:"entry_count"`
+			Method              string          `json:"method"`
 		}{
-			Version: streakStoreVersion, AsOf: now, EntryCount: len(s.entries),
+			Version: streakStoreVersion, AsOf: now,
+			SnapshotRevision: publication.Revision, SnapshotPublishedAt: publication.PublishedAt,
+			SnapshotFingerprint: publication.Fingerprint, EntryCount: len(s.entries),
 			Method: "versioned daemon regime-band streak classifier",
 		})
 		if err != nil {
 			return fmt.Errorf("encode streak metadata: %w", err)
 		}
-		return saveMarketState(s.authority, streakAuthorityScope, streakStateKind, corestore.ObservationInput{
+		if err := saveMarketStateContext(ctx, s.authority, streakAuthorityScope, streakStateKind, corestore.ObservationInput{
 			ScopeKey: streakAuthorityScope, Source: streakSource, Kind: streakObservationKind,
 			ObservedAt: now, ContentType: "application/json",
 			Payload: payload, MetadataJSON: metadata, DecisionEligible: true,
-		})
+		}); err != nil {
+			return err
+		}
+		s.asOf = now
+		s.publication = publication
+		s.stateExists = true
+		s.loadErr = nil
+		return nil
 	}
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", s.dir, err)
@@ -216,6 +305,10 @@ func (s *StreakStore) saveLocked() error {
 	if err := os.Rename(tmpPath, target); err != nil {
 		return fmt.Errorf("rename streaks: %w", err)
 	}
+	s.asOf = now
+	s.publication = publication
+	s.stateExists = true
+	s.loadErr = nil
 	return nil
 }
 
@@ -295,9 +388,9 @@ func (s *StreakStore) Tick(indicatorKey string, value float64, band string, nowN
 		}
 	}
 	s.entries[indicatorKey] = entry
-	// Best-effort persist. A failed write doesn't affect the in-memory
-	// authoritative state for the rest of the daemon's lifetime; only
-	// the next-restart bootstrap suffers.
+	// Legacy direct Tick callers retain best-effort persistence. Production
+	// evaluates on a volatile clone and commits through the exact publication
+	// barrier instead.
 	_ = s.saveLocked()
 	return entryToInfo(entry)
 }

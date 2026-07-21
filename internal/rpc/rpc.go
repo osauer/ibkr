@@ -61,6 +61,13 @@ const (
 	CodeInternal           = "internal"
 )
 
+// CodeRegimeUnavailable means the daemon has no complete, validated
+// last-good regime snapshot to serve. It is deliberately distinct from
+// gateway_unavailable: a disconnected gateway does not make a persisted
+// last-good snapshot disappear, while a cold authority cannot return a
+// partial dashboard as if it were current state.
+const CodeRegimeUnavailable = "regime_unavailable"
+
 // MarketDataType values carried on Quote.DataType, Frame.DataType, and
 // ChainResult.DataType. IBKR's tickMarketDataType message (58) maps
 // gateway feed state into one of these strings; the CLI renders a badge
@@ -1846,6 +1853,13 @@ type RegimeSnapshotParams struct{}
 // distinguishable.
 type RegimeSnapshotResult struct {
 	AsOf time.Time `json:"as_of"`
+	// AuthorityHealth describes how the daemon obtained this response. It is
+	// response/cache metadata, not classified market evidence: semantic regime
+	// fingerprints must ignore it. Nil preserves compatibility with older
+	// daemons; the Phase 1 authority populates it on every served last-good
+	// snapshot. Cold authorities fail with CodeRegimeUnavailable instead of
+	// manufacturing an empty or partial RegimeSnapshotResult.
+	AuthorityHealth *RegimeAuthorityHealth `json:"authority_health,omitempty"`
 	// TapeSessionState classifies the official US cash-equity calendar date
 	// this snapshot was taken on (TapeSessionFor). On a closed date
 	// (weekend/holiday) the direct SPY/VIX day-change prints are frozen

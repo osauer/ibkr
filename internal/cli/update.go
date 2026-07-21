@@ -62,7 +62,7 @@ func RunUpdate(ctx context.Context, args []string, version string, stdin io.Read
 	if exit, ok := parseUpdateFlags(args, &opts, stdout, stderr); !ok {
 		return exit
 	}
-	return runUpdateCore(ctx, &opts, fetchLatestReleaseAdapter, runInstallAdapter, restartDaemonAdapter)
+	return runUpdateCore(ctx, &opts, fetchLatestReleaseAdapter, runInstallAdapter, restartInstalledStackAdapter)
 }
 
 // parseUpdateFlags wires a flag.FlagSet against opts. Returns
@@ -73,8 +73,8 @@ func parseUpdateFlags(args []string, opts *updateOptions, stdout, stderr io.Writ
 	fs := flagSet(env, "update")
 	fs.BoolVar(&opts.check, "check", false, "dry-run: report what would change, do not install")
 	fs.BoolVar(&opts.force, "force", false, "install latest even if same version as current (corrupt-binary recovery)")
-	fs.BoolVar(&opts.restart, "restart", false, "restart the daemon after install (skip prompt)")
-	fs.BoolVar(&opts.noRestart, "no-restart", false, "do not restart the daemon after install (skip prompt)")
+	fs.BoolVar(&opts.restart, "restart", false, "restart the running app first, then the daemon, after install (skip prompt)")
+	fs.BoolVar(&opts.noRestart, "no-restart", false, "do not restart the app or daemon after install (skip prompt)")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err), false
 	}
@@ -87,13 +87,13 @@ func parseUpdateFlags(args []string, opts *updateOptions, stdout, stderr io.Writ
 
 // runUpdateCore is the testable core: takes injectable adapters for
 // the three side-effectful operations (fetch metadata, run install,
-// restart daemon) so unit tests can exercise the flag matrix and
+// restart the local stack) so unit tests can exercise the flag matrix and
 // version branches without HTTP / disk / signals.
 type fetchFunc func(ctx context.Context) (*update.Release, error)
 type installFunc func(ctx context.Context, plan *update.Plan) error
-type restartFunc func(pid int) error
+type stackRestartFunc func(ctx context.Context, installedExecutable string, stdout, stderr io.Writer) int
 
-func runUpdateCore(ctx context.Context, opts *updateOptions, fetch fetchFunc, doInstall installFunc, restart restartFunc) int {
+func runUpdateCore(ctx context.Context, opts *updateOptions, fetch fetchFunc, doInstall installFunc, restart stackRestartFunc) int {
 	// TTY ambiguity gate: in non-interactive mode without an explicit
 	// restart decision, refuse to install. Silent default-to-N would
 	// be a footgun for systemd timers expecting auto-restart. The
@@ -149,30 +149,29 @@ func runUpdateCore(ctx context.Context, opts *updateOptions, fetch fetchFunc, do
 	}
 	fmt.Fprintf(opts.out, "ibkr update: installed %s (prior binary stashed as %s.bak)\n", latest, plan.DestPath)
 
-	// Daemon restart decision.
+	// Local stack restart decision. This deliberately reuses the canonical
+	// app-first restart path: a running app must be on the newly-installed
+	// binary before the daemon is stopped and started.
 	doRestart := opts.restart
 	if !opts.restart && !opts.noRestart && opts.isTTY {
 		doRestart = promptRestart(opts.in, opts.out)
 	}
 
-	pid, running := update.IsDaemonRunning()
-	if !running {
-		// No daemon to restart — silent no-op regardless of flag.
-		return 0
-	}
 	if doRestart {
-		fmt.Fprintf(opts.out, "ibkr update: restarting daemon (pid %d)\n", pid)
-		if err := restart(pid); err != nil {
-			fmt.Fprintf(opts.err, "ibkr update: %v\n", err)
-			if errors.Is(err, update.ErrStopTimeout) {
-				fmt.Fprintln(opts.err, "ibkr update: run `ibkr restart --force` if the daemon is still stuck")
-			}
+		fmt.Fprintln(opts.out, "ibkr update: restarting the local app/daemon stack (app first)")
+		if restart == nil {
+			fmt.Fprintln(opts.err, "ibkr update: restart adapter unavailable")
 			return 1
 		}
-		fmt.Fprintln(opts.out, "ibkr update: daemon stopped; next `ibkr` command will respawn it")
-	} else {
-		fmt.Fprintf(opts.out, "ibkr update: daemon (pid %d) is still on the old binary; run `ibkr restart` to pick up the new version\n", pid)
+		if exit := restart(ctx, plan.DestPath, opts.out, opts.err); exit != 0 {
+			fmt.Fprintln(opts.err, "ibkr update: stack restart failed; app and daemon stages are ordered but non-atomic, and successful earlier stages are not rolled back (fix the reported failure and rerun `ibkr restart`)")
+			return exit
+		}
+		fmt.Fprintln(opts.out, "ibkr update: requested restart stages completed; previously stopped processes remain stopped")
+		return 0
 	}
+
+	fmt.Fprintln(opts.out, "ibkr update: app and daemon were not restarted; run `ibkr restart` to move running processes to the installed binary")
 	return 0
 }
 
@@ -180,7 +179,7 @@ func runUpdateCore(ctx context.Context, opts *updateOptions, fetch fetchFunc, do
 // enter / EOF (matches the design's "Default Y on enter" matrix
 // entry). Returns true to restart.
 func promptRestart(in io.Reader, out io.Writer) bool {
-	fmt.Fprint(out, "Restart daemon now? [Y/n] ")
+	fmt.Fprint(out, "Restart the local app/daemon stack now? [Y/n] ")
 	br := bufio.NewReader(in)
 	line, err := br.ReadString('\n')
 	if err != nil && line == "" {
@@ -269,6 +268,18 @@ func runInstallAdapter(ctx context.Context, plan *update.Plan) error {
 	return update.RunInstall(ctx, plan)
 }
 
-func restartDaemonAdapter(pid int) error {
-	return update.RestartDaemon(pid)
+func restartInstalledStackAdapter(ctx context.Context, installedExecutable string, stdout, stderr io.Writer) int {
+	return restartInstalledStackAdapterUsing(ctx, installedExecutable, stdout, stderr, productionDaemonRestartDepsForExecutable, productionAppRestartDepsForExecutable)
+}
+
+type daemonRestartDepsFactory func(string) restartDeps
+type appRestartDepsFactory func(string) appRestartDeps
+
+func restartInstalledStackAdapterUsing(ctx context.Context, installedExecutable string, stdout, stderr io.Writer, daemonFactory daemonRestartDepsFactory, appFactory appRestartDepsFactory) int {
+	opts := &restartOptions{
+		timeout: restartDefaultTimeout,
+		out:     stdout,
+		err:     stderr,
+	}
+	return runRestartStackCore(ctx, opts, daemonFactory(installedExecutable), appFactory(installedExecutable), restartStackBehavior{startDaemonWhenMissing: false})
 }

@@ -71,6 +71,11 @@ type StateDocumentCAS struct {
 	Kind             string
 	ExpectedRevision int64
 	JSON             []byte
+	// UpdatedAtNotBefore is an optional atomic commit-clock floor. The store
+	// compares it with the exact timestamp it will persist inside the same
+	// critical mutation, before touching the document or authority head. It is
+	// zero for ordinary callers.
+	UpdatedAtNotBefore time.Time
 }
 
 type RevisionConflictError struct {
