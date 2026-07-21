@@ -34,6 +34,14 @@ type Store struct {
 }
 
 func Open(ctx context.Context, opts Options) (*Store, error) {
+	return openWithPlan(ctx, opts, currentMigrationPlan())
+}
+
+func openWithPlan(ctx context.Context, opts Options, plan []migration) (*Store, error) {
+	if err := validateMigrationPlan(plan); err != nil {
+		return nil, err
+	}
+	targetVersion := len(plan)
 	if strings.TrimSpace(opts.Path) == "" {
 		return nil, errorsf("database path is required")
 	}
@@ -44,7 +52,13 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	if err := ensurePrivateParent(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
+	timeout := opts.BusyTimeout
+	if timeout <= 0 {
+		timeout = defaultBusyTimeout
+	}
+	existing := false
 	if info, err := os.Lstat(path); err == nil {
+		existing = true
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil, errorsf("database path must not be a symbolic link")
 		}
@@ -53,6 +67,22 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("inspect database path: %w", err)
+	}
+	if existing {
+		version, err := readSchemaVersionOnly(ctx, path, timeout)
+		if err != nil {
+			return nil, fmt.Errorf("read existing authority schema version: %w", err)
+		}
+		if version > targetVersion {
+			return nil, fmt.Errorf("future schema version %d exceeds supported %d", version, targetVersion)
+		}
+		if version > 0 && version < targetVersion {
+			inspection, inspectErr := inspectWithPlan(ctx, InspectOptions{Path: path, MinimumHead: opts.MinimumHead}, plan)
+			if inspectErr != nil {
+				return nil, inspectErr
+			}
+			return nil, &UpgradeRequiredError{CurrentVersion: inspection.SchemaVersion, TargetVersion: inspection.TargetVersion}
+		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -66,10 +96,6 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("close authority file: %w", err)
 	}
 
-	timeout := opts.BusyTimeout
-	if timeout <= 0 {
-		timeout = defaultBusyTimeout
-	}
 	dsn := sqliteDSN(path, timeout, false)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -96,18 +122,28 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&preMigrationVersion); err != nil {
 		return fail(fmt.Errorf("read pre-migration version: %w", err))
 	}
-	if preMigrationVersion > 0 && preMigrationVersion < schemaVersion {
-		if opts.MigrationBackupPath == "" {
-			return fail(errorsf("existing schema upgrade requires a verified backup"))
-		}
-		if err := requireMigrationBackup(ctx, db, opts.MigrationBackupPath, preMigrationVersion); err != nil {
-			return fail(err)
-		}
+	if preMigrationVersion > targetVersion {
+		return fail(fmt.Errorf("future schema version %d exceeds supported %d", preMigrationVersion, targetVersion))
 	}
-	if err := migrate(ctx, db, migrations, time.Now().UTC()); err != nil {
+	if preMigrationVersion > 0 && preMigrationVersion < targetVersion {
+		if err := validateSchemaLedgerWithPlan(ctx, db, preMigrationVersion, plan); err != nil {
+			return fail(fmt.Errorf("validate pre-upgrade authority schema: %w", err))
+		}
+		head, err := readAuthorityHead(ctx, db)
+		if err != nil {
+			return fail(fmt.Errorf("read pre-upgrade authority head: %w", err))
+		}
+		if opts.MinimumHead != nil {
+			if err := requireMinimumHead(head, *opts.MinimumHead); err != nil {
+				return fail(err)
+			}
+		}
+		return fail(&UpgradeRequiredError{CurrentVersion: preMigrationVersion, TargetVersion: targetVersion})
+	}
+	if err := migrate(ctx, db, plan, time.Now().UTC()); err != nil {
 		return fail(fmt.Errorf("open authority database: %w", err))
 	}
-	if err := validateSchemaLedger(ctx, db, schemaVersion); err != nil {
+	if err := validateSchemaLedgerWithPlan(ctx, db, targetVersion, plan); err != nil {
 		return fail(fmt.Errorf("validate authority schema: %w", err))
 	}
 	if report, err := checkIntegrityDB(ctx, db); err != nil {

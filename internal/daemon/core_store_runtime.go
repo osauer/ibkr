@@ -43,13 +43,33 @@ func (s *Server) openCoreStore(ctx context.Context) error {
 		lock.Release()
 		return fmt.Errorf("daemon authority is missing but its anti-rollback watermark remains")
 	}
+	if existed && minimum == nil {
+		lock.Release()
+		return fmt.Errorf("daemon authority anti-rollback watermark is missing; explicit verified recovery is required")
+	}
 
 	var (
 		store *corestore.Store
 		build coreCutoverBuild
 	)
 	if existed {
+		upgradePending, pendingErr := coreSchemaUpgradePending(s.coreStorePath)
+		if pendingErr != nil {
+			err = pendingErr
+		} else if upgradePending {
+			minimum, err = ensureCoreStoreSchemaCurrent(ctx, s.coreStorePath, minimum, s.nowUTC())
+		}
+		if err != nil {
+			lock.Release()
+			return fmt.Errorf("resume daemon authority schema upgrade: %w", err)
+		}
 		store, err = corestore.Open(ctx, s.liveCoreStoreOptions(minimum))
+		if errors.Is(err, corestore.ErrUpgradeRequired) {
+			minimum, err = ensureCoreStoreSchemaCurrent(ctx, s.coreStorePath, minimum, s.nowUTC())
+			if err == nil {
+				store, err = corestore.Open(ctx, s.liveCoreStoreOptions(minimum))
+			}
+		}
 		if err == nil {
 			build.manifest, build.doc, err = loadCoreCutoverManifest(ctx, store)
 		}
@@ -69,9 +89,6 @@ func (s *Server) openCoreStore(ctx context.Context) error {
 		s.coreStore = nil
 		s.persistenceLock = nil
 		return cause
-	}
-	if existed && minimum == nil {
-		return cleanup(fmt.Errorf("daemon authority anti-rollback watermark is missing; explicit verified recovery is required"))
 	}
 	s.persistenceLock = lock
 	s.coreStore = store

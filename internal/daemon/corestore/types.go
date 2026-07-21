@@ -19,6 +19,7 @@ var (
 	ErrLegacyImportConflict   = errors.New("corestore: legacy authority was already imported from a different source")
 	ErrFreshAuthorityConflict = errors.New("corestore: fresh trading authority requires empty order and purge state")
 	ErrProjectionConflict     = errors.New("corestore: immutable projection conflict")
+	ErrUpgradeRequired        = errors.New("corestore: schema upgrade required")
 )
 
 // Options configures the authoritative store. Path is required; the daemon
@@ -26,9 +27,6 @@ var (
 type Options struct {
 	Path        string
 	BusyTimeout time.Duration
-	// MigrationBackupPath must name a verified, reopenable backup at the
-	// exact current write head before an existing older schema may upgrade.
-	MigrationBackupPath string
 	// MinimumHead, when non-nil, prevents opening an older copy of the same
 	// authority. It is intended for restore/backup selection boundaries.
 	MinimumHead *AuthorityHead
@@ -47,6 +45,76 @@ type AuthorityHead struct {
 	HeadGeneration   int64
 	LastEventSeq     int64
 	SignerGeneration int64
+}
+
+// UpgradeRequiredError reports a valid, supported authority that must be
+// upgraded out of place before this build can open it for service.
+type UpgradeRequiredError struct {
+	CurrentVersion int
+	TargetVersion  int
+}
+
+func (e *UpgradeRequiredError) Error() string {
+	return fmt.Sprintf("%v: database version %d, target version %d", ErrUpgradeRequired, e.CurrentVersion, e.TargetVersion)
+}
+
+func (e *UpgradeRequiredError) Is(target error) bool { return target == ErrUpgradeRequired }
+
+type InspectionStatus string
+
+const (
+	InspectionCurrent         InspectionStatus = "current"
+	InspectionUpgradeRequired InspectionStatus = "upgrade_required"
+)
+
+// InspectOptions configures a non-mutating authority inspection. Path must
+// already exist. MinimumHead, when non-nil, enforces the external monotonic
+// watermark while the database is still opened read-only.
+type InspectOptions struct {
+	Path        string
+	MinimumHead *AuthorityHead
+}
+
+// Inspection is the validated identity, version, and write head of an
+// authority database. TargetVersion is the version supported by this build.
+type Inspection struct {
+	Path          string
+	SchemaVersion int
+	TargetVersion int
+	Status        InspectionStatus
+	Head          AuthorityHead
+	Integrity     IntegrityReport
+}
+
+// UpgradeOptions describes an out-of-place schema upgrade. BackupPath is an
+// immutable exact-head snapshot. CandidatePath is an unpublished, independent
+// database for the caller to atomically publish after any outer coordination
+// state is durable.
+type UpgradeOptions struct {
+	SourcePath       string
+	BackupPath       string
+	CandidatePath    string
+	MinimumHead      *AuthorityHead
+	ReplaceCandidate bool
+}
+
+// UpgradeResult contains independently verified artifacts. Source and Backup
+// remain at the old version and exact old head; Candidate is at TargetVersion
+// with HeadGeneration advanced exactly once.
+type UpgradeResult struct {
+	Source    Inspection
+	Backup    BackupInfo
+	Candidate Inspection
+}
+
+// QuiesceOptions identifies the exact old authority that may be physically
+// checkpointed immediately before an atomic candidate replacement. The caller
+// must hold the state-root persistence lock and must have closed every Store
+// handle; SQLite cannot prove that process-level ownership from a pathname.
+type QuiesceOptions struct {
+	Path                  string
+	ExpectedSchemaVersion int
+	ExpectedHead          AuthorityHead
 }
 
 // Health is a process-lifetime latch. Critical mutation failures caused by a
@@ -280,9 +348,10 @@ type ForeignKeyViolation struct {
 }
 
 type BackupInfo struct {
-	Path      string
-	Head      AuthorityHead
-	Integrity IntegrityReport
+	Path          string
+	SchemaVersion int
+	Head          AuthorityHead
+	Integrity     IntegrityReport
 }
 
 type StatementFileRecord struct {

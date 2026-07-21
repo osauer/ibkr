@@ -177,6 +177,31 @@ migration ledger or SQLite's structural check alone. It does not automatically
 repair corruption or restore a backup; recovery and broker/order reconciliation
 are a separate operational procedure.
 
+Schema readiness is part of daemon startup, before state adapters attach, the
+RPC socket is served, or either broker connection starts. A fresh installation
+creates and validates `daemon.db` directly at the binary's target schema. For
+an existing database, the daemon compares the on-disk schema version and
+checksummed migration ledger with that target: an equal version proceeds only
+after normal validation, a newer version refuses downgrade, and an older
+version enters the automatic upgrade coordinator.
+
+An upgrade never mutates the published database in place. Under the persistence
+lock, the coordinator first creates a verified, standalone backup at the exact
+current authority head, then applies immutable, ordered migrations to an
+unpublished candidate and runs the full schema, integrity, foreign-key,
+content-hash, and authority checks. A successful upgrade preserves the
+authority epoch and evidence, advances the authority head once, and atomically
+publishes the validated candidate. A small fsynced recovery manifest records
+the durable upgrade phase so restart can resume deterministically across the
+watermark and publication boundary; it is transient coordination, not another
+business-state authority. The pre-upgrade backup remains recovery-only, and a
+failed or ambiguous upgrade never triggers automatic repair or restore.
+
+SQL schema versions govern tables, indexes, constraints, and triggers. Mutable
+JSON documents carry independent, kind-specific payload versions and typed
+migrations. Append-only events are not rewritten to fit a new shape; new event
+or payload versions retain compatible readers or feed a new projection.
+
 Never persist broker market-data entitlements. Expose observed data type,
 quality, freshness, and warnings on typed read surfaces instead.
 

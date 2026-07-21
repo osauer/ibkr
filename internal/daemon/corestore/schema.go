@@ -13,7 +13,6 @@ import (
 
 const (
 	applicationID = 0x49424b52 // "IBKR"
-	schemaVersion = 1
 )
 
 type migration struct {
@@ -310,15 +309,60 @@ func migrationChecksum(m migration) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+func currentMigrationPlan() []migration {
+	return cloneMigrationPlan(migrations)
+}
+
+func cloneMigrationPlan(plan []migration) []migration {
+	cloned := make([]migration, len(plan))
+	for i, m := range plan {
+		cloned[i] = m
+		cloned[i].statements = append([]string(nil), m.statements...)
+	}
+	return cloned
+}
+
+func validateMigrationPlan(plan []migration) error {
+	if len(plan) == 0 {
+		return errorsf("empty migration plan")
+	}
+	for i, m := range plan {
+		if m.version != i+1 || strings.TrimSpace(m.name) == "" {
+			return fmt.Errorf("invalid migration plan at version %d", i+1)
+		}
+		if err := validateMigrationStatements(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateMigrationStatements(m migration) error {
+	for _, stmt := range m.statements {
+		upper := strings.ToUpper(strings.TrimSpace(stmt))
+		if strings.HasPrefix(upper, "DROP ") || strings.HasPrefix(upper, "DELETE ") || strings.HasPrefix(upper, "REPLACE ") || strings.HasPrefix(upper, "VACUUM") || strings.Contains(upper, " DROP COLUMN ") {
+			return fmt.Errorf("migration %d contains destructive statement", m.version)
+		}
+	}
+	return nil
+}
+
 // validateSchemaObjects compares every application-owned table, index, and
 // trigger against a database built from the canonical migration plan. SQLite
 // owns sqlite_* objects (including implicit autoindexes and sqlite_sequence),
 // so they are deliberately excluded from the application manifest.
 func validateSchemaObjects(ctx context.Context, db *sql.DB, expectedVersion int) error {
-	if expectedVersion < 1 || expectedVersion > len(migrations) {
+	return validateSchemaObjectsWithPlan(ctx, db, expectedVersion, currentMigrationPlan())
+}
+
+func validateSchemaObjectsWithPlan(ctx context.Context, db *sql.DB, expectedVersion int, plan []migration) error {
+	if err := validateMigrationPlan(plan); err != nil {
+		return err
+	}
+	if expectedVersion < 1 || expectedVersion > len(plan) {
 		return errorsf("unsupported schema version")
 	}
-	expected, err := canonicalSchemaManifest(ctx, expectedVersion)
+	expected, err := canonicalSchemaManifestWithPlan(ctx, expectedVersion, plan)
 	if err != nil {
 		return fmt.Errorf("build canonical schema manifest: %w", err)
 	}
@@ -366,7 +410,13 @@ func validateSchemaObjects(ctx context.Context, db *sql.DB, expectedVersion int)
 	return fmt.Errorf("schema object manifest mismatch: expected %s, got %s", wantFingerprint, gotFingerprint)
 }
 
-func canonicalSchemaManifest(ctx context.Context, version int) ([]schemaObject, error) {
+func canonicalSchemaManifestWithPlan(ctx context.Context, version int, plan []migration) ([]schemaObject, error) {
+	if err := validateMigrationPlan(plan); err != nil {
+		return nil, err
+	}
+	if version < 1 || version > len(plan) {
+		return nil, errorsf("unsupported schema version")
+	}
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		return nil, err
@@ -376,8 +426,7 @@ func canonicalSchemaManifest(ctx context.Context, version int) ([]schemaObject, 
 	if err := db.PingContext(ctx); err != nil {
 		return nil, err
 	}
-	plan := append([]migration(nil), migrations[:version]...)
-	if err := migrate(ctx, db, plan, time.Unix(0, 0).UTC()); err != nil {
+	if err := migrate(ctx, db, cloneMigrationPlan(plan[:version]), time.Unix(0, 0).UTC()); err != nil {
 		return nil, err
 	}
 	return readSchemaManifest(ctx, db)
@@ -491,8 +540,8 @@ func normalizeSchemaSQL(input string) (string, error) {
 }
 
 func migrate(ctx context.Context, db *sql.DB, plan []migration, now time.Time) error {
-	if len(plan) == 0 {
-		return errorsf("empty migration plan")
+	if err := validateMigrationPlan(plan); err != nil {
+		return err
 	}
 	var userVersion, appID int
 	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
@@ -559,12 +608,6 @@ func migrate(ctx context.Context, db *sql.DB, plan []migration, now time.Time) e
 		m := plan[version-1]
 		if m.version != version {
 			return fmt.Errorf("invalid migration plan at version %d", version)
-		}
-		for _, stmt := range m.statements {
-			upper := strings.ToUpper(strings.TrimSpace(stmt))
-			if strings.HasPrefix(upper, "DROP ") || strings.HasPrefix(upper, "DELETE ") || strings.HasPrefix(upper, "REPLACE ") || strings.HasPrefix(upper, "VACUUM") || strings.Contains(upper, " DROP COLUMN ") {
-				return fmt.Errorf("migration %d contains destructive statement", version)
-			}
 		}
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {

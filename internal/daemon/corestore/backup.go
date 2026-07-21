@@ -125,7 +125,7 @@ func normalizeBackupJournal(ctx context.Context, path string) error {
 
 func removeBackupSidecars(path string) error {
 	var joined error
-	for _, suffix := range []string{"-wal", "-shm"} {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
 		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
 			joined = errors.Join(joined, fmt.Errorf("remove backup%s: %w", suffix, err))
 		}
@@ -139,7 +139,11 @@ func cleanupBackupTemp(path string) {
 }
 
 func (s *Store) runOnlineBackup(ctx context.Context, destination string) error {
-	conn, err := s.db.Conn(ctx)
+	return runOnlineBackupDB(ctx, s.db, destination)
+}
+
+func runOnlineBackupDB(ctx context.Context, db *sql.DB, destination string) error {
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
@@ -179,6 +183,11 @@ func (s *Store) runOnlineBackup(ctx context.Context, destination string) error {
 // VerifyBackup performs read-only schema/checksum, integrity, foreign-key,
 // and minimum-head checks. It never upgrades or repairs the candidate.
 func VerifyBackup(ctx context.Context, path string, minimum AuthorityHead) (BackupInfo, error) {
+	plan := currentMigrationPlan()
+	return verifyBackupWithPlan(ctx, path, minimum, len(plan), plan)
+}
+
+func verifyBackupWithPlan(ctx context.Context, path string, minimum AuthorityHead, expectedVersion int, plan []migration) (BackupInfo, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return BackupInfo{}, err
@@ -192,7 +201,7 @@ func VerifyBackup(ctx context.Context, path string, minimum AuthorityHead) (Back
 	if err := db.PingContext(ctx); err != nil {
 		return BackupInfo{}, fmt.Errorf("open backup for verification: %w", err)
 	}
-	if err := validateSchemaLedger(ctx, db, schemaVersion); err != nil {
+	if err := validateSchemaLedgerWithPlan(ctx, db, expectedVersion, plan); err != nil {
 		return BackupInfo{}, fmt.Errorf("verify backup schema: %w", err)
 	}
 	report, err := checkIntegrityDB(ctx, db)
@@ -209,49 +218,14 @@ func VerifyBackup(ctx context.Context, path string, minimum AuthorityHead) (Back
 	if err := requireMinimumHead(head, minimum); err != nil {
 		return BackupInfo{}, err
 	}
-	return BackupInfo{Path: path, Head: head, Integrity: report}, nil
+	return BackupInfo{Path: path, SchemaVersion: expectedVersion, Head: head, Integrity: report}, nil
 }
 
-func requireMigrationBackup(ctx context.Context, source *sql.DB, path string, version int) error {
-	sourceHead, err := readAuthorityHead(ctx, source)
-	if err != nil {
-		return fmt.Errorf("read pre-migration authority head: %w", err)
-	}
-	path, err = filepath.Abs(path)
-	if err != nil {
+func validateSchemaLedgerWithPlan(ctx context.Context, db *sql.DB, expectedVersion int, plan []migration) error {
+	if err := validateMigrationPlan(plan); err != nil {
 		return err
 	}
-	db, err := sql.Open("sqlite", sqliteDSN(path, defaultBusyTimeout, true))
-	if err != nil {
-		return fmt.Errorf("open migration backup: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	defer db.Close()
-	if err := db.PingContext(ctx); err != nil {
-		return fmt.Errorf("open migration backup: %w", err)
-	}
-	if err := validateSchemaLedger(ctx, db, version); err != nil {
-		return fmt.Errorf("verify migration backup schema: %w", err)
-	}
-	report, err := checkIntegrityDB(ctx, db)
-	if err != nil || !report.OK() {
-		if err != nil {
-			return err
-		}
-		return integrityFailure(report)
-	}
-	backupHead, err := readAuthorityHead(ctx, db)
-	if err != nil {
-		return err
-	}
-	if backupHead != sourceHead {
-		return fmt.Errorf("%w: migration backup is not at exact write head", ErrRollback)
-	}
-	return nil
-}
-
-func validateSchemaLedger(ctx context.Context, db *sql.DB, expectedVersion int) error {
-	if expectedVersion < 1 || expectedVersion > len(migrations) {
+	if expectedVersion < 1 || expectedVersion > len(plan) {
 		return errorsf("unsupported schema version")
 	}
 	var version, appID int
@@ -282,7 +256,7 @@ func validateSchemaLedger(ctx context.Context, db *sql.DB, expectedVersion int) 
 		if v != seen+1 || v > expectedVersion {
 			return errorsf("migration ledger is non-contiguous")
 		}
-		want := migrations[v-1]
+		want := plan[v-1]
 		if name != want.name || checksum != migrationChecksum(want) {
 			return fmt.Errorf("migration checksum drift at version %d", v)
 		}
@@ -294,7 +268,7 @@ func validateSchemaLedger(ctx context.Context, db *sql.DB, expectedVersion int) 
 	if seen != expectedVersion {
 		return errorsf("migration ledger does not match schema version")
 	}
-	return validateSchemaObjects(ctx, db, expectedVersion)
+	return validateSchemaObjectsWithPlan(ctx, db, expectedVersion, plan)
 }
 
 func syncFile(path string) error {

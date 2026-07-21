@@ -91,10 +91,13 @@ silently ignored and are not queried by the new daemon.
 
 ## Store contract
 
-- Schema migrations are ordered, checksummed, transactional, and preceded by
-  a verified backup. A future schema, corruption, checksum mismatch, failed
-  integrity check, or migration error is fatal; the daemon never deletes or
-  silently recreates `daemon.db`.
+- The application schema version is recorded in `PRAGMA user_version` and an
+  immutable `schema_migrations` ledger. Migrations are ordered, versioned,
+  checksummed, and transactional. Released migrations are never edited,
+  reordered, removed, or assigned a new checksum.
+- A future schema, corruption, checksum mismatch, failed integrity check, or
+  migration error is fatal; the daemon never deletes or silently recreates
+  `daemon.db`.
 - The migration ledger is not accepted as proof by itself. Startup and backup
   verification compare every application-owned table, index, and trigger with
   the canonical schema object manifest, and recompute stored SHA-256 values for
@@ -142,6 +145,69 @@ silently ignored and are not queried by the new daemon.
   derived equity views. A parse/read failure leaves the previous complete
   projection intact; same-name/same-size restatements are detected by SHA-256,
   and removed files retract only their current winners.
+
+## Schema evolution
+
+Schema inspection and upgrade are daemon-startup prerequisites. They complete
+after the daemon wins its instance and persistence locks and before state
+adapters attach, the RPC socket is served, schedulers run, or broker
+connections start.
+
+A fresh installation creates an unpublished `daemon.db` directly at the
+binary's target schema, validates it, and follows the normal initial-publication
+protocol. It does not enter the existing-authority upgrade path.
+
+For an existing database, startup validates the recorded version, migration
+ledger, canonical objects, content hashes, integrity, foreign keys, authority
+identity, and external minimum head, then compares the on-disk version with the
+binary target:
+
+- Equal: open the validated database normally.
+- Newer: refuse to start; automatic downgrade is never allowed.
+- Older: run the automatic out-of-place upgrade below. The ledger must be an
+  exact checksummed prefix of the binary's immutable migration plan.
+
+The upgrade protocol is:
+
+1. Create and verify an immutable, standalone pre-upgrade backup at the exact
+   authority epoch and head. It must reopen without WAL, SHM, journal, or other
+   sidecar state. The source remains the published authority.
+2. Create an unpublished candidate from that exact head. Apply every pending
+   migration in order and transactionally; a failed migration cannot publish a
+   partial target schema.
+3. Fully validate the candidate against the binary target: migration ledger,
+   exact table/index/trigger manifest, SQLite integrity and foreign keys,
+   stored content hashes, and authority invariants. The candidate preserves the
+   authority epoch, signer generation, event sequence, and all existing state
+   and evidence, while advancing `head_generation` exactly once for the schema
+   transition.
+4. Persist and fsync a transient recovery manifest that binds the source,
+   backup, and candidate fingerprints; old and target schema versions; old and
+   candidate heads; and the last durable phase. The manifest is coordination
+   state only and is removed after a verified successful upgrade.
+5. With the validated candidate and manifest durable, advance the external
+   monotonic watermark in its normal anti-rollback order, atomically publish
+   the candidate as `daemon.db`, fsync the parent directory, reopen and
+   revalidate the published database, then remove the manifest durably.
+
+Restart resumes from the manifest's last verified phase rather than guessing
+from filenames or modification times. Before publication it continues only
+from artifacts whose recorded fingerprints and heads still match. After
+publication it verifies and finalizes the target database. Missing, conflicting,
+or unverifiable artifacts fail closed. The daemon never repairs a candidate,
+rolls back automatically, or restores the pre-upgrade backup automatically;
+that backup remains recovery-only under the explicit offline recovery policy.
+
+Three version domains remain separate:
+
+- SQL schema migrations change application-owned tables, indexes, constraints,
+  and triggers.
+- Mutable state documents carry kind-specific payload versions. Attribute
+  changes use typed per-document migration and validation; the SQL schema
+  version is not used as a proxy for a document's shape.
+- Append-only events and observations remain immutable. Evolution introduces a
+  versioned event/payload reader or a new projection; it never rewrites retained
+  evidence merely to match the newest representation.
 
 ## Cutover
 

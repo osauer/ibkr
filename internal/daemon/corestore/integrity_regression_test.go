@@ -119,7 +119,7 @@ func TestApplicationContentHashesRejectValidPayloadTampering(t *testing.T) {
 				path, head := createClosedIntegrityFixture(t, tc.name)
 				db := rawDB(t, path)
 				tamperStoredPayload(t, db, tc.table, tc.column, tc.newJSON, tc.appendOnly)
-				if err := validateSchemaObjects(t.Context(), db, schemaVersion); err != nil {
+				if err := validateSchemaObjects(t.Context(), db, len(migrations)); err != nil {
 					t.Fatalf("payload tamper changed schema: %v", err)
 				}
 				if err := db.Close(); err != nil {
