@@ -42,6 +42,8 @@ Do not describe the standard downloads as an order-entry or automated-trading sy
 - [TWS protocol coverage](https://osauer.dev/ibkr/reference/protocol.html)
 - [Concepts](https://osauer.dev/ibkr/concepts.html)
 - [Architecture](https://osauer.dev/ibkr/architecture.html)
+- [Policies](https://osauer.dev/ibkr/policies.html)
+- [Database](https://osauer.dev/ibkr/database.html)
 
 ## Primary Search Phrases
 

@@ -13,6 +13,18 @@
     <priority>0.7</priority>
   </url>
   <url>
+    <loc>https://osauer.dev/ibkr/policies.html</loc>
+    <lastmod>2026-07-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://osauer.dev/ibkr/database.html</loc>
+    <lastmod>2026-07-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
     <loc>https://osauer.dev/ibkr/canary-remote/</loc>
     <lastmod>2026-07-18</lastmod>
     <changefreq>weekly</changefreq>

@@ -69,7 +69,7 @@ const esc = (value) => String(value)
   .replaceAll(">", "&gt;")
   .replaceAll('"', "&quot;");
 
-function defs() {
+function defs(extraStyles = "") {
   const symbols = Object.entries(icons).map(([name, body]) =>
     `<symbol id="icon-${name}" viewBox="0 0 24 24">${body}</symbol>`).join("");
   const marker = (name, color) => `<marker id="arrow-${name}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="${color}"/></marker>`;
@@ -99,7 +99,7 @@ function defs() {
       .tile-sub { font-size: 11.8px; fill: ${C.muted}; }
       .format { font: 10.8px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: ${C.muted}; }
       .footnote { font-size: 10.5px; fill: ${C.muted}; opacity: .85; }
-    </style>
+${extraStyles}    </style>
   </defs>`;
 }
 
@@ -167,16 +167,26 @@ function junction(x, y, color = C.slate) {
   return `<circle cx="${x}" cy="${y}" r="3" fill="${color}"/>`;
 }
 
-function svgFrame({ width, height, title, description, body }) {
+function svgFrame({ width, height, title, description, body, extraStyles = "" }) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="diagram-title diagram-desc">
   <title id="diagram-title">${esc(title)}</title>
   <desc id="diagram-desc">${esc(description)}</desc>
   <metadata>Generic component icons derived from Tabler Icons 3.45.0, MIT License. Canary mark copyright the ibkr project.</metadata>
-  ${defs()}
+  ${defs(extraStyles)}
   <rect width="${width}" height="${height}" fill="${C.paper}"/>
   ${body}
 </svg>\n`;
 }
+
+const referenceDiagramStyles = `      .card-title { font-size: 14px; font-weight: 700; fill: ${C.ink}; }
+      .card-sub { font-size: 11.5px; fill: ${C.muted}; }
+      .er-title { font-size: 13px; font-weight: 700; fill: ${C.ink}; }
+      .er-key { font: 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; fill: ${C.greenDark}; }
+      .er-field { font: 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: ${C.muted}; }
+      .step-no { font-size: 12px; font-weight: 800; fill: #ffffff; }
+      .step-title { font-size: 12.5px; font-weight: 700; fill: ${C.ink}; }
+      .step-sub { font-size: 10.8px; fill: ${C.muted}; }
+`;
 
 function stripNode(x, y, width, label, iconName = "") {
   const textX = iconName ? x + width / 2 + 11 : x + width / 2;
@@ -413,6 +423,268 @@ function persistenceArchitecture() {
   });
 }
 
-fs.writeFileSync(path.join(here, "system-architecture.svg"), systemArchitecture());
-fs.writeFileSync(path.join(here, "data-and-persistence.svg"), persistenceArchitecture());
-console.log("rendered system-architecture.svg and data-and-persistence.svg");
+function policyCard({ x, y, width, height, iconName, color, title, lines, format, dark = false }) {
+  const fill = dark ? C.terminal : C.panel;
+  const titleFill = dark ? "#ffffff" : C.ink;
+  const subClass = dark ? "node-sub on-dark" : "card-sub";
+  const formatFill = dark ? C.textOnDarkDim : C.muted;
+  return `<g role="group" aria-label="${esc([title, ...lines, format].filter(Boolean).join(". "))}">
+    <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="14" fill="${fill}" stroke="${color}" stroke-width="1.2"/>
+    ${iconTile(iconName, x + 16, y + 16, color, 38)}
+    <text x="${x + 66}" y="${y + 35}" class="card-title" style="fill:${titleFill}">${esc(title)}</text>
+    ${textLines(x + 18, y + 72, lines, subClass, 16)}
+    <text x="${x + 18}" y="${y + height - 15}" class="mono-small" style="fill:${formatFill}">${esc(format)}</text>
+  </g>`;
+}
+
+function policyArchitecture() {
+  const body = `
+  ${header("Policy Authority and Execution", "Approved choices enter through typed boundaries; evidence, enforcement, and reporting stay separate.")}
+
+  ${legendItem(1028, 40, "green", "Operator authority")}
+  ${legendItem(1182, 40, "blue", "Observed evidence", { dashed: true })}
+  ${legendItem(1028, 64, "slate", "Typed decision flow")}
+  ${legendItem(1182, 64, "amber", "Human-only boundary", { dotted: true })}
+
+  <text x="36" y="138" class="layer">1 · AUTHORITY INPUTS</text>
+  <text x="392" y="138" class="layer">2 · DAEMON POLICY BOUNDARY</text>
+  <text x="744" y="138" class="layer">3 · EVIDENCE &amp; SEMANTICS</text>
+  <text x="1090" y="138" class="layer">4 · TYPED SURFACES</text>
+
+  ${policyCard({ x: 36, y: 160, width: 310, height: 126, iconName: "fileText", color: C.greenDark, title: "Risk Constitution", lines: ["operator-authored material limits", "missing values stay unapproved"], format: "policies/risk-policy.toml · no default" })}
+  ${policyCard({ x: 36, y: 306, width: 310, height: 126, iconName: "shieldCheck", color: C.green, title: "Advisory Engine Policies", lines: ["protection proposals · opportunities", "custom file or conservative default"], format: "versioned TOML · embedded defaults" })}
+  ${policyCard({ x: 36, y: 452, width: 310, height: 126, iconName: "settings", color: C.blue, title: "Runtime Preferences", lines: ["feature switches · overrides", "freeze / limits remain human-owned"], format: "daemon.db state document · CAS" })}
+  ${policyCard({ x: 36, y: 598, width: 310, height: 126, iconName: "lock", color: C.slate, title: "Code-Owned Invariants", lines: ["schema · validation · broker gates", "rulebook · Regime · Canary models"], format: "reviewed code + typed contracts", dark: true })}
+
+  <rect x="386" y="120" width="326" height="632" rx="18" fill="${C.panel}" stroke="${C.greenLine}" stroke-width="1.4"/>
+  <path d="M386 156h326v-18a18 18 0 0 0 -18 -18h-290a18 18 0 0 0 -18 18z" fill="${C.greenSoft}"/>
+  <text x="406" y="143" class="boundary" style="fill:${C.greenDark}">ONE EXECUTABLE POLICY CONTEXT</text>
+
+  ${policyCard({ x: 410, y: 178, width: 278, height: 126, iconName: "fileText", color: C.greenDark, title: "Strict Load & Validate", lines: ["known keys · units · combinations", "no material value is invented"], format: "internal/risk + daemon managers" })}
+  ${policyCard({ x: 410, y: 326, width: 278, height: 126, iconName: "refresh", color: C.green, title: "Version & Fingerprint", lines: ["higher version adopts new content", "same-version change reports drift"], format: "kind · schema · id · version · sha256" })}
+  ${policyCard({ x: 410, y: 474, width: 278, height: 126, iconName: "database", color: C.slate, title: "Last-Good Runtime Context", lines: ["active · absent · drift · error", "state and events commit before publish"], format: "daemon-owned · scope-bound" })}
+
+  <rect x="410" y="626" width="278" height="98" rx="12" fill="${C.amberSoft}" stroke="${C.amber}" stroke-dasharray="7 5"/>
+  ${icon("lock", 426, 642, 24, C.amber, 2)}
+  <text x="462" y="656" class="card-title">Non-overridable gates</text>
+  <text x="426" y="681" class="card-sub"><tspan x="426">pins · freeze · preview token · WhatIf</tspan><tspan x="426" dy="16">journal · daemon auth · agent origin</tspan></text>
+
+  ${line("M352 223H404", "green")}
+  ${line("M352 369H378V241H404", "green")}
+  ${line("M352 515H378V538H404", "blue", { dashed: true })}
+  ${line("M352 661H404", "slate")}
+
+  ${policyCard({ x: 744, y: 178, width: 302, height: 132, iconName: "worldDownload", color: C.blue, title: "Typed Evidence", lines: ["account · position · market · statement", "freshness · quality · finality · scope"], format: "missing / stale / partial ≠ zero" })}
+  ${policyCard({ x: 744, y: 338, width: 302, height: 132, iconName: "shieldCheck", color: C.green, title: "Pure Evaluation", lines: ["pass · watch · breach", "unknown · unapproved"], format: "internal/risk · no I/O" })}
+  ${policyCard({ x: 744, y: 498, width: 302, height: 132, iconName: "route", color: C.slate, title: "Declared Enforcement", lines: ["advisory · shadow · hard gate", "post-trade exception · reductions"], format: "typed result · never UI inference" })}
+  ${policyCard({ x: 744, y: 658, width: 302, height: 112, iconName: "database", color: C.greenDark, title: "Durable Reporting", lines: ["state revision + event / evidence"], format: "daemon.db · fingerprinted" })}
+
+  ${line("M718 404H738", "slate")}
+  ${line("M895 316V332", "blue", { dashed: true })}
+  ${line("M895 476V492", "slate")}
+  ${line("M895 636V652", "slate")}
+
+  ${policyCard({ x: 1090, y: 178, width: 314, height: 112, iconName: "terminal", color: C.slate, title: "CLI / JSON", lines: ["policy show · settings · proposals"], format: "operator actions stay explicit" })}
+  ${policyCard({ x: 1090, y: 316, width: 314, height: 112, iconName: "plugConnected", color: C.slate, title: "MCP / Agent Hosts", lines: ["read, research, and preview only"], format: "no policy or broker-write tools" })}
+  ${policyCard({ x: 1090, y: 454, width: 314, height: 112, iconName: "mobileCode", color: C.yellow, title: "Canary App / PWA", lines: ["renders daemon result and health"], format: "no second verdict", dark: false })}
+  ${policyCard({ x: 1090, y: 592, width: 314, height: 112, iconName: "bell", color: C.amber, title: "Alerts & Governance", lines: ["commissioned source and delivery state"], format: "shadow ≠ active delivery" })}
+
+  ${line("M1052 404H1072V234H1084", "slate")}
+  ${line("M1072 372H1084", "slate")}
+  ${line("M1072 510H1084", "slate")}
+  ${line("M1072 648H1084", "slate")}
+
+  <text x="1404" y="786" text-anchor="end" class="footnote">deterministic SVG · docs/diagrams/render-architecture.mjs · icons: Tabler 3.45 (MIT)</text>
+  `;
+
+  return svgFrame({
+    width: 1440,
+    height: 820,
+    title: "Policy Authority and Execution (ibkr canary)",
+    description: "Four policy authority classes enter the daemon through distinct validation paths, combine with typed evidence in pure risk semantics, and emerge as declared enforcement, durable reporting, and typed operator surfaces.",
+    body,
+    extraStyles: referenceDiagramStyles,
+  });
+}
+
+function dbTable({ x, y, width, title, rows, accent = C.green, fill = C.panel }) {
+  const height = 42 + rows.length * 18 + 14;
+  const content = rows.map((row, index) => {
+    const [key, field] = row;
+    const yy = y + 54 + index * 18;
+    return `<text x="${x + 14}" y="${yy}" class="er-key">${esc(key)}</text><text x="${x + 58}" y="${yy}" class="er-field">${esc(field)}</text>`;
+  }).join("");
+  return `<g role="group" aria-label="Table ${esc(title)}">
+    <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="10" fill="${fill}" stroke="${accent}" stroke-width="1.2"/>
+    <path d="M${x} ${y + 34}h${width}" stroke="${accent}" stroke-width="1.2"/>
+    <text x="${x + 14}" y="${y + 23}" class="er-title">${esc(title)}</text>
+    ${content}
+  </g>`;
+}
+
+function sqliteDataModel() {
+  const body = `
+  ${header("daemon.db Logical Data Model", "Current state, immutable evidence, order safety, and statement truth in one daemon-owned SQLite authority.")}
+
+  ${legendItem(978, 40, "green", "Current / authoritative")}
+  ${legendItem(1168, 40, "slate", "Append-only evidence")}
+  ${legendItem(978, 64, "blue", "External evidence link", { dashed: true })}
+  ${legendItem(1168, 64, "amber", "Monotonic safety", { dotted: true })}
+
+  <text x="36" y="132" class="layer">CONTROL &amp; CURRENT STATE</text>
+  ${dbTable({ x: 36, y: 150, width: 252, title: "store_meta", rows: [["PK", "singleton"], ["", "authority_epoch"], ["", "head / event / signer"]], accent: C.amber })}
+  ${dbTable({ x: 36, y: 278, width: 252, title: "schema_migrations", rows: [["PK", "version"], ["", "name · checksum"], ["", "applied_at"]], accent: C.slate })}
+  ${dbTable({ x: 36, y: 406, width: 252, title: "state_documents", rows: [["PK", "scope_key + kind"], ["", "revision · document_json"], ["", "sha256 · updated_at"]], accent: C.green })}
+  ${dbTable({ x: 36, y: 534, width: 252, title: "legacy_imports", rows: [["PK", "scope + source + hash"], ["", "status · details_json"], ["", "imported_through"]], accent: C.slate })}
+
+  <text x="330" y="132" class="layer">APPEND-ONLY EVENT SPINE &amp; PROJECTIONS</text>
+  ${dbTable({ x: 330, y: 150, width: 348, title: "event_log", rows: [["PK", "event_seq"], ["UQ", "scope_key + event_key"], ["", "type · action · origin"], ["", "occurred_at · recorded_at"], ["", "payload_json · sha256"]], accent: C.slate })}
+  ${dbTable({ x: 330, y: 320, width: 252, title: "regime_decisions", rows: [["PK/FK", "event_seq"], ["", "stage · readiness"], ["", "verdict · fingerprint"]], accent: C.slate })}
+  ${dbTable({ x: 596, y: 320, width: 252, title: "regime_indicators", rows: [["PK/FK", "decision_seq + indicator"], ["", "status · band · value"], ["", "freshness · eligible"]], accent: C.slate })}
+  ${dbTable({ x: 330, y: 448, width: 252, title: "rule_transitions", rows: [["PK/FK", "event_seq"], ["", "rule_id · status"], ["", "policy identity"]], accent: C.slate })}
+  ${dbTable({ x: 596, y: 448, width: 252, title: "canary_transitions", rows: [["PK/FK", "event_seq"], ["", "action · market_stage"], ["", "input_health · relevance"]], accent: C.slate })}
+  ${dbTable({ x: 330, y: 576, width: 252, title: "capital / policy events", rows: [["PK/FK", "event_seq"], ["", "capital_events"], ["", "risk_policy_events"]], accent: C.slate })}
+  ${dbTable({ x: 596, y: 576, width: 252, title: "proposal_outcomes", rows: [["PK/FK", "event_seq"], ["", "proposal_key · revision"], ["", "bucket · action · state"]], accent: C.slate })}
+
+  ${line("M510 282V314", "slate")}
+  ${line("M510 282H722V314", "slate")}
+  ${line("M510 282V442", "slate")}
+  ${line("M510 282H722V442", "slate")}
+  ${line("M510 282V570", "slate")}
+  ${line("M510 282H722V570", "slate")}
+  ${line("M588 384H590", "slate")}
+
+  <text x="890" y="132" class="layer">BROKER SCOPE, ORDER SAFETY &amp; OBSERVATIONS</text>
+  ${dbTable({ x: 890, y: 150, width: 246, title: "broker_scopes", rows: [["PK", "scope_key"], ["UQ", "binding_sha256"], ["", "endpoint · client · acct · mode"]], accent: C.greenDark })}
+  ${dbTable({ x: 1154, y: 150, width: 250, title: "order_events", rows: [["PK/FK", "event_seq"], ["FK", "scope_key"], ["", "type · refs · ids · status"]], accent: C.slate })}
+  ${dbTable({ x: 890, y: 278, width: 246, title: "consumed_preview_tokens", rows: [["PK", "token_digest"], ["FK", "scope_key"], ["", "epoch · signer · head"]], accent: C.amber })}
+  ${dbTable({ x: 1154, y: 278, width: 250, title: "order_id_floors", rows: [["PK", "floor_scope + scope_key"], ["", "floor · updated_at"], ["", "trigger: never decrease"]], accent: C.amber })}
+  ${dbTable({ x: 890, y: 406, width: 514, title: "observations", rows: [["PK", "observation_id"], ["", "scope · source · kind · observed_at"], ["", "payload · sha256 · metadata_json"], ["", "decision_eligible (required)"]], accent: C.blue })}
+
+  ${line("M1142 214H1148", "green")}
+  ${line("M1279 282V264H684", "slate")}
+  ${line("M1013 264V272", "green")}
+
+  <rect x="322" y="716" width="1082" height="180" rx="16" fill="${C.panel}" stroke="${C.blue}" stroke-width="1.2"/>
+  <text x="342" y="744" class="boundary" style="fill:${C.blue}">BROKER STATEMENT PROJECTION · ORIGINAL FLEX XML REMAINS EXTERNAL EVIDENCE</text>
+  ${dbTable({ x: 342, y: 764, width: 242, title: "statement_files", rows: [["PK", "scope + file_key"], ["UQ", "+ current sha256"], ["", "status · generated_at"]], accent: C.green })}
+  ${dbTable({ x: 604, y: 764, width: 242, title: "statement_equity_days", rows: [["UQ", "scope + account + day"], ["FK", "current file + sha256"], ["", "equity · raw_json"]], accent: C.green })}
+  ${dbTable({ x: 866, y: 764, width: 242, title: "statement_file_versions", rows: [["PK", "scope + file + sha256"], ["", "size · status"], ["", "generated · recorded"]], accent: C.slate })}
+  ${dbTable({ x: 1128, y: 764, width: 256, title: "statement_equity_day_versions", rows: [["PK", "equity_version_id"], ["FK", "immutable file version"], ["", "day · equity · raw sha256"]], accent: C.slate })}
+
+  ${line("M590 828H598", "green")}
+  ${line("M1114 828H1122", "blue", { dashed: true })}
+  ${line("M318 806H296V470H294", "blue", { dashed: true })}
+
+  <text x="1404" y="934" text-anchor="end" class="footnote">logical view of schema v1 · canonical DDL: internal/daemon/corestore/schema.go</text>
+  `;
+
+  return svgFrame({
+    width: 1440,
+    height: 968,
+    title: "daemon.db Logical Data Model (ibkr canary)",
+    description: "A logical entity relationship view groups SQLite control and state tables, the append-only event spine and domain projections, broker scope and order safety tables, retained observations, and current plus immutable broker statement projections.",
+    body,
+    extraStyles: referenceDiagramStyles,
+  });
+}
+
+function stepCard({ x, y, width, number, title, lines, color = C.slate }) {
+  const height = 104;
+  return `<g role="group" aria-label="Step ${number}. ${esc([title, ...lines].join(". "))}">
+    <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="12" fill="${C.panel}" stroke="${color}" stroke-width="1.2"/>
+    <circle cx="${x + 24}" cy="${y + 25}" r="15" fill="${color}"/>
+    <text x="${x + 24}" y="${y + 29}" text-anchor="middle" class="step-no">${number}</text>
+    <text x="${x + 48}" y="${y + 29}" class="step-title">${esc(title)}</text>
+    ${textLines(x + 16, y + 58, lines, "step-sub", 15)}
+  </g>`;
+}
+
+function sqliteUpdateLifecycle() {
+  const body = `
+  ${header("SQLite Mutation and Upgrade Lifecycle", "Every commit advances the authority head; startup validates before RPC or broker connectivity.")}
+
+  ${legendItem(1035, 40, "green", "Validated authority")}
+  ${legendItem(1208, 40, "slate", "Local durable flow")}
+  ${legendItem(1035, 64, "amber", "Anti-rollback", { dotted: true })}
+  ${legendItem(1208, 64, "blue", "Recovery artifact", { dashed: true })}
+
+  <rect x="36" y="126" width="1368" height="214" rx="16" fill="${C.panelAlt}" stroke="${C.line}"/>
+  <text x="56" y="154" class="layer">NORMAL MUTATION · ONE SERIALIZED WRITER</text>
+  ${stepCard({ x: 56, y: 174, width: 238, number: "1", title: "Validate input", lines: ["scope · revision · payload", "typed invariants"], color: C.slate })}
+  ${stepCard({ x: 326, y: 174, width: 238, number: "2", title: "BEGIN transaction", lines: ["CAS state and/or insert", "event · observation · safety rows"], color: C.slate })}
+  ${stepCard({ x: 596, y: 174, width: 238, number: "3", title: "Advance head", lines: ["head_generation monotonic", "event_seq when applicable"], color: C.green })}
+  ${stepCard({ x: 866, y: 174, width: 238, number: "4", title: "Commit SQLite", lines: ["WAL · FULL sync · foreign keys", "failure publishes nothing"], color: C.green })}
+  ${stepCard({ x: 1136, y: 174, width: 248, number: "5", title: "Seal watermark", lines: ["fsync daemon.db.head", "then publish in-memory / RPC"], color: C.amber })}
+  ${line("M300 226H320", "slate")}
+  ${line("M570 226H590", "slate")}
+  ${line("M840 226H860", "green")}
+  ${line("M1110 226H1130", "amber", { dotted: true })}
+
+  <rect x="36" y="372" width="1368" height="352" rx="16" fill="${C.panel}" stroke="${C.greenLine}" stroke-width="1.4"/>
+  <text x="56" y="402" class="layer">STARTUP GATE · BEFORE ADAPTERS, RPC, SCHEDULERS, OR BROKER CONNECTIONS</text>
+  ${stepCard({ x: 56, y: 424, width: 250, number: "1", title: "Inspect published DB", lines: ["locks · file/sidecars · app id", "schema · ledger · min head"], color: C.slate })}
+  ${stepCard({ x: 330, y: 424, width: 250, number: "2", title: "Validate authority", lines: ["objects · integrity · foreign keys", "content hashes · counters"], color: C.green })}
+  ${stepCard({ x: 604, y: 424, width: 250, number: "3", title: "Compare versions", lines: ["equal → verified open", "newer → refuse downgrade"], color: C.green })}
+  ${line("M312 476H324", "slate")}
+  ${line("M586 476H598", "green")}
+
+  <path d="M729 534V558H159V574" fill="none" stroke="${C.slate}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-slate)"/>
+  <text x="592" y="550" class="mono-small">older, valid schema → out-of-place coordinator</text>
+
+  ${stepCard({ x: 56, y: 580, width: 206, number: "4", title: "Exact-head backup", lines: ["standalone · verified", "source stays published"], color: C.blue })}
+  ${stepCard({ x: 282, y: 580, width: 206, number: "5", title: "Migrate candidate", lines: ["same directory · ordered", "transactional migrations"], color: C.slate })}
+  ${stepCard({ x: 508, y: 580, width: 206, number: "6", title: "Validate + manifest", lines: ["target objects · hashes", "fsynced recovery phase"], color: C.green })}
+  ${stepCard({ x: 734, y: 580, width: 206, number: "7", title: "Arm watermark", lines: ["candidate head bound", "old WAL quiesced"], color: C.amber })}
+  ${stepCard({ x: 960, y: 580, width: 206, number: "8", title: "Atomic publish", lines: ["rename candidate", "fsync parent · reopen"], color: C.green })}
+  ${stepCard({ x: 1186, y: 580, width: 198, number: "9", title: "Verify + finalize", lines: ["remove manifest", "backup stays recovery-only"], color: C.green })}
+  ${line("M268 632H276", "blue", { dashed: true })}
+  ${line("M494 632H502", "slate")}
+  ${line("M720 632H728", "green")}
+  ${line("M946 632H954", "amber", { dotted: true })}
+  ${line("M1172 632H1180", "green")}
+
+  <rect x="884" y="424" width="500" height="106" rx="12" fill="${C.amberSoft}" stroke="${C.amber}" stroke-dasharray="7 5"/>
+  ${icon("lock", 904, 442, 26, C.amber, 2)}
+  <text x="944" y="458" class="card-title">Any ambiguity fails closed</text>
+  <text x="904" y="484" class="card-sub"><tspan x="904">corruption · future schema · missing watermark · tamper</tspan><tspan x="904" dy="16">mismatched recovery artifacts · unsafe sidecars</tspan></text>
+
+  <text x="1404" y="758" text-anchor="end" class="footnote">no in-place upgrade · no automatic repair/restore · no legacy-file fallback</text>
+  `;
+
+  return svgFrame({
+    width: 1440,
+    height: 792,
+    title: "SQLite Mutation and Upgrade Lifecycle (ibkr canary)",
+    description: "The normal mutation lane validates, transactionally commits state and evidence, advances the authority head, seals an external watermark, and only then publishes. Startup validates the entire authority and upgrades older schemas through a verified backup and unpublished candidate before atomic publication.",
+    body,
+    extraStyles: referenceDiagramStyles,
+  });
+}
+
+const cleanGeneratedSVG = (svg) => svg.replace(/^[ \t]+$/gm, "");
+
+const outputs = new Map([
+  ["system-architecture.svg", systemArchitecture()],
+  ["data-and-persistence.svg", persistenceArchitecture()],
+  ["policy-authority.svg", cleanGeneratedSVG(policyArchitecture())],
+  ["sqlite-data-model.svg", cleanGeneratedSVG(sqliteDataModel())],
+  ["sqlite-update-lifecycle.svg", cleanGeneratedSVG(sqliteUpdateLifecycle())],
+]);
+
+if (process.argv.includes("--check")) {
+  const stale = [];
+  for (const [name, expected] of outputs) {
+    const output = path.join(here, name);
+    if (!fs.existsSync(output) || fs.readFileSync(output, "utf8") !== expected) stale.push(name);
+  }
+  if (stale.length) {
+    console.error(`diagram check: stale output: ${stale.join(", ")}; run node docs/diagrams/render-architecture.mjs`);
+    process.exitCode = 1;
+  } else {
+    console.log(`diagram check: ${outputs.size} SVG diagram(s) match the renderer`);
+  }
+} else {
+  for (const [name, content] of outputs) fs.writeFileSync(path.join(here, name), content);
+  console.log(`rendered ${outputs.size} architecture diagrams`);
+}

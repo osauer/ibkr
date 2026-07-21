@@ -455,7 +455,7 @@ docs-check: ## Verify checked-in docs/reference/*.md match what the generators e
 	done; \
 	exit $$fail
 
-# Markdown is the only prose authority for the 12 public documentation pages
+# Markdown is the only prose authority for the 14 public documentation pages
 # declared by scripts/docgen/docs-html. GitHub Pages currently publishes docs/
 # verbatim, so deterministic HTML derivatives stay checked in. The check
 # re-renders every declared page and compares exact bytes; it never trusts a
@@ -463,6 +463,7 @@ docs-check: ## Verify checked-in docs/reference/*.md match what the generators e
 docs-html-check: ## Verify generated docs/ HTML exactly matches Markdown sources
 	@go test ./scripts/docgen/docs-html
 	@go run ./scripts/docgen/docs-html -check
+	@node docs/diagrams/render-architecture.mjs --check
 
 docs-html-regen: ## Regenerate public docs/ HTML from Markdown sources
 	@go run ./scripts/docgen/docs-html

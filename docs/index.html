@@ -764,7 +764,7 @@ ibkr setup claude-desktop
         </article>
         <article class="feature">
           <small>Risk policy</small>
-          <h3>A risk policy you write yourself</h3>
+          <h3><a href="policies.html">A risk policy you write yourself</a></h3>
           <p><code>ibkr policy</code> reads a file you author: protected equity floor, declared risk capital, drawdown ladder. There are no default numbers in code, and nothing it reports ever blocks an order. Terminal only.</p>
         </article>
         <article class="feature">
@@ -891,6 +891,30 @@ ibkr setup claude-desktop
       </div>
     </section>
 
+    <section class="wrap" aria-labelledby="desk-references-title">
+      <div class="section-head">
+        <h2 id="desk-references-title">Desk references.</h2>
+        <p>Three visual, code-grounded references explain the platform boundary, policy authority, and the durable data beneath operator workflows and analytics.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature">
+          <small>System</small>
+          <h3><a href="architecture.html">Architecture</a></h3>
+          <p>Runtime processes, typed contracts, broker and external-data flows, state ownership, and deployment boundaries.</p>
+        </article>
+        <article class="feature">
+          <small>Operator</small>
+          <h3><a href="policies.html">Policies</a></h3>
+          <p>Who owns each policy class, how to configure it, version and fingerprint changes, enforcement, and commissioning state.</p>
+        </article>
+        <article class="feature">
+          <small>Data</small>
+          <h3><a href="database.html">Database</a></h3>
+          <p>The daemon SQLite model, supported query paths, transaction and evidence semantics, durability, and schema upgrades.</p>
+        </article>
+      </div>
+    </section>
+
     <section class="wrap" aria-labelledby="faq-title">
       <div class="section-head">
         <h2 id="faq-title">IBKR MCP FAQ.</h2>
@@ -969,6 +993,8 @@ ibkr setup claude-desktop
       <div class="footer-links">
         <a href="https://www.linkedin.com/in/osauer/">Oliver Sauer</a>
         <a href="architecture.html">Architecture</a>
+        <a href="policies.html">Policies</a>
+        <a href="database.html">Database</a>
         <a href="https://github.com/osauer/ibkr">GitHub</a>
         <a href="feedback/">Feedback</a>
         <a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a>

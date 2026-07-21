@@ -45,6 +45,18 @@ var pages = []pageSpec{
 		SocialImage: "diagrams/system-architecture.png",
 	},
 	{
+		Source:      "docs/policies.md",
+		Description: "Operator reference for ibkr policy authority, configuration, versioning, fingerprints, enforcement, and commissioning.",
+		Layout:      "architecture",
+		SocialImage: "diagrams/policy-authority.png",
+	},
+	{
+		Source:      "docs/database.md",
+		Description: "Reference for the ibkr daemon SQLite data model, query boundaries, transactional mechanics, durability, and schema upgrades.",
+		Layout:      "architecture",
+		SocialImage: "diagrams/sqlite-data-model.png",
+	},
+	{
 		Source:      "docs/concepts.md",
 		Description: "What the load-bearing market, portfolio, and data-quality context surfaces measure, and how to read them without mis-acting on the output.",
 	},

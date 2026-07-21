@@ -84,6 +84,11 @@ refreshable in-memory views do not.
   Global account, market, and sync state stays outside individual tab
   content.
 
+The desk-facing [Policies](policies.md) reference explains which choices are
+operator-authored, which policies have embedded defaults, how versions and
+fingerprints become one daemon execution context, and which broker-write gates
+no policy may weaken.
+
 ## Data Flows and Protocols
 
 The daemon protocol and the MCP protocol are different on purpose; only the
@@ -134,7 +139,9 @@ authorities. `daemon.db` is the daemon's sole live authority for mutable state,
 append-only events, orders, and retained market observations. Retained Flex XML
 remains original broker evidence; the daemon transactionally refreshes its
 typed statement inventory and equity projection in `daemon.db` from the
-complete XML set.
+complete XML set. See the [Database](database.md) reference for the logical ER
+model, table families, supported query paths, transaction semantics, and
+out-of-place schema-upgrade lifecycle.
 
 | Class | Default Location | Owner and Representative Contents |
 |---|---|---|
@@ -314,3 +321,8 @@ Market-event flags are daemon-owned observed context. Adapters render or
 filter the typed `market_events.snapshot`; they do not refetch Reg SHO, halt,
 borrow-inventory, borrow-fee, or earnings sources, and they do not duplicate
 proposal-blocking policy.
+
+For operator and builder reference, use [Policies](policies.md) for the policy
+authority/configuration model and [Database](database.md) for SQLite schema,
+query, durability, and update mechanics. These pages are generated to public
+HTML from their Markdown sources by the same deterministic chain as this page.

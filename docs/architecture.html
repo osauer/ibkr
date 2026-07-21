@@ -153,6 +153,10 @@ daemon access, or broker credentials.</li>
 Global account, market, and sync state stays outside individual tab
 content.</li>
 </ul>
+<p>The desk-facing <a href="policies.html">Policies</a> reference explains which choices are
+operator-authored, which policies have embedded defaults, how versions and
+fingerprints become one daemon execution context, and which broker-write gates
+no policy may weaken.</p>
 <h2 id="data-flows-and-protocols"><span class="secno" aria-hidden="true">04</span>Data Flows and Protocols</h2>
 <p>The daemon protocol and the MCP protocol are different on purpose; only the
 MCP side is JSON-RPC 2.0.</p>
@@ -287,7 +291,9 @@ authorities. <code>daemon.db</code> is the daemon's sole live authority for muta
 append-only events, orders, and retained market observations. Retained Flex XML
 remains original broker evidence; the daemon transactionally refreshes its
 typed statement inventory and equity projection in <code>daemon.db</code> from the
-complete XML set.</p>
+complete XML set. See the <a href="database.html">Database</a> reference for the logical ER
+model, table families, supported query paths, transaction semantics, and
+out-of-place schema-upgrade lifecycle.</p>
 <div class="tblwrap">
 <table>
 <thead>
@@ -500,6 +506,10 @@ daemon-owned sources and never recreate risk or trading verdicts.</p>
 filter the typed <code>market_events.snapshot</code>; they do not refetch Reg SHO, halt,
 borrow-inventory, borrow-fee, or earnings sources, and they do not duplicate
 proposal-blocking policy.</p>
+<p>For operator and builder reference, use <a href="policies.html">Policies</a> for the policy
+authority/configuration model and <a href="database.html">Database</a> for SQLite schema,
+query, durability, and update mechanics. These pages are generated to public
+HTML from their Markdown sources by the same deterministic chain as this page.</p>
   </main>
   <footer>
     <div class="wrap"><a href="index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div>

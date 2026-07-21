@@ -1,4 +1,4 @@
-# Architecture diagram sources
+# Documentation diagram sources
 
 The diagrams are deterministic, repository-owned SVG compositions. Generic
 component symbols are selected from Tabler Icons 3.45.0 and inlined into the
@@ -10,6 +10,15 @@ Regenerate the SVG files and high-resolution PNG fallbacks from this directory:
 node render-architecture.mjs
 rsvg-convert --zoom=2 system-architecture.svg --output system-architecture.png
 rsvg-convert --zoom=2 data-and-persistence.svg --output data-and-persistence.png
+rsvg-convert --zoom=2 policy-authority.svg --output policy-authority.png
+rsvg-convert --zoom=2 sqlite-data-model.svg --output sqlite-data-model.png
+rsvg-convert --zoom=2 sqlite-update-lifecycle.svg --output sqlite-update-lifecycle.png
+```
+
+Verify the checked-in SVGs without rewriting them:
+
+```sh
+node render-architecture.mjs --check
 ```
 
 The Canary logo is read from `../social/canary-icon.png` during generation.

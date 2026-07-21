@@ -6,7 +6,7 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr/v2.svg)](https://pkg.go.dev/github.com/osauer/ibkr/v2)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-[MCP tools](docs/reference/mcp-tools.md) · [MCP resources](docs/reference/mcp-resources.md) · [Configuration](docs/reference/config.md) · [Architecture](docs/architecture.md) · [Platform settings](docs/design/platform-settings.md) · [Agentic use](docs/guides/agentic-use.md) · [Mobile app](web/app/README.md)
+[MCP tools](docs/reference/mcp-tools.md) · [MCP resources](docs/reference/mcp-resources.md) · [Configuration](docs/reference/config.md) · [Policies](docs/policies.md) · [Database](docs/database.md) · [Architecture](docs/architecture.md) · [Platform settings](docs/design/platform-settings.md) · [Agentic use](docs/guides/agentic-use.md) · [Mobile app](web/app/README.md)
 
 **Agentic portfolio analysis and trading-research workflows for IBKR MCP, TWS, and IB Gateway.**
 
@@ -246,13 +246,15 @@ Every section and key — `[gateway]`, `[daemon]`, `[trading]`, `[auto_trade]`, 
 
 **Runtime platform preferences** are daemon-owned, live in `$XDG_STATE_HOME/ibkr/daemon.db`, and change instantly via `ibkr settings set`, the SPA Settings tab, or `PATCH /api/settings` — feature toggles, the `trading.freeze` brake, rulebook earnings overrides, and experimental trading-limit overrides. The writable keys are listed in the [configuration reference](docs/reference/config.md); ownership and semantics live in the [platform-settings design](docs/design/platform-settings.md).
 
-**Policy files** under `~/.config/ibkr/policies/` shape the advisory engines: protection proposals (`protection-policy.toml`) and option-exercise opportunities (`opportunity-policy.toml`). None need to exist — embedded defaults apply, printable with `ibkr policy default <protection|opportunity>` — and every key is enumerated in the same [configuration reference](docs/reference/config.md).
+**Policies** have explicit owners. The personal risk constitution at `~/.config/ibkr/policies/risk-policy.toml` has no embedded default: missing material decisions remain `unapproved`. Protection proposals (`protection-policy.toml`) and option-exercise opportunities (`opportunity-policy.toml`) do have conservative embedded defaults, printable with `ibkr policy default <protection|opportunity>`. The [policy reference](docs/policies.md) explains authority, versioning, fingerprints, enforcement, and commissioning; every editable engine key remains enumerated in the generated [configuration reference](docs/reference/config.md).
 
 **Trading config is opt-in and experimental.** Stable `ibkr` releases are read-only. Trading builds, when built or published separately, are experimental and provided as-is for explicit operator testing. Keep trading config inactive as `~/.config/ibkr/config.toml.trading`; it has no effect with that suffix. To activate it, a human or explicitly instructed local agent removes the `.trading` suffix so the file becomes `~/.config/ibkr/config.toml`, verifies the pinned account and endpoint, then runs `ibkr restart`. The example template lives at [examples/config.toml.trading](examples/config.toml.trading).
 
 References:
 
 - [Configuration reference](docs/reference/config.md) for TOML sections and `IBKR_*` environment variables.
+- [Policies](docs/policies.md) for desk-owned policy, embedded defaults, runtime preferences, versioning, enforcement, and commissioning.
+- [Database](docs/database.md) for the daemon SQLite data model, query contract, durability, and upgrade lifecycle.
 - [Experimental trading config](docs/guides/trading-preview.md) for the inactive `config.toml.trading` pattern and release-channel expectations.
 - [Concepts](docs/concepts.md) for breadth, gamma, and regime interpretation.
 - [Agentic use](docs/guides/agentic-use.md) for Claude and MCP workflows.

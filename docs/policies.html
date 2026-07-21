@@ -1,0 +1,298 @@
+<!doctype html>
+<!-- Generated from Markdown by scripts/docgen/docs-html. DO NOT EDIT. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Policies | ibkr</title>
+  <meta name="description" content="Operator reference for ibkr policy authority, configuration, versioning, fingerprints, enforcement, and commissioning.">
+  <link rel="canonical" href="https://osauer.dev/ibkr/policies.html">
+  <link rel="icon" type="image/png" href="social/canary-icon.png">
+<meta property="og:type" content="article">
+  <meta property="og:title" content="Policies | ibkr">
+  <meta property="og:description" content="Operator reference for ibkr policy authority, configuration, versioning, fingerprints, enforcement, and commissioning.">
+  <meta property="og:image" content="https://osauer.dev/ibkr/diagrams/policy-authority.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","author":{"@type":"Person","name":"Oliver Sauer","url":"https://github.com/osauer"},"description":"Operator reference for ibkr policy authority, configuration, versioning, fingerprints, enforcement, and commissioning.","headline":"Policies","isPartOf":{"@type":"SoftwareApplication","name":"ibkr","url":"https://osauer.dev/ibkr/"},"url":"https://osauer.dev/ibkr/policies.html"}</script>
+  <link rel="stylesheet" href="shared.css">
+</head>
+<body class="layout-architecture">
+  <div class="topline"></div>
+  <header class="wrap nav" aria-label="Primary">
+    <a class="brand" href="index.html" aria-label="ibkr canary home"><img src="social/canary-icon.png" width="192" height="192" alt="">ibkr canary</a>
+    <nav class="nav-links" aria-label="Site">
+      <a href="index.html#install">Install</a>
+      <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="reference/mcp-tools.html">MCP tools</a>
+      <a href="guides/agentic-use.html">Agent guide</a>
+    </nav>
+  </header>
+  <main class="wrap doc">
+<h1 id="policies">Policies</h1>
+<p><code>ibkr</code> uses several policy-shaped controls, but they do not all have the same
+owner or authority. The desk should start with one rule:</p>
+<blockquote>
+<p>A policy declares approved choices. Measurements report what is true now,
+enforcement decides what may happen, and reporting preserves what happened.
+A setting, warning, or dashboard label must not silently become policy.</p>
+</blockquote>
+<nav class="toc" aria-label="On this page">
+<span class="toc-label">On this page</span>
+<ul>
+<li><a href="#policy-system-overview"><span class="n">01</span>Policy System Overview</a></li>
+<li><a href="#four-policy-classes"><span class="n">02</span>Four Policy Classes</a></li>
+<li><a href="#risk-constitution"><span class="n">03</span>Risk Constitution</a></li>
+<li><a href="#protection-and-opportunity-policies"><span class="n">04</span>Protection and Opportunity Policies</a></li>
+<li><a href="#runtime-settings-are-not-policy-files"><span class="n">05</span>Runtime Settings Are Not Policy Files</a></li>
+<li><a href="#from-policy-to-decision"><span class="n">06</span>From Policy to Decision</a></li>
+<li><a href="#commissioning-and-work-in-progress"><span class="n">07</span>Commissioning and Work in Progress</a></li>
+<li><a href="#operator-change-procedure"><span class="n">08</span>Operator Change Procedure</a></li>
+<li><a href="#reference-map"><span class="n">09</span>Reference Map</a></li>
+</ul>
+</nav>
+<h2 id="policy-system-overview"><span class="secno" aria-hidden="true">01</span>Policy System Overview</h2>
+<p><a href="diagrams/policy-authority.svg"><img src="diagrams/policy-authority.svg" alt="ibkr policy authority and execution lifecycle"></a></p>
+<p><a href="diagrams/policy-authority.png">PNG fallback</a> ·
+<a href="diagrams/render-architecture.mjs">SVG source generator</a> ·
+<a href="diagrams/ICON-LICENSE.txt">Tabler Icons license</a></p>
+<p>The daemon is the policy executor. Operator-authored TOML, embedded engine
+defaults, daemon-owned runtime preferences, and code-owned invariants enter
+through different authority paths. The daemon validates and fingerprints the
+applicable policy, combines it with typed evidence, calls pure semantics in
+<code>internal/risk</code>, persists the resulting state or event where required, and
+publishes one typed result through RPC. CLI, MCP, app, and Canary render that
+result; they do not reinterpret policy.</p>
+<h2 id="four-policy-classes"><span class="secno" aria-hidden="true">02</span>Four Policy Classes</h2>
+<div class="tblwrap">
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>Authority</th>
+<th>Default if absent</th>
+<th>How it changes</th>
+<th>What it can do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Personal risk constitution</td>
+<td><code>~/.config/ibkr/policies/risk-policy.toml</code></td>
+<td>None. Missing material values remain <code>unapproved</code>.</td>
+<td>Edit the TOML and raise <code>policy_version</code>.</td>
+<td>Defines capital, drawdown, reconciliation, exception, cadence, and sibling-policy approval choices. Current schema is advisory/shadow.</td>
+</tr>
+<tr>
+<td>Advisory engine policy</td>
+<td>Protection and opportunity policy TOML, or their embedded defaults</td>
+<td>Conservative embedded policy.</td>
+<td>Generate the current default, save a file, edit it, and raise <code>policy_version</code>.</td>
+<td>Shapes protection proposals and option-exercise opportunity detection. It never submits an order by itself.</td>
+</tr>
+<tr>
+<td>Runtime preference</td>
+<td>Versioned platform-settings document in <code>daemon.db</code></td>
+<td>Code/config default, reported with provenance.</td>
+<td><code>ibkr settings set</code>, the Settings UI, or the typed API, subject to access rules.</td>
+<td>Enables product features, records earnings overrides, and applies the human-owned trading freeze or experimental limits. It is not a second policy-file system.</td>
+</tr>
+<tr>
+<td>Code-owned invariant or model</td>
+<td>Versioned code and typed contracts</td>
+<td>Always present in that binary.</td>
+<td>Reviewed code/release change; guardrail changes require an explicit human decision.</td>
+<td>Owns broker-write gates, validation, calculations, the rulebook/regime/Canary model, and constraints policy files are forbidden to weaken.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Policy and semantic fingerprints also identify the compiled rulebook, Regime,
+Canary, alert producers, and other models. Those identities make decisions
+reproducible and allow the constitution to pin approved sibling versions. They
+are not extra operator-editable TOML files unless this page or the
+<a href="reference/config.html">configuration reference</a> names one.</p>
+<h2 id="risk-constitution"><span class="secno" aria-hidden="true">03</span>Risk Constitution</h2>
+<p>The personal risk constitution is the desk's machine-readable approval record.
+Its fixed path is <code>~/.config/ibkr/policies/risk-policy.toml</code>; it has no embedded
+default and no path override. The schema lives in <code>internal/risk</code>, while the
+operator owns the material values.</p>
+<p>The main sections are:</p>
+<div class="tblwrap">
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Decision owned by the operator</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[capital]</code></td>
+<td>Account base currency, protected equity floor, declared risk capital, and evidence-age limits. Effective risk capital is the lesser of the declared amount and equity above the protected floor.</td>
+</tr>
+<tr>
+<td><code>[drawdown]</code></td>
+<td>Warning and block-consumption thresholds and the declared enforcement class. Schema v1 rejects <code>hard</code>; the implemented choices are <code>shadow</code> and <code>advisory</code>.</td>
+</tr>
+<tr>
+<td><code>[override]</code></td>
+<td>Maximum lifetime of one human-only, reasoned, expiring exception. The code owns origin gating and audit.</td>
+</tr>
+<tr>
+<td><code>[recon]</code></td>
+<td>Statement-flow match tolerances, date window, report age, and the same-day statement/runtime equity divergence allowed for clean-report auto-extension.</td>
+</tr>
+<tr>
+<td><code>[cadence]</code></td>
+<td>Advisory morning, end-of-day, weekly, and version-dependent nudge/monthly operating cadence. Missing material cadence remains explicit rather than receiving a model-chosen value.</td>
+</tr>
+<tr>
+<td><code>[inventory]</code></td>
+<td>The rulebook, protection, and Canary identities against which this constitution was approved. These are pins, not copies of sibling thresholds.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Use <a href="https://github.com/osauer/ibkr/blob/main/examples/risk-policy.toml">the checked-in template</a> to see every field.
+It intentionally leaves material numerical decisions commented out. <code>nil</code> or
+an omitted key means unapproved, never zero and never an invitation for an
+agent to choose a number.</p>
+<p>The risk-policy manager checks the file on a short interval and applies this
+version discipline:</p>
+<ol>
+<li>A valid first policy or a higher <code>policy_version</code> becomes active.</li>
+<li>Identical content at the active version remains active.</li>
+<li>Changed content at the same or a lower version reports <code>drift</code>; the last
+good policy remains the executable context.</li>
+<li>Invalid TOML, unknown keys, or failed validation report <code>error</code>; the last
+good policy remains visible and the error is not normalized away.</li>
+<li>Removing a previously active file is not retirement. Status becomes
+<code>absent</code>, the last loaded policy remains active, and the operator must
+restore the file or publish a deliberate revision.</li>
+</ol>
+<p>Inspect the applied constitution with:</p>
+<pre><code class="language-sh">ibkr policy show
+ibkr policy show --explain
+ibkr policy show --json
+</code></pre>
+<p><code>--explain</code> is the operator reference for units, effective values, evidence
+health, drawdown state, reconciliation, active overrides, cadence, sibling
+pins, and the policy fingerprint. The write verbs under <code>ibkr policy</code> record
+human governance actions; they are not configuration shortcuts and are
+rejected for agent origins.</p>
+<h2 id="protection-and-opportunity-policies"><span class="secno" aria-hidden="true">04</span>Protection and Opportunity Policies</h2>
+<p>Protection and opportunity policies are bounded advisory-engine policies. They
+have embedded defaults because the engines need a complete conservative
+parameter set even when the operator has not customized them.</p>
+<p>Print, review, and customize them as follows:</p>
+<pre><code class="language-sh">mkdir -p ~/.config/ibkr/policies
+ibkr policy default protection &gt; ~/.config/ibkr/policies/protection-policy.toml
+ibkr policy default opportunity &gt; ~/.config/ibkr/policies/opportunity-policy.toml
+</code></pre>
+<p>The protection path defaults to
+<code>~/.config/ibkr/policies/protection-policy.toml</code> and can be changed with
+<code>[auto_trade].policy_file</code>. The opportunity path defaults to
+<code>~/.config/ibkr/policies/opportunity-policy.toml</code> and can be changed with
+<code>[opportunities].policy_file</code>. Their complete generated key tables live in the
+<a href="reference/config.html">configuration reference</a>.</p>
+<p>For both files:</p>
+<ul>
+<li><code>kind</code>, <code>schema_version</code>, <code>policy_id</code>, and <code>policy_version</code> identify the
+contract; <code>profile</code> is a descriptive label.</li>
+<li>Unknown keys and invalid combinations fail validation.</li>
+<li>Every material edit needs a higher <code>policy_version</code>; same-version changes
+report drift rather than silently changing behavior.</li>
+<li>The current fingerprint travels with snapshots and previews so a proposal or
+opportunity can be tied to the policy that produced it.</li>
+<li><code>authority.auto_submit</code> must remain false. A proposal, opportunity, or
+preview is evidence, not broker-write authority.</li>
+</ul>
+<p>Read the loaded identities and blockers on the proposal and opportunity status
+surfaces after editing. A restart is not normally required when hot reload is
+enabled, but an operator may use the normal restart path when commissioning a
+new version.</p>
+<h2 id="runtime-settings-are-not-policy-files"><span class="secno" aria-hidden="true">05</span>Runtime Settings Are Not Policy Files</h2>
+<p>Platform settings are live preferences stored as one compare-and-swap document
+in <code>daemon.db</code>. They can reveal a config or build default, but they do not copy
+TOML into SQLite and they cannot create a new enforcement rule.</p>
+<pre><code class="language-sh">ibkr settings show
+ibkr settings show --json
+ibkr settings set &lt;key&gt;=&lt;value&gt;
+ibkr settings set &lt;key&gt;=null
+</code></pre>
+<p><code>null</code> removes the runtime override and exposes the underlying default or TOML
+value. Every typed field reports whether it is writable, its source, and any
+read-only reason. <code>trading.freeze</code> and trading-limit changes are human-only.
+No setting can bypass gateway/account/client pins, preview-token checks,
+WhatIf/eligibility, journal health, daemon authorization, or origin gating.
+See <a href="https://github.com/osauer/ibkr/blob/main/docs/design/platform-settings.md">Platform Settings</a> for the exact ownership
+contract.</p>
+<h2 id="from-policy-to-decision"><span class="secno" aria-hidden="true">06</span>From Policy to Decision</h2>
+<p>Every policy-backed decision should preserve five separate facts:</p>
+<ol>
+<li><strong>Identity:</strong> kind, schema version, policy ID/version, and semantic
+fingerprint.</li>
+<li><strong>Evidence:</strong> typed account, position, market, statement, calendar, or
+broker input with provenance, freshness, and completeness.</li>
+<li><strong>Evaluation:</strong> pure semantics that return pass, watch, breach, unknown, or
+unapproved without doing I/O.</li>
+<li><strong>Enforcement:</strong> advisory, shadow, pre-trade gate, or post-trade exception,
+including the risk-reducing and unavailable-data posture.</li>
+<li><strong>Reporting:</strong> the durable event or state revision and the typed result
+rendered to the operator.</li>
+</ol>
+<p>Missing, stale, partial, or contradictory required evidence is not a weak
+warning. It is an explicit unknown or data-quality condition. Likewise, a
+policy can be valid but incomplete: <code>unapproved</code> is a useful state and must not
+be converted into an implicit default.</p>
+<h2 id="commissioning-and-work-in-progress"><span class="secno" aria-hidden="true">07</span>Commissioning and Work in Progress</h2>
+<p>Code availability, policy approval, activation, and reliable delivery are
+separate milestones. The constitution's statement-backed reconciliation and
+clean-report automation are implemented. Later cadence and governance-nudge
+fields may be present in the binary while the installed desk policy is still
+on an earlier approved version. Unified alert producers may also be collecting
+shadow evidence while delivery remains inactive.</p>
+<p>Do not infer that a control pages, blocks, or owns a workflow merely because
+its schema or evaluator exists. Treat the installed typed status and
+fingerprint as current truth, and keep any explicit <code>shadow</code>, <code>unapproved</code>, or
+<code>delivery_active=false</code> boundary intact. The detailed commissioning records
+are <a href="https://github.com/osauer/ibkr/blob/main/docs/design/risk-governance-nudges.md">Risk Governance Nudges</a> and
+<a href="https://github.com/osauer/ibkr/blob/main/docs/design/alert-regime-production.md">Alerts and Regime Production</a>.</p>
+<h2 id="operator-change-procedure"><span class="secno" aria-hidden="true">08</span>Operator Change Procedure</h2>
+<p>For a policy-file change:</p>
+<ol>
+<li>Read the current typed status and record the active identity/fingerprint.</li>
+<li>Edit the authoritative file, changing only approved values.</li>
+<li>Raise <code>policy_version</code>; never reuse a version for different content.</li>
+<li>Wait for reload or use the normal operator restart path.</li>
+<li>Re-read the typed status and confirm <code>active</code>, the new version/fingerprint,
+expected effective values, and no drift/error/blocker.</li>
+<li>Exercise the affected read or preview surface. For a new enforcement rule,
+retain shadow/replay evidence before any separately approved promotion.</li>
+</ol>
+<p>For a runtime-setting change, read <code>access</code> and <code>source</code>, update one allowlisted
+key, then re-read the settings result. For a code-owned guardrail or policy
+schema change, use the policy and daemon contract templates and treat the
+change as a reviewed release change, not an operator configuration edit.</p>
+<h2 id="reference-map"><span class="secno" aria-hidden="true">09</span>Reference Map</h2>
+<ul>
+<li><a href="reference/config.html">Configuration Reference</a>: every config, protection
+policy, opportunity policy, runtime-setting, and environment key.</li>
+<li><a href="https://github.com/osauer/ibkr/blob/main/docs/design/risk-policy.md">Risk Constitution Design</a>: capital and reconciliation
+authority, safety invariants, and phase history.</li>
+<li><a href="https://github.com/osauer/ibkr/blob/main/docs/design/trading-rulebook.md">Trading Rulebook</a>: compiled discipline checks
+and policy identity.</li>
+<li><a href="https://github.com/osauer/ibkr/blob/main/docs/guides/trading-harness-development.md">Trading Harness Development</a>: how to
+design, shadow, promote, and reconcile a new policy-backed control.</li>
+<li><a href="architecture.html">Architecture</a>: daemon, RPC, adapter, and persistence
+ownership.</li>
+<li><a href="database.html">Database</a>: where policy state, events, and typed projections
+are stored without making SQLite the policy-authoring surface.</li>
+</ul>
+  </main>
+  <footer>
+    <div class="wrap"><a href="index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div>
+    <div class="wrap fineprint">Not financial advice. ibkr is analysis software; nothing here is a recommendation to buy or sell any security.</div>
+  </footer>
+</body>
+</html>
