@@ -1517,8 +1517,10 @@ type RegimeIndicatorMeta struct {
 	AsOf       *RegimeAsOfSummary `json:"as_of,omitempty"`
 	// Freshness is the cadence-relative freshness verdict for the row's
 	// banding input: "fresh" when no newer observation should exist under
-	// the indicator's native cadence, "overdue" otherwise. Overdue data can
-	// never make a red confirmation-eligible. MaxAgeSeconds documents the
+	// the indicator's native cadence, "not_due" when the source's native
+	// publication window has not opened yet, and "overdue" otherwise.
+	// Neither not-due nor overdue evidence can make a red confirmation-
+	// eligible. MaxAgeSeconds documents the
 	// served staleness policy so renderers never hardcode a twin.
 	Freshness *RegimeFreshness `json:"freshness,omitempty"`
 	// Eligibility says whether a red band may CONFIRM stress (depth +
@@ -1538,6 +1540,7 @@ type RegimeFreshness struct {
 
 const (
 	RegimeFreshnessFresh   = "fresh"
+	RegimeFreshnessNotDue  = "not_due"
 	RegimeFreshnessOverdue = "overdue"
 )
 
@@ -1547,7 +1550,7 @@ const (
 // visible and drive early_warning only. Latched reports that eligibility is
 // held by the streak-lifetime latch even though the measurement wobbled back
 // inside the minimum depth. Reasons name the failed gates when not eligible:
-// "depth_below_min", "streak_N_of_M", "data_overdue".
+// "depth_below_min", "streak_N_of_M", "data_not_due", "data_overdue".
 type RegimeEligibility struct {
 	Eligible bool     `json:"eligible"`
 	Latched  bool     `json:"latched,omitempty"`
@@ -2780,12 +2783,21 @@ type SubsystemHealth struct {
 type DataQualityHealth struct {
 	Surface          string    `json:"surface"`
 	Status           string    `json:"status"`
+	CadenceState     string    `json:"cadence_state,omitempty"`
 	Summary          string    `json:"summary,omitempty"`
 	StaleClusters    []string  `json:"stale_clusters,omitempty"`
 	PartialClusters  []string  `json:"partial_clusters,omitempty"`
 	DegradedClusters []string  `json:"degraded_clusters,omitempty"`
 	AsOf             time.Time `json:"as_of,omitzero"`
 }
+
+const (
+	DataCadenceCurrent       = "current"
+	DataCadenceNotDue        = "not_due"
+	DataCadenceMissedSession = "missed_session"
+	DataCadenceNoLastGood    = "no_last_good"
+	DataCadenceUnknown       = "unknown"
+)
 
 // DataFarmHealth is emitted on status.health only for data farms that
 // currently need operator attention. Healthy farms are intentionally omitted

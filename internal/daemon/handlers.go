@@ -235,6 +235,10 @@ func buildCurrencyExposure(ledger map[string]ibkrlib.CurrencyLedger, baseCcy str
 // handlePositionsList fetches all positions, splits stocks vs options, and
 // applies the optional symbol/type filter.
 func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rpc.PositionsResult, error) {
+	return s.handlePositionsListCaptured(ctx, req, nil)
+}
+
+func (s *Server) handlePositionsListCaptured(ctx context.Context, req *rpc.Request, portfolioHealth *ibkrlib.PortfolioStreamHealth) (*rpc.PositionsResult, error) {
 	var p rpc.PositionsListParams
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
@@ -243,7 +247,15 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 	if c == nil {
 		return nil, s.gatewayUnavailableError()
 	}
-	positions, err := c.CachedPositions()
+	var positions []*ibkrlib.RawPosition
+	var err error
+	if portfolioHealth == nil {
+		positions, err = c.CachedPositions()
+	} else {
+		var health ibkrlib.PortfolioStreamHealth
+		positions, health, err = c.CachedPositionsWithHealth()
+		*portfolioHealth = health
+	}
 	if err != nil {
 		return nil, err
 	}

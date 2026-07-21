@@ -16,11 +16,26 @@ import (
 )
 
 const (
-	orderHistoryDefaultLookback = 7 * 24 * time.Hour
-	orderHistoryDefaultLimit    = 50
-	orderHistoryMaxLimit        = 500
-	orderHistoryDefaultEvents   = 20
-	orderHistoryMaxEvents       = 200
+	orderHistoryDefaultLookback   = 7 * 24 * time.Hour
+	orderHistoryDefaultLimit      = 50
+	orderHistoryMaxLimit          = 500
+	orderHistoryDefaultEvents     = 20
+	orderHistoryMaxEvents         = 200
+	orderIntegrityPortfolioMaxAge = 5 * time.Minute
+)
+
+type orderIntegrityEvaluation struct {
+	AsOf         time.Time
+	Status       string
+	EvidenceAsOf time.Time
+	Scope        brokerStateScope
+	Orders       []rpc.OrderView
+}
+
+const (
+	orderIntegrityHealthCurrent     = "current"
+	orderIntegrityHealthStale       = "stale"
+	orderIntegrityHealthUnavailable = "unavailable"
 )
 
 func (s *Server) handleOrdersOpen(ctx context.Context, req *rpc.Request) (*rpc.OrdersOpenResult, error) {
@@ -28,11 +43,11 @@ func (s *Server) handleOrdersOpen(ctx context.Context, req *rpc.Request) (*rpc.O
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
 	}
-	views, eventsByKey, err := s.loadOrderViewsReconciled(ctx)
+	views, eventsByKey, integrity, err := s.loadOrderViewsReconciledWithHealth(ctx)
 	if err != nil {
 		return nil, err
 	}
-	scope := s.currentBrokerStateScope()
+	scope := integrity.Scope
 	out := make([]rpc.OrderView, 0, len(views))
 	for _, v := range views {
 		if !orderViewMatchesBrokerScope(v, scope) {
@@ -43,7 +58,7 @@ func (s *Server) handleOrdersOpen(ctx context.Context, req *rpc.Request) (*rpc.O
 		}
 	}
 	sortOrderViews(out)
-	return &rpc.OrdersOpenResult{
+	result := &rpc.OrdersOpenResult{
 		Orders:             out,
 		AsOf:               s.orderNow(),
 		Account:            scope.Account,
@@ -51,7 +66,10 @@ func (s *Server) handleOrdersOpen(ctx context.Context, req *rpc.Request) (*rpc.O
 		LastLocalEventAt:   latestScopedOrderEventAt(views, eventsByKey, scope),
 		NotBrokerStatement: orderHistoryNotBrokerStatement(),
 		Limitations:        orderHistoryLimitations(),
-	}, nil
+	}
+	integrity.Orders = append([]rpc.OrderView(nil), out...)
+	s.observeOrderIntegrityAlertShadow(ctx, integrity)
+	return result, nil
 }
 
 func (s *Server) handleOrdersHistory(_ context.Context, req *rpc.Request) (*rpc.OrdersHistoryResult, error) {
@@ -352,15 +370,47 @@ func (s *Server) loadOrderViews() ([]rpc.OrderView, map[string][]rpc.OrderEvent,
 }
 
 func (s *Server) loadOrderViewsReconciled(ctx context.Context) ([]rpc.OrderView, map[string][]rpc.OrderEvent, error) {
+	views, eventsByKey, _, err := s.loadOrderViewsReconciledWithHealth(ctx)
+	return views, eventsByKey, err
+}
+
+func (s *Server) loadOrderViewsReconciledWithHealth(ctx context.Context) ([]rpc.OrderView, map[string][]rpc.OrderEvent, orderIntegrityEvaluation, error) {
 	views, eventsByKey, err := s.loadOrderViews()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, orderIntegrityEvaluation{}, err
 	}
-	pos, posErr := s.handlePositionsList(ctx, &rpc.Request{})
+	now := s.orderNow().UTC()
+	scope := s.currentBrokerStateScope()
+	evaluation := orderIntegrityEvaluation{AsOf: now, Status: orderIntegrityHealthUnavailable, Scope: scope, Orders: []rpc.OrderView{}}
+	var health ibkrlib.PortfolioStreamHealth
+	pos, posErr := s.handlePositionsListCaptured(ctx, &rpc.Request{}, &health)
 	if posErr == nil {
-		reconcileFlatPositionProtectiveOrders(views, pos, s.orderNow())
+		reconcileFlatPositionProtectiveOrders(views, pos, now)
+		evidenceAt := health.InitialCompletedAt.UTC()
+		if health.LastUpdateAt.After(evidenceAt) {
+			evidenceAt = health.LastUpdateAt.UTC()
+		}
+		evaluation.EvidenceAsOf = evidenceAt
+		evaluation.Status = classifyOrderIntegrityPortfolioHealth(scope, health, now)
 	}
-	return views, eventsByKey, nil
+	return views, eventsByKey, evaluation, nil
+}
+
+func classifyOrderIntegrityPortfolioHealth(scope brokerStateScope, health ibkrlib.PortfolioStreamHealth, now time.Time) string {
+	evidenceAt := health.InitialCompletedAt.UTC()
+	if health.LastUpdateAt.After(evidenceAt) {
+		evidenceAt = health.LastUpdateAt.UTC()
+	}
+	switch {
+	case !brokerScopeConcrete(scope) || !brokerScopeAccountConcrete(health.Account) || !strings.EqualFold(health.Account, scope.Account) || health.InitialCompletedAt.IsZero():
+		return orderIntegrityHealthUnavailable
+	case evidenceAt.After(now.UTC()):
+		return orderIntegrityHealthUnavailable
+	case now.UTC().Sub(evidenceAt) > orderIntegrityPortfolioMaxAge:
+		return orderIntegrityHealthStale
+	default:
+		return orderIntegrityHealthCurrent
+	}
 }
 
 func reconcileFlatPositionProtectiveOrders(views []rpc.OrderView, pos *rpc.PositionsResult, now time.Time) {

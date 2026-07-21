@@ -1057,6 +1057,18 @@ func TestBriefClosedSessionDowngradesExpectedColdness(t *testing.T) {
 	if row := closed["borrow"]; row.Status != rpc.BriefStatusDegraded || !strings.Contains(row.Detail, "source health is degraded") {
 		t.Fatalf("closed degraded borrow row=%+v", row.BriefRowState)
 	}
+	borrowMissed := &rpc.MarketEventsResult{SourceHealth: []rpc.SourceHealth{{
+		Source: "borrow_fee", Status: rpc.SourceStatusStale, RefreshState: rpc.SourceRefreshNotDue, AsOf: asOf,
+	}}}
+	if row := byKind(briefMarketEventRows(borrowMissed, rules, nil, false))["borrow"]; row.Status != rpc.BriefStatusDegraded {
+		t.Fatalf("stale last-good from before the latest completed session was quieted: %+v", row.BriefRowState)
+	}
+	borrowCold := &rpc.MarketEventsResult{SourceHealth: []rpc.SourceHealth{{
+		Source: "borrow_fee", Status: rpc.SourceStatusUnknown, RefreshState: rpc.SourceRefreshNotDue, AsOf: asOf,
+	}}}
+	if row := byKind(briefMarketEventRows(borrowCold, rules, nil, false))["borrow"]; row.Status != rpc.BriefStatusOK || !strings.Contains(row.Detail, "no fresh update expected") {
+		t.Fatalf("not-yet-due cold borrow source=%+v", row.BriefRowState)
+	}
 	// A status outside the known vocabulary is never quiet-eligible: only
 	// stale/unknown may read as expected idleness while the market is closed.
 	weird := &rpc.MarketEventsResult{SourceHealth: []rpc.SourceHealth{{Source: "trading_halts", Status: "auth_failed", AsOf: asOf}}}
@@ -1079,14 +1091,29 @@ func TestBriefClosedSessionDowngradesExpectedColdness(t *testing.T) {
 	}
 
 	cold := &rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusCold}
-	if got := composeBriefGamma(cold, false); got.Status != rpc.BriefStatusOK || !strings.Contains(got.Detail, "market is closed") {
+	if got := composeBriefGamma(cold, false, asOf); got.Status != rpc.BriefStatusDegraded || !strings.Contains(got.Detail, rpc.DataCadenceNoLastGood) {
 		t.Fatalf("closed cold gamma=%+v", got.BriefRowState)
 	}
-	if got := composeBriefGamma(cold, true); got.Status != rpc.BriefStatusDegraded {
+	if got := composeBriefGamma(cold, true, asOf); got.Status != rpc.BriefStatusDegraded {
 		t.Fatalf("open cold gamma=%+v", got.BriefRowState)
 	}
-	if got := composeBriefGamma(&rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusError}, false); got.Status != rpc.BriefStatusDegraded {
+	if got := composeBriefGamma(&rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusError}, false, asOf); got.Status != rpc.BriefStatusDegraded {
 		t.Fatalf("gamma error must degrade even closed: %+v", got.BriefRowState)
+	}
+	mondayPreopen := time.Date(2026, 7, 20, 5, 5, 0, 0, time.UTC)
+	lastSession := &rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusReady, Result: &rpc.GammaZeroComputed{
+		AsOf: asOf, SpotUnderlying: 6300, GammaSign: "negative",
+		Quality: &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityContextOnly, RankabilityReason: "freshness: market is closed; cached gamma is context only"},
+	}}
+	if got := composeBriefGamma(lastSession, false, mondayPreopen); got.Status != rpc.BriefStatusOK || !strings.Contains(got.Detail, "no newer regular-session compute is due") {
+		t.Fatalf("last-completed-session gamma=%+v", got.BriefRowState)
+	}
+	blocked := *lastSession
+	blockedResult := *lastSession.Result
+	blocked.Result = &blockedResult
+	blocked.Result.Quality = &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityBlocked, RankabilityReason: "oi_observed_coverage: SPX OI is incomplete"}
+	if got := composeBriefGamma(&blocked, false, mondayPreopen); got.Status != rpc.BriefStatusDegraded || !strings.Contains(got.Detail, "OI is incomplete") {
+		t.Fatalf("blocked last-session gamma=%+v", got.BriefRowState)
 	}
 }
 

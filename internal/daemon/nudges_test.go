@@ -92,17 +92,21 @@ func primeNudgeBlockEpisode(s *Server, now time.Time, consumedKnown bool) {
 func TestGovernanceAuthorityGatesCandidatesShadowAndMonthly(t *testing.T) {
 	now := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name       string
-		policyTOML string
-		mutate     func(*Server)
-		wantStatus string
-		wantReason string
-		wantActive bool
+		name            string
+		policyTOML      string
+		mutate          func(*Server)
+		wantStatus      string
+		wantReason      string
+		wantIndependent bool
+		wantMonthly     bool
 	}{
-		{name: "active approved v4", policyTOML: validRiskPolicyV4TOML(), wantStatus: rpc.NudgeInputStatusOK, wantActive: true},
-		{name: "v3", policyTOML: validRiskPolicyV3TOML(), wantStatus: rpc.NudgeInputStatusInactive, wantReason: rpc.NudgeHealthReasonProcessRemindersNotEnabled},
+		{name: "active approved v4", policyTOML: validRiskPolicyV4TOML(), wantStatus: rpc.NudgeInputStatusOK, wantIndependent: true, wantMonthly: true},
+		{name: "v3", policyTOML: validRiskPolicyV3TOML(), wantStatus: rpc.NudgeInputStatusOK, wantIndependent: true},
 		{name: "inactive", policyTOML: validRiskPolicyV4TOML(), mutate: func(s *Server) { s.riskPolicies.status = rpc.RiskPolicyStatusAbsent }, wantStatus: rpc.NudgeInputStatusUnavailable, wantReason: rpc.NudgeHealthReasonSourceUnavailable},
-		{name: "unapproved", policyTOML: validRiskPolicyV4TOML(), mutate: func(s *Server) { s.riskPolicies.active.Cadence.Monthly.DayOfMonth = nil }, wantStatus: rpc.NudgeInputStatusUnapproved, wantReason: rpc.NudgeHealthReasonPolicyUnapproved},
+		{name: "cadence unapproved", policyTOML: validRiskPolicyV4TOML(), mutate: func(s *Server) {
+			s.riskPolicies.active.Cadence.Monthly.DayOfMonth = nil
+			s.riskPolicies.lastFingerprint = s.riskPolicies.active.FingerprintKey()
+		}, wantStatus: rpc.NudgeInputStatusOK, wantIndependent: true},
 		{name: "error", policyTOML: validRiskPolicyV4TOML(), mutate: func(s *Server) { s.riskPolicies.status = rpc.RiskPolicyStatusError }, wantStatus: rpc.NudgeInputStatusError, wantReason: rpc.NudgeHealthReasonEvaluationError},
 		{name: "unavailable", policyTOML: validRiskPolicyV4TOML(), mutate: func(s *Server) { s.riskPolicies.source = "" }, wantStatus: rpc.NudgeInputStatusUnavailable, wantReason: rpc.NudgeHealthReasonSourceUnavailable},
 		{name: "stale", policyTOML: validRiskPolicyV4TOML(), mutate: func(s *Server) { s.riskPolicies.lastCheckedAt = now.Add(-2 * time.Minute) }, wantStatus: rpc.NudgeInputStatusStale, wantReason: rpc.NudgeHealthReasonEvidenceStale},
@@ -120,8 +124,8 @@ func TestGovernanceAuthorityGatesCandidatesShadowAndMonthly(t *testing.T) {
 				s.riskPolicies.mu.Unlock()
 			}
 			warnings := s.riskPolicyPreviewWarnings(stockBuy, rpc.OrderPositionImpact{Effect: "open"})
-			if tt.wantActive && len(warnings) != 1 {
-				t.Fatalf("active v4 warnings=%+v", warnings)
+			if tt.wantIndependent && len(warnings) != 1 {
+				t.Fatalf("independent policy warnings=%+v", warnings)
 			}
 			result, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
 			if err != nil {
@@ -130,24 +134,27 @@ func TestGovernanceAuthorityGatesCandidatesShadowAndMonthly(t *testing.T) {
 			if result.SourceHealth.Policy.Status != tt.wantStatus || result.SourceHealth.Policy.Reason != tt.wantReason {
 				t.Fatalf("policy health=%+v, want %s/%s", result.SourceHealth.Policy, tt.wantStatus, tt.wantReason)
 			}
-			if tt.wantActive {
-				for _, kind := range []string{rpc.NudgeKindShadowWouldBlock, rpc.NudgeKindDrawdownLatched, rpc.NudgeKindMonthlyPulse} {
+			if tt.wantIndependent {
+				for _, kind := range []string{rpc.NudgeKindShadowWouldBlock, rpc.NudgeKindDrawdownLatched} {
 					if !candidateKindPresent(result.Candidates, kind) {
-						t.Fatalf("active candidates=%+v, missing %s", result.Candidates, kind)
+						t.Fatalf("independent candidates=%+v, missing %s", result.Candidates, kind)
 					}
+				}
+				if candidateKindPresent(result.Candidates, rpc.NudgeKindMonthlyPulse) != tt.wantMonthly {
+					t.Fatalf("monthly candidate present=%v, want %v; candidates=%+v", candidateKindPresent(result.Candidates, rpc.NudgeKindMonthlyPulse), tt.wantMonthly, result.Candidates)
 				}
 				if result.Context == nil || result.Context.Shadow == nil || result.Context.Shadow.Count != 1 || result.Context.Drawdown == nil {
 					t.Fatalf("active context=%+v", result.Context)
 				}
+				if tt.name == "v3" {
+					if result.SourceHealth.Cadence.Status != rpc.NudgeInputStatusInactive || result.SourceHealth.ConfirmedFlow.Status != rpc.NudgeInputStatusInactive {
+						t.Fatalf("v3 reminder sources=%+v, want explicitly inactive", result.SourceHealth)
+					}
+				}
+				if tt.name == "cadence unapproved" && result.SourceHealth.Cadence.Status != rpc.NudgeInputStatusUnapproved {
+					t.Fatalf("cadence health=%+v, want only cadence unapproved", result.SourceHealth.Cadence)
+				}
 				return
-			}
-			if tt.name == "v3" {
-				if result.Reconciliation == nil {
-					t.Fatal("active v3 omitted daily broker-report status")
-				}
-				if result.SourceHealth.Cadence.Status != rpc.NudgeInputStatusInactive || result.SourceHealth.ConfirmedFlow.Status != rpc.NudgeInputStatusInactive {
-					t.Fatalf("v3 reminder sources=%+v, want explicitly inactive", result.SourceHealth)
-				}
 			}
 			if len(result.Candidates) != 0 || result.Context != nil || result.IsCleanEmpty() {
 				t.Fatalf("blocked result candidates=%+v context=%+v clean=%v", result.Candidates, result.Context, result.IsCleanEmpty())

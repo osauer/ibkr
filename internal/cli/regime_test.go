@@ -1606,3 +1606,12 @@ func TestRegimeRow_GammaSingleScopeKeepsSpotPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestRegimeEligibilityReasonTextDistinguishesNotDue(t *testing.T) {
+	if got := regimeEligibilityReasonText([]string{"data_not_due"}); got != "new session data not due yet" {
+		t.Fatalf("not-due reason=%q", got)
+	}
+	if got := regimeEligibilityReasonText([]string{"data_overdue"}); got != "data overdue" {
+		t.Fatalf("overdue reason=%q", got)
+	}
+}

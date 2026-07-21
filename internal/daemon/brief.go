@@ -287,7 +287,7 @@ func (s *Server) handleMonthlyBriefAck(ctx context.Context, p rpc.BriefAckParams
 	now := s.briefNow().UTC()
 	authority := s.currentNudgeAuthority(now)
 	policy := authority.policy
-	if !authority.eligible {
+	if !authority.cadenceEligible {
 		return nil, errBadRequest("monthly brief completion is unavailable until current active fully approved v4 authority is present")
 	}
 	report, err := s.buildReconReportContext(ctx)
@@ -333,7 +333,7 @@ func (s *Server) handleMonthlyBriefAck(ctx context.Context, p rpc.BriefAckParams
 		return nil, err
 	}
 	finalAuthority := s.currentNudgeAuthority(now)
-	if !finalAuthority.eligible || !policyPinsReady(finalAuthority.report.Inventory) {
+	if !finalAuthority.cadenceEligible || !policyPinsReady(finalAuthority.report.Inventory) {
 		return nil, errBadRequest("monthly brief completion authority changed before persistence")
 	}
 	finalReport, err := s.buildReconReportContext(ctx)
@@ -370,7 +370,7 @@ func (s *Server) handleMonthlyBriefAck(ctx context.Context, p rpc.BriefAckParams
 	// filesystem write. Revalidate again so receipt acceptance is still bound
 	// to the exact current policy/pin/report generation at commit time.
 	commitAuthority := s.currentNudgeAuthority(now)
-	if !commitAuthority.eligible || !policyPinsReady(commitAuthority.report.Inventory) {
+	if !commitAuthority.cadenceEligible || !policyPinsReady(commitAuthority.report.Inventory) {
 		return nil, errBadRequest("monthly brief completion authority changed before persistence")
 	}
 	commitReport, err := s.buildReconReportContext(ctx)
@@ -770,7 +770,7 @@ func composeBriefMarket(now time.Time, acct *rpc.AccountResult, pos *rpc.Positio
 	if breadth != nil {
 		out.Breadth.AsOf, out.Breadth.DataType = breadth.AsOf, breadth.DataType
 	}
-	out.Gamma = composeBriefGamma(gamma, sessionOpen)
+	out.Gamma = composeBriefGamma(gamma, sessionOpen, now)
 	canaryInput := rpc.CanaryInput{Now: now}
 	if acct != nil {
 		canaryInput.Account = *acct
@@ -796,20 +796,14 @@ func composeBriefMarket(now time.Time, acct *rpc.AccountResult, pos *rpc.Positio
 	return out, can
 }
 
-func composeBriefGamma(env *rpc.GammaZeroSPXResult, sessionOpen bool) rpc.BriefGammaRow {
+func composeBriefGamma(env *rpc.GammaZeroSPXResult, sessionOpen bool, now time.Time) rpc.BriefGammaRow {
 	row := rpc.BriefGammaRow{BriefRowState: briefUnavailable("dealer gamma cache is unavailable")}
 	if env == nil {
 		return row
 	}
 	if env.Status != rpc.GammaZeroStatusReady || env.Result == nil {
-		// A cold or still-computing cache while the market is closed is the
-		// expected weekend/overnight state, not a data incident; degraded is
-		// reserved for abnormal-for-session gaps and hard errors.
-		if !sessionOpen && (env.Status == rpc.GammaZeroStatusCold || env.Status == rpc.GammaZeroStatusComputing) {
-			row.BriefRowState = briefOK("dealer gamma cache is idle while the market is closed; it resumes with the next session")
-			return row
-		}
-		row.BriefRowState = briefDegraded("dealer gamma source is " + env.Status)
+		cadence := gammaOperationalCadence(env, now)
+		row.BriefRowState = briefDegraded("dealer gamma source is " + env.Status + " (" + cadence + ")")
 		return row
 	}
 	computed := env.Result
@@ -821,13 +815,28 @@ func composeBriefGamma(env *rpc.GammaZeroSPXResult, sessionOpen bool) rpc.BriefG
 		row.Spot = new(computed.SpotUnderlying)
 	}
 	row.ZeroGamma, row.GapPct, row.GammaSign, row.AsOf = computed.ZeroGamma, computed.GapPct, computed.GammaSign, computed.AsOf
+	cadence := gammaOperationalCadence(env, now)
+	if !sessionOpen && cadence == rpc.DataCadenceNotDue {
+		row.BriefRowState = briefOK("dealer gamma is last-completed-session context; no newer regular-session compute is due")
+	} else if cadence == rpc.DataCadenceMissedSession || cadence == rpc.DataCadenceUnknown {
+		row.BriefRowState = briefDegraded("dealer gamma process health is " + cadence)
+	}
 	if row.Spot == nil || (row.ZeroGamma == nil && row.GammaSign == "") {
 		row.BriefRowState = briefDegraded("gamma result lacks a complete spot/zero-crossing classification")
 	}
-	if computed.Quality != nil && computed.Quality.Rankability != rpc.GammaRankabilityRankable {
+	if computed.Quality != nil && computed.Quality.Rankability != rpc.GammaRankabilityRankable &&
+		!(cadence == rpc.DataCadenceNotDue && !sessionOpen && gammaRankabilityCadenceOnly(computed.Quality)) {
 		row.BriefRowState = briefDegraded("gamma is context-only: " + computed.Quality.RankabilityReason)
 	}
 	return row
+}
+
+func gammaRankabilityCadenceOnly(quality *rpc.GammaSignalQuality) bool {
+	if quality == nil {
+		return false
+	}
+	reason := strings.ToLower(strings.TrimSpace(quality.RankabilityReason))
+	return strings.Contains(reason, "market is closed") || strings.Contains(reason, "prior session")
 }
 
 func composeBriefCalendar(cal *rpc.MarketCalendarResult, events *rpc.MarketEventsResult, rules *rpc.RulesResult, calErr, eventsErr error, sessionOpen bool) rpc.BriefCalendarSection {
@@ -887,13 +896,14 @@ func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult
 		syms := mapKeysSorted(sets[kind])
 		flagged := fmt.Sprintf("%d held %s flagged", len(syms), pluralNoun(len(syms), "symbol"))
 		state := briefOK(flagged)
-		worst, lastChecked := briefEventKindHealth(events, kind)
+		worst, refreshState, lastChecked := briefEventKindHealth(events, kind)
 		switch {
 		case hardErr || (kind == "earnings" && rules == nil):
 			state = briefDegraded(fmt.Sprintf("%d known; one or more event sources are degraded", len(syms)))
 		case worst == "" || worst == "ok":
 			// healthy source: flagged copy stands as-is
-		case !sessionOpen && (worst == rpc.SourceStatusStale || worst == rpc.SourceStatusUnknown):
+		case !sessionOpen && (worst == rpc.SourceStatusStale || worst == rpc.SourceStatusUnknown) &&
+			(kind != "borrow" || (refreshState == rpc.SourceRefreshNotDue && worst == rpc.SourceStatusUnknown)):
 			// Only stale/unknown are quiet-eligible while closed: no fresh
 			// update is expected, and the copy claims only what the code
 			// verified — counts come from the last good data, not a fresh
@@ -928,9 +938,9 @@ func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult
 // so an unrelated source (for example an unreachable borrow-fee feed) cannot
 // degrade every event row. It returns the worst matching status and the newest
 // matching observation time; empty means no matching source reported.
-func briefEventKindHealth(events *rpc.MarketEventsResult, kind string) (string, time.Time) {
+func briefEventKindHealth(events *rpc.MarketEventsResult, kind string) (string, string, time.Time) {
 	if events == nil {
-		return "", time.Time{}
+		return "", "", time.Time{}
 	}
 	match := func(source string) bool {
 		source = strings.ToLower(source)
@@ -946,22 +956,22 @@ func briefEventKindHealth(events *rpc.MarketEventsResult, kind string) (string, 
 		}
 	}
 	rank := map[string]int{rpc.SourceStatusOK: 0, rpc.SourceStatusStale: 1, rpc.SourceStatusUnknown: 2, rpc.SourceStatusPartial: 3, rpc.SourceStatusDegraded: 4}
-	worst, worstRank := "", -1
+	worst, worstRefresh, worstRank := "", "", -1
 	var lastChecked time.Time
 	for _, row := range events.SourceHealth {
 		if !match(row.Source) {
 			continue
 		}
 		if r, known := rank[row.Status]; known && r > worstRank {
-			worst, worstRank = row.Status, r
+			worst, worstRefresh, worstRank = row.Status, row.RefreshState, r
 		} else if !known && row.Status != "" && worstRank < len(rank) {
-			worst, worstRank = row.Status, len(rank)
+			worst, worstRefresh, worstRank = row.Status, row.RefreshState, len(rank)
 		}
 		if row.AsOf.After(lastChecked) {
 			lastChecked = row.AsOf
 		}
 	}
-	return worst, lastChecked
+	return worst, worstRefresh, lastChecked
 }
 
 func briefLastChecked(at time.Time) string {

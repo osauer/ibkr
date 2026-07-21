@@ -98,8 +98,20 @@ type SourceHealth struct {
 	Confidence           string       `json:"confidence,omitempty"`
 	Fingerprint          *Fingerprint `json:"fingerprint,omitempty"`
 	FingerprintStability string       `json:"fingerprint_stability,omitempty"`
-	Notes                []string     `json:"notes,omitempty"`
+	// RefreshState separates source scheduling from evidence quality. A
+	// source can be not_due with no current negative, or stale because a due
+	// fetch failed and is waiting for its bounded retry.
+	RefreshState string     `json:"refresh_state,omitempty"`
+	NextAttempt  *time.Time `json:"next_attempt,omitempty"`
+	Notes        []string   `json:"notes,omitempty"`
 }
+
+const (
+	SourceRefreshCurrent            = "current"
+	SourceRefreshNotDue             = "not_due"
+	SourceRefreshFetchFailed        = "fetch_failed"
+	SourceRefreshFetchFailedBackoff = "fetch_failed_backoff"
+)
 
 // BuildRegimeLifecycle classifies broad-market-only regime evidence into the
 // stress lifecycle used by downstream orchestration. It does not look at

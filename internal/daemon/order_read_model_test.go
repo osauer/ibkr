@@ -15,6 +15,30 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
+func TestClassifyOrderIntegrityPortfolioHealth(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
+	cases := []struct {
+		name   string
+		health ibkrlib.PortfolioStreamHealth
+		want   string
+	}{
+		{name: "current initial completion", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(-4 * time.Minute)}, want: orderIntegrityHealthCurrent},
+		{name: "current heartbeat overrides old completion", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(-time.Hour), LastUpdateAt: now.Add(-time.Minute)}, want: orderIntegrityHealthCurrent},
+		{name: "stale silence", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(-orderIntegrityPortfolioMaxAge - time.Nanosecond)}, want: orderIntegrityHealthStale},
+		{name: "unprimed", health: ibkrlib.PortfolioStreamHealth{Account: "DU123"}, want: orderIntegrityHealthUnavailable},
+		{name: "wrong account", health: ibkrlib.PortfolioStreamHealth{Account: "DU999", InitialCompletedAt: now.Add(-time.Minute)}, want: orderIntegrityHealthUnavailable},
+		{name: "future receipt", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(time.Minute)}, want: orderIntegrityHealthUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyOrderIntegrityPortfolioHealth(scope, tc.health, now); got != tc.want {
+				t.Fatalf("health=%+v classified %q, want %q", tc.health, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildOrderViewsFromJournalLifecycle(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 5, 28, 9, 30, 0, 0, time.UTC)

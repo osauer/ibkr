@@ -776,8 +776,15 @@ type nudgeAuthorityState struct {
 	policyHealth   rpc.NudgeInputHealth
 	loadedAt       time.Time
 	pinsReadable   bool
-	eligible       bool
-	capitalNudge   riskCapitalNudgeSnapshot
+	// eligible is the current, validated base policy authority used by
+	// version-independent facts (policy drift, capital latch/shadow, and
+	// reconciliation exceptions). Cadence and confirmed-flow features have
+	// narrower gates so a missing v4 reminder field cannot suppress an
+	// unrelated risk fact.
+	eligible              bool
+	cadenceEligible       bool
+	confirmedFlowEligible bool
+	capitalNudge          riskCapitalNudgeSnapshot
 }
 
 func (s *Server) governanceMonthlyPulse(constitution *risk.Constitution, report *rpc.ReconResult, now time.Time) (risk.MonthlyPulseEvaluation, *risk.MonthlyPulseCompletion) {
@@ -797,7 +804,7 @@ func (s *Server) governanceMonthlyPulseForWrite(authority nudgeAuthorityState, c
 // fresh exact-authority render receipt can reach the authorized retry write.
 func (s *Server) governanceMonthlyPulseForRenderRecovery(authority nudgeAuthorityState, constitution *risk.Constitution, now time.Time) risk.MonthlyPulseEvaluation {
 	if constitution == nil || constitution.PolicyVersion < 4 || s == nil || s.nudges == nil ||
-		!authority.eligible || authority.policyIdentity != nudgePolicyIdentity(constitution) || !s.nudges.transientWriteFault() {
+		!authority.cadenceEligible || authority.policyIdentity != nudgePolicyIdentity(constitution) || !s.nudges.transientWriteFault() {
 		return risk.MonthlyPulseEvaluation{}
 	}
 	return risk.EvaluateMonthlyPulse(risk.MonthlyPulseInput{
@@ -816,7 +823,7 @@ func (s *Server) governanceMonthlyPulseForAuthorityUse(authority nudgeAuthorityS
 	if allowTransientFault {
 		storeReady = s != nil && s.nudges != nil && s.nudges.writeReady()
 	}
-	if !authority.eligible || authority.policyIdentity != identity || !storeReady {
+	if !authority.cadenceEligible || authority.policyIdentity != identity || !storeReady {
 		return risk.MonthlyPulseEvaluation{Status: risk.MonthlyPulseStatusBlocked, Month: month}, nil
 	}
 	completion := s.nudges.monthlyCompletion(month, identity)
@@ -905,7 +912,14 @@ func (s *Server) currentNudgeAuthority(now time.Time) nudgeAuthorityState {
 		setHealth(rpc.NudgeInputStatusStale, rpc.NudgeHealthReasonEvidenceStale)
 		return state
 	}
-	if len(state.report.Unapproved) != 0 {
+	baseUnapproved := false
+	for _, key := range state.report.Unapproved {
+		if !strings.HasPrefix(key, "cadence.nudges.") && !strings.HasPrefix(key, "cadence.monthly.") {
+			baseUnapproved = true
+			break
+		}
+	}
+	if baseUnapproved {
 		setHealth(rpc.NudgeInputStatusUnapproved, rpc.NudgeHealthReasonPolicyUnapproved)
 		return state
 	}
@@ -914,16 +928,17 @@ func (s *Server) currentNudgeAuthority(now time.Time) nudgeAuthorityState {
 		return state
 	}
 	state.pinsReadable = policyPinsReadable(state.report.Inventory, false)
-	if mgr.policy.PolicyVersion == 3 {
-		setHealth(rpc.NudgeInputStatusInactive, rpc.NudgeHealthReasonProcessRemindersNotEnabled)
-		return state
-	}
-	if mgr.policy.PolicyVersion != 4 {
+	if mgr.policy.PolicyVersion < 3 || mgr.policy.PolicyVersion > 4 {
 		setHealth(rpc.NudgeInputStatusUnapproved, rpc.NudgeHealthReasonPolicyUnapproved)
 		return state
 	}
 	setHealth(rpc.NudgeInputStatusOK, rpc.NudgeHealthReasonNone)
 	state.eligible = true
+	state.confirmedFlowEligible = mgr.policy.PolicyVersion == 4
+	state.cadenceEligible = state.confirmedFlowEligible && len(state.report.Unapproved) == 0 &&
+		mgr.policy.Cadence.Nudges != nil && mgr.policy.Cadence.Monthly != nil &&
+		mgr.policy.Cadence.Nudges.Timezone != nil && mgr.policy.Cadence.Nudges.ReconcileWarningDays != nil &&
+		mgr.policy.Cadence.Monthly.Class != nil && mgr.policy.Cadence.Monthly.DayOfMonth != nil && mgr.policy.Cadence.Monthly.NudgeAtLocal != nil
 	return state
 }
 
@@ -940,7 +955,7 @@ func (s *Server) observeConfirmedFlows(snapshot nudgeConfirmedFlowSnapshot) {
 		now = s.now().UTC()
 	}
 	authority := s.currentNudgeAuthority(now)
-	if !authority.eligible || authority.report.PolicyVersion != 4 || snapshot.PolicyVersion != 4 ||
+	if !authority.confirmedFlowEligible || authority.report.PolicyVersion != 4 || snapshot.PolicyVersion != 4 ||
 		snapshot.PolicyIdentity != authority.policyIdentity || snapshot.ReportStatus != rpc.ReconStatusActive ||
 		!snapshot.StatementsHealthy || strings.TrimSpace(snapshot.ReportIdentity) == "" || snapshot.StatementAsOf.IsZero() ||
 		snapshot.StatementAsOf.After(now) || reconReportStale(authority.policy, &rpc.ReconResult{StatementAsOf: snapshot.StatementAsOf}, now) {
@@ -1062,7 +1077,7 @@ func (s *Server) validateCutoverReview(ctx context.Context, now time.Time) (nudg
 		return nudgeAuthorityState{}, "", nil, cutoverValidationToken{}, err
 	}
 	authority := s.currentNudgeAuthority(now)
-	if !authority.eligible || !policyPinsReady(authority.report.Inventory) {
+	if !authority.confirmedFlowEligible || !policyPinsReady(authority.report.Inventory) {
 		return nudgeAuthorityState{}, "", nil, cutoverValidationToken{}, errBadRequest("confirmed-flow cutover review requires current active fully approved v4 policy authority")
 	}
 	report, err := s.buildReconReportContext(ctx)
@@ -1095,7 +1110,7 @@ func cutoverAuthorityIdentity(governanceIdentity, reportIdentity string, stateme
 
 func nudgeAuthorityToken(authority nudgeAuthorityState) string {
 	parts := []string{authority.policyIdentity, strconv.Itoa(authority.report.PolicyVersion), authority.report.Status, authority.report.Source,
-		strconv.FormatBool(authority.eligible),
+		strconv.FormatBool(authority.eligible), strconv.FormatBool(authority.cadenceEligible), strconv.FormatBool(authority.confirmedFlowEligible),
 		authority.policyHealth.Status, authority.policyHealth.Reason}
 	for _, pin := range authority.report.Inventory {
 		parts = append(parts, pin.Policy, pin.Status, pin.PinnedID, pin.PinnedVersion, pin.LiveID, pin.LiveVersion)
@@ -1248,12 +1263,12 @@ func (s *Server) composeNudgesSnapshotContextWithAuthority(ctx context.Context, 
 	}
 
 	policyIdentity := authority.policyIdentity
-	if policy.Cadence.Nudges == nil || policy.Cadence.Monthly == nil ||
-		policy.Cadence.Nudges.Timezone == nil || policy.Cadence.Nudges.ReconcileWarningDays == nil ||
-		policy.Cadence.Monthly.Class == nil || policy.Cadence.Monthly.DayOfMonth == nil || policy.Cadence.Monthly.NudgeAtLocal == nil {
+	switch {
+	case policy.PolicyVersion < 4:
+		result.SourceHealth.Cadence = setHealth(rpc.NudgeInputStatusInactive, rpc.NudgeHealthReasonProcessRemindersNotEnabled)
+	case !authority.cadenceEligible:
 		result.SourceHealth.Cadence = setHealth(rpc.NudgeInputStatusUnapproved, rpc.NudgeHealthReasonCadenceUnapproved)
-		return result, nil
-	} else {
+	default:
 		result.SourceHealth.Cadence = setHealth(rpc.NudgeInputStatusOK, rpc.NudgeHealthReasonNone)
 	}
 
@@ -1287,7 +1302,7 @@ func (s *Server) composeNudgesSnapshotContextWithAuthority(ctx context.Context, 
 			}
 		}
 		clock := s.riskCapital.UnreconciledClock(policy, now)
-		if clock.Approved && !clock.Deadline.IsZero() && policy.Cadence.Nudges != nil {
+		if authority.cadenceEligible && clock.Approved && !clock.Deadline.IsZero() && policy.Cadence.Nudges != nil {
 			if candidate := risk.EvaluateReconcileDue(risk.ReconcileDueInput{
 				Now: now, Deadline: clock.Deadline,
 				WarningDays: policy.Cadence.Nudges.ReconcileWarningDays,
@@ -1331,7 +1346,9 @@ func (s *Server) composeNudgesSnapshotContextWithAuthority(ctx context.Context, 
 		}
 	}
 
-	if s.nudges != nil && s.nudges.healthOK() {
+	if !authority.confirmedFlowEligible {
+		result.SourceHealth.ConfirmedFlow = setHealth(rpc.NudgeInputStatusInactive, rpc.NudgeHealthReasonProcessRemindersNotEnabled)
+	} else if s.nudges != nil && s.nudges.healthOK() {
 		currentAuthority := confirmedFlowCurrentAuthority{GovernanceIdentity: nudgeAuthorityToken(authority)}
 		if report != nil {
 			currentAuthority.ReportIdentity = opaqueIdentity("recon-report", report.ReportID)

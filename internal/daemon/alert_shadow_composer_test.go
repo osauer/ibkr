@@ -122,8 +122,96 @@ func TestAlertShadowComposerCanaryNormalStressRecoveryReopenAndMetrics(t *testin
 		t.Fatalf("Regime unavailable status=%+v", regime)
 	}
 	orderIntegrity := alertShadowTestSourceStatus(t, status, rpc.AlertSourceOrderIntegrity)
-	if orderIntegrity.Status != alertShadowStatusPositiveOnlyNotWired || orderIntegrity.Reason != alertShadowReasonPositiveOnlyNotWired {
+	if orderIntegrity.Status != alertShadowStatusNotObserved || orderIntegrity.Reason != alertShadowReasonNotObserved {
 		t.Fatalf("order-integrity status=%+v", orderIntegrity)
+	}
+}
+
+func TestAlertShadowComposerRulebookCurrentNegativeAndDegradedHold(t *testing.T) {
+	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+	defer store.Close()
+	registry, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composer := newAlertShadowComposer(registry)
+	scope := alertShadowTestBrokerScope(t)
+	base := time.Date(2026, 7, 21, 11, 0, 0, 0, time.UTC)
+	now := base.Add(time.Second)
+	composer.now = func() time.Time { return now }
+
+	breach := alertShadowTestRulebook(base, risk.RuleStatusWatch)
+	opened, err := composer.ObserveRulebook(t.Context(), scope, breach)
+	if err != nil || len(opened.Candidates) != 1 || opened.Candidates[0].Source != rpc.AlertSourceRulebook ||
+		opened.Candidates[0].State != rpc.AlertEpisodeOpen || opened.Candidates[0].Destination != rpc.AlertDestinationMonitor {
+		t.Fatalf("rulebook open=%+v err=%v", opened, err)
+	}
+
+	now = base.Add(time.Minute + time.Second)
+	degraded := alertShadowTestRulebook(base.Add(time.Minute), risk.RuleStatusPass)
+	degraded.Status = "degraded"
+	degraded.InputHealth[0].Status = rpc.SourceStatusUnknown
+	held, err := composer.ObserveRulebook(t.Context(), scope, degraded)
+	if err != nil || len(held.Candidates) != 1 || held.Candidates[0].State != rpc.AlertEpisodeOpen || held.Candidates[0].EvidenceHealth == rpc.AlertEvidenceCurrent {
+		t.Fatalf("degraded negative cleared rulebook episode: %+v err=%v", held, err)
+	}
+
+	now = base.Add(2*time.Minute + time.Second)
+	clear := alertShadowTestRulebook(base.Add(2*time.Minute), risk.RuleStatusPass)
+	recovered, err := composer.ObserveRulebook(t.Context(), scope, clear)
+	if err != nil || len(recovered.Candidates) != 1 || recovered.Candidates[0].State != rpc.AlertEpisodeRecovered {
+		t.Fatalf("current rulebook negative did not recover: %+v err=%v", recovered, err)
+	}
+}
+
+func TestAlertShadowComposerOrderIntegrityRequiresConfirmationAndCurrentNegative(t *testing.T) {
+	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+	defer store.Close()
+	registry, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composer := newAlertShadowComposer(registry)
+	scope := alertShadowTestBrokerScope(t)
+	base := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	now := base.Add(time.Second)
+	composer.now = func() time.Time { return now }
+	order := alertShadowTestMismatchedOrder(base, scope)
+
+	first, err := composer.ObserveOrderIntegrity(t.Context(), scope, orderIntegrityEvaluation{
+		AsOf: base, EvidenceAsOf: base, Status: orderIntegrityHealthCurrent, Orders: []rpc.OrderView{order},
+	})
+	if err != nil || len(first.Candidates) != 0 {
+		t.Fatalf("first mismatch pass alerted: %+v err=%v", first, err)
+	}
+	status := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceOrderIntegrity)
+	if status.Covered || status.Reason != alertShadowReasonConfirmationPending {
+		t.Fatalf("first mismatch status=%+v", status)
+	}
+
+	now = base.Add(time.Minute + time.Second)
+	order.BrokerTruthAsOf = base.Add(time.Minute)
+	second, err := composer.ObserveOrderIntegrity(t.Context(), scope, orderIntegrityEvaluation{
+		AsOf: base.Add(time.Minute), EvidenceAsOf: base.Add(time.Minute), Status: orderIntegrityHealthCurrent, Orders: []rpc.OrderView{order},
+	})
+	if err != nil || len(second.Candidates) != 1 || second.Candidates[0].State != rpc.AlertEpisodeOpen || second.Candidates[0].Severity != rpc.AlertSeverityUrgent {
+		t.Fatalf("second mismatch pass=%+v err=%v", second, err)
+	}
+
+	now = base.Add(2*time.Minute + time.Second)
+	held, err := composer.ObserveOrderIntegrity(t.Context(), scope, orderIntegrityEvaluation{
+		AsOf: base.Add(2 * time.Minute), EvidenceAsOf: base, Status: orderIntegrityHealthStale, Orders: []rpc.OrderView{},
+	})
+	if err != nil || len(held.Candidates) != 1 || held.Candidates[0].State != rpc.AlertEpisodeOpen {
+		t.Fatalf("stale negative cleared order episode: %+v err=%v", held, err)
+	}
+
+	now = base.Add(3*time.Minute + time.Second)
+	recovered, err := composer.ObserveOrderIntegrity(t.Context(), scope, orderIntegrityEvaluation{
+		AsOf: base.Add(3 * time.Minute), EvidenceAsOf: base.Add(3 * time.Minute), Status: orderIntegrityHealthCurrent, Orders: []rpc.OrderView{},
+	})
+	if err != nil || len(recovered.Candidates) != 1 || recovered.Candidates[0].State != rpc.AlertEpisodeRecovered {
+		t.Fatalf("trusted order negative did not recover: %+v err=%v", recovered, err)
 	}
 }
 
@@ -341,6 +429,45 @@ func TestAlertShadowComposerNudgeOwnershipRecoveryAndNoDelivery(t *testing.T) {
 	}
 }
 
+func TestAlertShadowComposerNudgeV3InactiveReminderSourcesRemainCovered(t *testing.T) {
+	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+	defer store.Close()
+	registry, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composer := newAlertShadowComposer(registry)
+	now := time.Date(2026, 7, 21, 10, 30, 0, 0, time.UTC)
+	composer.now = func() time.Time { return now.Add(time.Second) }
+	scope := alertShadowTestBrokerScope(t)
+	input := alertShadowTestNudges(scope, now,
+		alertShadowTestPolicyDrift(now.Add(-time.Minute)),
+		alertShadowTestReconcileException(now.Add(-time.Minute)),
+	)
+	inactive := rpc.NudgeInputHealth{
+		Status: rpc.NudgeInputStatusInactive, Reason: rpc.NudgeHealthReasonProcessRemindersNotEnabled, AsOf: now,
+	}
+	input.Snapshot.SourceHealth.Cadence = inactive
+	input.Snapshot.SourceHealth.ConfirmedFlow = inactive
+	input.Snapshot.ConfirmedFlowCoverage = nil
+
+	snapshot, err := composer.ObserveNudges(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertAlertShadowCoverage(t, snapshot.Coverage, []rpc.AlertSource{
+		rpc.AlertSourceRiskPolicy, rpc.AlertSourceReconciliation, rpc.AlertSourceGovernance,
+	})
+	if len(snapshot.Candidates) != 2 {
+		t.Fatalf("v3 independent candidates=%+v", snapshot.Candidates)
+	}
+	for _, candidate := range snapshot.Candidates {
+		if candidate.EvidenceHealth != rpc.AlertEvidenceCurrent {
+			t.Fatalf("v3 independent candidate is not current: %+v", candidate)
+		}
+	}
+}
+
 func TestAlertShadowComposerNudgeOutageDuplicateAndEquivocation(t *testing.T) {
 	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
 	defer store.Close()
@@ -508,6 +635,30 @@ func alertShadowTestNudges(scope alertShadowBrokerScope, at time.Time, candidate
 			},
 			ConfirmedFlowCoverage: &rpc.NudgeConfirmedFlowCoverage{CoverageFrom: at.Add(-24 * time.Hour)},
 		},
+	}
+}
+
+func alertShadowTestRulebook(at time.Time, status string) rpc.RulesResult {
+	policy := risk.DefaultRulebookPolicy()
+	fingerprint := rpc.Fingerprint{Version: rpc.RulebookPolicyFingerprintVersion, Key: policy.FingerprintKey()}
+	return rpc.RulesResult{
+		AsOf: at, Enabled: true, Status: "ok", PolicyID: policy.ID, PolicyVersion: policy.Version,
+		PolicyFingerprint: &fingerprint,
+		Rules:             []risk.RuleRow{{ID: risk.RuleSingleNameExposure, Number: 1, Title: "Single-name exposure", Status: status, Evidence: "classified"}},
+		InputHealth: []rpc.SourceHealth{
+			{Source: "account", Status: rpc.SourceStatusOK, AsOf: at},
+			{Source: "positions", Status: rpc.SourceStatusOK, AsOf: at},
+		},
+	}
+}
+
+func alertShadowTestMismatchedOrder(at time.Time, scope alertShadowBrokerScope) rpc.OrderView {
+	return rpc.OrderView{
+		OrderRef: "private-order-ref", Endpoint: "127.0.0.1:4002", ClientID: 7,
+		Account: scope.account, Mode: scope.mode, Open: true, Remaining: 100,
+		ReconciliationState: "position_mismatch", ReconciliationKind: rpc.OrderReconciliationKindShortEntryExcess,
+		ReconciliationSeverity: rpc.OrderReconciliationSeverityCritical, ShortRiskQuantity: 50, ReduceToQuantity: 50,
+		BrokerTruthAsOf: at,
 	}
 }
 

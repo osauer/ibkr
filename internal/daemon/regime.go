@@ -178,7 +178,10 @@ func (s *Server) populateStreaksWithStore(res *rpc.RegimeSnapshotResult, streaks
 	if res == nil {
 		return policies
 	}
-	now := nyDateNow()
+	now := nyTime(res.AsOf)
+	if res.AsOf.IsZero() {
+		now = nyDateNow()
+	}
 	for _, ind := range streakIndicators {
 		key := ind.key()
 		band, value := ind.bandAndValue(res)
@@ -210,12 +213,16 @@ func (s *Server) populateStreaksWithStore(res *rpc.RegimeSnapshotResult, streaks
 			}
 		}
 		fresh := ind.fresh(res, now)
-		freshness := &rpc.RegimeFreshness{
-			Class:         rpc.RegimeFreshnessFresh,
-			MaxAgeSeconds: rpc.RegimeSourceMaxAgeSeconds(rpc.RegimeIndicatorCluster(key)),
+		freshnessClass := rpc.RegimeFreshnessOverdue
+		if fresh {
+			freshnessClass = rpc.RegimeFreshnessFresh
 		}
-		if !fresh {
-			freshness.Class = rpc.RegimeFreshnessOverdue
+		if key == rpc.RegimeIndicatorVIXTerm {
+			freshnessClass = vixTermCadenceClass(res, now)
+		}
+		freshness := &rpc.RegimeFreshness{
+			Class:         freshnessClass,
+			MaxAgeSeconds: rpc.RegimeSourceMaxAgeSeconds(rpc.RegimeIndicatorCluster(key)),
 		}
 		var elig *rpc.RegimeEligibility
 		if display == "red" {
@@ -237,6 +244,7 @@ func (s *Server) populateStreaksWithStore(res *rpc.RegimeSnapshotResult, streaks
 				Depth:          ind.depth(res),
 				StreakSessions: sessions,
 				Fresh:          fresh,
+				FreshnessClass: freshnessClass,
 				Latched:        latched,
 			})
 			if elig != nil && elig.Eligible && streaks != nil && band == "red" {

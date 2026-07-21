@@ -227,11 +227,24 @@ func (vixTermStreaks) depth(res *rpc.RegimeSnapshotResult) *float64 {
 	return res.VIXTermStructure.Ratio
 }
 
-// VIX freshness: ticks flow from ~03:00 ET, so a live row (status ok) is
-// fresh at any hour; a frozen/delayed row (status stale) is overdue because
-// a newer tick should exist.
+// VIX freshness: live rows are fresh at any hour. Frozen rows remain
+// confirmation-ineligible; before the documented ~03:00 ET native window on
+// an official trading date they are classified separately as not due by
+// vixTermCadenceClass rather than falsely called overdue.
 func (vixTermStreaks) fresh(res *rpc.RegimeSnapshotResult, _ time.Time) bool {
 	return res.VIXTermStructure.Status == rpc.RegimeStatusOK
+}
+
+func vixTermCadenceClass(res *rpc.RegimeSnapshotResult, nowNY time.Time) string {
+	if res != nil && res.VIXTermStructure.Status == rpc.RegimeStatusOK {
+		return rpc.RegimeFreshnessFresh
+	}
+	if res != nil && res.VIXTermStructure.Status == rpc.RegimeStatusStale && nowNY.Hour() < 3 {
+		if state, _, _ := rpc.TapeSessionFor(nowNY); state == rpc.TapeSessionTradingDate {
+			return rpc.RegimeFreshnessNotDue
+		}
+	}
+	return rpc.RegimeFreshnessOverdue
 }
 
 // Exit hysteresis: leave red only when the ratio falls below 0.98.

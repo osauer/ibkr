@@ -3200,6 +3200,39 @@ func (c *Connector) CachedPositions() ([]*RawPosition, error) {
 		return nil, nil
 	}
 	ibkrPositions := conn.GetPositions()
+	result := c.filteredCachedPositions(ibkrPositions)
+	if len(result) == 0 {
+		// Self-heal a dead portfolio stream behind the read: consumers
+		// poll this path constantly, so a failed account-updates
+		// subscription recovers within a poll cycle.
+		c.maybeResubscribeAccountUpdates()
+	}
+	return result, nil
+}
+
+// CachedPositionsWithHealth returns the same non-destructive portfolio cache
+// plus the reqAccountUpdates completion/heartbeat receipts needed by daemon
+// integrity checks. Existing consumers keep using CachedPositions.
+func (c *Connector) CachedPositionsWithHealth() ([]*RawPosition, PortfolioStreamHealth, error) {
+	if !c.isConnected() {
+		return nil, PortfolioStreamHealth{}, nil
+	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return nil, PortfolioStreamHealth{}, nil
+	}
+	ibkrPositions, health := conn.GetPositionsWithPortfolioHealth()
+	result := c.filteredCachedPositions(ibkrPositions)
+	if len(result) == 0 && accountSummaryShowsPositions(conn.GetAccountSummary()) {
+		c.maybeResubscribeAccountUpdates()
+		_, health = conn.GetPositionsWithPortfolioHealth()
+	}
+	return result, health, nil
+}
+
+func (c *Connector) filteredCachedPositions(ibkrPositions map[string]*RawPosition) []*RawPosition {
 	c.seedContractCacheFromPositions(ibkrPositions)
 	result := make([]*RawPosition, 0, len(ibkrPositions))
 	for _, pos := range ibkrPositions {
@@ -3219,13 +3252,7 @@ func (c *Connector) CachedPositions() ([]*RawPosition, error) {
 		// A possibly-stale price beats a vanished position.
 		result = append(result, pos)
 	}
-	if len(result) == 0 {
-		// Self-heal a dead portfolio stream behind the read: consumers
-		// poll this path constantly, so a failed account-updates
-		// subscription recovers within a poll cycle.
-		c.maybeResubscribeAccountUpdates()
-	}
-	return result, nil
+	return result
 }
 
 func isZeroValueStockPosition(pos *RawPosition) bool {

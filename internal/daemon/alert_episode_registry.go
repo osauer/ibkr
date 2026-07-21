@@ -155,8 +155,10 @@ type alertEpisodeRegistrySourceState struct {
 }
 
 type alertShadowDurableCursors struct {
-	Canary alertShadowInputCursor `json:"canary"`
-	Nudges alertShadowInputCursor `json:"nudges"`
+	Canary         alertShadowInputCursor `json:"canary"`
+	Nudges         alertShadowInputCursor `json:"nudges"`
+	Rulebook       alertShadowInputCursor `json:"rulebook,omitzero"`
+	OrderIntegrity alertShadowInputCursor `json:"order_integrity,omitzero"`
 }
 
 type alertShadowDurableMetrics struct {
@@ -1121,7 +1123,7 @@ func validateAlertEpisodeEvaluation(evaluation alertEpisodeEvaluation) error {
 		}
 	}
 	if evaluation.CursorKind != "" {
-		if evaluation.CursorKind != alertShadowCursorCanary && evaluation.CursorKind != alertShadowCursorNudges {
+		if evaluation.CursorKind != alertShadowCursorCanary && evaluation.CursorKind != alertShadowCursorNudges && evaluation.CursorKind != alertShadowCursorRulebook && evaluation.CursorKind != alertShadowCursorOrderIntegrity {
 			return errors.New("alert episode evaluation has invalid cursor kind")
 		}
 		if err := validateAlertShadowInputCursor(evaluation.Cursor); err != nil {
@@ -1266,6 +1268,12 @@ func validateAlertEpisodeRegistryDocument(document alertEpisodeRegistryDocument,
 		}
 		if err := validateAlertShadowInputCursorOptional(scopeDocument.Cursors.Nudges); err != nil {
 			return fmt.Errorf("invalid alert episode registry Nudge cursor: %w", err)
+		}
+		if err := validateAlertShadowInputCursorOptional(scopeDocument.Cursors.Rulebook); err != nil {
+			return fmt.Errorf("invalid alert episode registry Rulebook cursor: %w", err)
+		}
+		if err := validateAlertShadowInputCursorOptional(scopeDocument.Cursors.OrderIntegrity); err != nil {
+			return fmt.Errorf("invalid alert episode registry Order Integrity cursor: %w", err)
 		}
 		if err := validateAlertShadowDurableMetrics(scopeDocument.Metrics, document.UpdatedAt); err != nil {
 			return fmt.Errorf("invalid alert episode registry commissioning metrics: %w", err)
@@ -1673,6 +1681,10 @@ func applyAlertShadowCursor(scopeDocument *alertEpisodeRegistryScopeDocument, ki
 		scopeDocument.Cursors.Canary = cursor
 	case alertShadowCursorNudges:
 		scopeDocument.Cursors.Nudges = cursor
+	case alertShadowCursorRulebook:
+		scopeDocument.Cursors.Rulebook = cursor
+	case alertShadowCursorOrderIntegrity:
+		scopeDocument.Cursors.OrderIntegrity = cursor
 	}
 }
 

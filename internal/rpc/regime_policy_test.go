@@ -59,6 +59,12 @@ func TestEvaluateRegimeEligibility(t *testing.T) {
 			wantReason:   "data_overdue",
 		},
 		{
+			name:         "latch never overrides not-due cadence",
+			in:           RegimeEligibilityInput{Indicator: RegimeIndicatorVIXTerm, Band: "red", Depth: new(1.06), StreakSessions: 3, Fresh: false, FreshnessClass: RegimeFreshnessNotDue, Latched: true},
+			wantEligible: false,
+			wantReason:   "data_not_due",
+		},
+		{
 			name:         "vix inversion needs two sessions",
 			in:           RegimeEligibilityInput{Indicator: RegimeIndicatorVIXTerm, Band: "red", Depth: new(1.01), StreakSessions: 1, Fresh: true},
 			wantEligible: false,

@@ -850,6 +850,8 @@ func regimeEligibilityReasonText(reasons []string) string {
 			out = append(out, "depth below floor")
 		case reason == "data_overdue":
 			out = append(out, "data overdue")
+		case reason == "data_not_due":
+			out = append(out, "new session data not due yet")
 		case strings.HasPrefix(reason, "streak_"):
 			if parts := strings.Split(reason, "_"); len(parts) == 4 {
 				out = append(out, "day "+parts[1]+" of "+parts[3])

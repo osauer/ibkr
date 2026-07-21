@@ -209,7 +209,7 @@ func TestMarketEventBorrowFeesSnapshotIndexesBySymbol(t *testing.T) {
 }
 
 func TestMarketEventBorrowFeeStaleCacheFallback(t *testing.T) {
-	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 6, 8, 16, 0, 0, 0, time.UTC)
 	cache := newMarketEventCache(func() time.Time { return now })
 	cache.borrowFees = marketEventBorrowFeeEntry{
 		FetchedAt: now.Add(-marketEventsBorrowFeeFreshFor - time.Minute),
@@ -229,8 +229,42 @@ func TestMarketEventBorrowFeeStaleCacheFallback(t *testing.T) {
 	if _, ok := entry.Symbols["CRWV"]; !ok {
 		t.Fatalf("cached symbol missing: %+v", entry.Symbols)
 	}
-	if health.Status != rpc.SourceStatusStale {
-		t.Fatalf("health status=%q, want stale", health.Status)
+	if health.Status != rpc.SourceStatusStale || health.RefreshState != rpc.SourceRefreshFetchFailed || health.NextAttempt == nil {
+		t.Fatalf("health=%+v, want stale first-fetch failure with retry", health)
+	}
+}
+
+func TestMarketEventBorrowFeeNotDueSkipsFetch(t *testing.T) {
+	now := time.Date(2026, 7, 20, 5, 5, 0, 0, time.UTC) // Monday 01:05 ET.
+	cache := newMarketEventCache(func() time.Time { return now })
+	var fetchCalls int
+	orig := fetchIBKRBorrowFees
+	fetchIBKRBorrowFees = func(context.Context) (marketEventBorrowFeeEntry, error) {
+		fetchCalls++
+		return marketEventBorrowFeeEntry{}, errors.New("must not fetch before the regular session")
+	}
+	t.Cleanup(func() { fetchIBKRBorrowFees = orig })
+
+	entry, health, err := cache.loadBorrowFees(context.Background(), now)
+	if err != nil || len(entry.Symbols) != 0 || fetchCalls != 0 {
+		t.Fatalf("not-due read entry=%+v health=%+v calls=%d err=%v", entry, health, fetchCalls, err)
+	}
+	if health.Status != rpc.SourceStatusUnknown || health.RefreshState != rpc.SourceRefreshNotDue || health.NextAttempt != nil {
+		t.Fatalf("not-due health=%+v", health)
+	}
+
+	cache.borrowFees = marketEventBorrowFeeEntry{
+		FetchedAt: time.Date(2026, 7, 17, 18, 0, 0, 0, time.UTC), AsOf: time.Date(2026, 7, 17, 18, 0, 0, 0, time.UTC),
+		Symbols: map[string]marketEventBorrowFeeRecord{"CRWV": {Symbol: "CRWV", FeeRate: 65}},
+	}
+	entry, health, err = cache.loadBorrowFees(context.Background(), now)
+	if err != nil || len(entry.Symbols) != 1 || fetchCalls != 0 || health.Status != rpc.SourceStatusOK || health.RefreshState != rpc.SourceRefreshNotDue {
+		t.Fatalf("not-due last-good entry=%+v health=%+v calls=%d err=%v", entry, health, fetchCalls, err)
+	}
+	tuesdayPreopen := time.Date(2026, 7, 21, 5, 5, 0, 0, time.UTC)
+	entry, health, err = cache.loadBorrowFees(context.Background(), tuesdayPreopen)
+	if err != nil || len(entry.Symbols) != 1 || fetchCalls != 0 || health.Status != rpc.SourceStatusStale || health.RefreshState != rpc.SourceRefreshNotDue {
+		t.Fatalf("missed-session last-good entry=%+v health=%+v calls=%d err=%v", entry, health, fetchCalls, err)
 	}
 }
 
@@ -345,7 +379,7 @@ func TestMarketEventCacheShortableAbsence(t *testing.T) {
 // hang was being re-paid on every canary run. Past the window, exactly
 // one retry fires; success clears the memory.
 func TestMarketEventBorrowFeeFailureMemory(t *testing.T) {
-	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 6, 8, 16, 0, 0, 0, time.UTC)
 	cache := newMarketEventCache(func() time.Time { return now })
 
 	var fetchCalls int
@@ -356,7 +390,7 @@ func TestMarketEventBorrowFeeFailureMemory(t *testing.T) {
 	}
 	t.Cleanup(func() { fetchIBKRBorrowFees = orig })
 
-	if _, health, err := cache.loadBorrowFees(context.Background(), now); err == nil || health.Status != rpc.SourceStatusUnknown {
+	if _, health, err := cache.loadBorrowFees(context.Background(), now); err == nil || health.Status != rpc.SourceStatusUnknown || health.RefreshState != rpc.SourceRefreshFetchFailed || health.NextAttempt == nil {
 		t.Fatalf("first failure: err=%v status=%s", err, health.Status)
 	}
 	if fetchCalls != 1 {
@@ -365,7 +399,7 @@ func TestMarketEventBorrowFeeFailureMemory(t *testing.T) {
 
 	// Within the retry window: no fetch attempt, same degraded health.
 	within := now.Add(marketEventsBorrowFeeRetryAfter - time.Minute)
-	if _, health, err := cache.loadBorrowFees(context.Background(), within); err == nil || health.Status != rpc.SourceStatusUnknown {
+	if _, health, err := cache.loadBorrowFees(context.Background(), within); err == nil || health.Status != rpc.SourceStatusUnknown || health.RefreshState != rpc.SourceRefreshFetchFailedBackoff || health.NextAttempt == nil {
 		t.Fatalf("suppressed call: err=%v status=%s", err, health.Status)
 	}
 	if fetchCalls != 1 {
@@ -381,7 +415,7 @@ func TestMarketEventBorrowFeeFailureMemory(t *testing.T) {
 		}, nil
 	}
 	past := now.Add(marketEventsBorrowFeeRetryAfter + time.Minute)
-	if _, health, err := cache.loadBorrowFees(context.Background(), past); err != nil || health.Status != rpc.SourceStatusOK {
+	if _, health, err := cache.loadBorrowFees(context.Background(), past); err != nil || health.Status != rpc.SourceStatusOK || health.RefreshState != rpc.SourceRefreshCurrent || health.NextAttempt != nil {
 		t.Fatalf("recovery call: err=%v status=%s", err, health.Status)
 	}
 	if fetchCalls != 2 {
@@ -398,13 +432,13 @@ func TestMarketEventBorrowFeeFailureMemory(t *testing.T) {
 		return marketEventBorrowFeeEntry{}, errors.New("network down again")
 	}
 	expired := past.Add(marketEventsBorrowFeeFreshFor + time.Minute)
-	if entry, health, err := cache.loadBorrowFees(context.Background(), expired); err != nil || health.Status != rpc.SourceStatusStale || len(entry.Symbols) == 0 {
+	if entry, health, err := cache.loadBorrowFees(context.Background(), expired); err != nil || health.Status != rpc.SourceStatusStale || health.RefreshState != rpc.SourceRefreshFetchFailed || health.NextAttempt == nil || len(entry.Symbols) == 0 {
 		t.Fatalf("stale fallback after failure: err=%v status=%s symbols=%d", err, health.Status, len(entry.Symbols))
 	}
 	if fetchCalls != 3 {
 		t.Fatalf("stale-fallback failure: fetch ran %d times, want 3", fetchCalls)
 	}
-	if entry, health, err := cache.loadBorrowFees(context.Background(), expired.Add(time.Minute)); err != nil || health.Status != rpc.SourceStatusStale || len(entry.Symbols) == 0 {
+	if entry, health, err := cache.loadBorrowFees(context.Background(), expired.Add(time.Minute)); err != nil || health.Status != rpc.SourceStatusStale || health.RefreshState != rpc.SourceRefreshFetchFailedBackoff || health.NextAttempt == nil || len(entry.Symbols) == 0 {
 		t.Fatalf("suppressed stale fallback: err=%v status=%s symbols=%d", err, health.Status, len(entry.Symbols))
 	}
 	if fetchCalls != 3 {

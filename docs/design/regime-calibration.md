@@ -544,7 +544,7 @@ Additive only; raw measurements untouched:
 
 - `RegimeIndicatorMeta` += `freshness {class, max_age_seconds}`,
   `eligibility {eligible, latched, reasons[]}` (reasons name the failed gate:
-  `depth_below_min`, `streak_1_of_2`, `data_overdue`).
+  `depth_below_min`, `streak_1_of_2`, `data_not_due`, `data_overdue`).
 - `LifecycleState` += `governors []GovernorAction`.
 - `RegimeComposite` += eligible-red tallies.
 - Lifecycle builder: revised triggers (all branches kept), governor ordering,

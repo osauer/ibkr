@@ -165,13 +165,13 @@ func TestCompactCanaryAlertDropsDiagnosticArraysAndKeepsFlags(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 3, 8, 45, 0, 0, time.UTC)
+	nextAttempt := now.Add(15 * time.Minute)
 	canary := CanaryResult{
 		AsOf:               now,
 		Fingerprint:        Fingerprint{Version: CanaryFingerprintVersion, Key: "sha256:canary"},
 		SourceFingerprints: CanarySourceFingerprints{Positions: &Fingerprint{Version: PositionsFingerprintVersion, Key: "sha256:positions"}},
 		SourceHealth: []SourceHealth{{
-			Source:      "positions",
-			Status:      "ok",
+			Source: "positions", Status: "ok", RefreshState: SourceRefreshFetchFailedBackoff, NextAttempt: &nextAttempt,
 			Fingerprint: &Fingerprint{Version: PositionsFingerprintVersion, Key: "sha256:positions"},
 		}},
 		Action:             "watch",
@@ -210,6 +210,9 @@ func TestCompactCanaryAlertDropsDiagnosticArraysAndKeepsFlags(t *testing.T) {
 		if !strings.Contains(wire, present) {
 			t.Fatalf("compact canary alert missing %s: %s", present, wire)
 		}
+	}
+	if !strings.Contains(wire, `"refresh_state":"fetch_failed_backoff"`) || !strings.Contains(wire, `"next_attempt"`) {
+		t.Fatalf("compact source health dropped refresh scheduling: %s", wire)
 	}
 	if strings.Contains(wire, `"fingerprint"`) && strings.Contains(wire, `"source_health":[{"source":"positions","status":"ok","fingerprint"`) {
 		t.Fatalf("source_health should drop nested fingerprints in alert view: %s", wire)

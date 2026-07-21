@@ -309,6 +309,18 @@ func regimeStatusQuality(r *rpc.RegimeSnapshotResult) []rpc.DataQualityHealth {
 }
 
 func gammaStatusQuality(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool) {
+	return gammaStatusQualityAt(env, time.Now())
+}
+
+func gammaStatusQualityAt(env rpc.GammaZeroSPXResult, now time.Time) (rpc.DataQualityHealth, bool) {
+	quality, ok := gammaStatusQualityClassified(env)
+	if ok {
+		quality.CadenceState = gammaOperationalCadence(&env, now)
+	}
+	return quality, ok
+}
+
+func gammaStatusQualityClassified(env rpc.GammaZeroSPXResult) (rpc.DataQualityHealth, bool) {
 	switch env.Status {
 	case rpc.GammaZeroStatusReady:
 		if env.Result == nil {

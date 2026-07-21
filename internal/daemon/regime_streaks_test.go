@@ -149,6 +149,39 @@ func TestStreakStoreUsesSQLiteWithoutLegacyFallback(t *testing.T) {
 	}
 }
 
+func TestVIXTermCadenceDistinguishesNotDueFromOverdue(t *testing.T) {
+	ny := newYorkLocation()
+	ratio := 1.06
+	result := &rpc.RegimeSnapshotResult{
+		AsOf: time.Date(2026, 7, 20, 1, 5, 0, 0, ny),
+		VIXTermStructure: rpc.RegimeVIXTerm{
+			Status: rpc.RegimeStatusStale, Ratio: &ratio,
+		},
+	}
+	if got := vixTermCadenceClass(result, result.AsOf); got != rpc.RegimeFreshnessNotDue {
+		t.Fatalf("Monday 01:05 ET cadence=%q, want not_due", got)
+	}
+	policy := (&Server{}).populateStreaksWithStore(result, nil)[rpc.RegimeIndicatorVIXTerm]
+	if policy.freshness == nil || policy.freshness.Class != rpc.RegimeFreshnessNotDue || policy.eligibility == nil || policy.eligibility.Eligible ||
+		len(policy.eligibility.Reasons) != 1 || policy.eligibility.Reasons[0] != "data_not_due" {
+		t.Fatalf("Monday 01:05 ET VIX policy=%+v", policy)
+	}
+
+	afterWindow := result.AsOf.Add(1*time.Hour + 55*time.Minute)
+	if got := vixTermCadenceClass(result, afterWindow); got != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("Monday 03:00 ET cadence=%q, want overdue", got)
+	}
+	result.VIXTermStructure.Status = rpc.RegimeStatusOK
+	if got := vixTermCadenceClass(result, result.AsOf); got != rpc.RegimeFreshnessFresh {
+		t.Fatalf("live VIX cadence=%q, want fresh", got)
+	}
+	result.VIXTermStructure.Status = rpc.RegimeStatusStale
+	weekend := time.Date(2026, 7, 19, 1, 5, 0, 0, ny)
+	if got := vixTermCadenceClass(result, weekend); got != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("Sunday cadence=%q, want overdue", got)
+	}
+}
+
 // TestClassifyBands sanity-checks each classifier against the spec.
 func TestClassifyBands(t *testing.T) {
 	mkPtr := func(v float64) *float64 { return &v }

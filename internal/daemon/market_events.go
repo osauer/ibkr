@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
+	"github.com/osauer/ibkr/v2/internal/marketcal"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -434,15 +435,26 @@ func haltsFallback(cached marketEventHaltsEntry, now time.Time, freshFor time.Du
 
 func (c *marketEventCache) loadBorrowFees(ctx context.Context, now time.Time) (marketEventBorrowFeeEntry, rpc.SourceHealth, error) {
 	c.mu.Lock()
+	if !borrowFeeSourceDue(now) {
+		cached := cloneBorrowFeeEntry(c.borrowFees)
+		c.mu.Unlock()
+		return borrowFeesNotDue(cached, now)
+	}
 	if !c.borrowFees.FetchedAt.IsZero() && now.Sub(c.borrowFees.FetchedAt) <= marketEventsBorrowFeeFreshFor {
 		entry := cloneBorrowFeeEntry(c.borrowFees)
 		c.mu.Unlock()
-		return entry, marketEventSourceHealth("borrow_fee", rpc.SourceStatusOK, entry.AsOf, now, marketEventsBorrowFeeMaxAge, "medium", []string{"IBKR short-stock availability fee rate"}), nil
+		health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusOK, entry.AsOf, now, marketEventsBorrowFeeMaxAge, "medium", []string{"IBKR short-stock availability fee rate"})
+		health.RefreshState = rpc.SourceRefreshCurrent
+		return entry, health, nil
 	}
 	if !c.borrowFeesFailedAt.IsZero() && now.Sub(c.borrowFeesFailedAt) <= marketEventsBorrowFeeRetryAfter {
 		cached := cloneBorrowFeeEntry(c.borrowFees)
+		next := c.borrowFeesFailedAt.Add(marketEventsBorrowFeeRetryAfter).UTC()
 		c.mu.Unlock()
-		return borrowFeesFallback(cached, now, errMarketEventRetrySuppressed)
+		entry, health, err := borrowFeesFallback(cached, now, errMarketEventRetrySuppressed)
+		health.RefreshState = rpc.SourceRefreshFetchFailedBackoff
+		health.NextAttempt = &next
+		return entry, health, err
 	}
 	c.mu.Unlock()
 
@@ -452,7 +464,11 @@ func (c *marketEventCache) loadBorrowFees(ctx context.Context, now time.Time) (m
 		c.borrowFeesFailedAt = now
 		cached := cloneBorrowFeeEntry(c.borrowFees)
 		c.mu.Unlock()
-		return borrowFeesFallback(cached, now, err)
+		entry, health, fallbackErr := borrowFeesFallback(cached, now, err)
+		health.RefreshState = rpc.SourceRefreshFetchFailed
+		next := now.Add(marketEventsBorrowFeeRetryAfter).UTC()
+		health.NextAttempt = &next
+		return entry, health, fallbackErr
 	}
 	entry.FetchedAt = now
 	if err := c.persistBorrowFees(ctx, entry); err != nil {
@@ -460,13 +476,48 @@ func (c *marketEventCache) loadBorrowFees(ctx context.Context, now time.Time) (m
 		c.borrowFeesFailedAt = now
 		cached := cloneBorrowFeeEntry(c.borrowFees)
 		c.mu.Unlock()
-		return borrowFeesFallback(cached, now, fmt.Errorf("persist normalized borrow-fee snapshot: %w", err))
+		entry, health, fallbackErr := borrowFeesFallback(cached, now, fmt.Errorf("persist normalized borrow-fee snapshot: %w", err))
+		health.RefreshState = rpc.SourceRefreshFetchFailed
+		next := now.Add(marketEventsBorrowFeeRetryAfter).UTC()
+		health.NextAttempt = &next
+		return entry, health, fallbackErr
 	}
 	c.mu.Lock()
 	c.borrowFees = cloneBorrowFeeEntry(entry)
 	c.borrowFeesFailedAt = time.Time{}
 	c.mu.Unlock()
-	return entry, marketEventSourceHealth("borrow_fee", rpc.SourceStatusOK, entry.AsOf, now, marketEventsBorrowFeeMaxAge, "medium", []string{"IBKR short-stock availability fee rate"}), nil
+	health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusOK, entry.AsOf, now, marketEventsBorrowFeeMaxAge, "medium", []string{"IBKR short-stock availability fee rate"})
+	health.RefreshState = rpc.SourceRefreshCurrent
+	return entry, health, nil
+}
+
+func borrowFeeSourceDue(now time.Time) bool {
+	session, err := marketcal.NewWithClock(func() time.Time { return now }).SessionAt(marketcal.MarketUSEquity, now)
+	if err != nil || session.State == marketcal.StateUnknown {
+		return true
+	}
+	return session.IsOpen
+}
+
+func borrowFeesNotDue(cached marketEventBorrowFeeEntry, now time.Time) (marketEventBorrowFeeEntry, rpc.SourceHealth, error) {
+	if len(cached.Symbols) == 0 {
+		health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusUnknown, now, now, marketEventsBorrowFeeMaxAge, "low", []string{"IBKR borrow-fee source is outside its official US-equity refresh window"})
+		health.RefreshState = rpc.SourceRefreshNotDue
+		return marketEventBorrowFeeEntry{}, health, nil
+	}
+	status := rpc.SourceStatusStale
+	if completedDate, _, ok := lastCompletedMarketSession(now, marketcal.MarketUSEquity); ok && !cached.FetchedAt.IsZero() && !cached.FetchedAt.After(now) {
+		ny, err := time.LoadLocation("America/New_York")
+		if err == nil && cached.FetchedAt.In(ny).Format("2006-01-02") == completedDate {
+			status = rpc.SourceStatusOK
+		}
+	} else if !cached.FetchedAt.IsZero() && !cached.FetchedAt.After(now) && now.Sub(cached.FetchedAt) <= marketEventsBorrowFeeMaxAge {
+		status = rpc.SourceStatusOK
+	}
+	health := marketEventSourceHealth("borrow_fee", status, cached.AsOf, now, marketEventsBorrowFeeMaxAge, "medium-low", []string{"serving last-good IBKR borrow-fee data; no regular-session refresh is due"})
+	health.AgeSeconds = int64(now.Sub(cached.FetchedAt).Seconds())
+	health.RefreshState = rpc.SourceRefreshNotDue
+	return cached, health, nil
 }
 
 // borrowFeesFallback mirrors regSHOFallback for the IBKR short-stock

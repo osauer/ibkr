@@ -147,3 +147,31 @@ func (s *Server) observeNudgesAlertShadow(ctx context.Context, input alertShadow
 		s.warnf("alert shadow: Nudge observation failed: %v", err)
 	}
 }
+
+func (s *Server) observeRulebookAlertShadow(ctx context.Context, result *rpc.RulesResult, brokerScope brokerStateScope) {
+	if s == nil || s.alertShadow == nil || result == nil {
+		return
+	}
+	scope, err := newAlertShadowBrokerScope(brokerScope)
+	if err != nil {
+		s.warnf("alert shadow: Rulebook observation skipped: %v", err)
+		return
+	}
+	if _, err := s.alertShadow.ObserveRulebook(ctx, scope, *result); err != nil {
+		s.warnf("alert shadow: Rulebook observation failed: %v", err)
+	}
+}
+
+func (s *Server) observeOrderIntegrityAlertShadow(ctx context.Context, input orderIntegrityEvaluation) {
+	if s == nil || s.alertShadow == nil {
+		return
+	}
+	scope, err := newAlertShadowBrokerScope(input.Scope)
+	if err != nil {
+		s.warnf("alert shadow: Order Integrity observation skipped: %v", err)
+		return
+	}
+	if _, err := s.alertShadow.ObserveOrderIntegrity(ctx, scope, input); err != nil {
+		s.warnf("alert shadow: Order Integrity observation failed: %v", err)
+	}
+}

@@ -1050,6 +1050,26 @@ func TestAlertCandidatesPollAfterCurrentCanaryProducerInSameCadence(t *testing.T
 	}
 }
 
+func TestAlertCandidatePollFollowsAllSameCycleProducers(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 45, 0, 0, time.UTC)
+	client := &alertCandidateFakeClient{
+		fakeClient: &fakeClient{
+			canary: &rpc.CanaryResult{AsOf: now}, regime: &rpc.RegimeMonitorResult{AsOf: now},
+			rules: &rpc.RulesResult{AsOf: now, Enabled: true, Status: "ok"},
+		},
+		orders:   &rpc.OrdersOpenResult{AsOf: now, Orders: []rpc.OrderView{}},
+		snapshot: liveAlertSnapshot(now),
+	}
+	service := New(client, 5*time.Second, time.Minute)
+	service.now = func() time.Time { return now }
+	service.OnOrders = func(context.Context, rpc.OrdersOpenResult) { client.recordCall("on_orders") }
+
+	service.PollOnce(t.Context())
+	if got, want := strings.Join(client.CallOrder(), ","), "canary,rules,orders_open,alert_candidates,on_orders"; got != want {
+		t.Fatalf("same-cycle producer order=%q, want %q", got, want)
+	}
+}
+
 func TestRepeatedOldAlertSnapshotCannotResetAuthoritativeFreshness(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 7, 21, 13, 0, 0, 0, time.UTC)
@@ -1320,15 +1340,18 @@ type alertCandidateFakeClient struct {
 	*fakeClient
 	mu           sync.Mutex
 	snapshot     *rpc.AlertCandidateSnapshot
+	orders       *rpc.OrdersOpenResult
 	err          error
 	calls        int
 	canaryCalls  int
+	callOrder    []string
 	producerHook func()
 }
 
 func (c *alertCandidateFakeClient) CanaryWithRegime(ctx context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error) {
 	c.mu.Lock()
 	c.canaryCalls++
+	c.callOrder = append(c.callOrder, "canary")
 	hook := c.producerHook
 	c.mu.Unlock()
 	if hook != nil {
@@ -1341,10 +1364,35 @@ func (c *alertCandidateFakeClient) AlertCandidates(context.Context) (*rpc.AlertC
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
+	c.callOrder = append(c.callOrder, "alert_candidates")
 	if c.err != nil {
 		return nil, c.err
 	}
 	return cloneAlertCandidateSnapshot(c.snapshot), nil
+}
+
+func (c *alertCandidateFakeClient) Rules(ctx context.Context) (*rpc.RulesResult, error) {
+	c.recordCall("rules")
+	return c.fakeClient.Rules(ctx)
+}
+
+func (c *alertCandidateFakeClient) OrdersOpen(context.Context, rpc.OrdersOpenParams) (*rpc.OrdersOpenResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.callOrder = append(c.callOrder, "orders_open")
+	return c.orders, nil
+}
+
+func (c *alertCandidateFakeClient) recordCall(name string) {
+	c.mu.Lock()
+	c.callOrder = append(c.callOrder, name)
+	c.mu.Unlock()
+}
+
+func (c *alertCandidateFakeClient) CallOrder() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.callOrder...)
 }
 
 func (c *alertCandidateFakeClient) Set(snapshot *rpc.AlertCandidateSnapshot, err error) {

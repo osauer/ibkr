@@ -69,6 +69,9 @@ func (s *Server) handleRulesSnapshot(ctx context.Context, req *rpc.Request) (*rp
 		}
 	}
 	res := s.evaluateRules(ctx, true)
+	// Observe the complete result before any caller-local offender filter.
+	// A filtered view cannot prove that rules outside its symbol are clear.
+	s.observeRulebookAlertShadow(ctx, res, s.currentBrokerStateScope())
 	if params.Symbol != "" {
 		filterRuleOffenders(res, strings.ToUpper(strings.TrimSpace(params.Symbol)))
 	}
@@ -234,6 +237,11 @@ func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMainte
 	if !in.Positions.Healthy || !in.Account.Healthy {
 		res.Status = "degraded"
 	}
+	// The envelope is the completion boundary for the assembled inputs. Some
+	// components (notably the positions read model) stamp their own receipt
+	// after evaluation starts; retaining the start time here makes valid
+	// same-call evidence appear to come from the future to strict consumers.
+	res.AsOf = time.Now().UTC()
 	return res
 }
 

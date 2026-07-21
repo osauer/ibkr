@@ -303,3 +303,25 @@ func TestConnectionManagedAccountsStoresVersionedAccountList(t *testing.T) {
 		t.Fatalf("managed account = %q, want DU123", got)
 	}
 }
+
+func TestConnectionPortfolioStreamHealthTracksCompletionAndHeartbeat(t *testing.T) {
+	conn := NewConnection(DefaultConfig())
+	if conn == nil {
+		t.Fatal("NewConnection returned nil")
+	}
+
+	conn.processMessage(conn.encodeMsg(msgAcctDownloadEnd, "1", "DU123"))
+	_, completed := conn.GetPositionsWithPortfolioHealth()
+	if completed.Account != "DU123" || completed.InitialCompletedAt.IsZero() {
+		t.Fatalf("completion health=%+v", completed)
+	}
+	if !completed.LastUpdateAt.IsZero() {
+		t.Fatalf("completion manufactured heartbeat=%+v", completed)
+	}
+
+	conn.processMessage(conn.encodeMsg(msgAcctUpdateTime, "1", "12:34"))
+	_, heartbeat := conn.GetPositionsWithPortfolioHealth()
+	if heartbeat.LastUpdateAt.IsZero() || heartbeat.LastUpdateAt.Before(completed.InitialCompletedAt) {
+		t.Fatalf("heartbeat health=%+v after completion=%+v", heartbeat, completed)
+	}
+}

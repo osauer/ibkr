@@ -161,6 +161,7 @@ type RegimeEligibilityInput struct {
 	Depth          *float64
 	StreakSessions int
 	Fresh          bool
+	FreshnessClass string
 	Latched        bool
 }
 
@@ -179,7 +180,11 @@ func EvaluateRegimeEligibility(in RegimeEligibilityInput) *RegimeEligibility {
 	}
 	sessions := max(in.StreakSessions, 1)
 	out := &RegimeEligibility{}
-	if !in.Fresh {
+	if in.FreshnessClass == RegimeFreshnessNotDue {
+		out.Reasons = append(out.Reasons, "data_not_due")
+		return out
+	}
+	if !in.Fresh || in.FreshnessClass == RegimeFreshnessOverdue {
 		out.Reasons = append(out.Reasons, "data_overdue")
 		return out
 	}

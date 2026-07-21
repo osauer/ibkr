@@ -338,9 +338,11 @@ type Connection struct {
 	competingLiveSession bool
 
 	// Portfolio data storage
-	positions      map[string]*RawPosition
-	positionsMu    sync.RWMutex
-	accountSummary map[string]string
+	positions         map[string]*RawPosition
+	positionsMu       sync.RWMutex
+	portfolioHealthMu sync.RWMutex
+	portfolioHealth   PortfolioStreamHealth
+	accountSummary    map[string]string
 	// summarySnapshots accumulates account-summary rows per reqID so a
 	// synchronous reqAccountSummary read cannot be clobbered by the
 	// streaming reqAccountUpdates subscription, which writes the shared
@@ -373,6 +375,17 @@ type Connection struct {
 type handlerEntry struct {
 	id uint64
 	fn func([]string)
+}
+
+// PortfolioStreamHealth is receipt metadata for the streaming
+// reqAccountUpdates portfolio cache. It contains no positions or balances;
+// callers use it only to decide whether an empty cache is a trustworthy
+// negative rather than an unprimed or silent stream.
+type PortfolioStreamHealth struct {
+	Account            string
+	RequestedAt        time.Time
+	InitialCompletedAt time.Time
+	LastUpdateAt       time.Time
 }
 
 type reqAliasEntry struct {
@@ -1873,8 +1886,17 @@ func (c *Connection) processMessage(msgBytes []byte) {
 			// log volume (observed 2026-06-11).
 			portfolioLogger.Debugf("Account update time: %s", fields[2])
 		}
+		c.portfolioHealthMu.Lock()
+		c.portfolioHealth.LastUpdateAt = time.Now().UTC()
+		c.portfolioHealthMu.Unlock()
 	case msgAcctDownloadEnd:
 		portfolioLogger.Infof("Account download complete")
+		c.portfolioHealthMu.Lock()
+		if len(fields) > 2 && accountCodeConcrete(fields[2]) {
+			c.portfolioHealth.Account = strings.TrimSpace(fields[2])
+		}
+		c.portfolioHealth.InitialCompletedAt = time.Now().UTC()
+		c.portfolioHealthMu.Unlock()
 	case msgMarketDataType:
 		// Market data type notification (live/delayed/frozen)
 		// Format: [msgID, version, reqID, type]
@@ -5168,6 +5190,20 @@ func (c *Connection) GetPositions() map[string]*RawPosition {
 	return result
 }
 
+// GetPositionsWithPortfolioHealth captures the cached portfolio rows and the
+// stream receipts under one lock order. The returned map and health value are
+// detached copies.
+func (c *Connection) GetPositionsWithPortfolioHealth() (map[string]*RawPosition, PortfolioStreamHealth) {
+	c.positionsMu.RLock()
+	c.portfolioHealthMu.RLock()
+	result := make(map[string]*RawPosition, len(c.positions))
+	maps.Copy(result, c.positions)
+	health := c.portfolioHealth
+	c.portfolioHealthMu.RUnlock()
+	c.positionsMu.RUnlock()
+	return result, health
+}
+
 // GetPosition returns a specific position by key
 func (c *Connection) GetPosition(key string) (*RawPosition, bool) {
 	c.positionsMu.RLock()
@@ -5209,6 +5245,14 @@ func (c *Connection) RequestAccountUpdates(account string) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
+
+	bound := strings.TrimSpace(account)
+	if !accountCodeConcrete(bound) {
+		bound = strings.TrimSpace(c.GetAccountCode())
+	}
+	c.portfolioHealthMu.Lock()
+	c.portfolioHealth = PortfolioStreamHealth{Account: bound, RequestedAt: time.Now().UTC()}
+	c.portfolioHealthMu.Unlock()
 
 	msg := c.encodeMsg(reqAcctData, "2", "1", account)
 	return c.sendMessage(msg)

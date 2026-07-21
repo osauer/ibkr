@@ -144,6 +144,37 @@ reports `positive_only_not_wired`. Neither is counted as clear. Coverage is
 current-process knowledge and is not reconstructed from a durable active
 episode after restart.
 
+The commissioned producer boundary is explicit:
+
+- Canary consumes the producer-authored current result and its established-path
+  compatibility projection.
+- Risk policy, reconciliation, and governance consume one normalized Nudge
+  evaluation. Valid v3 policy keeps v4 cadence and confirmed-flow reminders
+  explicitly inactive without suppressing independent policy-drift, drawdown,
+  or reconciliation-exception facts. V4-only reminder coverage remains gated
+  by its own approved cadence and cutover evidence.
+- Rulebook consumes the complete unfiltered `rules.snapshot`; watch/act rows
+  open episodes, while only a current account-and-positions-backed snapshot may
+  clear them.
+- Order integrity consumes the journal-scoped open-order read model. A critical
+  mismatch must repeat on two consecutive current portfolio-stream reads;
+  stale, unprimed, future, or wrong-account stream evidence may retain an open
+  episode but cannot clear it.
+- Regime, protection, and broad data-health remain explicitly uncovered until
+  their source-specific active/recovery, materiality, severity, and destination
+  policies are approved. Existing Canary/Regime advisory presentation is not a
+  substitute for that authority.
+
+Source schedules do not masquerade as outages. Frozen VIX/VIX3M evidence before
+03:00 ET on an official trading date is `not_due` and remains confirmation-
+ineligible; after that window it is `overdue`. Gamma process health distinguishes
+`not_due`, `missed_session`, and `no_last_good` against the official options
+calendar. The external IBKR borrow-fee file is attempted during the official
+U.S. equity regular session; outside that window it is `not_due`, while an actual
+failed attempt and its bounded retry backoff are exposed separately. A last-good
+file from the latest completed equity session is expected overnight; an older
+file remains stale rather than being quieted as merely not due.
+
 Candidate lifecycle has three externally meaningful states: open, qualifying
 escalation, and recovered. The producer decides whether a fact is active and
 which escalation qualifies; the registry owns durable, monotonic transition

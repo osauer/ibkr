@@ -518,20 +518,10 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 				}
 			}
 		}
-		// CanaryWithRegime is the daemon call that produces the current Canary
-		// shadow observation. Read the composed source-neutral snapshot only after
-		// that producer returns so one cadence ingests its own result without a
-		// second broker evaluation or a full-cycle lag.
-		if alertClient, ok := s.client.(alertCandidateClient); ok {
-			alertSnapshot, source, err := s.pollAlertCandidates(ctx, alertClient, alertStore, now)
-			snap.AlertCandidates = alertSnapshot
-			snap.Sources["alert_candidates"] = source
-			if err != nil {
-				errors = append(errors, sourceErr("alert_candidates", err, now))
-			}
-		}
 		// Rules ride the canary cadence: same inputs (positions/account),
-		// same daily-discipline freshness needs, no extra poll knob.
+		// same daily-discipline freshness needs, no extra poll knob. Observe
+		// them before reading the source-neutral snapshot so the snapshot
+		// includes this cycle's complete unfiltered Rulebook evaluation.
 		if rules, err := s.client.Rules(ctx); err != nil {
 			errors = append(errors, sourceErr("rules", err, now))
 			snap.Sources["rules"] = sourceUnavailable(snap.Sources["rules"], now)
@@ -545,13 +535,26 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 				events = append(events, Event{Type: "rules", Data: rules})
 			}
 		}
-		// Open-order mismatch watch rides the same cadence: read-only journal
-		// view, observer-only (not part of the snapshot contract). Errors are
-		// dropped — the orders tab remains the durable surface.
-		if s.OnOrders != nil {
-			if orders, err := s.client.OrdersOpen(ctx, rpc.OrdersOpenParams{}); err == nil && orders != nil {
-				s.OnOrders(ctx, *orders)
+		// The daemon observes Order Integrity from this same read. Keep the
+		// result buffered so the established app watch still receives exactly
+		// one pass at its existing cadence after shadow composition.
+		var openOrders *rpc.OrdersOpenResult
+		if orders, err := s.client.OrdersOpen(ctx, rpc.OrdersOpenParams{}); err == nil {
+			openOrders = orders
+		}
+		// Canary, Rulebook, and Order Integrity have now all observed this
+		// cycle. Read their composed record-only snapshot without a second
+		// broker evaluation or a full-cycle lag.
+		if alertClient, ok := s.client.(alertCandidateClient); ok {
+			alertSnapshot, source, err := s.pollAlertCandidates(ctx, alertClient, alertStore, now)
+			snap.AlertCandidates = alertSnapshot
+			snap.Sources["alert_candidates"] = source
+			if err != nil {
+				errors = append(errors, sourceErr("alert_candidates", err, now))
 			}
+		}
+		if s.OnOrders != nil && openOrders != nil {
+			s.OnOrders(ctx, *openOrders)
 		}
 		// The brief composes canary and other daily-discipline inputs, so it
 		// shares this one-minute cadence instead of the five-second app poll.

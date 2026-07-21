@@ -71,11 +71,13 @@ type RegimeMonitorResult struct {
 }
 
 type CompactSourceHealth struct {
-	Source     string    `json:"source"`
-	Status     string    `json:"status"`
-	AsOf       time.Time `json:"as_of,omitzero"`
-	Confidence string    `json:"confidence,omitempty"`
-	Notes      []string  `json:"notes,omitempty"`
+	Source       string     `json:"source"`
+	Status       string     `json:"status"`
+	AsOf         time.Time  `json:"as_of,omitzero"`
+	Confidence   string     `json:"confidence,omitempty"`
+	RefreshState string     `json:"refresh_state,omitempty"`
+	NextAttempt  *time.Time `json:"next_attempt,omitempty"`
+	Notes        []string   `json:"notes,omitempty"`
 }
 
 type RegimeMonitorIndicator struct {
@@ -256,11 +258,13 @@ func compactSourceHealth(in []SourceHealth) []CompactSourceHealth {
 	out := make([]CompactSourceHealth, 0, len(in))
 	for _, src := range in {
 		out = append(out, CompactSourceHealth{
-			Source:     src.Source,
-			Status:     src.Status,
-			AsOf:       src.AsOf,
-			Confidence: src.Confidence,
-			Notes:      src.Notes,
+			Source:       src.Source,
+			Status:       src.Status,
+			AsOf:         src.AsOf,
+			Confidence:   src.Confidence,
+			RefreshState: src.RefreshState,
+			NextAttempt:  src.NextAttempt,
+			Notes:        src.Notes,
 		})
 	}
 	return out
