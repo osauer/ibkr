@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -63,6 +64,32 @@ func TestParseEarningsOverride(t *testing.T) {
 	}
 	if e, ok := parseEarningsOverride("2026-07-22", loc); !ok || e.TimeOfDay != "" {
 		t.Fatalf("date-only override = %+v ok=%v, want empty time_of_day", e, ok)
+	}
+}
+
+func TestAssembleEarningsPropagatesTypedUnknownAndSourceHealth(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	next := now.Add(earningsFreshWindow)
+	provider := earningsProviderState{LastAttempt: earningsProviderAttempt{
+		Status: rpc.EarningsStatusNoDatePublished, AttemptedAt: now, CompletedAt: now, NextAttempt: &next,
+	}}
+	providers := map[string]earningsProviderState{earningsNasdaqProvider: provider}
+	cache := newEarningsCacheMemory(nil)
+	cache.clock = func() time.Time { return now }
+	cache.symbols["NOW"] = earningsSymbolState{
+		Resolution: resolveEarningsProviders(providers, now), Providers: providers, UpdatedAt: now,
+	}
+	srv := &Server{earnings: cache}
+	earnings, infos := srv.assembleEarnings(context.Background(), []risk.NameInput{{Symbol: "NOW"}}, risk.DefaultRulebookPolicy(), marketcal.New(), now, false)
+	if len(infos) != 1 || infos[0].Status != rpc.EarningsStatusNoDatePublished || infos[0].Reason != rpc.EarningsStatusNoDatePublished || infos[0].Source != "unknown" {
+		t.Fatalf("typed earnings info = %+v", infos)
+	}
+	if got := earnings["NOW"]; got.Known || got.Reason != rpc.EarningsStatusNoDatePublished {
+		t.Fatalf("risk earnings input = %+v", got)
+	}
+	health, degraded := rulesEarningsSourceHealth(infos, now)
+	if !degraded || health.Status != rpc.SourceStatusDegraded || len(health.Notes) != 1 || !strings.Contains(health.Notes[0], rpc.EarningsStatusNoDatePublished) {
+		t.Fatalf("earnings source health = %+v degraded=%v", health, degraded)
 	}
 }
 

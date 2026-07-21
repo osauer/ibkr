@@ -92,18 +92,43 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 	}
 	fmt.Fprintln(env.Stdout)
 	if len(res.Earnings) > 0 {
-		var unknowns []string
+		var unresolved []string
 		for _, e := range res.Earnings {
-			if e.Source == "unknown" {
-				unknowns = append(unknowns, e.Symbol)
+			if e.Source == "unknown" || e.Status != "" && e.Status != rpc.EarningsStatusDate {
+				reason := e.Reason
+				if reason == "" {
+					reason = e.Status
+				}
+				unresolved = append(unresolved, fmt.Sprintf("%s (%s)", e.Symbol, earningsOutcomeLabel(reason)))
 			}
 		}
-		if len(unknowns) > 0 {
-			fmt.Fprintf(env.Stdout, "No earnings date for: %s — set one with `ibkr settings set features.rulebook.earnings_overrides.<SYM>=YYYY-MM-DD` (rules 6-8 stay unknown, never pass).\n",
-				strings.Join(unknowns, ", "))
+		if len(unresolved) > 0 {
+			fmt.Fprintf(env.Stdout, "Earnings unresolved: %s — set an authoritative override with `ibkr settings set features.rulebook.earnings_overrides.<SYM>=YYYY-MM-DD` if needed (rules 6-8 stay unknown, never pass).\n",
+				strings.Join(unresolved, ", "))
 		}
 	}
 	return 0
+}
+
+func earningsOutcomeLabel(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case rpc.EarningsStatusNoDatePublished:
+		return "no date published"
+	case rpc.EarningsStatusUnsupportedSecurity:
+		return "unsupported security"
+	case rpc.EarningsStatusFormatChange:
+		return "provider format changed"
+	case rpc.EarningsStatusTransportFailure:
+		return "provider transport failed"
+	case rpc.EarningsStatusConflictingSources:
+		return "providers conflict"
+	case "date_elapsed":
+		return "published date elapsed"
+	case "not_observed", "":
+		return "not checked yet"
+	default:
+		return strings.ReplaceAll(reason, "_", " ")
+	}
 }
 
 // runRulesHistory renders the daemon's derived rule-transition index

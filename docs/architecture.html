@@ -243,7 +243,7 @@ MCP side is JSON-RPC 2.0.</p>
 <tr>
 <td>TWS / IB Gateway API socket</td>
 <td>TWS wire protocol over TCP/TLS</td>
-<td>Account, positions, quotes, option chains/Greeks/OI, historical bars, scanners, order lifecycle, shortable-share observations, and broker WhatIf/eligibility.</td>
+<td>Account, positions, quotes, option chains/Greeks/OI, historical bars, scanners, order lifecycle, shortable-share observations, subscription-gated Wall Street Horizon earnings events, and broker WhatIf/eligibility.</td>
 </tr>
 <tr>
 <td>IBKR Flex Web Service</td>
@@ -258,7 +258,7 @@ MCP side is JSON-RPC 2.0.</p>
 <tr>
 <td>Nasdaq</td>
 <td>HTTPS JSON, pipe-delimited text, and RSS/XML</td>
-<td>Earnings dates, Reg SHO threshold securities, LULD/trade-halt context.</td>
+<td>One independent earnings-date input, Reg SHO threshold securities, and LULD/trade-halt context.</td>
 </tr>
 <tr>
 <td>FRED, CBOE, Federal Reserve, US Treasury</td>
@@ -278,9 +278,11 @@ MCP side is JSON-RPC 2.0.</p>
 </tbody>
 </table>
 </div>
-<p>Market-event, contract-resolution, and membership projections plus retained
-observations live in <code>daemon.db</code>. Retry/backoff controls and other refreshable
-views stay in memory or use disposable scratch only.</p>
+<p>Market-event, earnings-provider, contract-resolution, and membership
+projections plus retained observations live in <code>daemon.db</code>. Borrow-fee and
+earnings attempts retain typed failure and retry state there so a restart
+cannot erase a failed source read. Other refreshable views stay in memory or
+use disposable scratch only.</p>
 <h2 id="data-and-persistence"><span class="secno" aria-hidden="true">06</span>Data and Persistence</h2>
 <p><a href="diagrams/data-and-persistence.svg"><img src="diagrams/data-and-persistence.svg" alt="ibkr canary state ownership and lifecycle"></a></p>
 <p><a href="diagrams/data-and-persistence.png">PNG fallback</a> ·

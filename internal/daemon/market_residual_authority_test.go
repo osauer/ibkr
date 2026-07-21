@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,10 +167,11 @@ func TestEarningsSQLiteReplacesLegacyAndSurvivesRestart(t *testing.T) {
 	if _, _, ok := cache.get("BUGGY"); ok {
 		t.Fatal("empty SQLite authority retained legacy earnings current state")
 	}
-	cache.mu.Lock()
-	cache.entries["AAPL"] = earningsEntry{Date: "2026-07-30", TimeOfDay: "amc", ObservedAt: base}
-	cache.mu.Unlock()
-	cache.persist()
+	cache.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		body := `{"data":{"reportText":"AAPL is expected to report earnings after market close.","announcement":"Earnings announcement for AAPL: Jul 30, 2026"},"status":{"rCode":200}}`
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	cache.refreshOne(context.Background(), "AAPL")
 	after, err := os.ReadFile(legacyPath)
 	if err != nil || !bytes.Equal(after, legacyBytes) {
 		t.Fatalf("legacy earnings-dates.json changed after attachment: err=%v", err)
@@ -182,7 +186,7 @@ func TestEarningsSQLiteReplacesLegacyAndSurvivesRestart(t *testing.T) {
 	if !ok || entry.Date != "2026-07-30" || entry.TimeOfDay != "amc" {
 		t.Fatalf("SQLite earnings restart: entry=%+v ok=%v", entry, ok)
 	}
-	assertStateAndObservation(t, authority, earningsAuthorityScope, earningsStateKind, earningsObservationSource, earningsObservationKind)
+	assertStateAndObservation(t, authority, earningsAuthorityScope, earningsStateKind, earningsObservationSource, earningsProviderObservationKind)
 }
 
 func TestResidualAuthoritiesRejectMalformedRows(t *testing.T) {

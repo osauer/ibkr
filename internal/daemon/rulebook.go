@@ -201,19 +201,15 @@ func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMainte
 		s.kickRulesRegimeStageRefresh(ctx)
 	}
 
+	earningsDegraded := false
 	if in.Positions.Healthy && pos != nil {
 		in.Names = mapRuleNames(pos, pol, in.BaseCurrency)
 		earnings, infos := s.assembleEarnings(ctx, in.Names, pol, cal, now, allowMaintenance)
 		in.Earnings = earnings
 		res.Earnings = infos
-		earningsStatus := "ok"
-		for _, info := range infos {
-			if info.Source == "unknown" || info.Stale {
-				earningsStatus = "degraded"
-				break
-			}
-		}
-		health = append(health, rpc.SourceHealth{Source: "earnings", Status: earningsStatus, AsOf: now})
+		earningsHealth, degraded := rulesEarningsSourceHealth(infos, now)
+		earningsDegraded = degraded
+		health = append(health, earningsHealth)
 	}
 
 	if includeTape && in.SessionOpen && in.Positions.Healthy {
@@ -234,7 +230,7 @@ func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMainte
 		counts[r.Status]++
 	}
 	res.BreachCounts = counts
-	if !in.Positions.Healthy || !in.Account.Healthy {
+	if !in.Positions.Healthy || !in.Account.Healthy || earningsDegraded {
 		res.Status = "degraded"
 	}
 	// The envelope is the completion boundary for the assembled inputs. Some
@@ -243,6 +239,30 @@ func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMainte
 	// same-call evidence appear to come from the future to strict consumers.
 	res.AsOf = time.Now().UTC()
 	return res
+}
+
+func rulesEarningsSourceHealth(infos []rpc.EarningsInfo, now time.Time) (rpc.SourceHealth, bool) {
+	status := rpc.SourceStatusOK
+	degraded := false
+	var lastFailure *rpc.SourceFailure
+	var notes []string
+	for _, info := range infos {
+		if info.Source == "unknown" || info.Stale || info.Status != rpc.EarningsStatusDate {
+			status = rpc.SourceStatusDegraded
+			degraded = true
+			notes = append(notes, info.Symbol+": "+nonEmptyString(info.Reason, nonEmptyString(info.Status, "not_observed")))
+		} else if info.Reason == earningsReasonSingleSource && status == rpc.SourceStatusOK {
+			status = rpc.SourceStatusPartial
+		}
+		for _, provider := range info.Providers {
+			failure := provider.LastFailure
+			if failure != nil && (lastFailure == nil || failure.FailedAt.After(lastFailure.FailedAt)) {
+				copyFailure := *failure
+				lastFailure = &copyFailure
+			}
+		}
+	}
+	return rpc.SourceHealth{Source: "earnings", Status: status, AsOf: now, LastFailure: lastFailure, Notes: notes}, degraded
 }
 
 // mapRuleNames converts the positions snapshot into pure rule inputs. The
@@ -428,13 +448,16 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 		if pol.IsHedgeSymbol(sym) {
 			continue // index products have no earnings print
 		}
-		info := rpc.EarningsInfo{Symbol: sym, Source: "unknown"}
+		info := rpc.EarningsInfo{Symbol: sym, Source: "unknown", Reason: "not_observed"}
 		if raw, ok := overrides[sym]; ok {
 			if e, parseOK := parseEarningsOverride(raw, loc); parseOK {
 				e.Source = "override"
+				e.Reason = "override"
 				e.SessionsUntil = sessionsUntil(cal, now.In(loc), e.Date)
 				earnings[sym] = e
 				info.Source = "override"
+				info.Status = rpc.EarningsStatusDate
+				info.Reason = "override"
 				info.Date = e.Date.Format("2006-01-02")
 				info.TimeOfDay = e.TimeOfDay
 				infos = append(infos, info)
@@ -442,21 +465,32 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 			}
 		}
 		if s.earnings != nil {
-			entry, stale, ok := s.earnings.get(sym)
-			if ok {
-				if d, err := time.ParseInLocation("2006-01-02", entry.Date, loc); err == nil {
-					e := risk.EarningsInput{Known: true, Date: d, TimeOfDay: entry.TimeOfDay,
-						Estimated: entry.Estimated, Stale: stale, Source: "fetched"}
-					e.SessionsUntil = sessionsUntil(cal, now.In(loc), d)
-					earnings[sym] = e
-					info.Source = "fetched"
-					info.Date = entry.Date
-					info.TimeOfDay = entry.TimeOfDay
-					info.Estimated = entry.Estimated
-					info.ObservedAt = entry.ObservedAt
-					info.Stale = stale
+			view, observed := s.earnings.resolution(sym)
+			if observed {
+				info.Status = view.Status
+				info.Reason = view.Reason
+				info.Providers = view.Providers
+				if view.Status == rpc.EarningsStatusDate {
+					entry := view.Entry
+					if d, err := time.ParseInLocation("2006-01-02", entry.Date, loc); err == nil {
+						e := risk.EarningsInput{Known: true, Date: d, TimeOfDay: entry.TimeOfDay,
+							Estimated: entry.Estimated, Stale: view.Stale, Source: "fetched", Reason: view.Reason}
+						e.SessionsUntil = sessionsUntil(cal, now.In(loc), d)
+						earnings[sym] = e
+						info.Source = "fetched"
+						info.Date = entry.Date
+						info.TimeOfDay = entry.TimeOfDay
+						info.Estimated = entry.Estimated
+						info.ObservedAt = entry.ObservedAt
+						info.Stale = view.Stale
+					}
+				} else {
+					earnings[sym] = risk.EarningsInput{Known: false, Source: "fetched", Reason: nonEmptyString(view.Reason, view.Status)}
 				}
 			}
+		}
+		if _, ok := earnings[sym]; !ok {
+			earnings[sym] = risk.EarningsInput{Known: false, Source: "unknown", Reason: info.Reason}
 		}
 		if info.Source != "override" && (info.Source == "unknown" || info.Stale) {
 			toFetch = append(toFetch, sym)

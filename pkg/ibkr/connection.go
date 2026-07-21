@@ -1308,6 +1308,8 @@ const (
 	msgHistoricalTicksLast                    = 98
 	msgTickByTick                             = 99
 	msgOrderBound                             = 100
+	msgWSHMetaData                            = 104
+	msgWSHEventData                           = 105
 	msgSystemNotification                     = 204
 
 	// Outgoing message IDs
@@ -1358,6 +1360,10 @@ const (
 	unsubscribeFromGroupEvents  = 70
 	startAPI                    = 71
 	reqSecDefOptParams          = 78
+	reqWSHMetaData              = 100
+	cancelWSHMetaData           = 101
+	reqWSHEventData             = 102
+	cancelWSHEventData          = 103
 	// PnL subscription opcodes (TWS API EClient: REQ_PNL / CANCEL_PNL /
 	// REQ_PNL_SINGLE / CANCEL_PNL_SINGLE). The numeric IDs collide with
 	// inbound IDs on the msg* table (msgRerouteMktDepthReq=92,

@@ -287,6 +287,15 @@ func TestEarningsGapEdges(t *testing.T) {
 	}
 }
 
+func TestEarningsUnknownReasonIsDisclosed(t *testing.T) {
+	if got := earningsGapWord(EarningsInput{Reason: "conflicting_sources"}); got != "conflicting across providers" {
+		t.Fatalf("conflict label = %q", got)
+	}
+	if got := earningsGapWord(EarningsInput{Reason: "no_date_published"}); got != "not published by the provider" {
+		t.Fatalf("no-date label = %q", got)
+	}
+}
+
 func TestHedgeExemptionSuppressedWhenOverHedged(t *testing.T) {
 	in := healthyInputs()
 	// Inflate the hedge so the band breaches high: short delta ~194k vs

@@ -120,7 +120,7 @@ func TestRenderCanaryTextShowsActionEvidenceAndInputHealth(t *testing.T) {
 		"Input checks",
 		"computing",
 		"breadth and gamma",
-		"Alert ID   canary-fp-v1 sha256:",
+		"Alert ID   canary-fp-v2 sha256:",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("render missing %q:\n%s", want, got)

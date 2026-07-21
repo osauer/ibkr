@@ -11,7 +11,7 @@ const (
 	// MarketEventsSchemaVersion identifies a stable wire schema.
 	MarketEventsSchemaVersion = "market-events-v1"
 	// MarketEventsFingerprintVersion identifies a semantic fingerprint projection.
-	MarketEventsFingerprintVersion = "market-events-fp-v1"
+	MarketEventsFingerprintVersion = "market-events-fp-v2"
 
 	MarketEventBorrowInventoryTight = "borrow_inventory_tight"
 	MarketEventBorrowFeeExtreme     = "borrow_fee_extreme"

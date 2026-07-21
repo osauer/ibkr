@@ -1219,7 +1219,7 @@ func testEstablishedAlertProjection(hexDigit, action string, severity risk.Signa
 	return &rpc.EstablishedAlertProjection{
 		SchemaVersion: rpc.EstablishedAlertProjectionSchemaVersion,
 		CanonicalFingerprint: rpc.Fingerprint{
-			Version: rpc.CanaryFingerprintVersion,
+			Version: rpc.EstablishedCanaryFingerprintVersion,
 			Key:     "sha256:" + strings.Repeat(hexDigit, 64),
 		},
 		OccurrenceEligible: occurrenceEligible,

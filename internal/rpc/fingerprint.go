@@ -16,13 +16,13 @@ import (
 // They are not data-freshness or authority versions.
 const (
 	// RegimeFingerprintVersion identifies a semantic fingerprint projection.
-	RegimeFingerprintVersion = "regime-fp-v1"
+	RegimeFingerprintVersion = "regime-fp-v2"
 	// AccountFingerprintVersion identifies a semantic fingerprint projection.
 	AccountFingerprintVersion = "account-fp-v1"
 	// PositionsFingerprintVersion identifies a semantic fingerprint projection.
 	PositionsFingerprintVersion = "positions-fp-v1"
 	// CanaryFingerprintVersion identifies a semantic fingerprint projection.
-	CanaryFingerprintVersion = "canary-fp-v1"
+	CanaryFingerprintVersion = "canary-fp-v2"
 )
 
 // BuildMarketEventsFingerprint returns the semantic identity of current
@@ -382,6 +382,8 @@ type sourceHealthFingerprint struct {
 	Status               string `json:"status"`
 	Confidence           string `json:"confidence,omitempty"`
 	FingerprintStability string `json:"fingerprint_stability,omitempty"`
+	FailureCode          string `json:"failure_code,omitempty"`
+	FailureStage         string `json:"failure_stage,omitempty"`
 }
 
 type marketEventFlagFingerprint struct {
@@ -566,6 +568,10 @@ func sourceHealthFingerprints(values []SourceHealth) []sourceHealthFingerprint {
 			Confidence:           cleanString(v.Confidence),
 			FingerprintStability: cleanString(v.FingerprintStability),
 		}
+		if v.LastFailure != nil {
+			fp.FailureCode = cleanString(v.LastFailure.Code)
+			fp.FailureStage = cleanString(v.LastFailure.Stage)
+		}
 		if fp.Source == "" && fp.Status == "" && fp.Confidence == "" {
 			continue
 		}
@@ -577,6 +583,8 @@ func sourceHealthFingerprints(values []SourceHealth) []sourceHealthFingerprint {
 			cmp.Compare(a.Status, b.Status),
 			cmp.Compare(a.Confidence, b.Confidence),
 			cmp.Compare(a.FingerprintStability, b.FingerprintStability),
+			cmp.Compare(a.FailureCode, b.FailureCode),
+			cmp.Compare(a.FailureStage, b.FailureStage),
 		)
 	})
 	return out

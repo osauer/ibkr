@@ -46,6 +46,13 @@ type Connector struct {
 
 	fetchContractDetails func(string, time.Duration) ([]ContractDetailsLite, error)
 	contractTimingHook   func(string, time.Duration, bool)
+	resolveWSHContract   func(context.Context, string, time.Duration) (*ContractDetailsLite, error)
+	wshNow               func() time.Time
+	wshGateMu            sync.Mutex
+	wshGate              chan struct{}
+	wshMetadataConn      *Connection
+	wshMetadataReadyAt   time.Time
+	wshEarningsEventTag  string
 
 	// Component state
 	running   bool
@@ -542,6 +549,9 @@ func NewConnector(config *ConnectorConfig) *Connector {
 	}
 	c.fetchContractDetails = c.FetchContractDetails
 	c.requestAllOpenOrders = c.requestAllOpenOrdersDefault
+	c.resolveWSHContract = c.resolveWSHStockContract
+	c.wshGate = make(chan struct{}, 1)
+	c.wshGate <- struct{}{}
 	return c
 }
 
@@ -1189,6 +1199,7 @@ func (c *Connector) attachConnectionHooks(conn *Connection) {
 }
 
 func (c *Connector) onConnectionEstablished(conn *Connection) {
+	c.resetWSHMetadataReadiness()
 	// Ensure the connector references the active connection while handlers register.
 	c.mu.Lock()
 	c.conn = conn
@@ -1204,6 +1215,7 @@ func (c *Connector) onConnectionEstablished(conn *Connection) {
 }
 
 func (c *Connector) onConnectionLost(conn *Connection) {
+	c.resetWSHMetadataReadiness()
 	if conn != nil {
 		conn.SetSystemNoticeHandler(nil)
 	}

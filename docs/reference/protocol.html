@@ -30,24 +30,28 @@
 <p>Unrestricted <code>SubmitOrder</code>/<code>CancelOrder</code>, <code>PlaceOrder</code>/<code>CancelOrder</code>, and <code>ExerciseOptions</code> methods are present in every build, but their position-changing wire paths are enabled only in trading-capable builds; default builds return <code>pkg/ibkr.ErrTradingDisabled</code> before writing such a frame. The narrower <code>SubmitPaperOrder</code>, <code>PlacePaperOrder</code>, and <code>CancelPaperOrder</code> methods are present in both builds and validate a concrete paper account plus matching connection coordinates. That library-level evidence is not submit authority. Broker WhatIf previews are also available in both builds, but they do not create working orders and never grant submit authority. The daemon adds trading status, pinned account/mode, preview-token, freeze, journal, broker, and origin checks; the MCP server remains preview/read-oriented and exposes no place/modify/cancel tools.</p>
 <h2 id="semantic-fingerprints">Semantic fingerprints</h2>
 <p>Decision surfaces that are useful to monitors expose a semantic <code>fingerprint</code> object:</p>
-<pre><code class="language-json">{&quot;version&quot;: &quot;canary-fp-v1&quot;, &quot;key&quot;: &quot;sha256:...&quot;}
+<pre><code class="language-json">{&quot;version&quot;: &quot;canary-fp-v2&quot;, &quot;key&quot;: &quot;sha256:...&quot;}
 </code></pre>
 <p>The key is a SHA-256 hash of classified state, not a hash of the full JSON response. It deliberately excludes timestamps, raw prices, exact observed values inside the same threshold bucket, methodology prose, row guidance text, and rendering order. Monitors should use the key for dedupe, recovery, and repeat-alert TTL policy instead of recomputing their own hash.</p>
-<p><code>regime.snapshot</code> emits <code>regime-fp-v1</code> from indicator bands/statuses,
+<p><code>regime.snapshot</code> emits <code>regime-fp-v2</code> from indicator bands/statuses,
 composite counts, lifecycle stage/severity/readiness buckets, warning
 codes/scopes/severities, high-level data quality, source-health buckets, and
-gamma/breadth semantic state.</p>
-<p><code>market_events.snapshot</code> emits <code>market-events-fp-v1</code> from requested symbols,
+gamma/breadth semantic state. V2 adds the allowlisted failure code/stage when a
+source carries typed failure evidence.</p>
+<p><code>market_events.snapshot</code> emits <code>market-events-fp-v2</code> from requested symbols,
 semantic flag categories/statuses/severities/roles/sources, and source-health
 buckets. It excludes timestamps, exact rates/share counts inside the same flag
-classification, source prose, and rendering order.</p>
-<p><code>canary</code> emits <code>canary-fp-v1</code> from policy, action, market confirmation,
+classification, source prose, and rendering order. V2 includes typed failure
+code/stage so a materially different source failure changes monitor identity.</p>
+<p><code>canary</code> emits <code>canary-fp-v2</code> from policy, action, market confirmation,
 portfolio fit, input health, direction, severity, planner mode/readiness,
 primary drivers, signal semantics including held-underlying stress buckets,
 classified market state, source-health buckets, row titles/states, and
 <code>source_fingerprints.account</code>,
 <code>source_fingerprints.positions</code>, <code>source_fingerprints.regime</code>, and
-<code>source_fingerprints.market_events</code>.</p>
+<code>source_fingerprints.market_events</code>. V2 includes typed source failure
+code/stage. The separate <code>established_alert_projection</code> intentionally retains
+its frozen <code>canary-fp-v1</code> compatibility identity for delivery continuity.</p>
 <p><code>rules.snapshot</code> emits <code>rulebook-fp-v3</code> — a policy-identity fingerprint, not
 a classified-state hash: the key is a SHA-256 of a JSON projection of the
 active rulebook policy (rule set, thresholds, regime-conditional sets), so it
@@ -70,6 +74,10 @@ The result contains <code>flags[]</code>, <code>by_symbol</code>, <code>source_h
 <code>halt_regulatory_or_news</code>. Event <code>status</code> uses event terms such as <code>active</code> and
 <code>recent</code>; source freshness uses <code>source_health[].status</code> values such as <code>ok</code>,
 <code>stale</code>, <code>unknown</code>, or <code>degraded</code>.</p>
+<p><code>source_health[]</code> may also carry durable <code>refresh_state</code>, <code>next_attempt</code>, and
+redacted typed <code>last_failure</code> fields (<code>code</code>, <code>stage</code>, <code>failed_at</code>,
+<code>retryable</code>). Consumers must respect backoff/not-due state and use these typed
+fields instead of parsing provider or transport prose from <code>notes</code>.</p>
 <p>Borrow inventory comes from IBKR shortable-share market data. Borrow fee comes
 from IBKR short-stock availability fee-rate evidence and emits
 <code>borrow_fee_extreme</code> only at or above 50% annualized. Reg SHO V1 uses Nasdaq's
@@ -197,6 +205,12 @@ paired with an existing reduce/cover proposal.</p>
 <td><code>reqFundamentalData</code> (52)</td>
 <td>-</td>
 <td>not implemented</td>
+</tr>
+<tr>
+<td>Wall Street Horizon earnings dates</td>
+<td><code>reqWshMetaData</code> (100), <code>reqWshEventData</code> (102)</td>
+<td><code>Connector.FetchWSHEarnings</code></td>
+<td>ready; read-only, subscription-gated</td>
 </tr>
 <tr>
 <td>News bulletins</td>

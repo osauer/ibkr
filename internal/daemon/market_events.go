@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"regexp"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
@@ -95,13 +97,16 @@ func marketEventsNoRedirect(*http.Request, []*http.Request) error {
 var fetchIBKRBorrowFees = fetchIBKRBorrowFeesFTP
 
 type marketEventCache struct {
-	mu             sync.Mutex
-	regSHO         marketEventRegSHOEntry
-	halts          marketEventHaltsEntry
-	borrowFees     marketEventBorrowFeeEntry
-	regSHOFreshFor time.Duration
-	haltsFreshFor  time.Duration
-	now            func() time.Time
+	mu                    sync.Mutex
+	borrowFeesRefreshMu   sync.Mutex
+	regSHO                marketEventRegSHOEntry
+	halts                 marketEventHaltsEntry
+	borrowFees            marketEventBorrowFeeEntry
+	borrowFeesLastAttempt *marketEventBorrowFeeAttempt
+	borrowFeesRevision    int64
+	regSHOFreshFor        time.Duration
+	haltsFreshFor         time.Duration
+	now                   func() time.Time
 
 	// shortableAbsent remembers symbols whose shortable tick (236) did
 	// not arrive within a full poll budget. Non-US listings never
@@ -118,12 +123,12 @@ type marketEventCache struct {
 	// *FailedAt remember the last failed fetch per external source so
 	// the marketEvents*RetryAfter windows can suppress immediate
 	// re-fetches. Zero value = no recent failure. Cleared on success.
-	regSHOFailedAt     time.Time
-	haltsFailedAt      time.Time
-	borrowFeesFailedAt time.Time
+	regSHOFailedAt time.Time
+	haltsFailedAt  time.Time
 
 	// authority is the sole durable runtime store after startup attachment.
-	// Failure/backoff and shortableAbsent intentionally remain memory-only.
+	// Borrow-fee failure/backoff is durable; Reg SHO/halt retry timestamps and
+	// shortableAbsent remain memory-only control state.
 	authority *corestore.Store
 }
 
@@ -434,61 +439,75 @@ func haltsFallback(cached marketEventHaltsEntry, now time.Time, freshFor time.Du
 }
 
 func (c *marketEventCache) loadBorrowFees(ctx context.Context, now time.Time) (marketEventBorrowFeeEntry, rpc.SourceHealth, error) {
+	c.borrowFeesRefreshMu.Lock()
+	defer c.borrowFeesRefreshMu.Unlock()
+
 	c.mu.Lock()
+	cached := cloneBorrowFeeEntry(c.borrowFees)
+	lastAttempt := cloneBorrowFeeAttempt(c.borrowFeesLastAttempt)
 	if !borrowFeeSourceDue(now) {
-		cached := cloneBorrowFeeEntry(c.borrowFees)
 		c.mu.Unlock()
-		return borrowFeesNotDue(cached, now)
+		return borrowFeesNotDue(cached, lastAttempt, now)
 	}
-	if !c.borrowFees.FetchedAt.IsZero() && now.Sub(c.borrowFees.FetchedAt) <= marketEventsBorrowFeeFreshFor {
-		entry := cloneBorrowFeeEntry(c.borrowFees)
+	if borrowFeeEntryFresh(cached, now) {
 		c.mu.Unlock()
-		health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusOK, entry.AsOf, now, marketEventsBorrowFeeMaxAge, "medium", []string{"IBKR short-stock availability fee rate"})
+		health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusOK, cached.AsOf, now, marketEventsBorrowFeeMaxAge, "medium", []string{"IBKR short-stock availability fee rate"})
 		health.RefreshState = rpc.SourceRefreshCurrent
-		return entry, health, nil
+		return cached, health, nil
 	}
-	if !c.borrowFeesFailedAt.IsZero() && now.Sub(c.borrowFeesFailedAt) <= marketEventsBorrowFeeRetryAfter {
-		cached := cloneBorrowFeeEntry(c.borrowFees)
-		next := c.borrowFeesFailedAt.Add(marketEventsBorrowFeeRetryAfter).UTC()
+	if lastAttempt != nil && lastAttempt.Outcome == marketEventBorrowFeeOutcomeFailure && lastAttempt.NextAttempt != nil && now.Before(*lastAttempt.NextAttempt) {
 		c.mu.Unlock()
-		entry, health, err := borrowFeesFallback(cached, now, errMarketEventRetrySuppressed)
+		entry, health, err := borrowFeesFallback(cached, now, lastAttempt.Failure)
 		health.RefreshState = rpc.SourceRefreshFetchFailedBackoff
-		health.NextAttempt = &next
+		health.NextAttempt = cloneBorrowFeeTimePtr(lastAttempt.NextAttempt)
 		return entry, health, err
 	}
 	c.mu.Unlock()
 
+	attemptedAt := now.UTC()
 	entry, err := fetchIBKRBorrowFees(ctx)
+	completedAt := attemptedAt
 	if err != nil {
-		c.mu.Lock()
-		c.borrowFeesFailedAt = now
-		cached := cloneBorrowFeeEntry(c.borrowFees)
-		c.mu.Unlock()
-		entry, health, fallbackErr := borrowFeesFallback(cached, now, err)
+		failure := borrowFeeFailureFromError(err, completedAt)
+		next := completedAt.Add(marketEventsBorrowFeeRetryAfter).UTC()
+		attempt := marketEventBorrowFeeAttempt{
+			Outcome: marketEventBorrowFeeOutcomeFailure, AttemptedAt: attemptedAt,
+			CompletedAt: completedAt, NextAttempt: &next, Failure: &failure,
+		}
+		if persistErr := c.persistBorrowFeeFailure(ctx, cached, attempt); persistErr != nil {
+			persistFailure := borrowFeeSourceFailure(rpc.SourceFailureAuthorityWriteFailed, rpc.SourceFailureStageAuthorityPersist, completedAt, false)
+			entry, health, fallbackErr := borrowFeesFallback(cached, now, &persistFailure)
+			health.RefreshState = rpc.SourceRefreshFetchFailed
+			return entry, health, fallbackErr
+		}
+		entry, health, fallbackErr := borrowFeesFallback(cached, now, &failure)
 		health.RefreshState = rpc.SourceRefreshFetchFailed
-		next := now.Add(marketEventsBorrowFeeRetryAfter).UTC()
-		health.NextAttempt = &next
+		health.NextAttempt = cloneBorrowFeeTimePtr(&next)
 		return entry, health, fallbackErr
 	}
-	entry.FetchedAt = now
-	if err := c.persistBorrowFees(ctx, entry); err != nil {
-		c.mu.Lock()
-		c.borrowFeesFailedAt = now
-		cached := cloneBorrowFeeEntry(c.borrowFees)
-		c.mu.Unlock()
-		entry, health, fallbackErr := borrowFeesFallback(cached, now, fmt.Errorf("persist normalized borrow-fee snapshot: %w", err))
+	entry.FetchedAt = completedAt
+	if err := c.persistBorrowFeeSuccess(ctx, entry, attemptedAt, completedAt); err != nil {
+		persistFailure := borrowFeeSourceFailure(rpc.SourceFailureAuthorityWriteFailed, rpc.SourceFailureStageAuthorityPersist, completedAt, false)
+		entry, health, fallbackErr := borrowFeesFallback(cached, now, &persistFailure)
 		health.RefreshState = rpc.SourceRefreshFetchFailed
-		next := now.Add(marketEventsBorrowFeeRetryAfter).UTC()
-		health.NextAttempt = &next
 		return entry, health, fallbackErr
 	}
-	c.mu.Lock()
-	c.borrowFees = cloneBorrowFeeEntry(entry)
-	c.borrowFeesFailedAt = time.Time{}
-	c.mu.Unlock()
-	health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusOK, entry.AsOf, now, marketEventsBorrowFeeMaxAge, "medium", []string{"IBKR short-stock availability fee rate"})
+	status := rpc.SourceStatusOK
+	confidence := "medium"
+	if !borrowFeeEntryFresh(entry, now) {
+		status = rpc.SourceStatusStale
+		confidence = "medium-low"
+	}
+	health := marketEventSourceHealth("borrow_fee", status, entry.AsOf, now, marketEventsBorrowFeeMaxAge, confidence, []string{"IBKR short-stock availability fee rate"})
 	health.RefreshState = rpc.SourceRefreshCurrent
 	return entry, health, nil
+}
+
+func borrowFeeEntryFresh(entry marketEventBorrowFeeEntry, now time.Time) bool {
+	if entry.AsOf.IsZero() || entry.AsOf.After(now) {
+		return false
+	}
+	return now.Sub(entry.AsOf) <= marketEventsBorrowFeeFreshFor
 }
 
 func borrowFeeSourceDue(now time.Time) bool {
@@ -499,36 +518,40 @@ func borrowFeeSourceDue(now time.Time) bool {
 	return session.IsOpen
 }
 
-func borrowFeesNotDue(cached marketEventBorrowFeeEntry, now time.Time) (marketEventBorrowFeeEntry, rpc.SourceHealth, error) {
+func borrowFeesNotDue(cached marketEventBorrowFeeEntry, lastAttempt *marketEventBorrowFeeAttempt, now time.Time) (marketEventBorrowFeeEntry, rpc.SourceHealth, error) {
 	if len(cached.Symbols) == 0 {
 		health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusUnknown, now, now, marketEventsBorrowFeeMaxAge, "low", []string{"IBKR borrow-fee source is outside its official US-equity refresh window"})
 		health.RefreshState = rpc.SourceRefreshNotDue
+		applyBorrowFeeLastFailure(&health, lastAttempt)
 		return marketEventBorrowFeeEntry{}, health, nil
 	}
 	status := rpc.SourceStatusStale
-	if completedDate, _, ok := lastCompletedMarketSession(now, marketcal.MarketUSEquity); ok && !cached.FetchedAt.IsZero() && !cached.FetchedAt.After(now) {
+	if completedDate, _, ok := lastCompletedMarketSession(now, marketcal.MarketUSEquity); ok && !cached.AsOf.IsZero() && !cached.AsOf.After(now) {
 		ny, err := time.LoadLocation("America/New_York")
-		if err == nil && cached.FetchedAt.In(ny).Format("2006-01-02") == completedDate {
+		if err == nil && cached.AsOf.In(ny).Format("2006-01-02") == completedDate {
 			status = rpc.SourceStatusOK
 		}
-	} else if !cached.FetchedAt.IsZero() && !cached.FetchedAt.After(now) && now.Sub(cached.FetchedAt) <= marketEventsBorrowFeeMaxAge {
+	} else if !cached.AsOf.IsZero() && !cached.AsOf.After(now) && now.Sub(cached.AsOf) <= marketEventsBorrowFeeMaxAge {
 		status = rpc.SourceStatusOK
 	}
 	health := marketEventSourceHealth("borrow_fee", status, cached.AsOf, now, marketEventsBorrowFeeMaxAge, "medium-low", []string{"serving last-good IBKR borrow-fee data; no regular-session refresh is due"})
-	health.AgeSeconds = int64(now.Sub(cached.FetchedAt).Seconds())
 	health.RefreshState = rpc.SourceRefreshNotDue
+	applyBorrowFeeLastFailure(&health, lastAttempt)
 	return cached, health, nil
 }
 
 // borrowFeesFallback mirrors regSHOFallback for the IBKR short-stock
 // availability file.
-func borrowFeesFallback(cached marketEventBorrowFeeEntry, now time.Time, cause error) (marketEventBorrowFeeEntry, rpc.SourceHealth, error) {
+func borrowFeesFallback(cached marketEventBorrowFeeEntry, now time.Time, failure *rpc.SourceFailure) (marketEventBorrowFeeEntry, rpc.SourceHealth, error) {
+	cause := borrowFeeFailureError(failure)
 	if len(cached.Symbols) > 0 {
-		health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusStale, cached.AsOf, now, marketEventsBorrowFeeMaxAge, "medium-low", []string{"using stale cached IBKR short-stock availability: " + cause.Error()})
-		health.AgeSeconds = int64(now.Sub(cached.FetchedAt).Seconds())
+		health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusStale, cached.AsOf, now, marketEventsBorrowFeeMaxAge, "medium-low", []string{"using stale cached IBKR short-stock availability; latest refresh " + cause.Error()})
+		health.LastFailure = cloneBorrowFeeSourceFailure(failure)
 		return cached, health, nil
 	}
-	return marketEventBorrowFeeEntry{}, marketEventSourceHealth("borrow_fee", rpc.SourceStatusUnknown, now, now, marketEventsBorrowFeeMaxAge, "low", []string{cause.Error()}), cause
+	health := marketEventSourceHealth("borrow_fee", rpc.SourceStatusUnknown, now, now, marketEventsBorrowFeeMaxAge, "low", []string{"IBKR borrow-fee data is unavailable; latest refresh " + cause.Error()})
+	health.LastFailure = cloneBorrowFeeSourceFailure(failure)
+	return marketEventBorrowFeeEntry{}, health, cause
 }
 
 func fetchLatestNasdaqRegSHO(ctx context.Context, now time.Time) (marketEventRegSHOEntry, error) {
@@ -627,11 +650,21 @@ func fetchIBKRBorrowFeesFTP(ctx context.Context) (marketEventBorrowFeeEntry, err
 	if err != nil {
 		return marketEventBorrowFeeEntry{}, err
 	}
+	return parseIBKRBorrowFeeDownload(body, endpoint)
+}
+
+func parseIBKRBorrowFeeDownload(body, endpoint string) (marketEventBorrowFeeEntry, error) {
 	entry, err := parseIBKRBorrowFees(strings.NewReader(body))
 	if err != nil {
-		return marketEventBorrowFeeEntry{}, err
+		if _, ok := errors.AsType[*borrowFeeFetchError](err); ok {
+			return marketEventBorrowFeeEntry{}, err
+		}
+		return marketEventBorrowFeeEntry{}, newBorrowFeeFetchError(rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageBorrowParse, true)
 	}
-	entry.SourceURL = endpoint
+	entry.SourceURL = strings.TrimSpace(endpoint)
+	if entry.SourceURL == "" {
+		return marketEventBorrowFeeEntry{}, newBorrowFeeFetchError(rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageBorrowParse, true)
+	}
 	return entry, nil
 }
 
@@ -640,13 +673,15 @@ func parseIBKRBorrowFees(r io.Reader) (marketEventBorrowFeeEntry, error) {
 	reader.Comma = '|'
 	reader.FieldsPerRecord = -1
 	entry := marketEventBorrowFeeEntry{Symbols: map[string]marketEventBorrowFeeRecord{}}
+	seenBOF := false
+	seenHeader := false
 	for {
 		rec, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return marketEventBorrowFeeEntry{}, fmt.Errorf("read IBKR borrow-fee row: %w", err)
+			return marketEventBorrowFeeEntry{}, newBorrowFeeFetchError(rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageBorrowParse, true)
 		}
 		if len(rec) == 0 {
 			continue
@@ -654,12 +689,26 @@ func parseIBKRBorrowFees(r io.Reader) (marketEventBorrowFeeEntry, error) {
 		tag := strings.TrimSpace(rec[0])
 		switch {
 		case tag == "#BOF":
-			if len(rec) >= 3 {
-				entry.AsOf = parseIBKRBorrowFeeAsOf(rec[1], rec[2])
+			if seenBOF || len(rec) < 3 {
+				return marketEventBorrowFeeEntry{}, newBorrowFeeFetchError(rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageBorrowParse, true)
 			}
+			entry.AsOf = parseIBKRBorrowFeeAsOf(rec[1], rec[2])
+			if entry.AsOf.IsZero() {
+				return marketEventBorrowFeeEntry{}, newBorrowFeeFetchError(rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageBorrowParse, true)
+			}
+			seenBOF = true
+			continue
+		case tag == "#SYM":
+			if seenHeader || !validIBKRBorrowFeeHeader(rec) {
+				return marketEventBorrowFeeEntry{}, newBorrowFeeFetchError(rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageBorrowParse, true)
+			}
+			seenHeader = true
 			continue
 		case strings.HasPrefix(tag, "#"):
 			continue
+		}
+		if !seenBOF || !seenHeader {
+			return marketEventBorrowFeeEntry{}, newBorrowFeeFetchError(rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageBorrowParse, true)
 		}
 		if len(rec) < 8 {
 			continue
@@ -672,8 +721,14 @@ func parseIBKRBorrowFees(r io.Reader) (marketEventBorrowFeeEntry, error) {
 		if !feeOK {
 			continue
 		}
-		rebateRate, _ := parseFloatField(rec[5])
-		available, _ := parseIntField(rec[7])
+		rebateRate, rebateOK := parseFloatField(rec[5])
+		if !rebateOK {
+			continue
+		}
+		available, availableOK := parseIntField(rec[7])
+		if !availableOK || available < 0 {
+			continue
+		}
 		entry.Symbols[sym] = marketEventBorrowFeeRecord{
 			Symbol:     sym,
 			Currency:   strings.TrimSpace(rec[1]),
@@ -685,7 +740,134 @@ func parseIBKRBorrowFees(r io.Reader) (marketEventBorrowFeeEntry, error) {
 			Available:  available,
 		}
 	}
+	if !seenBOF || !seenHeader || entry.AsOf.IsZero() || len(entry.Symbols) == 0 {
+		return marketEventBorrowFeeEntry{}, newBorrowFeeFetchError(rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageBorrowParse, true)
+	}
 	return entry, nil
+}
+
+func validIBKRBorrowFeeHeader(rec []string) bool {
+	want := []string{"#SYM", "CUR", "NAME", "CON", "ISIN", "REBATERATE", "FEERATE", "AVAILABLE"}
+	if len(rec) < len(want) {
+		return false
+	}
+	for i, field := range want {
+		if strings.ToUpper(strings.TrimSpace(rec[i])) != field {
+			return false
+		}
+	}
+	return true
+}
+
+type borrowFeeFetchError struct {
+	code      string
+	stage     string
+	retryable bool
+}
+
+func newBorrowFeeFetchError(code, stage string, retryable bool) error {
+	return &borrowFeeFetchError{code: code, stage: stage, retryable: retryable}
+}
+
+func (e *borrowFeeFetchError) Error() string {
+	if e == nil {
+		return "failed at ftp_control_connect (transport_failed)"
+	}
+	return fmt.Sprintf("failed at %s (%s)", e.stage, e.code)
+}
+
+func borrowFeeTransportFetchError(stage string, err error) error {
+	code := rpc.SourceFailureTransportFailed
+	var dnsErr *net.DNSError
+	switch {
+	case errors.As(err, &dnsErr):
+		code = rpc.SourceFailureDNSFailed
+	case errors.Is(err, context.DeadlineExceeded):
+		code = rpc.SourceFailureTimeout
+	case errors.Is(err, syscall.ECONNREFUSED):
+		code = rpc.SourceFailureConnectionRefused
+	default:
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			code = rpc.SourceFailureTimeout
+		}
+	}
+	return newBorrowFeeFetchError(code, stage, true)
+}
+
+func borrowFeeFTPResponseFetchError(stage string, err error) error {
+	var netErr net.Error
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &netErr) {
+		return borrowFeeTransportFetchError(stage, err)
+	}
+	return newBorrowFeeFetchError(rpc.SourceFailureProtocolRejected, stage, true)
+}
+
+func borrowFeeFailureFromError(err error, failedAt time.Time) rpc.SourceFailure {
+	if sourceErr, ok := errors.AsType[*borrowFeeFetchError](err); ok {
+		return borrowFeeSourceFailure(sourceErr.code, sourceErr.stage, failedAt, sourceErr.retryable)
+	}
+	return borrowFeeSourceFailure(rpc.SourceFailureTransportFailed, rpc.SourceFailureStageFTPControlConnect, failedAt, true)
+}
+
+func borrowFeeSourceFailure(code, stage string, failedAt time.Time, retryable bool) rpc.SourceFailure {
+	return rpc.SourceFailure{Code: code, Stage: stage, FailedAt: failedAt.UTC(), Retryable: retryable}
+}
+
+func borrowFeeFailureError(failure *rpc.SourceFailure) error {
+	if failure == nil {
+		return newBorrowFeeFetchError(rpc.SourceFailureTransportFailed, rpc.SourceFailureStageFTPControlConnect, true)
+	}
+	return newBorrowFeeFetchError(failure.Code, failure.Stage, failure.Retryable)
+}
+
+func validateBorrowFeeSourceFailure(failure rpc.SourceFailure) error {
+	if !rpc.ValidSourceFailure(&failure) || failure.FailedAt.IsZero() {
+		return errors.New("invalid borrow-fee source failure")
+	}
+	switch failure.Code {
+	case rpc.SourceFailureTimeout, rpc.SourceFailureDNSFailed, rpc.SourceFailureConnectionRefused,
+		rpc.SourceFailureTransportFailed, rpc.SourceFailureProtocolRejected,
+		rpc.SourceFailureAuthenticationRejected, rpc.SourceFailureInvalidPayload,
+		rpc.SourceFailureAuthorityWriteFailed:
+	default:
+		return errors.New("invalid borrow-fee source failure code")
+	}
+	switch failure.Stage {
+	case rpc.SourceFailureStageFTPControlConnect, rpc.SourceFailureStageFTPGreeting,
+		rpc.SourceFailureStageFTPAuthenticate, rpc.SourceFailureStageFTPPassiveNegotiate,
+		rpc.SourceFailureStageFTPPassiveConnect, rpc.SourceFailureStageFTPRetrieve,
+		rpc.SourceFailureStageBorrowParse, rpc.SourceFailureStageAuthorityPersist:
+	default:
+		return errors.New("invalid borrow-fee source failure stage")
+	}
+	if (failure.Code == rpc.SourceFailureAuthorityWriteFailed) != (failure.Stage == rpc.SourceFailureStageAuthorityPersist) {
+		return errors.New("invalid borrow-fee authority failure pairing")
+	}
+	return nil
+}
+
+func applyBorrowFeeLastFailure(health *rpc.SourceHealth, attempt *marketEventBorrowFeeAttempt) {
+	if health == nil || attempt == nil || attempt.Outcome != marketEventBorrowFeeOutcomeFailure {
+		return
+	}
+	health.LastFailure = cloneBorrowFeeSourceFailure(attempt.Failure)
+}
+
+func cloneBorrowFeeSourceFailure(in *rpc.SourceFailure) *rpc.SourceFailure {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneBorrowFeeTimePtr(in *time.Time) *time.Time {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func parseIBKRBorrowFeeAsOf(rawDate, rawTime string) time.Time {
@@ -704,7 +886,7 @@ func fetchFTPFile(ctx context.Context, addr, user, pass, path string) (string, e
 	dialer := net.Dialer{Timeout: marketEventsFTPDialTimeout}
 	control, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return "", err
+		return "", borrowFeeTransportFetchError(rpc.SourceFailureStageFTPControlConnect, err)
 	}
 	defer control.Close()
 	deadline := time.Now().Add(10 * time.Second)
@@ -713,74 +895,84 @@ func fetchFTPFile(ctx context.Context, addr, user, pass, path string) (string, e
 	}
 	_ = control.SetDeadline(deadline)
 	reader := bufio.NewReader(control)
-	if code, line, err := readFTPResponse(reader); err != nil || code != 220 {
-		return "", fmt.Errorf("FTP greeting: %s: %w", line, err)
+	if code, _, err := readFTPResponse(reader); err != nil {
+		return "", borrowFeeFTPResponseFetchError(rpc.SourceFailureStageFTPGreeting, err)
+	} else if code != 220 {
+		return "", newBorrowFeeFetchError(rpc.SourceFailureProtocolRejected, rpc.SourceFailureStageFTPGreeting, true)
 	}
 	if err := writeFTPCommand(control, "USER "+user); err != nil {
-		return "", err
+		return "", borrowFeeTransportFetchError(rpc.SourceFailureStageFTPAuthenticate, err)
 	}
-	code, line, err := readFTPResponse(reader)
+	code, _, err := readFTPResponse(reader)
 	if err != nil {
-		return "", fmt.Errorf("FTP USER: %w", err)
+		return "", borrowFeeFTPResponseFetchError(rpc.SourceFailureStageFTPAuthenticate, err)
 	}
 	if code == 331 {
 		if err := writeFTPCommand(control, "PASS "+pass); err != nil {
-			return "", err
+			return "", borrowFeeTransportFetchError(rpc.SourceFailureStageFTPAuthenticate, err)
 		}
-		code, line, err = readFTPResponse(reader)
+		code, _, err = readFTPResponse(reader)
 		if err != nil {
-			return "", fmt.Errorf("FTP PASS: %w", err)
+			return "", borrowFeeFTPResponseFetchError(rpc.SourceFailureStageFTPAuthenticate, err)
 		}
 	}
 	if code != 230 {
-		return "", fmt.Errorf("FTP login failed: %d %s", code, line)
+		return "", newBorrowFeeFetchError(rpc.SourceFailureAuthenticationRejected, rpc.SourceFailureStageFTPAuthenticate, true)
 	}
 	if err := writeFTPCommand(control, "TYPE I"); err != nil {
-		return "", err
+		return "", borrowFeeTransportFetchError(rpc.SourceFailureStageFTPPassiveNegotiate, err)
 	}
-	if code, line, err := readFTPResponse(reader); err != nil || code != 200 {
-		return "", fmt.Errorf("FTP TYPE I: %d %s: %w", code, line, err)
+	if code, _, err := readFTPResponse(reader); err != nil {
+		return "", borrowFeeFTPResponseFetchError(rpc.SourceFailureStageFTPPassiveNegotiate, err)
+	} else if code != 200 {
+		return "", newBorrowFeeFetchError(rpc.SourceFailureProtocolRejected, rpc.SourceFailureStageFTPPassiveNegotiate, true)
 	}
 	if err := writeFTPCommand(control, "PASV"); err != nil {
-		return "", err
+		return "", borrowFeeTransportFetchError(rpc.SourceFailureStageFTPPassiveNegotiate, err)
 	}
-	code, line, err = readFTPResponse(reader)
-	if err != nil || code != 227 {
-		return "", fmt.Errorf("FTP PASV: %d %s: %w", code, line, err)
+	code, line, err := readFTPResponse(reader)
+	if err != nil {
+		return "", borrowFeeFTPResponseFetchError(rpc.SourceFailureStageFTPPassiveNegotiate, err)
+	}
+	if code != 227 {
+		return "", newBorrowFeeFetchError(rpc.SourceFailureProtocolRejected, rpc.SourceFailureStageFTPPassiveNegotiate, true)
 	}
 	dataAddr, err := ftpPassiveAddr(line)
 	if err != nil {
-		return "", err
+		return "", newBorrowFeeFetchError(rpc.SourceFailureProtocolRejected, rpc.SourceFailureStageFTPPassiveNegotiate, true)
 	}
 	data, err := dialer.DialContext(ctx, "tcp", dataAddr)
 	if err != nil {
-		return "", err
+		return "", borrowFeeTransportFetchError(rpc.SourceFailureStageFTPPassiveConnect, err)
 	}
 	_ = data.SetDeadline(deadline)
 	if err := writeFTPCommand(control, "RETR "+path); err != nil {
 		data.Close()
-		return "", err
+		return "", borrowFeeTransportFetchError(rpc.SourceFailureStageFTPRetrieve, err)
 	}
-	code, line, err = readFTPResponse(reader)
+	code, _, err = readFTPResponse(reader)
 	if err != nil {
 		data.Close()
-		return "", fmt.Errorf("FTP RETR: %w", err)
+		return "", borrowFeeFTPResponseFetchError(rpc.SourceFailureStageFTPRetrieve, err)
 	}
 	if code != 125 && code != 150 {
 		data.Close()
-		return "", fmt.Errorf("FTP RETR failed: %d %s", code, line)
+		return "", newBorrowFeeFetchError(rpc.SourceFailureProtocolRejected, rpc.SourceFailureStageFTPRetrieve, true)
 	}
 	body, readErr := io.ReadAll(data)
 	closeErr := data.Close()
 	if readErr != nil {
-		return "", readErr
+		return "", borrowFeeTransportFetchError(rpc.SourceFailureStageFTPRetrieve, readErr)
 	}
 	if closeErr != nil {
-		return "", closeErr
+		return "", borrowFeeTransportFetchError(rpc.SourceFailureStageFTPRetrieve, closeErr)
 	}
-	code, line, err = readFTPResponse(reader)
-	if err != nil || code != 226 {
-		return "", fmt.Errorf("FTP transfer complete: %d %s: %w", code, line, err)
+	code, _, err = readFTPResponse(reader)
+	if err != nil {
+		return "", borrowFeeFTPResponseFetchError(rpc.SourceFailureStageFTPRetrieve, err)
+	}
+	if code != 226 {
+		return "", newBorrowFeeFetchError(rpc.SourceFailureProtocolRejected, rpc.SourceFailureStageFTPRetrieve, true)
 	}
 	_ = writeFTPCommand(control, "QUIT")
 	return string(body), nil
@@ -845,7 +1037,7 @@ func parseFloatField(raw string) (float64, bool) {
 		return 0, false
 	}
 	v, err := strconv.ParseFloat(raw, 64)
-	return v, err == nil
+	return v, err == nil && !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 func parseIntField(raw string) (int64, bool) {

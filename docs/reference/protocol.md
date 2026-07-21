@@ -11,28 +11,32 @@ Unrestricted `SubmitOrder`/`CancelOrder`, `PlaceOrder`/`CancelOrder`, and `Exerc
 Decision surfaces that are useful to monitors expose a semantic `fingerprint` object:
 
 ```json
-{"version": "canary-fp-v1", "key": "sha256:..."}
+{"version": "canary-fp-v2", "key": "sha256:..."}
 ```
 
 The key is a SHA-256 hash of classified state, not a hash of the full JSON response. It deliberately excludes timestamps, raw prices, exact observed values inside the same threshold bucket, methodology prose, row guidance text, and rendering order. Monitors should use the key for dedupe, recovery, and repeat-alert TTL policy instead of recomputing their own hash.
 
-`regime.snapshot` emits `regime-fp-v1` from indicator bands/statuses,
+`regime.snapshot` emits `regime-fp-v2` from indicator bands/statuses,
 composite counts, lifecycle stage/severity/readiness buckets, warning
 codes/scopes/severities, high-level data quality, source-health buckets, and
-gamma/breadth semantic state.
+gamma/breadth semantic state. V2 adds the allowlisted failure code/stage when a
+source carries typed failure evidence.
 
-`market_events.snapshot` emits `market-events-fp-v1` from requested symbols,
+`market_events.snapshot` emits `market-events-fp-v2` from requested symbols,
 semantic flag categories/statuses/severities/roles/sources, and source-health
 buckets. It excludes timestamps, exact rates/share counts inside the same flag
-classification, source prose, and rendering order.
+classification, source prose, and rendering order. V2 includes typed failure
+code/stage so a materially different source failure changes monitor identity.
 
-`canary` emits `canary-fp-v1` from policy, action, market confirmation,
+`canary` emits `canary-fp-v2` from policy, action, market confirmation,
 portfolio fit, input health, direction, severity, planner mode/readiness,
 primary drivers, signal semantics including held-underlying stress buckets,
 classified market state, source-health buckets, row titles/states, and
 `source_fingerprints.account`,
 `source_fingerprints.positions`, `source_fingerprints.regime`, and
-`source_fingerprints.market_events`.
+`source_fingerprints.market_events`. V2 includes typed source failure
+code/stage. The separate `established_alert_projection` intentionally retains
+its frozen `canary-fp-v1` compatibility identity for delivery continuity.
 
 `rules.snapshot` emits `rulebook-fp-v3` — a policy-identity fingerprint, not
 a classified-state hash: the key is a SHA-256 of a JSON projection of the
@@ -60,6 +64,11 @@ The result contains `flags[]`, `by_symbol`, `source_health[]`,
 `halt_regulatory_or_news`. Event `status` uses event terms such as `active` and
 `recent`; source freshness uses `source_health[].status` values such as `ok`,
 `stale`, `unknown`, or `degraded`.
+
+`source_health[]` may also carry durable `refresh_state`, `next_attempt`, and
+redacted typed `last_failure` fields (`code`, `stage`, `failed_at`,
+`retryable`). Consumers must respect backoff/not-due state and use these typed
+fields instead of parsing provider or transport prose from `notes`.
 
 Borrow inventory comes from IBKR shortable-share market data. Borrow fee comes
 from IBKR short-stock availability fee-rate evidence and emits
@@ -92,6 +101,7 @@ paired with an existing reduce/cover proposal.
 | Real-time bars | `reqRealTimeBars` (50) | - | not implemented |
 | Market depth (L2) | `reqMktDepth` (10), `reqMktDepthL2` (13) | - | not implemented |
 | Fundamental data | `reqFundamentalData` (52) | - | not implemented |
+| Wall Street Horizon earnings dates | `reqWshMetaData` (100), `reqWshEventData` (102) | `Connector.FetchWSHEarnings` | ready; read-only, subscription-gated |
 | News bulletins | `reqNewsBulletins` (12) | - | not implemented |
 | Financial Advisor (FA) | `reqFA` (18) | - | not implemented |
 | IV / option-price calculators | `reqCalcImpliedVolatility` (54), `reqCalcOptionPrice` (55) | - | not implemented |

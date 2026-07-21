@@ -88,6 +88,9 @@ type EarningsInput struct {
 	// nil when unknown.
 	SessionsUntil *int
 	Source        string
+	// Reason is a stable typed explanation for unknown/stale evidence. It is
+	// disclosure only and never turns absence into a pass.
+	Reason string
 }
 
 // LegInput is one option leg of a name.
@@ -1365,9 +1368,37 @@ func sortOffenders(o []RuleOffender) {
 
 func earningsGapWord(e EarningsInput) string {
 	if e.Known && e.Stale {
-		return "stale"
+		return "stale (" + earningsReasonWords(e.Reason) + ")"
+	}
+	if e.Reason != "" {
+		return earningsReasonWords(e.Reason)
 	}
 	return "unknown"
+}
+
+func earningsReasonWords(reason string) string {
+	switch reason {
+	case "no_date_published":
+		return "not published by the provider"
+	case "unsupported_security":
+		return "unsupported by the provider"
+	case "format_change":
+		return "unreadable after a provider format change"
+	case "transport_failure":
+		return "unavailable after a provider transport failure"
+	case "conflicting_sources":
+		return "conflicting across providers"
+	case "not_observed":
+		return "not checked yet"
+	case "retained_last_good":
+		return "retained from the last good provider result"
+	case "single_source":
+		return "confirmed by only one provider"
+	case "date_elapsed":
+		return "elapsed without a newly published date"
+	default:
+		return "unknown"
+	}
 }
 
 func estNote(e EarningsInput) string {

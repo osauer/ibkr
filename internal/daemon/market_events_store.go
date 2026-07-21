@@ -1,18 +1,22 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 const marketEventStateVersion = 1
+const marketEventBorrowFeesStateVersion = 2
 
 const (
 	marketEventRegSHOScope                    = "market/events/reg-sho"
@@ -25,7 +29,7 @@ const (
 	marketEventHaltsSource                    = "nasdaq.trade_halts"
 	marketEventBorrowFeesScope                = "market/events/borrow-fees"
 	marketEventBorrowFeesStateKind            = "borrow_fees.current.v1"
-	marketEventBorrowFeesObservationKind      = "borrow_fees.snapshot.v1"
+	marketEventBorrowFeesObservationKind      = "borrow_fees.fetch_outcome.v2"
 	marketEventBorrowFeesSource               = "ibkr.short_stock_availability"
 	marketEventBorrowInventoryScope           = "market/events/borrow-inventory"
 	marketEventBorrowInventoryStateKind       = "borrow_inventory.current.v1"
@@ -43,10 +47,35 @@ type marketEventHaltsState struct {
 	Entry   marketEventHaltsEntry `json:"entry"`
 }
 
-type marketEventBorrowFeesState struct {
+type marketEventBorrowFeesStateV1 struct {
 	Version int                       `json:"version"`
 	Entry   marketEventBorrowFeeEntry `json:"entry"`
 }
+
+type marketEventBorrowFeesState struct {
+	Version     int                          `json:"version"`
+	LastGood    *marketEventBorrowFeeEntry   `json:"last_good,omitempty"`
+	LastAttempt *marketEventBorrowFeeAttempt `json:"last_attempt,omitempty"`
+}
+
+type marketEventBorrowFeeAttempt struct {
+	Outcome     string             `json:"outcome"`
+	AttemptedAt time.Time          `json:"attempted_at"`
+	CompletedAt time.Time          `json:"completed_at"`
+	NextAttempt *time.Time         `json:"next_attempt,omitempty"`
+	Failure     *rpc.SourceFailure `json:"failure,omitempty"`
+}
+
+type marketEventBorrowFeeOutcome struct {
+	Version int                         `json:"version"`
+	Attempt marketEventBorrowFeeAttempt `json:"attempt"`
+	Entry   *marketEventBorrowFeeEntry  `json:"entry,omitempty"`
+}
+
+const (
+	marketEventBorrowFeeOutcomeSuccess = "success"
+	marketEventBorrowFeeOutcomeFailure = "failure"
+)
 
 type marketEventBorrowInventoryState struct {
 	Version    int                                         `json:"version"`
@@ -64,8 +93,9 @@ type marketEventBorrowInventoryRecord struct {
 
 // UseCoreStore atomically swaps the cache projection to daemon.db. Every
 // existing document is decoded and validated before any in-memory value or
-// authority pointer changes. Retry/backoff and negative-absence state are
-// intentionally reset: they are ephemeral control state, not observations.
+// authority pointer changes. Borrow-fee retry/failure state is durable source
+// evidence; only the other sources' retry state and negative-absence cache are
+// intentionally reset.
 func (c *marketEventCache) UseCoreStore(store *corestore.Store) error {
 	if c == nil {
 		return errors.New("market events: nil cache")
@@ -81,22 +111,23 @@ func (c *marketEventCache) UseCoreStore(store *corestore.Store) error {
 	if err != nil {
 		return err
 	}
-	borrowFees, err := loadMarketEventBorrowFees(store)
-	if err != nil {
+	if err := validateStoredBorrowInventory(store); err != nil {
 		return err
 	}
-	if err := validateStoredBorrowInventory(store); err != nil {
+	borrowFees, borrowFeesRevision, err := loadMarketEventBorrowFees(store)
+	if err != nil {
 		return err
 	}
 	c.mu.Lock()
 	c.authority = store
 	c.regSHO = regSHO
 	c.halts = halts
-	c.borrowFees = borrowFees
+	c.borrowFees = marketEventBorrowFeeLastGood(borrowFees)
+	c.borrowFeesLastAttempt = cloneBorrowFeeAttempt(borrowFees.LastAttempt)
+	c.borrowFeesRevision = borrowFeesRevision
 	c.shortableAbsent = nil
 	c.regSHOFailedAt = time.Time{}
 	c.haltsFailedAt = time.Time{}
-	c.borrowFeesFailedAt = time.Time{}
 	c.mu.Unlock()
 	return nil
 }
@@ -137,22 +168,61 @@ func loadMarketEventHalts(store *corestore.Store) (marketEventHaltsEntry, error)
 	return cloneHaltsEntry(state.Entry), nil
 }
 
-func loadMarketEventBorrowFees(store *corestore.Store) (marketEventBorrowFeeEntry, error) {
-	raw, ok, err := loadMarketState(store, marketEventBorrowFeesScope, marketEventBorrowFeesStateKind)
-	if err != nil || !ok {
-		return marketEventBorrowFeeEntry{}, err
+func loadMarketEventBorrowFees(store *corestore.Store) (marketEventBorrowFeesState, int64, error) {
+	for range marketAuthorityWriteAttempts {
+		doc, ok, err := store.GetStateDocument(context.Background(), marketEventBorrowFeesScope, marketEventBorrowFeesStateKind)
+		if err != nil {
+			return marketEventBorrowFeesState{}, 0, err
+		}
+		if !ok {
+			return marketEventBorrowFeesState{Version: marketEventBorrowFeesStateVersion}, 0, nil
+		}
+		var header struct {
+			Version int `json:"version"`
+		}
+		if err := json.Unmarshal(doc.JSON, &header); err != nil {
+			return marketEventBorrowFeesState{}, 0, fmt.Errorf("decode borrow-fees authority header: %w", err)
+		}
+		switch header.Version {
+		case marketEventStateVersion:
+			var legacy marketEventBorrowFeesStateV1
+			if err := decodeStrictMarketEventJSON(doc.JSON, &legacy); err != nil {
+				return marketEventBorrowFeesState{}, 0, fmt.Errorf("decode borrow-fees v1 authority: %w", err)
+			}
+			if err := validateBorrowFeeEntry(legacy.Entry); err != nil {
+				return marketEventBorrowFeesState{}, 0, fmt.Errorf("validate borrow-fees v1 authority: %w", err)
+			}
+			entry := cloneBorrowFeeEntry(legacy.Entry)
+			state := marketEventBorrowFeesState{Version: marketEventBorrowFeesStateVersion, LastGood: &entry}
+			raw, err := json.Marshal(state)
+			if err != nil {
+				return marketEventBorrowFeesState{}, 0, fmt.Errorf("encode borrow-fees v2 migration: %w", err)
+			}
+			saved, err := store.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
+				ScopeKey: marketEventBorrowFeesScope, Kind: marketEventBorrowFeesStateKind,
+				ExpectedRevision: doc.Revision, JSON: raw,
+			})
+			if errors.Is(err, corestore.ErrRevisionConflict) {
+				continue
+			}
+			if err != nil {
+				return marketEventBorrowFeesState{}, 0, fmt.Errorf("migrate borrow-fees authority: %w", err)
+			}
+			return cloneBorrowFeesState(state), saved.Revision, nil
+		case marketEventBorrowFeesStateVersion:
+			var state marketEventBorrowFeesState
+			if err := decodeStrictMarketEventJSON(doc.JSON, &state); err != nil {
+				return marketEventBorrowFeesState{}, 0, fmt.Errorf("decode borrow-fees v2 authority: %w", err)
+			}
+			if err := validateBorrowFeesState(state); err != nil {
+				return marketEventBorrowFeesState{}, 0, fmt.Errorf("validate borrow-fees v2 authority: %w", err)
+			}
+			return cloneBorrowFeesState(state), doc.Revision, nil
+		default:
+			return marketEventBorrowFeesState{}, 0, fmt.Errorf("invalid borrow-fees authority version %d", header.Version)
+		}
 	}
-	var state marketEventBorrowFeesState
-	if err := json.Unmarshal(raw, &state); err != nil {
-		return marketEventBorrowFeeEntry{}, fmt.Errorf("decode borrow-fees authority: %w", err)
-	}
-	if state.Version != marketEventStateVersion {
-		return marketEventBorrowFeeEntry{}, fmt.Errorf("invalid borrow-fees authority version %d", state.Version)
-	}
-	if err := validateBorrowFeeEntry(state.Entry); err != nil {
-		return marketEventBorrowFeeEntry{}, fmt.Errorf("validate borrow-fees authority: %w", err)
-	}
-	return cloneBorrowFeeEntry(state.Entry), nil
+	return marketEventBorrowFeesState{}, 0, fmt.Errorf("migrate borrow-fees authority: %w after %d attempts", corestore.ErrRevisionConflict, marketAuthorityWriteAttempts)
 }
 
 func validateStoredBorrowInventory(store *corestore.Store) error {
@@ -194,14 +264,97 @@ func (c *marketEventCache) persistHalts(ctx context.Context, entry marketEventHa
 }
 
 func (c *marketEventCache) persistBorrowFees(ctx context.Context, entry marketEventBorrowFeeEntry) error {
-	if c.authority == nil {
-		return nil
-	}
+	return c.persistBorrowFeeSuccess(ctx, entry, entry.FetchedAt, entry.FetchedAt)
+}
+
+func (c *marketEventCache) persistBorrowFeeSuccess(ctx context.Context, entry marketEventBorrowFeeEntry, attemptedAt, completedAt time.Time) error {
 	if err := validateBorrowFeeEntry(entry); err != nil {
 		return err
 	}
-	state := marketEventBorrowFeesState{Version: marketEventStateVersion, Entry: cloneBorrowFeeEntry(entry)}
-	return saveMarketEventState(ctx, c.authority, marketEventBorrowFeesScope, marketEventBorrowFeesStateKind, marketEventBorrowFeesSource, marketEventBorrowFeesObservationKind, entry.FetchedAt, state, len(entry.Symbols), entry.SourceURL)
+	attempt := marketEventBorrowFeeAttempt{
+		Outcome: marketEventBorrowFeeOutcomeSuccess, AttemptedAt: attemptedAt, CompletedAt: completedAt,
+	}
+	revision, err := c.persistBorrowFeeState(ctx, &entry, attempt)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.borrowFees = cloneBorrowFeeEntry(entry)
+	c.borrowFeesLastAttempt = cloneBorrowFeeAttempt(&attempt)
+	c.borrowFeesRevision = revision
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *marketEventCache) persistBorrowFeeFailure(ctx context.Context, cached marketEventBorrowFeeEntry, attempt marketEventBorrowFeeAttempt) error {
+	var lastGood *marketEventBorrowFeeEntry
+	if len(cached.Symbols) > 0 {
+		entry := cloneBorrowFeeEntry(cached)
+		lastGood = &entry
+	}
+	revision, err := c.persistBorrowFeeState(ctx, lastGood, attempt)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.borrowFeesLastAttempt = cloneBorrowFeeAttempt(&attempt)
+	c.borrowFeesRevision = revision
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *marketEventCache) persistBorrowFeeState(ctx context.Context, lastGood *marketEventBorrowFeeEntry, attempt marketEventBorrowFeeAttempt) (int64, error) {
+	state := marketEventBorrowFeesState{Version: marketEventBorrowFeesStateVersion, LastGood: cloneBorrowFeeEntryPtr(lastGood), LastAttempt: cloneBorrowFeeAttempt(&attempt)}
+	if err := validateBorrowFeesState(state); err != nil {
+		return 0, err
+	}
+	c.mu.Lock()
+	store := c.authority
+	revision := c.borrowFeesRevision
+	c.mu.Unlock()
+	if store == nil {
+		return revision, nil
+	}
+	statePayload, err := json.Marshal(state)
+	if err != nil {
+		return 0, err
+	}
+	outcome := marketEventBorrowFeeOutcome{Version: marketEventBorrowFeesStateVersion, Attempt: *cloneBorrowFeeAttempt(&attempt)}
+	if attempt.Outcome == marketEventBorrowFeeOutcomeSuccess {
+		outcome.Entry = cloneBorrowFeeEntryPtr(lastGood)
+	}
+	outcomePayload, err := json.Marshal(outcome)
+	if err != nil {
+		return 0, err
+	}
+	records := 0
+	sourceURL := ""
+	if outcome.Entry != nil {
+		records = len(outcome.Entry.Symbols)
+		sourceURL = outcome.Entry.SourceURL
+	}
+	metadata, err := json.Marshal(struct {
+		Version   int    `json:"version"`
+		Outcome   string `json:"outcome"`
+		Records   int    `json:"records"`
+		SourceURL string `json:"source_url,omitempty"`
+	}{marketEventBorrowFeesStateVersion, attempt.Outcome, records, sourceURL})
+	if err != nil {
+		return 0, err
+	}
+	saved, _, err := store.CompareAndSwapStateDocumentWithObservations(ctx, corestore.StateDocumentCAS{
+		ScopeKey: marketEventBorrowFeesScope, Kind: marketEventBorrowFeesStateKind,
+		ExpectedRevision: revision, JSON: statePayload,
+	}, []corestore.ObservationInput{{
+		ScopeKey: marketEventBorrowFeesScope, Source: marketEventBorrowFeesSource,
+		Kind: marketEventBorrowFeesObservationKind, ObservedAt: attempt.CompletedAt,
+		ContentType: "application/json", Payload: outcomePayload, MetadataJSON: metadata,
+		DecisionEligible: true,
+	}})
+	if err != nil {
+		return 0, err
+	}
+	return saved.Revision, nil
 }
 
 func (c *marketEventCache) persistBorrowInventory(ctx context.Context, observedAt time.Time, records map[string]marketEventBorrowInventoryRecord) error {
@@ -260,13 +413,99 @@ func validateHaltsEntry(entry marketEventHaltsEntry) error {
 }
 
 func validateBorrowFeeEntry(entry marketEventBorrowFeeEntry) error {
-	if entry.FetchedAt.IsZero() || entry.AsOf.IsZero() || strings.TrimSpace(entry.SourceURL) == "" || entry.Symbols == nil {
+	if entry.FetchedAt.IsZero() || entry.AsOf.IsZero() || strings.TrimSpace(entry.SourceURL) == "" || len(entry.Symbols) == 0 {
 		return errors.New("invalid borrow-fees envelope")
 	}
 	for key, row := range entry.Symbols {
 		if key == "" || key != normSym(key) || row.Symbol != key || row.Available < 0 {
 			return fmt.Errorf("invalid borrow-fees row %q", key)
 		}
+	}
+	return nil
+}
+
+func validateBorrowFeesState(state marketEventBorrowFeesState) error {
+	if state.Version != marketEventBorrowFeesStateVersion {
+		return fmt.Errorf("invalid borrow-fees state version %d", state.Version)
+	}
+	if state.LastGood != nil {
+		if err := validateBorrowFeeEntry(*state.LastGood); err != nil {
+			return err
+		}
+	}
+	if state.LastAttempt == nil {
+		return nil
+	}
+	attempt := state.LastAttempt
+	if attempt.AttemptedAt.IsZero() || attempt.CompletedAt.IsZero() || attempt.CompletedAt.Before(attempt.AttemptedAt) {
+		return errors.New("invalid borrow-fee attempt timestamps")
+	}
+	switch attempt.Outcome {
+	case marketEventBorrowFeeOutcomeSuccess:
+		if state.LastGood == nil || attempt.Failure != nil || attempt.NextAttempt != nil {
+			return errors.New("invalid successful borrow-fee attempt")
+		}
+	case marketEventBorrowFeeOutcomeFailure:
+		if attempt.Failure == nil || attempt.NextAttempt == nil || !attempt.NextAttempt.After(attempt.CompletedAt) {
+			return errors.New("invalid failed borrow-fee attempt")
+		}
+		if err := validateBorrowFeeSourceFailure(*attempt.Failure); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("invalid borrow-fee attempt outcome %q", attempt.Outcome)
+	}
+	return nil
+}
+
+func marketEventBorrowFeeLastGood(state marketEventBorrowFeesState) marketEventBorrowFeeEntry {
+	if state.LastGood == nil {
+		return marketEventBorrowFeeEntry{}
+	}
+	return cloneBorrowFeeEntry(*state.LastGood)
+}
+
+func cloneBorrowFeesState(in marketEventBorrowFeesState) marketEventBorrowFeesState {
+	return marketEventBorrowFeesState{
+		Version: in.Version, LastGood: cloneBorrowFeeEntryPtr(in.LastGood), LastAttempt: cloneBorrowFeeAttempt(in.LastAttempt),
+	}
+}
+
+func cloneBorrowFeeEntryPtr(in *marketEventBorrowFeeEntry) *marketEventBorrowFeeEntry {
+	if in == nil {
+		return nil
+	}
+	out := cloneBorrowFeeEntry(*in)
+	return &out
+}
+
+func cloneBorrowFeeAttempt(in *marketEventBorrowFeeAttempt) *marketEventBorrowFeeAttempt {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.NextAttempt != nil {
+		next := *in.NextAttempt
+		out.NextAttempt = &next
+	}
+	if in.Failure != nil {
+		failure := *in.Failure
+		out.Failure = &failure
+	}
+	return &out
+}
+
+func decodeStrictMarketEventJSON(raw []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
 	}
 	return nil
 }

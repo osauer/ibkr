@@ -1155,17 +1155,20 @@ func TestComputeCanaryFingerprintIncludesSourceRegimeFingerprint(t *testing.T) {
 func TestComputeCanaryFingerprintIncludesSourceMarketEventsFingerprint(t *testing.T) {
 	t.Parallel()
 	regime := healthyCanaryRegime()
+	positions := rpc.PositionsResult{AsOf: canaryTestNow, Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: -1}}}
 	first := ComputeCanary(CanaryInput{Now: canaryTestNow,
-		Account: baseCanaryAccount(),
-		Regime:  regime,
+		Account:   baseCanaryAccount(),
+		Positions: positions,
+		Regime:    regime,
 		MarketEvents: rpc.MarketEventsResult{
 			Kind:        rpc.MarketEventsKind,
 			Fingerprint: rpc.Fingerprint{Version: rpc.MarketEventsFingerprintVersion, Key: "sha256:market-a"},
 		},
 	})
 	second := ComputeCanary(CanaryInput{Now: canaryTestNow,
-		Account: baseCanaryAccount(),
-		Regime:  regime,
+		Account:   baseCanaryAccount(),
+		Positions: positions,
+		Regime:    regime,
 		MarketEvents: rpc.MarketEventsResult{
 			Kind:        rpc.MarketEventsKind,
 			Fingerprint: rpc.Fingerprint{Version: rpc.MarketEventsFingerprintVersion, Key: "sha256:market-b"},
@@ -1176,6 +1179,98 @@ func TestComputeCanaryFingerprintIncludesSourceMarketEventsFingerprint(t *testin
 	}
 	if first.Fingerprint == second.Fingerprint {
 		t.Fatal("canary fingerprint did not change when source market-events fingerprint changed")
+	}
+}
+
+func TestComputeCanaryFingerprintIgnoresBorrowHealthWithoutShortStock(t *testing.T) {
+	t.Parallel()
+	positions := rpc.PositionsResult{
+		AsOf:   canaryTestNow,
+		Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: 100}},
+	}
+	baseEvents := healthyCanaryMarketEvents(canaryTestNow, "XYZ")
+	baseEvents.Fingerprint = rpc.BuildMarketEventsFingerprint(&baseEvents)
+	failedEvents := baseEvents
+	failedEvents.SourceHealth = slices.Clone(baseEvents.SourceHealth)
+	for i := range failedEvents.SourceHealth {
+		if failedEvents.SourceHealth[i].Source == "borrow_fee" {
+			failedEvents.SourceHealth[i].Status = rpc.SourceStatusUnknown
+			failedEvents.SourceHealth[i].LastFailure = &rpc.SourceFailure{
+				Code: "timeout", Stage: "ftp_control_connect", FailedAt: canaryTestNow, Retryable: true,
+			}
+		}
+	}
+	failedEvents.Fingerprint = rpc.BuildMarketEventsFingerprint(&failedEvents)
+	input := CanaryInput{Now: canaryTestNow, Account: baseCanaryAccount(), Positions: positions, Regime: healthyCanaryRegime(), MarketEvents: baseEvents}
+	baseline := ComputeCanary(input)
+	input.MarketEvents = failedEvents
+	changed := ComputeCanary(input)
+	if baseline.Fingerprint != changed.Fingerprint {
+		t.Fatalf("all-long borrow failure changed Canary fingerprint: %s -> %s", baseline.Fingerprint.Key, changed.Fingerprint.Key)
+	}
+	if baseline.EstablishedAlertProjection == nil || changed.EstablishedAlertProjection == nil {
+		t.Fatal("missing established alert projection")
+	}
+	if baseline.EstablishedAlertProjection.CanonicalFingerprint == changed.EstablishedAlertProjection.CanonicalFingerprint {
+		t.Fatal("frozen v1 compatibility identity unexpectedly ignored its established source-status bucket")
+	}
+	nonBorrowFailure := baseEvents
+	nonBorrowFailure.SourceHealth = slices.Clone(baseEvents.SourceHealth)
+	for i := range nonBorrowFailure.SourceHealth {
+		if nonBorrowFailure.SourceHealth[i].Source == "trading_halts" {
+			nonBorrowFailure.SourceHealth[i].Status = rpc.SourceStatusUnknown
+		}
+	}
+	nonBorrowFailure.Fingerprint = rpc.BuildMarketEventsFingerprint(&nonBorrowFailure)
+	input.MarketEvents = nonBorrowFailure
+	if got := ComputeCanary(input); got.Fingerprint == baseline.Fingerprint {
+		t.Fatal("all-long relevance filter suppressed non-borrow source-health identity")
+	}
+
+	input.Positions.Stocks[0].Quantity = -100
+	input.MarketEvents = baseEvents
+	shortHealthy := ComputeCanary(input)
+	input.MarketEvents = failedEvents
+	shortFailed := ComputeCanary(input)
+	if shortHealthy.Fingerprint == shortFailed.Fingerprint {
+		t.Fatal("short-book borrow failure did not change Canary fingerprint")
+	}
+}
+
+func TestComputeCanaryEstablishedFingerprintIgnoresTypedFailureDetails(t *testing.T) {
+	t.Parallel()
+	positions := rpc.PositionsResult{
+		AsOf:   canaryTestNow,
+		Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: -100}},
+	}
+	baseEvents := healthyCanaryMarketEvents(canaryTestNow, "XYZ")
+	withFailure := func(code, stage string) rpc.MarketEventsResult {
+		events := baseEvents
+		events.SourceHealth = slices.Clone(baseEvents.SourceHealth)
+		for i := range events.SourceHealth {
+			if events.SourceHealth[i].Source == "borrow_fee" {
+				events.SourceHealth[i].Status = rpc.SourceStatusUnknown
+				events.SourceHealth[i].LastFailure = &rpc.SourceFailure{
+					Code: code, Stage: stage, FailedAt: canaryTestNow, Retryable: true,
+				}
+			}
+		}
+		events.Fingerprint = rpc.BuildMarketEventsFingerprint(&events)
+		return events
+	}
+	input := CanaryInput{
+		Now: canaryTestNow, Account: baseCanaryAccount(), Positions: positions,
+		Regime: healthyCanaryRegime(), MarketEvents: withFailure(rpc.SourceFailureTimeout, rpc.SourceFailureStageFTPControlConnect),
+	}
+	first := ComputeCanary(input)
+	input.MarketEvents = withFailure(rpc.SourceFailureConnectionRefused, rpc.SourceFailureStageFTPPassiveConnect)
+	second := ComputeCanary(input)
+	if first.Fingerprint == second.Fingerprint {
+		t.Fatal("current Canary v2 identity ignored changed typed failure details")
+	}
+	if first.EstablishedAlertProjection == nil || second.EstablishedAlertProjection == nil ||
+		*first.EstablishedAlertProjection != *second.EstablishedAlertProjection {
+		t.Fatalf("typed failure details changed established v1 identity: before=%+v after=%+v", first.EstablishedAlertProjection, second.EstablishedAlertProjection)
 	}
 }
 
@@ -2150,6 +2245,28 @@ func TestComputeCanaryBorrowHealthRequiresShortStockExposure(t *testing.T) {
 			hasBorrowWarning := strings.Contains(strings.Join(res.Warnings, "\n"), "borrow_")
 			if hasBorrowWarning != test.wantBorrow {
 				t.Fatalf("borrow warning present = %v, want %v; warnings: %+v", hasBorrowWarning, test.wantBorrow, res.Warnings)
+			}
+		})
+	}
+}
+
+func TestCanaryShortStockExposureRejectsExplicitNonStockRows(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		book rpc.PositionsResult
+		want bool
+	}{
+		{name: "stock", book: rpc.PositionsResult{Stocks: []rpc.PositionView{{SecType: rpc.SecTypeStock, Quantity: -1}}}, want: true},
+		{name: "wire_stock", book: rpc.PositionsResult{Stocks: []rpc.PositionView{{SecType: "STK", Quantity: -1}}}, want: true},
+		{name: "legacy_stock", book: rpc.PositionsResult{Stocks: []rpc.PositionView{{Quantity: -1}}}, want: true},
+		{name: "future", book: rpc.PositionsResult{Stocks: []rpc.PositionView{{SecType: "FUT", Quantity: -1}}}},
+		{name: "grouped_index", book: rpc.PositionsResult{ByUnderlying: []rpc.PositionGroup{{Stock: &rpc.PositionView{SecType: "IND", Quantity: -1}}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := canaryHasShortStockExposure(test.book); got != test.want {
+				t.Fatalf("canaryHasShortStockExposure()=%v, want %v", got, test.want)
 			}
 		})
 	}

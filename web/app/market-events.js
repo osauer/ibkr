@@ -1,5 +1,6 @@
 import { $, labelize, normalizeSymbol, shortTimeWithZone } from "./shared.js";
 import { state } from "./state.js";
+import { positionsHaveShortStock } from "./exposure-relevance.js";
 
 function renderMarketFlagRail(id, items) {
   const rail = $(id);
@@ -147,8 +148,7 @@ function borrowSourceHealth(health = {}) {
 }
 
 function bookHasShortStock() {
-  const groups = state.snapshot?.positions?.by_underlying || [];
-  return groups.some((group) => typeof group.stock?.quantity === "number" && group.stock.quantity < 0);
+  return positionsHaveShortStock(state.snapshot?.positions);
 }
 
 function marketEventLabel(flag = {}, options = {}) {

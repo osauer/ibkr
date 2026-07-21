@@ -17,6 +17,11 @@ var canaryPolicy = risk.DefaultPolicy()
 
 const canaryHeldStressLimit = 5
 
+const (
+	canaryEstablishedRegimeFingerprintVersion       = "regime-fp-v1"
+	canaryEstablishedMarketEventsFingerprintVersion = "market-events-fp-v1"
+)
+
 // CanaryInput is the shared typed input contract defined by package rpc.
 type CanaryInput = rpc.CanaryInput
 
@@ -68,9 +73,12 @@ func computeCanary(in CanaryInput, now time.Time, sourceIssues []canarySourceIss
 	if regimeFingerprint.Key == "" {
 		regimeFingerprint = rpc.BuildRegimeFingerprint(&in.Regime)
 	}
-	marketEventsFingerprint := in.MarketEvents.Fingerprint
-	if marketEventsFingerprint.Key == "" && canaryHasMarketEventsInput(in.MarketEvents) {
-		marketEventsFingerprint = rpc.BuildMarketEventsFingerprint(&in.MarketEvents)
+	if established {
+		regimeFingerprint = canaryEstablishedRegimeFingerprint(in.Regime)
+	}
+	marketEventsFingerprint := canaryRelevantMarketEventsFingerprint(in.Positions, in.MarketEvents)
+	if established {
+		marketEventsFingerprint = canaryEstablishedMarketEventsFingerprint(in.MarketEvents)
 	}
 	sourceAsOf := CanarySourceAsOf{Account: in.Account.AsOf, Positions: in.Positions.AsOf, Regime: in.Regime.AsOf, MarketEvents: in.MarketEvents.AsOf}
 	sourceFingerprints := CanarySourceFingerprints{Account: &accountFingerprint, Positions: &positionsFingerprint, Regime: &regimeFingerprint}
@@ -132,6 +140,91 @@ func computeCanary(in CanaryInput, now time.Time, sourceIssues []canarySourceIss
 	return res
 }
 
+// canaryRelevantMarketEventsFingerprint applies the same exposure boundary as
+// canaryMarketEventSourceIssues before market-event health enters alert
+// identity. The diagnostic snapshot remains portfolio-neutral, while a borrow
+// outage on an all-long book cannot churn Canary or established delivery
+// fingerprints. Active flags are retained: only irrelevant borrow source
+// health is removed.
+func canaryRelevantMarketEventsFingerprint(pos rpc.PositionsResult, events rpc.MarketEventsResult) rpc.Fingerprint {
+	if !canaryHasMarketEventsInput(events) {
+		return rpc.Fingerprint{}
+	}
+	if canaryHasShortStockExposure(pos) {
+		if events.Fingerprint.Key != "" {
+			return events.Fingerprint
+		}
+		return rpc.BuildMarketEventsFingerprint(&events)
+	}
+	filtered := canaryRelevantMarketEvents(pos, events)
+	filtered.Fingerprint = rpc.Fingerprint{}
+	return rpc.BuildMarketEventsFingerprint(&filtered)
+}
+
+// canaryEstablishedMarketEventsFingerprint keeps the exact pre-v2
+// MarketEvents source projection used by established delivery. New typed
+// failure details are stripped, but every v1 source-health bucket remains;
+// changing that projection under the same v1 label would break dedupe and
+// recovery continuity.
+func canaryEstablishedMarketEventsFingerprint(events rpc.MarketEventsResult) rpc.Fingerprint {
+	if !canaryHasMarketEventsInput(events) {
+		return rpc.Fingerprint{}
+	}
+	if events.Fingerprint.Key != "" && !canarySourceHealthHasTypedFailure(events.SourceHealth) {
+		fingerprint := events.Fingerprint
+		fingerprint.Version = canaryEstablishedMarketEventsFingerprintVersion
+		return fingerprint
+	}
+	filtered := events
+	filtered.Fingerprint = rpc.Fingerprint{}
+	filtered.SourceHealth = slices.Clone(filtered.SourceHealth)
+	for i := range filtered.SourceHealth {
+		filtered.SourceHealth[i].LastFailure = nil
+	}
+	fingerprint := rpc.BuildMarketEventsFingerprint(&filtered)
+	fingerprint.Version = canaryEstablishedMarketEventsFingerprintVersion
+	return fingerprint
+}
+
+func canaryEstablishedRegimeFingerprint(regime rpc.RegimeSnapshotResult) rpc.Fingerprint {
+	if regime.Fingerprint.Key != "" && !canarySourceHealthHasTypedFailure(regime.SourceHealth) {
+		fingerprint := regime.Fingerprint
+		fingerprint.Version = canaryEstablishedRegimeFingerprintVersion
+		return fingerprint
+	}
+	regime.Fingerprint = rpc.Fingerprint{}
+	regime.SourceHealth = slices.Clone(regime.SourceHealth)
+	for i := range regime.SourceHealth {
+		regime.SourceHealth[i].LastFailure = nil
+	}
+	fingerprint := rpc.BuildRegimeFingerprint(&regime)
+	fingerprint.Version = canaryEstablishedRegimeFingerprintVersion
+	return fingerprint
+}
+
+func canarySourceHealthHasTypedFailure(health []rpc.SourceHealth) bool {
+	for _, source := range health {
+		if source.LastFailure != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func canaryRelevantMarketEvents(pos rpc.PositionsResult, events rpc.MarketEventsResult) rpc.MarketEventsResult {
+	if canaryHasShortStockExposure(pos) {
+		return events
+	}
+	filtered := events
+	filtered.SourceHealth = slices.DeleteFunc(slices.Clone(events.SourceHealth), func(health rpc.SourceHealth) bool {
+		return canaryMarketEventBorrowSource(canaryMarketEventSourceName(health.Source))
+	})
+	filtered.WarningDetails = slices.DeleteFunc(slices.Clone(events.WarningDetails), func(warning rpc.DataWarning) bool {
+		return canaryMarketEventBorrowSource(canaryMarketEventSourceName(warning.Scope + " " + warning.Code))
+	})
+	return filtered
+}
+
 func canaryEstablishedAlertProjection(result CanaryResult) rpc.EstablishedAlertProjection {
 	portfolioRelevant := result.PortfolioAlertRelevant != nil && *result.PortfolioAlertRelevant
 	actionEligible := severityRankAtLeast(result.Severity, risk.SeverityAct) ||
@@ -142,7 +235,7 @@ func canaryEstablishedAlertProjection(result CanaryResult) rpc.EstablishedAlertP
 		(severityRankAtLeast(result.Severity, risk.SeverityWatch) || actionEligible)
 	return rpc.EstablishedAlertProjection{
 		SchemaVersion:        rpc.EstablishedAlertProjectionSchemaVersion,
-		CanonicalFingerprint: result.Fingerprint,
+		CanonicalFingerprint: rpc.Fingerprint{Version: rpc.EstablishedCanaryFingerprintVersion, Key: result.Fingerprint.Key},
 		OccurrenceEligible:   occurrenceEligible,
 		ActOnlyEligible:      occurrenceEligible && actionEligible,
 		Action:               result.Action,
@@ -2104,16 +2197,24 @@ func canaryMarketEventSourceIssues(pos rpc.PositionsResult, events rpc.MarketEve
 
 func canaryHasShortStockExposure(pos rpc.PositionsResult) bool {
 	for _, stock := range pos.Stocks {
-		if stock.Quantity < 0 {
+		if canaryPositionIsStock(stock) && stock.Quantity < 0 {
 			return true
 		}
 	}
 	for _, group := range pos.ByUnderlying {
-		if group.Stock != nil && group.Stock.Quantity < 0 {
+		if group.Stock != nil && canaryPositionIsStock(*group.Stock) && group.Stock.Quantity < 0 {
 			return true
 		}
 	}
 	return false
+}
+
+func canaryPositionIsStock(position rpc.PositionView) bool {
+	secType := strings.ToUpper(strings.TrimSpace(position.SecType))
+	// Empty is retained as a compatibility-safe legacy stock projection. Live
+	// rows carry STOCK; explicit FUT, IND, or OPTION rows never make stock-borrow
+	// evidence decision-relevant.
+	return secType == "" || secType == rpc.SecTypeStock || secType == "STK" || secType == "ETF"
 }
 
 func canaryMarketEventBorrowSource(source string) bool {
@@ -2302,7 +2403,7 @@ func canarySourceDataQualitySignals(issues []canarySourceIssue) []risk.Signal {
 }
 
 // canaryEstablishedSourceDataQualitySignals preserves the exact classified
-// signal fields hashed by the ad5b77b canary-fp-v1 implementation.
+// signal fields hashed by the established Canary compatibility projection.
 func canaryEstablishedSourceDataQualitySignals(issues []canarySourceIssue) []risk.Signal {
 	if len(issues) == 0 {
 		return nil
@@ -2479,7 +2580,7 @@ func canaryRegimeWarningCluster(w rpc.RegimeWarning) string {
 }
 
 // canaryEstablishedSourceHealth preserves the exact ad5b77b source-health
-// projection that participates in canary-fp-v1. New authority and
+// projection that participates in the established Canary fingerprint. New authority and
 // required-source interpretations stay on the main Canary result only.
 func canaryEstablishedSourceHealth(in CanaryInput, now time.Time, accountFP, positionsFP, regimeFP, marketEventsFP rpc.Fingerprint, inputHealth string, m CanaryMarketSummary) []rpc.SourceHealth {
 	out := []rpc.SourceHealth{
@@ -2488,7 +2589,7 @@ func canaryEstablishedSourceHealth(in CanaryInput, now time.Time, accountFP, pos
 		canaryEstablishedRegimeSourceHealth(in.Regime.AsOf, now, regimeFP, canaryInputHealthConfidence(inputHealth), m),
 	}
 	if canaryHasMarketEventsInput(in.MarketEvents) {
-		out = append(out, canaryEstablishedMarketEventsSourceHealth(in.MarketEvents, now, marketEventsFP))
+		out = append(out, canaryEstablishedMarketEventsSourceHealth(in.Positions, in.MarketEvents, now, marketEventsFP))
 	}
 	return out
 }
@@ -2518,7 +2619,8 @@ func canaryEstablishedRegimeSourceHealth(asOf, now time.Time, fp rpc.Fingerprint
 	return health
 }
 
-func canaryEstablishedMarketEventsSourceHealth(events rpc.MarketEventsResult, now time.Time, fp rpc.Fingerprint) rpc.SourceHealth {
+func canaryEstablishedMarketEventsSourceHealth(pos rpc.PositionsResult, events rpc.MarketEventsResult, now time.Time, fp rpc.Fingerprint) rpc.SourceHealth {
+	events = canaryRelevantMarketEvents(pos, events)
 	status := rpc.RegimeStatusOK
 	confidence := "medium"
 	notes := []string{}

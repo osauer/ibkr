@@ -82,6 +82,11 @@ type CanaryResult struct {
 // projection schema consumed by the established Canary monitor.
 const EstablishedAlertProjectionSchemaVersion = "canary-established-alert-v1"
 
+// EstablishedCanaryFingerprintVersion identifies the frozen fingerprint
+// version carried by EstablishedAlertProjection. It remains v1 even when the
+// current Canary result advances its semantic projection.
+const EstablishedCanaryFingerprintVersion = "canary-fp-v1"
+
 // EstablishedAlertProjection atomically carries every producer-owned field
 // the pre-shadow Canary monitor used for occurrence identity and delivery-mode
 // eligibility. CanonicalFingerprint remains the established canary-fp-v1
@@ -133,7 +138,7 @@ func ValidateEstablishedAlertProjection(projection EstablishedAlertProjection) e
 }
 
 func validateEstablishedAlertFingerprint(fingerprint Fingerprint) error {
-	if fingerprint.Version != CanaryFingerprintVersion {
+	if fingerprint.Version != EstablishedCanaryFingerprintVersion {
 		return fmt.Errorf("invalid established alert fingerprint version %q", fingerprint.Version)
 	}
 	const prefix = "sha256:"

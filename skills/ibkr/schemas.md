@@ -1400,7 +1400,7 @@ all eight indicator rows.
 ```json
 {
   "as_of": "2026-05-09T14:32:09Z",
-  "fingerprint": {"version": "regime-fp-v1", "key": "sha256:..."},
+  "fingerprint": {"version": "regime-fp-v2", "key": "sha256:..."},
   "lifecycle": {
     "stage": "early_warning",
     "severity": "watch",
@@ -1563,7 +1563,10 @@ Field meanings:
 - `source_health[]` reports each broad-market source cluster's `as_of`,
   status (`ok`, `stale`, `partial`, `degraded`, `computing`,
   `unavailable`, or `error`), confidence, optional age/max-age values, and
-  `fingerprint_stability: "semantic_buckets_only"`.
+  `fingerprint_stability: "semantic_buckets_only"`. A row may also carry
+  durable `refresh_state`, `next_attempt`, and a redacted typed `last_failure`
+  (`code`, `stage`, `failed_at`, `retryable`); use those fields instead of
+  parsing `notes` for the failure class.
 - `fingerprint` and `lifecycle.fingerprint` are semantic hashes for monitor
   dedupe; do not recompute them from raw JSON.
 - Each indicator row carries a `status` field:
@@ -1661,7 +1664,7 @@ array. Omit both to use held underlyings.
      "notes": ["Nasdaq-listed threshold securities source; non-Nasdaq listing-exchange threshold feeds remain outside V1."],
      "fingerprint_stability": "semantic_buckets_only"}
   ],
-  "fingerprint": {"version": "market-events-fp-v1", "key": "sha256:..."},
+  "fingerprint": {"version": "market-events-fp-v2", "key": "sha256:..."},
   "not_execution": "Market-event flags are observed context and daemon safety gates; no orders are placed by ibkr."
 }
 ```
@@ -1678,6 +1681,9 @@ Field meanings:
   missing key as proof that all sources were healthy.
 - Unknown/null source data is unavailable, not false or zero. Check
   `source_health[]` before relying on absence of a flag.
+- `source_health[]` may carry durable `refresh_state`, `next_attempt`, and a
+  redacted typed `last_failure` (`code`, `stage`, `failed_at`, `retryable`).
+  Respect backoff/not-due state; do not parse `notes` for failure semantics.
 - Flags are reduce-only context. Borrow flags can modify existing short
   buy-to-cover reductions; active halt/LULD blocks preview/submit;
   `reg_sho_threshold` is regulatory context. V1 never creates buy-add or
@@ -1701,12 +1707,12 @@ regime itself.
     "positions": "2026-05-31T21:11:04+02:00",
     "regime": "2026-05-31T21:11:20+02:00"
   },
-  "fingerprint": {"version": "canary-fp-v1", "key": "sha256:..."},
+  "fingerprint": {"version": "canary-fp-v2", "key": "sha256:..."},
   "source_fingerprints": {
     "account": {"version": "account-fp-v1", "key": "sha256:..."},
     "positions": {"version": "positions-fp-v1", "key": "sha256:..."},
-    "regime": {"version": "regime-fp-v1", "key": "sha256:..."},
-    "market_events": {"version": "market-events-fp-v1", "key": "sha256:..."}
+    "regime": {"version": "regime-fp-v2", "key": "sha256:..."},
+    "market_events": {"version": "market-events-fp-v2", "key": "sha256:..."}
   },
   "source_health": [
     {"source": "account", "status": "ok", "age_seconds": 15,
@@ -1773,7 +1779,9 @@ Field meanings:
 - `source_health[]` is the freshness/readiness surface for orchestration. During
   regular trading/pre-market, sources are expected to be fresh on a roughly
   five-minute cadence; outside trading, the max-age window is wider. Always
-  respect `status`, `confidence`, and `planner_readiness`.
+  respect `status`, `confidence`, and `planner_readiness`. Durable
+  `refresh_state`/`next_attempt` and redacted typed `last_failure` fields
+  describe retry/backoff and failure class without requiring prose parsing.
 - `market_indicators[]` lists each regime indicator with `green`, `amber`,
   `red`, `context`, or `n/a` status; context-only gamma is awareness evidence,
   not degraded input health.

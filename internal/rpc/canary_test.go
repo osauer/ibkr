@@ -87,7 +87,7 @@ func TestCanaryResultAllowsAbsentEstablishedProjectionForOlderDaemonSkew(t *test
 func validEstablishedAlertProjection() EstablishedAlertProjection {
 	return EstablishedAlertProjection{
 		SchemaVersion:        EstablishedAlertProjectionSchemaVersion,
-		CanonicalFingerprint: Fingerprint{Version: CanaryFingerprintVersion, Key: "sha256:" + strings.Repeat("a", 64)},
+		CanonicalFingerprint: Fingerprint{Version: EstablishedCanaryFingerprintVersion, Key: "sha256:" + strings.Repeat("a", 64)},
 		OccurrenceEligible:   true,
 		ActOnlyEligible:      true,
 		Action:               "confirm_inputs",

@@ -704,7 +704,7 @@ function buildSyntheticSnapshot() {
     flags: [],
     by_symbol: {},
     source_health: [sourceHealth("halt"), sourceHealth("reg_sho")],
-    fingerprint: fingerprint("market-events-fp-v1", "synthetic-market-events-quiet"),
+    fingerprint: fingerprint("market-events-fp-v2", "synthetic-market-events-quiet"),
     warning_details: [],
     not_execution: "Context only; no orders are placed.",
   };
@@ -856,7 +856,7 @@ function buildSyntheticSnapshot() {
     },
     regime: {
       as_of: asOf,
-      fingerprint: fingerprint("regime-fp-v1", "synthetic-regime-quiet"),
+      fingerprint: fingerprint("regime-fp-v2", "synthetic-regime-quiet"),
       lifecycle: {
         stage: "quiet",
         scope: "market",
@@ -870,7 +870,7 @@ function buildSyntheticSnapshot() {
         suppressed: [],
         rejected_by: [],
         governors: [],
-        fingerprint: fingerprint("regime-fp-v1", "synthetic-regime-quiet"),
+        fingerprint: fingerprint("regime-fp-v2", "synthetic-regime-quiet"),
         not_execution: "Regime read only; no orders are placed.",
       },
       summary: {
@@ -926,7 +926,7 @@ function buildSyntheticSnapshot() {
     canary: {
       as_of: asOf,
       source_as_of: { account: asOf, positions: asOf, regime: asOf, market_events: asOf },
-      fingerprint: fingerprint("canary-fp-v1", "synthetic-canary-quiet"),
+      fingerprint: fingerprint("canary-fp-v2", "synthetic-canary-quiet"),
       source_fingerprints: {},
       source_health: [sourceHealth("account"), sourceHealth("positions"), sourceHealth("regime"), sourceHealth("market_events")],
       policy: "synthetic-canary",

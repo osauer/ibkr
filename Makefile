@@ -56,7 +56,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check go-doc-check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-service-worker-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish registry-publish-verify-first release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-regen account-data-check hook-behavior-check agent-config-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check go-doc-check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-market-events-check app-service-worker-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish registry-publish-verify-first release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-regen account-data-check hook-behavior-check agent-config-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -105,7 +105,7 @@ restart-daemon: build ## Install + restart daemon, skipped when the binary is un
 
 APP_SMOKE_URL ?= http://127.0.0.1:8765
 APP_SMOKE_BROWSER ?= chromium
-app-check: app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-service-worker-check ## Fast SPA gate: JS syntax + static app contracts
+app-check: app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-market-events-check app-service-worker-check ## Fast SPA gate: JS syntax + static app contracts
 
 # Go embedding accepts arbitrary bytes: a syntax error in app.js or
 # service-worker.js still compiles, passes the substring-based contract
@@ -134,6 +134,10 @@ app-alert-unread-check: ## Execute shared unread, notification setting, and devi
 app-alert-inbox-v2-check: ## Execute the additive source-neutral Alert Inbox v2 shadow contract
 	@command -v node >/dev/null 2>&1 || { echo "app-alert-inbox-v2-check: node not found — this gate is binding, install Node.js" >&2; exit 1; }
 	node --test web/app/test/alert-inbox-v2.test.mjs
+
+app-market-events-check: ## Execute market-event exposure relevance contracts
+	@command -v node >/dev/null 2>&1 || { echo "app-market-events-check: node not found — this gate is binding, install Node.js" >&2; exit 1; }
+	node --test web/app/test/market-events.test.mjs
 
 app-service-worker-check: ## Execute service-worker payload and fixed-navigation contracts in a Node VM
 	@command -v node >/dev/null 2>&1 || { echo "app-service-worker-check: node not found — this gate is binding, install Node.js" >&2; exit 1; }
@@ -234,7 +238,7 @@ test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overla
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
 CHECK_JOBS ?= 8
-CHECK_TARGETS = $(CHECK_DEPS) agent-config-check modernize-check docs-check docs-html-check changelog-check account-data-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-service-worker-check remote-relay-check go-doc-check gofmt-check vet-check staticcheck-check govulncheck-check
+CHECK_TARGETS = $(CHECK_DEPS) agent-config-check modernize-check docs-check docs-html-check changelog-check account-data-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-market-events-check app-service-worker-check remote-relay-check go-doc-check gofmt-check vet-check staticcheck-check govulncheck-check
 CHECK_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(CHECK_JOBS),)
 check: ## agent config/hooks + Go docs/format/vet/staticcheck/vulns + modernize/plugin/parity/docs/changelog/account/app checks (binding pre-commit gate)
 	$(MAKE) $(CHECK_MAKEFLAGS) $(CHECK_TARGETS)

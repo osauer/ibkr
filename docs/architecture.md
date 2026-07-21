@@ -114,17 +114,19 @@ Not all market context arrives through TWS or Gateway.
 
 | Source | Runtime Path | Data |
 |---|---|---|
-| TWS / IB Gateway API socket | TWS wire protocol over TCP/TLS | Account, positions, quotes, option chains/Greeks/OI, historical bars, scanners, order lifecycle, shortable-share observations, and broker WhatIf/eligibility. |
+| TWS / IB Gateway API socket | TWS wire protocol over TCP/TLS | Account, positions, quotes, option chains/Greeks/OI, historical bars, scanners, order lifecycle, shortable-share observations, subscription-gated Wall Street Horizon earnings events, and broker WhatIf/eligibility. |
 | IBKR Flex Web Service | HTTPS POST and polling | Daily raw Flex XML statements used as broker statement truth for reconciliation. |
 | IBKR short-stock availability | FTP | Borrow availability and fee-rate evidence. |
-| Nasdaq | HTTPS JSON, pipe-delimited text, and RSS/XML | Earnings dates, Reg SHO threshold securities, LULD/trade-halt context. |
+| Nasdaq | HTTPS JSON, pipe-delimited text, and RSS/XML | One independent earnings-date input, Reg SHO threshold securities, and LULD/trade-halt context. |
 | FRED, CBOE, Federal Reserve, US Treasury | HTTPS CSV/XML | Public regime and rates series. |
 | Wikipedia S&P 500 list | Scheduled HTTPS refresh | Breadth constituent membership, with a validated SQLite projection and embedded fallback. |
 | Official exchange calendars | Embedded Go data | Handwritten build-time tables for US equities, US options, and Xetra, covering 2026 through 2028; a date outside coverage reports an explicit unknown state. There is no runtime calendar network call. |
 
-Market-event, contract-resolution, and membership projections plus retained
-observations live in `daemon.db`. Retry/backoff controls and other refreshable
-views stay in memory or use disposable scratch only.
+Market-event, earnings-provider, contract-resolution, and membership
+projections plus retained observations live in `daemon.db`. Borrow-fee and
+earnings attempts retain typed failure and retry state there so a restart
+cannot erase a failed source read. Other refreshable views stay in memory or
+use disposable scratch only.
 
 ## Data and Persistence
 

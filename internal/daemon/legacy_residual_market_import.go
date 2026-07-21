@@ -83,8 +83,8 @@ func preflightLegacyEarnings(manifest *legacyMarketImportManifest, path string) 
 	if err != nil || !ok {
 		return legacyMarketImportPlan{}, false, err
 	}
-	var env earningsPersistEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil || env.Version != earningsPersistVersion || env.Entries == nil {
+	var env earningsPersistEnvelopeV1
+	if err := json.Unmarshal(raw, &env); err != nil || env.Version != earningsLegacyVersion || env.Entries == nil {
 		return legacyMarketImportPlan{}, false, invalidLegacyArtifact(manifest, index, fmt.Errorf("invalid earnings envelope: decode=%v version=%d", err, env.Version))
 	}
 	var observedAt time.Time

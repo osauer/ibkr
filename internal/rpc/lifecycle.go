@@ -110,7 +110,86 @@ type SourceHealth struct {
 	// fetch failed and is waiting for its bounded retry.
 	RefreshState string     `json:"refresh_state,omitempty"`
 	NextAttempt  *time.Time `json:"next_attempt,omitempty"`
-	Notes        []string   `json:"notes,omitempty"`
+	// LastFailure is a redacted, allowlisted machine-readable failure. Raw
+	// transport, provider, and parser text must never cross the RPC boundary.
+	LastFailure *SourceFailure `json:"last_failure,omitempty"`
+	Notes       []string       `json:"notes,omitempty"`
+}
+
+// SourceFailure identifies where and how the most recent source attempt
+// failed without carrying untrusted upstream text. FailedAt and Retryable are
+// scheduling context; Code and Stage are stable semantic values suitable for
+// persistence, rendering, and fingerprints.
+type SourceFailure struct {
+	Code      string    `json:"code"`
+	Stage     string    `json:"stage"`
+	FailedAt  time.Time `json:"failed_at"`
+	Retryable bool      `json:"retryable"`
+}
+
+// Source-failure codes and stages are the allowlisted cross-surface vocabulary
+// for redacted transport, parser, provider, and authority failures.
+const (
+	SourceFailureTimeout                = "timeout"
+	SourceFailureDNSFailed              = "dns_failed"
+	SourceFailureConnectionRefused      = "connection_refused"
+	SourceFailureTransportFailed        = "transport_failed"
+	SourceFailureProtocolRejected       = "protocol_rejected"
+	SourceFailureAuthenticationRejected = "authentication_rejected"
+	SourceFailureInvalidPayload         = "invalid_payload"
+	SourceFailureAuthorityWriteFailed   = "authority_write_failed"
+	SourceFailureNotEntitled            = "not_entitled"
+	SourceFailureGatewayUnavailable     = "gateway_unavailable"
+
+	SourceFailureStageFTPControlConnect   = "ftp_control_connect"
+	SourceFailureStageFTPGreeting         = "ftp_greeting"
+	SourceFailureStageFTPAuthenticate     = "ftp_authenticate"
+	SourceFailureStageFTPPassiveNegotiate = "ftp_passive_negotiate"
+	SourceFailureStageFTPPassiveConnect   = "ftp_passive_connect"
+	SourceFailureStageFTPRetrieve         = "ftp_retrieve"
+	SourceFailureStageBorrowParse         = "borrow_parse"
+	SourceFailureStageNasdaqRequest       = "nasdaq_request"
+	SourceFailureStageNasdaqDecode        = "nasdaq_decode"
+	SourceFailureStageNasdaqSchema        = "nasdaq_schema"
+	SourceFailureStageWSHContractResolve  = "wsh_contract_resolve"
+	SourceFailureStageWSHMetadata         = "wsh_metadata"
+	SourceFailureStageWSHEvent            = "wsh_event"
+	SourceFailureStageWSHDecode           = "wsh_decode"
+	SourceFailureStageAuthorityPersist    = "authority_persist"
+)
+
+// ValidSourceFailure enforces the shared allowlist. Persistence and adapters
+// call this before accepting a failure so upstream prose cannot masquerade as
+// a typed code or stage.
+func ValidSourceFailure(f *SourceFailure) bool {
+	if f == nil {
+		return true
+	}
+	validCode := false
+	switch f.Code {
+	case SourceFailureTimeout, SourceFailureDNSFailed, SourceFailureConnectionRefused,
+		SourceFailureTransportFailed, SourceFailureProtocolRejected,
+		SourceFailureAuthenticationRejected, SourceFailureInvalidPayload,
+		SourceFailureAuthorityWriteFailed, SourceFailureNotEntitled,
+		SourceFailureGatewayUnavailable:
+		validCode = true
+	}
+	if !validCode {
+		return false
+	}
+	switch f.Stage {
+	case SourceFailureStageFTPControlConnect, SourceFailureStageFTPGreeting,
+		SourceFailureStageFTPAuthenticate, SourceFailureStageFTPPassiveNegotiate,
+		SourceFailureStageFTPPassiveConnect, SourceFailureStageFTPRetrieve,
+		SourceFailureStageBorrowParse, SourceFailureStageNasdaqRequest,
+		SourceFailureStageNasdaqDecode, SourceFailureStageNasdaqSchema,
+		SourceFailureStageWSHContractResolve, SourceFailureStageWSHMetadata,
+		SourceFailureStageWSHEvent, SourceFailureStageWSHDecode,
+		SourceFailureStageAuthorityPersist:
+		return true
+	default:
+		return false
+	}
 }
 
 // Source-refresh states describe scheduler progress separately from the

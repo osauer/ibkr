@@ -129,6 +129,23 @@ func TestMarketEventsFingerprintTracksSemanticFlagsOnly(t *testing.T) {
 	if BuildMarketEventsFingerprint(&changedStatus) == first {
 		t.Fatal("fingerprint did not change when flag status changed")
 	}
+
+	failed := base
+	failed.SourceHealth = slices.Clone(base.SourceHealth)
+	failed.SourceHealth[0].Status = SourceStatusUnknown
+	failed.SourceHealth[0].LastFailure = &SourceFailure{Code: SourceFailureTimeout, Stage: SourceFailureStageFTPControlConnect, FailedAt: now, Retryable: true}
+	failedFP := BuildMarketEventsFingerprint(&failed)
+	if failedFP == first {
+		t.Fatal("fingerprint did not change when typed source failure appeared")
+	}
+	retried := failed
+	retried.SourceHealth = slices.Clone(failed.SourceHealth)
+	retriedFailure := *failed.SourceHealth[0].LastFailure
+	retriedFailure.FailedAt = now.Add(time.Minute)
+	retried.SourceHealth[0].LastFailure = &retriedFailure
+	if got := BuildMarketEventsFingerprint(&retried); got != failedFP {
+		t.Fatalf("fingerprint changed on failure timestamp only: %v != %v", got, failedFP)
+	}
 }
 
 // eligibleRedMeta is a red row whose evidence passed the confirmation gates

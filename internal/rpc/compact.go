@@ -82,13 +82,14 @@ type RegimeMonitorResult struct {
 // CompactSourceHealth retains the status, reason, and freshness needed to
 // interpret a compact result without raw upstream detail.
 type CompactSourceHealth struct {
-	Source       string     `json:"source"`
-	Status       string     `json:"status"`
-	AsOf         time.Time  `json:"as_of,omitzero"`
-	Confidence   string     `json:"confidence,omitempty"`
-	RefreshState string     `json:"refresh_state,omitempty"`
-	NextAttempt  *time.Time `json:"next_attempt,omitempty"`
-	Notes        []string   `json:"notes,omitempty"`
+	Source       string         `json:"source"`
+	Status       string         `json:"status"`
+	AsOf         time.Time      `json:"as_of,omitzero"`
+	Confidence   string         `json:"confidence,omitempty"`
+	RefreshState string         `json:"refresh_state,omitempty"`
+	NextAttempt  *time.Time     `json:"next_attempt,omitempty"`
+	LastFailure  *SourceFailure `json:"last_failure,omitempty"`
+	Notes        []string       `json:"notes,omitempty"`
 }
 
 // RegimeMonitorIndicator is a compact indicator reading and its data quality.
@@ -286,10 +287,19 @@ func compactSourceHealth(in []SourceHealth) []CompactSourceHealth {
 			Confidence:   src.Confidence,
 			RefreshState: src.RefreshState,
 			NextAttempt:  src.NextAttempt,
+			LastFailure:  cloneSourceFailure(src.LastFailure),
 			Notes:        src.Notes,
 		})
 	}
 	return out
+}
+
+func cloneSourceFailure(in *SourceFailure) *SourceFailure {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func optionHealthAndFlaggedLegs(p PositionsResult, maxLegs int) (OptionHealthSummary, []OptionRiskLegSummary) {

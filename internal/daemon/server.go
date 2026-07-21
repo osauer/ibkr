@@ -628,7 +628,11 @@ func (s *Server) installEarningsCache() {
 		s.logger.Warnf("earnings cache: resolve dir: %v (persistence disabled)", err)
 		dir = ""
 	}
-	s.earnings = newEarningsCacheCold(dir, s.logger.Warnf)
+	cache := newEarningsCacheCold(dir, s.logger.Warnf)
+	if err := cache.setSecondaryProvider(earningsWSHProvider, s.fetchWSHEarningsProvider); err != nil {
+		s.logger.Warnf("earnings cache: install IBKR WSH provider: %v", err)
+	}
+	s.earnings = cache
 }
 
 // installGammaZeroCache replaces the bootstrap in-memory gamma cache

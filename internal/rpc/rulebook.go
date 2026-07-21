@@ -35,12 +35,46 @@ type EarningsInfo struct {
 	TimeOfDay string `json:"time_of_day,omitempty"`
 	// Estimated marks provider-flagged estimated (unconfirmed) dates.
 	Estimated bool `json:"estimated,omitempty"`
-	// Source is fetched | override | unknown.
+	// Source is fetched | override | unknown. Provider-level provenance lives
+	// in Providers so existing clients do not have to infer agreement.
 	Source string `json:"source"`
+	// Status is date or a typed unresolved outcome. Conflicting provider
+	// dates never populate Date.
+	Status string `json:"status,omitempty"`
+	// Reason is a stable aggregate explanation such as single_source or
+	// conflicting_sources; it never contains provider free text.
+	Reason string `json:"reason,omitempty"`
 	// ObservedAt is when the fetched value was last confirmed from the
 	// provider; zero for overrides and unknowns.
-	ObservedAt time.Time `json:"observed_at,omitzero"`
-	Stale      bool      `json:"stale,omitempty"`
+	ObservedAt time.Time              `json:"observed_at,omitzero"`
+	Stale      bool                   `json:"stale,omitempty"`
+	Providers  []EarningsProviderInfo `json:"providers,omitempty"`
+}
+
+// Earnings statuses are the closed aggregate/provider outcome vocabulary.
+const (
+	EarningsStatusDate                = "date"
+	EarningsStatusNoDatePublished     = "no_date_published"
+	EarningsStatusUnsupportedSecurity = "unsupported_security"
+	EarningsStatusFormatChange        = "format_change"
+	EarningsStatusTransportFailure    = "transport_failure"
+	EarningsStatusConflictingSources  = "conflicting_sources"
+)
+
+// EarningsProviderInfo is one provider's latest typed outcome. A transport
+// failure may coexist with a retained LastGoodDate, but Date is populated only
+// when the latest attempt itself returned a usable date.
+type EarningsProviderInfo struct {
+	Provider     string         `json:"provider"`
+	Status       string         `json:"status"`
+	Date         string         `json:"date,omitempty"`
+	TimeOfDay    string         `json:"time_of_day,omitempty"`
+	Estimated    bool           `json:"estimated,omitempty"`
+	ObservedAt   time.Time      `json:"observed_at,omitzero"`
+	AttemptedAt  time.Time      `json:"attempted_at,omitzero"`
+	NextAttempt  *time.Time     `json:"next_attempt,omitempty"`
+	LastGoodDate string         `json:"last_good_date,omitempty"`
+	LastFailure  *SourceFailure `json:"last_failure,omitempty"`
 }
 
 // RulesResult is the rules.snapshot payload. Rows come from the pure

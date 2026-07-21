@@ -2,9 +2,12 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -12,6 +15,7 @@ import (
 
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -153,6 +157,48 @@ func TestParseIBKRBorrowFeesAndEmitExtremeFlag(t *testing.T) {
 	}
 }
 
+func TestParseIBKRBorrowFeesRejectsMalformedEnvelopes(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"missing BOF": strings.Join([]string{
+			"#SYM|CUR|NAME|CON|ISIN|REBATERATE|FEERATE|AVAILABLE|",
+			"CRWV|USD|COREWEAVE INC|123|US0000000001|-70|75|1500|",
+		}, "\n"),
+		"invalid BOF": strings.Join([]string{
+			"#BOF|not-a-date|not-a-time",
+			"#SYM|CUR|NAME|CON|ISIN|REBATERATE|FEERATE|AVAILABLE|",
+			"CRWV|USD|COREWEAVE INC|123|US0000000001|-70|75|1500|",
+		}, "\n"),
+		"missing header": strings.Join([]string{
+			"#BOF|2026.06.06|11:45:03",
+			"CRWV|USD|COREWEAVE INC|123|US0000000001|-70|75|1500|",
+		}, "\n"),
+		"invalid header": strings.Join([]string{
+			"#BOF|2026.06.06|11:45:03",
+			"#SYM|CUR|NAME|CON|ISIN|REBATERATE|CHANGED|AVAILABLE|",
+			"CRWV|USD|COREWEAVE INC|123|US0000000001|-70|75|1500|",
+		}, "\n"),
+		"zero usable rows": strings.Join([]string{
+			"#BOF|2026.06.06|11:45:03",
+			"#SYM|CUR|NAME|CON|ISIN|REBATERATE|FEERATE|AVAILABLE|",
+			"CRWV|USD|COREWEAVE INC|123|US0000000001|-70|not-a-fee|1500|",
+		}, "\n"),
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseIBKRBorrowFees(strings.NewReader(raw))
+			var sourceErr *borrowFeeFetchError
+			if !errors.As(err, &sourceErr) {
+				t.Fatalf("error=%v, want typed borrow-fee failure", err)
+			}
+			if sourceErr.code != rpc.SourceFailureInvalidPayload || sourceErr.stage != rpc.SourceFailureStageBorrowParse {
+				t.Fatalf("typed failure=%+v", sourceErr)
+			}
+		})
+	}
+}
+
 func TestFTPPassiveAddrRejectsOutOfRangeParts(t *testing.T) {
 	t.Parallel()
 
@@ -214,6 +260,7 @@ func TestMarketEventBorrowFeeStaleCacheFallback(t *testing.T) {
 	cache.borrowFees = marketEventBorrowFeeEntry{
 		FetchedAt: now.Add(-marketEventsBorrowFeeFreshFor - time.Minute),
 		AsOf:      now.Add(-marketEventsBorrowFeeFreshFor - time.Minute),
+		SourceURL: "ftp://ftp3.interactivebrokers.com/usa.txt",
 		Symbols:   map[string]marketEventBorrowFeeRecord{"CRWV": {Symbol: "CRWV", FeeRate: 65}},
 	}
 	orig := fetchIBKRBorrowFees
@@ -410,8 +457,9 @@ func TestMarketEventBorrowFeeFailureMemory(t *testing.T) {
 	fetchIBKRBorrowFees = func(context.Context) (marketEventBorrowFeeEntry, error) {
 		fetchCalls++
 		return marketEventBorrowFeeEntry{
-			AsOf:    now,
-			Symbols: map[string]marketEventBorrowFeeRecord{"CRWV": {Symbol: "CRWV", FeeRate: 65}},
+			AsOf:      now.Add(marketEventsBorrowFeeRetryAfter + time.Minute),
+			SourceURL: "ftp://ftp3.interactivebrokers.com/usa.txt",
+			Symbols:   map[string]marketEventBorrowFeeRecord{"CRWV": {Symbol: "CRWV", FeeRate: 65}},
 		}, nil
 	}
 	past := now.Add(marketEventsBorrowFeeRetryAfter + time.Minute)
@@ -421,8 +469,8 @@ func TestMarketEventBorrowFeeFailureMemory(t *testing.T) {
 	if fetchCalls != 2 {
 		t.Fatalf("recovery: fetch ran %d times, want 2", fetchCalls)
 	}
-	if !cache.borrowFeesFailedAt.IsZero() {
-		t.Fatal("success should clear the failure memory")
+	if cache.borrowFeesLastAttempt == nil || cache.borrowFeesLastAttempt.Outcome != marketEventBorrowFeeOutcomeSuccess || cache.borrowFeesLastAttempt.Failure != nil {
+		t.Fatalf("success should supersede failure memory: %+v", cache.borrowFeesLastAttempt)
 	}
 
 	// Stale-cache variant: a later failure serves the cached list
@@ -443,6 +491,276 @@ func TestMarketEventBorrowFeeFailureMemory(t *testing.T) {
 	}
 	if fetchCalls != 3 {
 		t.Fatalf("suppressed stale fallback must not re-fetch: fetch ran %d times", fetchCalls)
+	}
+}
+
+func TestMarketEventBorrowFeeFreshnessUsesProviderAsOf(t *testing.T) {
+	now := time.Date(2026, 6, 8, 16, 0, 0, 0, time.UTC)
+	cache := newMarketEventCache(func() time.Time { return now })
+	cache.borrowFees = marketEventBorrowFeeEntry{
+		FetchedAt: now,
+		AsOf:      now.Add(-marketEventsBorrowFeeFreshFor - time.Minute),
+		SourceURL: "ftp://ftp3.interactivebrokers.com/usa.txt",
+		Symbols:   map[string]marketEventBorrowFeeRecord{"CRWV": {Symbol: "CRWV", FeeRate: 65}},
+	}
+	var fetchCalls int
+	orig := fetchIBKRBorrowFees
+	fetchIBKRBorrowFees = func(context.Context) (marketEventBorrowFeeEntry, error) {
+		fetchCalls++
+		return marketEventBorrowFeeEntry{
+			AsOf: now, SourceURL: "ftp://ftp3.interactivebrokers.com/usa.txt",
+			Symbols: map[string]marketEventBorrowFeeRecord{"CRWV": {Symbol: "CRWV", FeeRate: 65}},
+		}, nil
+	}
+	t.Cleanup(func() { fetchIBKRBorrowFees = orig })
+
+	_, health, err := cache.loadBorrowFees(context.Background(), now)
+	if err != nil || fetchCalls != 1 || health.Status != rpc.SourceStatusOK {
+		t.Fatalf("provider-age refresh calls=%d health=%+v err=%v", fetchCalls, health, err)
+	}
+}
+
+func TestMarketEventBorrowFeeFailurePersistsAcrossRestartAndSuccessSupersedes(t *testing.T) {
+	authority := openMarketTestCoreStore(t)
+	failedAt := time.Date(2026, 6, 8, 16, 0, 0, 0, time.UTC)
+	cache := newMarketEventCache(func() time.Time { return failedAt })
+	if err := cache.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+
+	var fetchCalls int
+	orig := fetchIBKRBorrowFees
+	fetchIBKRBorrowFees = func(context.Context) (marketEventBorrowFeeEntry, error) {
+		fetchCalls++
+		return marketEventBorrowFeeEntry{}, newBorrowFeeFetchError(rpc.SourceFailureTimeout, rpc.SourceFailureStageFTPControlConnect, true)
+	}
+	t.Cleanup(func() { fetchIBKRBorrowFees = orig })
+
+	_, health, err := cache.loadBorrowFees(context.Background(), failedAt)
+	if err == nil || fetchCalls != 1 || health.LastFailure == nil {
+		t.Fatalf("first failure calls=%d health=%+v err=%v", fetchCalls, health, err)
+	}
+	if health.LastFailure.Code != rpc.SourceFailureTimeout || health.LastFailure.Stage != rpc.SourceFailureStageFTPControlConnect || !health.LastFailure.Retryable {
+		t.Fatalf("typed failure=%+v", health.LastFailure)
+	}
+	if strings.Contains(strings.Join(health.Notes, " "), "dial tcp") {
+		t.Fatalf("raw transport text crossed health boundary: %+v", health.Notes)
+	}
+
+	failureObservation, ok, err := authority.LatestObservation(context.Background(), marketEventBorrowFeesScope, marketEventBorrowFeesSource, marketEventBorrowFeesObservationKind)
+	if err != nil || !ok {
+		t.Fatalf("failure observation ok=%v err=%v", ok, err)
+	}
+	if strings.Contains(string(failureObservation.Payload), "dial tcp") {
+		t.Fatalf("raw transport text persisted: %s", failureObservation.Payload)
+	}
+	var outcome marketEventBorrowFeeOutcome
+	if err := json.Unmarshal(failureObservation.Payload, &outcome); err != nil {
+		t.Fatalf("decode failure outcome: %v", err)
+	}
+	if outcome.Attempt.Failure == nil || outcome.Attempt.Failure.Code != rpc.SourceFailureTimeout {
+		t.Fatalf("persisted failure outcome=%+v", outcome)
+	}
+
+	within := failedAt.Add(time.Minute)
+	restarted := newMarketEventCache(func() time.Time { return within })
+	if err := restarted.UseCoreStore(authority); err != nil {
+		t.Fatalf("restart UseCoreStore: %v", err)
+	}
+	_, health, err = restarted.loadBorrowFees(context.Background(), within)
+	if err == nil || fetchCalls != 1 || health.RefreshState != rpc.SourceRefreshFetchFailedBackoff || health.LastFailure == nil {
+		t.Fatalf("restart backoff calls=%d health=%+v err=%v", fetchCalls, health, err)
+	}
+
+	recoveredAt := failedAt.Add(marketEventsBorrowFeeRetryAfter + time.Minute)
+	fetchIBKRBorrowFees = func(context.Context) (marketEventBorrowFeeEntry, error) {
+		fetchCalls++
+		return marketEventBorrowFeeEntry{
+			AsOf: recoveredAt, SourceURL: "ftp://ftp3.interactivebrokers.com/usa.txt",
+			Symbols: map[string]marketEventBorrowFeeRecord{"CRWV": {Symbol: "CRWV", FeeRate: 65, Available: 1500}},
+		}, nil
+	}
+	entry, health, err := restarted.loadBorrowFees(context.Background(), recoveredAt)
+	if err != nil || fetchCalls != 2 || len(entry.Symbols) != 1 || health.LastFailure != nil || health.Status != rpc.SourceStatusOK {
+		t.Fatalf("recovery calls=%d entry=%+v health=%+v err=%v", fetchCalls, entry, health, err)
+	}
+
+	observations, err := authority.ListObservations(context.Background(), corestore.ObservationQuery{
+		ScopeKey: marketEventBorrowFeesScope, Source: marketEventBorrowFeesSource, Kind: marketEventBorrowFeesObservationKind,
+	})
+	if err != nil || len(observations) != 2 {
+		t.Fatalf("fetch outcome observations=%d err=%v", len(observations), err)
+	}
+	doc, ok, err := authority.GetStateDocument(context.Background(), marketEventBorrowFeesScope, marketEventBorrowFeesStateKind)
+	if err != nil || !ok {
+		t.Fatalf("borrow-fee state ok=%v err=%v", ok, err)
+	}
+	var state marketEventBorrowFeesState
+	if err := decodeStrictMarketEventJSON(doc.JSON, &state); err != nil {
+		t.Fatalf("decode recovered state: %v", err)
+	}
+	if state.Version != marketEventBorrowFeesStateVersion || state.LastAttempt == nil || state.LastAttempt.Outcome != marketEventBorrowFeeOutcomeSuccess || state.LastAttempt.Failure != nil {
+		t.Fatalf("success did not supersede failure: %+v", state)
+	}
+
+	afterRestart := newMarketEventCache(func() time.Time { return recoveredAt.Add(time.Minute) })
+	if err := afterRestart.UseCoreStore(authority); err != nil {
+		t.Fatalf("post-recovery restart UseCoreStore: %v", err)
+	}
+	_, health, err = afterRestart.loadBorrowFees(context.Background(), recoveredAt.Add(time.Minute))
+	if err != nil || fetchCalls != 2 || health.LastFailure != nil || health.Status != rpc.SourceStatusOK {
+		t.Fatalf("post-recovery restart calls=%d health=%+v err=%v", fetchCalls, health, err)
+	}
+}
+
+func TestMarketEventBorrowFeeDownloadParseSQLiteReopenRecovery(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("secure test corestore dir: %v", err)
+	}
+	path := filepath.Join(dir, "daemon.db")
+	authority, err := corestore.Open(context.Background(), corestore.Options{Path: path})
+	if err != nil {
+		t.Fatalf("open corestore: %v", err)
+	}
+	authorityOpen := true
+	t.Cleanup(func() {
+		if authorityOpen {
+			_ = authority.Close()
+		}
+	})
+
+	now := time.Date(2026, 6, 8, 16, 1, 0, 0, time.UTC)
+	cache := newMarketEventCache(func() time.Time { return now })
+	if err := cache.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	raw := strings.Join([]string{
+		"#BOF|2026.06.08|12:00:00",
+		"#SYM|CUR|NAME|CON|ISIN|REBATERATE|FEERATE|AVAILABLE|",
+		"CRWV|USD|COREWEAVE INC|123456789|US0000000001|-70.2500|75.2500|1500|",
+		"MSFT|USD|MICROSOFT CORP|272093|US5949181045|4.7500|0.2500|8000000|",
+	}, "\n")
+	var fetchCalls int
+	orig := fetchIBKRBorrowFees
+	fetchIBKRBorrowFees = func(context.Context) (marketEventBorrowFeeEntry, error) {
+		fetchCalls++
+		return parseIBKRBorrowFeeDownload(raw, "ftp://ftp3.interactivebrokers.com/usa.txt")
+	}
+	t.Cleanup(func() { fetchIBKRBorrowFees = orig })
+
+	entry, health, err := cache.loadBorrowFees(context.Background(), now)
+	if err != nil || fetchCalls != 1 || len(entry.Symbols) != 2 || health.Status != rpc.SourceStatusOK {
+		t.Fatalf("download/parse/persist calls=%d entry=%+v health=%+v err=%v", fetchCalls, entry, health, err)
+	}
+	if entry.AsOf != time.Date(2026, 6, 8, 16, 0, 0, 0, time.UTC) {
+		t.Fatalf("provider as_of=%s", entry.AsOf)
+	}
+	if _, ok, err := authority.LatestObservation(context.Background(), marketEventBorrowFeesScope, marketEventBorrowFeesSource, marketEventBorrowFeesObservationKind); err != nil || !ok {
+		t.Fatalf("fetch outcome observation ok=%v err=%v", ok, err)
+	}
+	if err := authority.Close(); err != nil {
+		t.Fatalf("close corestore: %v", err)
+	}
+	authorityOpen = false
+
+	reopened, err := corestore.Open(context.Background(), corestore.Options{Path: path})
+	if err != nil {
+		t.Fatalf("reopen corestore: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	afterRestart := newMarketEventCache(func() time.Time { return now.Add(2 * time.Minute) })
+	if err := afterRestart.UseCoreStore(reopened); err != nil {
+		t.Fatalf("restart UseCoreStore: %v", err)
+	}
+	recovered, health, err := afterRestart.loadBorrowFees(context.Background(), now.Add(2*time.Minute))
+	if err != nil || fetchCalls != 1 || len(recovered.Symbols) != 2 || health.Status != rpc.SourceStatusOK || health.LastFailure != nil {
+		t.Fatalf("restart recovery calls=%d entry=%+v health=%+v err=%v", fetchCalls, recovered, health, err)
+	}
+}
+
+func TestMarketEventBorrowFeeDoesNotPublishMemoryWhenAuthorityCommitFails(t *testing.T) {
+	authority := openMarketTestCoreStore(t)
+	now := time.Date(2026, 6, 8, 16, 0, 0, 0, time.UTC)
+	cache := newMarketEventCache(func() time.Time { return now })
+	if err := cache.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	old := marketEventBorrowFeeEntry{
+		FetchedAt: now.Add(-time.Hour), AsOf: now.Add(-time.Hour), SourceURL: "ftp://ftp3.interactivebrokers.com/usa.txt",
+		Symbols: map[string]marketEventBorrowFeeRecord{"OLD": {Symbol: "OLD", FeeRate: 65, Available: 10}},
+	}
+	if err := cache.persistBorrowFees(context.Background(), old); err != nil {
+		t.Fatalf("persist initial last-good: %v", err)
+	}
+	orig := fetchIBKRBorrowFees
+	fetchIBKRBorrowFees = func(context.Context) (marketEventBorrowFeeEntry, error) {
+		return marketEventBorrowFeeEntry{
+			AsOf: now, SourceURL: "ftp://ftp3.interactivebrokers.com/usa.txt",
+			Symbols: map[string]marketEventBorrowFeeRecord{"NEW": {Symbol: "NEW", FeeRate: 75, Available: 20}},
+		}, nil
+	}
+	t.Cleanup(func() { fetchIBKRBorrowFees = orig })
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	entry, health, err := cache.loadBorrowFees(canceled, now)
+	if err != nil {
+		t.Fatalf("stale last-good fallback should remain usable: %v", err)
+	}
+	if health.LastFailure == nil || health.LastFailure.Code != rpc.SourceFailureAuthorityWriteFailed || health.LastFailure.Stage != rpc.SourceFailureStageAuthorityPersist {
+		t.Fatalf("authority failure health=%+v", health)
+	}
+	if _, ok := entry.Symbols["OLD"]; !ok {
+		t.Fatalf("returned last-good was replaced before commit: %+v", entry.Symbols)
+	}
+	if _, ok := cache.borrowFees.Symbols["OLD"]; !ok {
+		t.Fatalf("memory was replaced before commit: %+v", cache.borrowFees.Symbols)
+	}
+	if _, ok := cache.borrowFees.Symbols["NEW"]; ok {
+		t.Fatalf("uncommitted entry leaked into memory: %+v", cache.borrowFees.Symbols)
+	}
+	observations, err := authority.ListObservations(context.Background(), corestore.ObservationQuery{
+		ScopeKey: marketEventBorrowFeesScope, Source: marketEventBorrowFeesSource, Kind: marketEventBorrowFeesObservationKind,
+	})
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("failed commit appended an observation: count=%d err=%v", len(observations), err)
+	}
+}
+
+func TestMarketEventBorrowFeeAuthorityMigratesV1InPlace(t *testing.T) {
+	authority := openMarketTestCoreStore(t)
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	legacy := marketEventBorrowFeesStateV1{Version: marketEventStateVersion, Entry: marketEventBorrowFeeEntry{
+		FetchedAt: now, AsOf: now.Add(-time.Minute), SourceURL: "ftp://ftp3.interactivebrokers.com/usa.txt",
+		Symbols: map[string]marketEventBorrowFeeRecord{"CRWV": {Symbol: "CRWV", FeeRate: 65, Available: 1500}},
+	}}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeMalformedMarketState(t, authority, marketEventBorrowFeesScope, marketEventBorrowFeesStateKind, raw)
+
+	cache := newMarketEventCache(func() time.Time { return now })
+	if err := cache.UseCoreStore(authority); err != nil {
+		t.Fatalf("migrate v1 borrow-fee authority: %v", err)
+	}
+	if _, ok := cache.borrowFees.Symbols["CRWV"]; !ok {
+		t.Fatalf("migrated last-good missing: %+v", cache.borrowFees)
+	}
+	doc, ok, err := authority.GetStateDocument(context.Background(), marketEventBorrowFeesScope, marketEventBorrowFeesStateKind)
+	if err != nil || !ok {
+		t.Fatalf("migrated document ok=%v err=%v", ok, err)
+	}
+	var state marketEventBorrowFeesState
+	if err := decodeStrictMarketEventJSON(doc.JSON, &state); err != nil {
+		t.Fatalf("decode migrated state: %v", err)
+	}
+	if state.Version != marketEventBorrowFeesStateVersion || state.LastGood == nil || state.LastAttempt != nil {
+		t.Fatalf("migrated state=%+v", state)
+	}
+	if _, ok, err := authority.LatestObservation(context.Background(), marketEventBorrowFeesScope, marketEventBorrowFeesSource, marketEventBorrowFeesObservationKind); err != nil || ok {
+		t.Fatalf("schema-only migration must not invent a fetch observation: ok=%v err=%v", ok, err)
 	}
 }
 
@@ -547,8 +865,11 @@ func TestMarketEventSQLitePersistsNormalizedSnapshotsAndRestarts(t *testing.T) {
 	if _, ok := restarted.borrowFees.Symbols["CRWV"]; !ok {
 		t.Fatalf("borrow-fee state did not survive restart: %+v", restarted.borrowFees)
 	}
-	if restarted.shortableAbsent != nil || !restarted.regSHOFailedAt.IsZero() || !restarted.haltsFailedAt.IsZero() || !restarted.borrowFeesFailedAt.IsZero() {
+	if restarted.shortableAbsent != nil || !restarted.regSHOFailedAt.IsZero() || !restarted.haltsFailedAt.IsZero() {
 		t.Fatal("ephemeral retry/absence state should not persist")
+	}
+	if restarted.borrowFeesLastAttempt == nil || restarted.borrowFeesLastAttempt.Outcome != marketEventBorrowFeeOutcomeSuccess {
+		t.Fatalf("borrow-fee success attempt did not survive restart: %+v", restarted.borrowFeesLastAttempt)
 	}
 }
 

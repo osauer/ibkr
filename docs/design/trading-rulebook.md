@@ -68,6 +68,10 @@ never drifts into contradiction:
 2. Enforcement: advisory + preview causes. No hard blocks in v1.
 3. SPA: compact card on the overview + drill-in. No new tab.
 4. Hook: read-only `ibkr orders` allowlisted explicitly (see Hook section).
+5. Amendment (2026-07-21): earnings resolution combines Nasdaq with the
+   subscription-gated IBKR Wall Street Horizon feed. Provider outcomes remain
+   independent; conflicting published dates are `unknown`, and an override is
+   still the only operator-authored authority.
 
 ## The 14 rules
 
@@ -141,7 +145,7 @@ Semantics notes:
   `not_evaluated` with reason `no_stock_leg_tape`. Off-session:
   `not_evaluated`.
 - Rules 6/7/8 report `unknown` when the earnings date is unknown or stale
-  (staleness threshold in policy). Estimated dates (Nasdaq flags these)
+  (staleness threshold in policy). Provider-flagged estimated dates
   evaluate normally but evidence discloses `estimated`; manual overrides are
   authoritative. Comparisons are computed in ET with `time_of_day`: AMC
   earnings on an option's expiry day do NOT breach rule 7 (the option dies
@@ -234,6 +238,8 @@ internal/daemon/rulebook.go       input assembly, rules.snapshot handler,
 internal/daemon/rulebook_regime_stage.go
                                   regime stage bucket/latch/persist/kick
 internal/daemon/earnings_cache.go async fetch + LKG cache (fx_cache mirror)
+internal/daemon/earnings_wsh.go   typed IBKR WSH adapter + strict event parser
+pkg/ibkr/wsh.go                   serialized read-only WSH wire protocol
 internal/rpc/rulebook.go          MethodRulesSnapshot, RulesResult, RuleRow
 internal/cli/rules.go             `ibkr rules` renderer
 internal/mcp/tools.go             ibkr_rules tool
@@ -250,23 +256,26 @@ web/app/*                         rules card + drill-in
 - Evaluation is stateless and on-demand; the pure core lives in
   `internal/risk` with table tests. No new scheduler for evaluation.
 - **Earnings fetches are strictly off the snapshot path.** `rules.snapshot`
-  only observes cache staleness and kicks an async refresher: bounded
-  concurrency (≤4), ~3s per-fetch budget, per-symbol failure memory with
-  retry-after (borrow-fee pattern), LKG served meanwhile, rows `unknown`/
-  `stale` until data lands. Endpoint spike (2026-07-07, empirical):
+  only observes cache state and kicks an async refresher: bounded concurrency
+  (≤4), an 8s provider budget, and durable per-provider outcome/backoff state.
+  Transport failure alone may retain a last-good date as stale; an explicit
+  no-date, unsupported-security, schema change, or provider conflict cannot
+  hide behind LKG. Nasdaq endpoint spike (2026-07-07, empirical):
   `Go-http-client/1.1` is reset at connection level by api.nasdaq.com
   (exit 000 in 0.17s); a browser-identifying UA with `Accept:
   application/json` returns 200 in ~2–3s. The fetcher therefore sends a
   browser-style UA — a deliberate, documented choice, not the spx-fetcher
-  convention. Strict parser against recorded fixtures; any ambiguity →
-  `unknown` + source degradation, never a guessed date. Symbol mapping is an
-  explicit tested function (IBKR `BRK B` → Nasdaq `BRK.B`); non-US listings
-  are out of Nasdaq coverage and stay `unknown` unless overridden — for this
-  book that means EUR names; the drill-in shows per-name source
-  (`fetched | estimated | override | unknown`) via `RulesResult.Earnings[]`.
-- Persistence: daemon.db current state plus immutable earnings observations,
-  shaped as `{version, entries: {SYM: {date, time_of_day, estimated,
-  observed_at, source}}}`, fresh 24h, TTL 45d, 1/min throttled flush.
+  convention. Both provider parsers are strict; any ambiguity becomes a typed
+  unknown plus source degradation, never a guessed date. Nasdaq symbol mapping
+  is an explicit tested function (IBKR `BRK B` → Nasdaq `BRK.B`). IBKR WSH is
+  requested through serialized metadata/event reads and requires the account's
+  WSH research entitlement. Matching dates form consensus; differing dates or
+  incompatible published session halves remain `conflicting_sources`.
+- Persistence: daemon.db v2 current state plus immutable provider-outcome
+  observations. Each symbol stores aggregate resolution and per-provider
+  latest attempt, next retry, typed redacted failure, and last-good value.
+  State and outcome observations commit atomically before memory publication;
+  the provider fresh window is 24h and the retained-date TTL is 45d.
   Manual override `features.rulebook.earnings_overrides` (map sym →
   YYYY-MM-DD or YYYY-MM-DDTamc/bmo, `null` clears) wins over fetch;
   platform-settings contract (access/source/reason) applies.
@@ -300,7 +309,7 @@ web/app/*                         rules card + drill-in
 |---|---|---|---|---|
 | Rule thresholds | rulebook policy (embedded; TOML planned) × latched regime stage for rules 3/4/12 | `RulesResult.PolicyFingerprint` | all | embedded `rulebook-v2`; stage carried/never-seen ⇒ worse-of/calm with disclosure |
 | Rule verdicts | daemon `rules.snapshot` | `RulesResult.Rules []RuleRow` | CLI/MCP/SPA render only | per-row `unknown`/`not_evaluated`, result-level InputHealth |
-| Earnings dates | daemon earnings cache (fetch ∪ override) | `RulesResult.Earnings[]` | same | `unknown`; stale flagged; per-name source shown |
+| Earnings dates | daemon multi-provider earnings resolution ∪ authoritative override | `RulesResult.Earnings[]` with provider outcomes | same | typed `unknown`; conflicting dates have no usable date; stale LKG flagged |
 | Preview causes | daemon preview handler (cached eval ≤45s) | `Warnings[].Code = rule_*`, `Scope = rulebook` | order preview surfaces | absent when rules disabled/stale beyond TTL |
 | Feature toggle + overrides | platform settings (runtime) | `features.rulebook.*` | settings surfaces + SPA | defaults on |
 

@@ -1,4 +1,5 @@
 import { canaryProtectionCoverageFor, protectionCoverageBaseCurrency, protectionCoverageHasData, protectionCoverageHeadline, protectionCoverageLargestText, protectionCoverageStaleText } from "./protection-coverage.js";
+import { unknownEventRuleNote } from "./earnings-relevance.js";
 import { $, cleanDetail, firstNumber, labelize, normalizeSymbol, numberRead, parseDate, pct, quoteTimestamp, renderFreshnessTimestamp, shortTimeWithZone, signedClass, signedPct } from "./shared.js";
 import { state } from "./state.js";
 
@@ -71,24 +72,6 @@ function renderRulesCard(rules) {
   if (state.rulesDetailOpen) {
     renderRulesGrid(rules, order);
   }
-}
-
-// unknownEventRuleNote cross-links live held-name events to the rules that
-// govern them: upcoming earnings with the earnings rules unknown is exactly
-// the moment a silent "unknown" costs the most, so it gets named out loud.
-// Display-only — the daemon's verdicts and ranking stay authoritative.
-function unknownEventRuleNote(rules) {
-  const governing = { earnings_size_freeze: true, overwrite_earnings: true };
-  const unknownRules = (rules.rules || [])
-    .filter((r) => governing[r.id] && r.status === "unknown")
-    .map((r) => (r.number ? `rule ${r.number} (${r.title || labelize(r.id || "")})` : labelize(r.id || "")));
-  if (unknownRules.length === 0) return "";
-  const upcoming = (rules.earnings || [])
-    .filter((e) => e.date && e.source !== "unknown")
-    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
-    .map((e) => `${normalizeSymbol(e.symbol)} ${e.date}`);
-  if (upcoming.length === 0) return "";
-  return `Earnings ahead (${upcoming.join(" · ")}) while ${unknownRules.join(" and ")} ${unknownRules.length === 1 ? "is" : "are"} unknown — the freeze cannot be confirmed.`;
 }
 
 function renderRulesGrid(rules, order) {
@@ -1340,4 +1323,4 @@ function heldStressFlagLabel(value) {
   return cleanDetail(value);
 }
 
-export { RULE_TONES, canaryDriverLabel, canaryDriverPriority, canaryDriverRow, canaryDriverRows, canaryDriverTone, canaryEmptyDriverRow, canaryExplanationCards, canaryHasProvisionalOnlyMarketWarning, canaryInputCheckBlocksAction, canaryInputCheckSentence, canaryInputIssueLabels, canaryInputIssueSummary, canaryNeedsInputCheck, canaryRowNeedsAttention, canaryStageLabel, canarySummaryText, clusterInputLabel, detailCard, firstClause, gatewayDataStatus, heldStressEvidence, heldStressFlagLabel, heldStressItems, heldStressReasonLabel, heldStressReasonLabels, heldStressRow, heldStressSummary, heldStressTone, humanList, humanizeStalenessSeconds, indicatorAsOfLabel, indicatorStatusClass, latestRegimeRead, latestRegimeTimestamp, latestRegimeTimestampFallback, legacyRegimeTone, marketExplanation, marketHasDataGaps, marketQuoteCell, marketQuoteChangeClass, marketQuoteErrorLabel, marketQuoteFallback, marketQuoteInterruptedLine, marketQuoteSourceLine, marketRegimeLabel, marketRegimeStatusLine, marketSourceErrorLabel, marketSourceIssueLabels, normalizeRegimePosture, portfolioExplanation, protectionCoverageCanaryLine, quoteBySymbol, quoteChange, quoteChangePct, quotePrevClose, quotePrice, quoteTime, reconcileSignalPanelTimes, regimeAuthorityLabel, regimeAuthorityReasonLabel, regimeAuthorityStatusLine, regimeAuthorityView, regimeFallbackIndicators, regimeGovernedNote, regimeGovernorReasonLabel, regimePosture, regimePostureDetailTone, regimePresentationPosture, regimeStaleBudgetMinutes, regimeWeatherClass, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderHeldStress, renderMarketContext, renderMarketWeather, renderRegimeAuthorityTimestamp, renderRegimeDetail, renderRegimePanel, renderRegimeQualityRemarks, renderRulesCard, renderRulesGrid, renderSignedPercent, ruleStatusLabel, ruleTone, sourceHealthMentions };
+export { RULE_TONES, canaryDriverLabel, canaryDriverPriority, canaryDriverRow, canaryDriverRows, canaryDriverTone, canaryEmptyDriverRow, canaryExplanationCards, canaryHasProvisionalOnlyMarketWarning, canaryInputCheckBlocksAction, canaryInputCheckSentence, canaryInputIssueLabels, canaryInputIssueSummary, canaryNeedsInputCheck, canaryRowNeedsAttention, canaryStageLabel, canarySummaryText, clusterInputLabel, detailCard, firstClause, gatewayDataStatus, heldStressEvidence, heldStressFlagLabel, heldStressItems, heldStressReasonLabel, heldStressReasonLabels, heldStressRow, heldStressSummary, heldStressTone, humanList, humanizeStalenessSeconds, indicatorAsOfLabel, indicatorStatusClass, latestRegimeRead, latestRegimeTimestamp, latestRegimeTimestampFallback, legacyRegimeTone, marketExplanation, marketHasDataGaps, marketQuoteCell, marketQuoteChangeClass, marketQuoteErrorLabel, marketQuoteFallback, marketQuoteInterruptedLine, marketQuoteSourceLine, marketRegimeLabel, marketRegimeStatusLine, marketSourceErrorLabel, marketSourceIssueLabels, normalizeRegimePosture, portfolioExplanation, protectionCoverageCanaryLine, quoteBySymbol, quoteChange, quoteChangePct, quotePrevClose, quotePrice, quoteTime, reconcileSignalPanelTimes, regimeAuthorityLabel, regimeAuthorityReasonLabel, regimeAuthorityStatusLine, regimeAuthorityView, regimeFallbackIndicators, regimeGovernedNote, regimeGovernorReasonLabel, regimePosture, regimePostureDetailTone, regimePresentationPosture, regimeStaleBudgetMinutes, regimeWeatherClass, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderHeldStress, renderMarketContext, renderMarketWeather, renderRegimeAuthorityTimestamp, renderRegimeDetail, renderRegimePanel, renderRegimeQualityRemarks, renderRulesCard, renderRulesGrid, renderSignedPercent, ruleStatusLabel, ruleTone, sourceHealthMentions, unknownEventRuleNote };

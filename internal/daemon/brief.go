@@ -522,7 +522,7 @@ func (s *Server) composeBrief(ctx context.Context) (*rpc.BriefResult, *rpc.Rules
 	// Brief-hook canary evidence: the same computed result the brief row
 	// rendered, journaled with dedupe (docs/design/history-index.md).
 	s.journalCanaryDecision(&can)
-	calendar := composeBriefCalendar(cal, marketEvents, rules, calErr, marketEventsErr, sessionOpen)
+	calendar := composeBriefCalendar(cal, marketEvents, rules, calErr, marketEventsErr, sessionOpen, briefBorrowFeeRelevant(pos, posErr))
 	portfolio := s.composeBriefPortfolio(acct, pos, acctErr, posErr, sessionOpen)
 	riskLimits := composeBriefRisk(policy, now)
 	process := s.composeBriefProcessForAuthority(policy, constitution, recon, rules, renderAuthority, now)
@@ -842,7 +842,7 @@ func gammaRankabilityCadenceOnly(quality *rpc.GammaSignalQuality) bool {
 	return strings.Contains(reason, "market is closed") || strings.Contains(reason, "prior session")
 }
 
-func composeBriefCalendar(cal *rpc.MarketCalendarResult, events *rpc.MarketEventsResult, rules *rpc.RulesResult, calErr, eventsErr error, sessionOpen bool) rpc.BriefCalendarSection {
+func composeBriefCalendar(cal *rpc.MarketCalendarResult, events *rpc.MarketEventsResult, rules *rpc.RulesResult, calErr, eventsErr error, sessionOpen bool, borrowRelevant ...*bool) rpc.BriefCalendarSection {
 	out := rpc.BriefCalendarSection{}
 	if calErr != nil || cal == nil {
 		out.Session.BriefRowState = briefUnavailable("market calendar unavailable: " + errText(calErr))
@@ -854,7 +854,7 @@ func composeBriefCalendar(cal *rpc.MarketCalendarResult, events *rpc.MarketEvent
 			out.Session.NextOpen = *s.NextOpen
 		}
 	}
-	out.MarketEvents = briefMarketEventRows(events, rules, eventsErr, sessionOpen)
+	out.MarketEvents = briefMarketEventRows(events, rules, eventsErr, sessionOpen, borrowRelevant...)
 	states := []rpc.BriefRowState{out.Session.BriefRowState}
 	for _, row := range out.MarketEvents {
 		states = append(states, row.BriefRowState)
@@ -863,7 +863,7 @@ func composeBriefCalendar(cal *rpc.MarketCalendarResult, events *rpc.MarketEvent
 	return out
 }
 
-func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult, sourceErr error, sessionOpen bool) []rpc.BriefMarketEventRow {
+func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult, sourceErr error, sessionOpen bool, borrowRelevant ...*bool) []rpc.BriefMarketEventRow {
 	kinds := []string{"earnings", "halt", "ssr", "borrow"}
 	sets := map[string]map[string]struct{}{}
 	for _, kind := range kinds {
@@ -871,7 +871,7 @@ func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult
 	}
 	if rules != nil {
 		for _, e := range rules.Earnings {
-			if e.Date != "" && e.Source != "unknown" {
+			if strings.TrimSpace(e.Symbol) != "" {
 				sets["earnings"][strings.ToUpper(e.Symbol)] = struct{}{}
 			}
 		}
@@ -898,7 +898,15 @@ func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult
 	for _, kind := range kinds {
 		syms := mapKeysSorted(sets[kind])
 		flagged := fmt.Sprintf("%d held %s flagged", len(syms), pluralNoun(len(syms), "symbol"))
+		if kind == "earnings" {
+			flagged = fmt.Sprintf("%d held %s with earnings context", len(syms), pluralNoun(len(syms), "symbol"))
+		}
 		state := briefOK(flagged)
+		if kind == "borrow" && len(borrowRelevant) > 0 && borrowRelevant[0] != nil && !*borrowRelevant[0] {
+			state = briefOK(flagged + "; borrow-fee coverage is not required because there is no short-stock exposure")
+			rows = append(rows, rpc.BriefMarketEventRow{BriefRowState: state, Kind: kind, Count: len(syms), Symbols: syms})
+			continue
+		}
 		worst, refreshState, lastChecked := briefEventKindHealth(events, kind)
 		switch {
 		case hardErr || (kind == "earnings" && rules == nil):
@@ -923,18 +931,59 @@ func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult
 			state = briefDegraded(flagged + "; source health is " + worst + briefLastChecked(lastChecked))
 		}
 		if kind == "earnings" && len(syms) > 0 {
+			unresolved := briefUnresolvedEarnings(rules)
+			if len(unresolved) > 0 {
+				state = briefDegraded(fmt.Sprintf("%d held earnings context unresolved (%s)", len(unresolved), strings.Join(unresolved, ", ")))
+			}
 			if unknown := briefUnknownEarningsRules(rules); len(unknown) > 0 {
 				verb := "report"
 				if len(unknown) == 1 {
 					verb = "reports"
 				}
-				state = briefAttention(fmt.Sprintf("%d held earnings upcoming while the %s %s %s unknown; the rulebook cannot confirm earnings sizing is frozen",
-					len(syms), strings.Join(unknown, " and "), pluralNoun(len(unknown), "rule"), verb))
+				if len(unresolved) > 0 {
+					state = briefAttention(fmt.Sprintf("%d held earnings context unresolved (%s) while the %s %s %s unknown; the rulebook cannot confirm the held-name earnings controls",
+						len(unresolved), strings.Join(unresolved, ", "), strings.Join(unknown, " and "), pluralNoun(len(unknown), "rule"), verb))
+				} else {
+					state = briefAttention(fmt.Sprintf("%d held earnings upcoming while the %s %s %s unknown; the rulebook cannot confirm the held-name earnings controls",
+						len(syms), strings.Join(unknown, " and "), pluralNoun(len(unknown), "rule"), verb))
+				}
 			}
 		}
 		rows = append(rows, rpc.BriefMarketEventRow{BriefRowState: state, Kind: kind, Count: len(syms), Symbols: syms})
 	}
 	return rows
+}
+
+// briefBorrowFeeRelevant returns nil when positions are unavailable, false for
+// a known all-long book, and true only for actual short-stock exposure. Option
+// positions do not make the stock-borrow fee source decision-relevant.
+func briefBorrowFeeRelevant(pos *rpc.PositionsResult, posErr error) *bool {
+	if posErr != nil || pos == nil {
+		return nil
+	}
+	relevant := false
+	for _, stock := range pos.Stocks {
+		if briefPositionIsStock(stock) && stock.Quantity < 0 {
+			relevant = true
+			break
+		}
+	}
+	if !relevant {
+		for _, group := range pos.ByUnderlying {
+			if group.Stock != nil && briefPositionIsStock(*group.Stock) && group.Stock.Quantity < 0 {
+				relevant = true
+				break
+			}
+		}
+	}
+	return &relevant
+}
+
+func briefPositionIsStock(position rpc.PositionView) bool {
+	secType := strings.ToUpper(strings.TrimSpace(position.SecType))
+	// Empty is a legacy stock projection. Explicit non-stock security types
+	// cannot make the stock-borrow fee source decision-relevant.
+	return secType == "" || secType == rpc.SecTypeStock || secType == "STK" || secType == "ETF"
 }
 
 // briefEventKindHealth maps one brief event kind to its own source-health rows
@@ -998,7 +1047,7 @@ func briefUnknownEarningsRules(rules *rpc.RulesResult) []string {
 	if rules == nil {
 		return nil
 	}
-	governing := map[string]bool{"earnings_size_freeze": true, "overwrite_earnings": true}
+	governing := map[string]bool{"catalyst_coverage": true, "earnings_size_freeze": true, "overwrite_earnings": true}
 	var unknown []string
 	for _, row := range rules.Rules {
 		if governing[row.ID] && row.Status == risk.RuleStatusUnknown {
@@ -1007,6 +1056,22 @@ func briefUnknownEarningsRules(rules *rpc.RulesResult) []string {
 	}
 	slices.Sort(unknown)
 	return unknown
+}
+
+func briefUnresolvedEarnings(rules *rpc.RulesResult) []string {
+	if rules == nil {
+		return nil
+	}
+	var unresolved []string
+	for _, earnings := range rules.Earnings {
+		if earnings.Date != "" && earnings.Source != "unknown" && (earnings.Status == "" || earnings.Status == rpc.EarningsStatusDate) {
+			continue
+		}
+		reason := nonEmptyString(earnings.Reason, nonEmptyString(earnings.Status, "not_observed"))
+		unresolved = append(unresolved, strings.ToUpper(earnings.Symbol)+" ("+strings.ReplaceAll(reason, "_", " ")+")")
+	}
+	slices.Sort(unresolved)
+	return unresolved
 }
 
 func (s *Server) composeBriefPortfolio(acct *rpc.AccountResult, pos *rpc.PositionsResult, acctErr, posErr error, sessionOpen bool) rpc.BriefPortfolioSection {

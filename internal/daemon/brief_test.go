@@ -1117,9 +1117,52 @@ func TestBriefClosedSessionDowngradesExpectedColdness(t *testing.T) {
 	}
 }
 
+func TestBriefBorrowHealthRequiresShortStockExposure(t *testing.T) {
+	events := &rpc.MarketEventsResult{SourceHealth: []rpc.SourceHealth{{
+		Source: "borrow_fee", Status: rpc.SourceStatusUnknown,
+		LastFailure: &rpc.SourceFailure{Code: "timeout", Stage: "ftp_control_connect", Retryable: true},
+	}}}
+	rules := &rpc.RulesResult{}
+	row := func(rows []rpc.BriefMarketEventRow) rpc.BriefMarketEventRow {
+		for _, candidate := range rows {
+			if candidate.Kind == "borrow" {
+				return candidate
+			}
+		}
+		return rpc.BriefMarketEventRow{}
+	}
+	allLong := false
+	if got := row(briefMarketEventRows(events, rules, nil, true, &allLong)); got.Status != rpc.BriefStatusOK || !strings.Contains(got.Detail, "no short-stock exposure") {
+		t.Fatalf("all-long borrow row=%+v, want explicit non-required OK", got.BriefRowState)
+	}
+	short := true
+	if got := row(briefMarketEventRows(events, rules, nil, true, &short)); got.Status != rpc.BriefStatusDegraded {
+		t.Fatalf("short-book borrow row=%+v, want degraded", got.BriefRowState)
+	}
+	if got := row(briefMarketEventRows(events, rules, nil, true, nil)); got.Status != rpc.BriefStatusDegraded {
+		t.Fatalf("unknown exposure borrow row=%+v, want fail-closed degraded", got.BriefRowState)
+	}
+
+	if relevant := briefBorrowFeeRelevant(&rpc.PositionsResult{Stocks: []rpc.PositionView{{Quantity: 10}}}, nil); relevant == nil || *relevant {
+		t.Fatalf("all-long relevance=%v, want false", relevant)
+	}
+	if relevant := briefBorrowFeeRelevant(&rpc.PositionsResult{ByUnderlying: []rpc.PositionGroup{{Stock: &rpc.PositionView{Quantity: -1}}}}, nil); relevant == nil || !*relevant {
+		t.Fatalf("grouped short relevance=%v, want true", relevant)
+	}
+	if relevant := briefBorrowFeeRelevant(&rpc.PositionsResult{Stocks: []rpc.PositionView{{SecType: "FUT", Quantity: -1}}}, nil); relevant == nil || *relevant {
+		t.Fatalf("short future relevance=%v, want false", relevant)
+	}
+	if relevant := briefBorrowFeeRelevant(&rpc.PositionsResult{ByUnderlying: []rpc.PositionGroup{{Stock: &rpc.PositionView{SecType: "IND", Quantity: -1}}}}, nil); relevant == nil || *relevant {
+		t.Fatalf("short index relevance=%v, want false", relevant)
+	}
+	if relevant := briefBorrowFeeRelevant(nil, errors.New("positions unavailable")); relevant != nil {
+		t.Fatalf("unavailable positions relevance=%v, want nil", relevant)
+	}
+}
+
 func TestBriefEarningsRowEscalatesWhenGoverningRuleUnknown(t *testing.T) {
 	rules := &rpc.RulesResult{
-		Rules:    []risk.RuleRow{{ID: "earnings_size_freeze", Status: risk.RuleStatusUnknown}},
+		Rules:    []risk.RuleRow{{ID: "catalyst_coverage", Status: risk.RuleStatusUnknown}},
 		Earnings: []rpc.EarningsInfo{{Symbol: "MSFT", Date: "2026-07-29", Source: "fetched"}},
 	}
 	rows := briefMarketEventRows(&rpc.MarketEventsResult{}, rules, nil, false)
@@ -1132,14 +1175,29 @@ func TestBriefEarningsRowEscalatesWhenGoverningRuleUnknown(t *testing.T) {
 			halt = row
 		}
 	}
-	if earnings.Status != rpc.BriefStatusAttention || !strings.Contains(earnings.Detail, "earnings size freeze") || earnings.Count != 1 {
+	if earnings.Status != rpc.BriefStatusAttention || !strings.Contains(earnings.Detail, "catalyst coverage") || earnings.Count != 1 {
 		t.Fatalf("earnings row must escalate on unknown governing rule: %+v", earnings)
 	}
 	if halt.Status != rpc.BriefStatusOK {
 		t.Fatalf("halt row must not inherit the earnings escalation: %+v", halt.BriefRowState)
 	}
 
+	rules.Earnings = []rpc.EarningsInfo{{
+		Symbol: "NOW", Source: "unknown", Status: rpc.EarningsStatusNoDatePublished,
+		Reason: rpc.EarningsStatusNoDatePublished,
+	}}
+	for _, row := range briefMarketEventRows(&rpc.MarketEventsResult{}, rules, nil, false) {
+		if row.Kind != "earnings" {
+			continue
+		}
+		if row.Status != rpc.BriefStatusAttention || row.Count != 1 || len(row.Symbols) != 1 || row.Symbols[0] != "NOW" ||
+			!strings.Contains(row.Detail, "NOW (no date published)") {
+			t.Fatalf("sole unresolved catalyst must remain visible and non-green: %+v", row)
+		}
+	}
+
 	rules.Rules[0].Status = risk.RuleStatusPass
+	rules.Earnings = []rpc.EarningsInfo{{Symbol: "MSFT", Date: "2026-07-29", Source: "fetched", Status: rpc.EarningsStatusDate}}
 	for _, row := range briefMarketEventRows(&rpc.MarketEventsResult{}, rules, nil, false) {
 		if row.Kind == "earnings" && row.Status != rpc.BriefStatusOK {
 			t.Fatalf("passing governing rule must not escalate: %+v", row.BriefRowState)
