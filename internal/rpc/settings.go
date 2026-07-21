@@ -2,6 +2,8 @@ package rpc
 
 import "time"
 
+// Settings access and source values state whether a field is mutable and which
+// authority supplied it.
 const (
 	SettingsAccessRead  = "read"
 	SettingsAccessWrite = "write"
@@ -12,6 +14,7 @@ const (
 	SettingsSourceObserved = "observed"
 )
 
+// SettingsBool is a boolean value annotated with access and source authority.
 type SettingsBool struct {
 	Value  bool   `json:"value"`
 	Access string `json:"access"`
@@ -19,6 +22,8 @@ type SettingsBool struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// SettingsFloat is a floating-point value annotated with access and source
+// authority.
 type SettingsFloat struct {
 	Value  float64 `json:"value"`
 	Access string  `json:"access"`
@@ -26,6 +31,7 @@ type SettingsFloat struct {
 	Reason string  `json:"reason,omitempty"`
 }
 
+// SettingsInt is an integer value annotated with access and source authority.
 type SettingsInt struct {
 	Value  int    `json:"value"`
 	Access string `json:"access"`
@@ -33,6 +39,7 @@ type SettingsInt struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// SettingsString is a string value annotated with access and source authority.
 type SettingsString struct {
 	Value  string `json:"value"`
 	Access string `json:"access"`
@@ -40,6 +47,8 @@ type SettingsString struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// PlatformSettings is the typed, daemon-authored settings view. It combines
+// writable runtime preferences with read-only config, build, and observations.
 type PlatformSettings struct {
 	Kind       string                    `json:"kind"`
 	Features   PlatformFeatureSettings   `json:"features"`
@@ -96,16 +105,21 @@ type HistoryRotationSettings struct {
 	KeepRawMonths SettingsInt `json:"keep_raw_months"`
 }
 
+// PlatformFeatureSettings groups runtime feature preferences.
 type PlatformFeatureSettings struct {
 	PurgeRestore    PurgeRestoreSettings    `json:"purge_restore"`
 	StockProtection StockProtectionSettings `json:"stock_protection"`
 	Rulebook        RulebookSettings        `json:"rulebook"`
 }
 
+// PurgeRestoreSettings controls purge/restore actions while leaving status
+// readable.
 type PurgeRestoreSettings struct {
 	Enabled SettingsBool `json:"enabled"`
 }
 
+// StockProtectionSettings controls stock-protection proposal actions without
+// enabling broker writes.
 type StockProtectionSettings struct {
 	Enabled SettingsBool `json:"enabled"`
 }
@@ -132,6 +146,8 @@ type SettingsStringMap struct {
 	Reason string            `json:"reason,omitempty"`
 }
 
+// PlatformTradingSettings combines the runtime freeze brake with read-only
+// trading configuration, build capability, and limits.
 type PlatformTradingSettings struct {
 	// Freeze is the runtime trading brake: true blocks every new broker
 	// write while cancels stay allowed. Toggled via
@@ -147,6 +163,8 @@ type PlatformTradingSettings struct {
 	Limits               TradingLimitSettings `json:"limits"`
 }
 
+// PlatformAutoTradeSettings exposes proposal-generation preferences and loaded
+// configuration; none of its fields are broker-write authority.
 type PlatformAutoTradeSettings struct {
 	ProposalsEnabled SettingsBool   `json:"proposals_enabled"`
 	FastPathEnabled  SettingsBool   `json:"fast_path_enabled"`
@@ -156,6 +174,8 @@ type PlatformAutoTradeSettings struct {
 	ProposalCadence  SettingsString `json:"proposal_cadence"`
 }
 
+// TradingLimitSettings reports effective safety limits with per-field access
+// and source metadata.
 type TradingLimitSettings struct {
 	MaxNotional           SettingsFloat `json:"max_notional"`
 	MaxOptionContracts    SettingsInt   `json:"max_option_contracts"`
@@ -163,10 +183,14 @@ type TradingLimitSettings struct {
 	AllowOptionSellToOpen SettingsBool  `json:"allow_option_sell_to_open"`
 }
 
+// PlatformMarketDataSetting exposes observed data quality and never persists
+// broker entitlements.
 type PlatformMarketDataSetting struct {
 	Quality PlatformMarketDataQuality `json:"quality"`
 }
 
+// PlatformMarketDataQuality summarizes current observed feed quality. A zero
+// ObservedAt means no observation is available.
 type PlatformMarketDataQuality struct {
 	Status      string              `json:"status"`
 	Summary     string              `json:"summary,omitempty"`
@@ -178,6 +202,7 @@ type PlatformMarketDataQuality struct {
 	ObservedAt  time.Time           `json:"observed_at,omitzero"`
 }
 
+// PlatformBuildSettings exposes immutable build-channel capabilities.
 type PlatformBuildSettings struct {
 	Channel                 SettingsString `json:"channel"`
 	TradingWritesAvailable  SettingsBool   `json:"trading_writes_available"`

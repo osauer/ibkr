@@ -1,3 +1,5 @@
+// Command release-registry-server derives a versioned MCP Registry document
+// from server.json and the release bundle's SHA-256 digest.
 package main
 
 import (

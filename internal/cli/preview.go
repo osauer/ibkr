@@ -5,58 +5,74 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
-// Preview* expose the user-facing text renderers to the cmd/_preview tool
-// so it can demo the visual output with synthetic fixture data — useful
-// for screenshots, social-preview images, and README updates without
-// touching a live account.
-//
-// These are thin pass-throughs to the unexported renderers; they don't
-// add behaviour and are not intended to be part of any stable public API.
-// The Preview prefix and the placement in this file are the convention.
+// PreviewRenderAccount renders synthetic account data with the production text
+// renderer.
 func PreviewRenderAccount(env *Env, a *rpc.AccountResult) {
 	renderAccountText(env, a)
 }
 
+// PreviewRenderPositionsByUnderlying renders synthetic positions grouped by
+// underlying with the production text renderer.
 func PreviewRenderPositionsByUnderlying(env *Env, r *rpc.PositionsResult) {
 	renderPositionsByUnderlying(env, r)
 }
 
+// PreviewRenderPositions renders synthetic position rows with the production
+// text renderer.
 func PreviewRenderPositions(env *Env, r *rpc.PositionsResult) {
 	renderPositionsText(env, r)
 }
 
+// PreviewRenderChainExpiries renders a synthetic expiry list with the
+// production text renderer.
 func PreviewRenderChainExpiries(env *Env, r *rpc.ChainExpiriesResult, withIV bool) {
 	renderChainExpiriesText(env, r, withIV)
 }
 
+// PreviewRenderChainStrikes renders a synthetic strike grid with the production
+// text renderer.
 func PreviewRenderChainStrikes(env *Env, c *rpc.ChainResult) {
 	renderChainText(env, c)
 }
 
+// PreviewRenderQuoteSnapshot renders synthetic quote rows with the production
+// text renderer.
 func PreviewRenderQuoteSnapshot(env *Env, qs []rpc.Quote) {
 	renderQuoteSnapshotText(env, qs)
 }
 
+// PreviewRenderHistory renders synthetic daily history with the production
+// text renderer.
 func PreviewRenderHistory(env *Env, r *rpc.HistoryDailyResult) {
 	renderHistoryText(env, r)
 }
 
+// PreviewRenderScan renders synthetic scanner results with the production text
+// renderer.
 func PreviewRenderScan(env *Env, r *rpc.ScanResult) {
 	renderScanText(env, r)
 }
 
+// PreviewRenderSize renders a synthetic position-size result with the
+// production text renderer.
 func PreviewRenderSize(env *Env, r *risk.SizeResult) {
 	renderSizeText(env, r)
 }
 
+// PreviewRenderStatus renders synthetic daemon health with the production text
+// renderer.
 func PreviewRenderStatus(env *Env, h *rpc.HealthResult) {
 	renderStatusText(env, h)
 }
 
+// PreviewRenderRegime renders a synthetic regime snapshot with the production
+// text renderer.
 func PreviewRenderRegime(env *Env, r *rpc.RegimeSnapshotResult) {
 	renderRegimeText(env, r)
 }
 
+// PreviewRenderCanary renders a synthetic canary result with the production
+// text renderer.
 func PreviewRenderCanary(env *Env, r *rpc.CanaryResult) {
 	renderCanaryText(env, env.Stdout, r)
 }

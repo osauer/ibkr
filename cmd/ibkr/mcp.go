@@ -1,9 +1,3 @@
-// mcp.go hosts the `ibkr mcp` subcommand: a stdio MCP (Model Context
-// Protocol) server that exposes the daemon's read-only surface to local
-// MCP clients (Claude Desktop, Cursor, Continue, etc.). Tool/resource requests
-// lazily dial — and autospawn if needed — the same Unix socket the CLI uses, so
-// a single daemon serves both surfaces without an idle MCP process holding the
-// daemon open.
 package main
 
 import (

@@ -1,30 +1,15 @@
-// Package history maintains history.db, a derived and always-rebuildable
-// SQLite index over the daemon's append-only evidence journals
-// (regime/rules/canary decisions, capital events, risk-policy governance,
-// proposal outcomes, the order journal) plus the retained Flex statements.
-// The journals stay the evidence of record; this package mirrors their
-// complete lines into queryable tables so operator timelines
-// (regime.history / rules.history / canary.history / recon.equity) and
-// offline sqlite3 calibration work stop requiring jq over tens of
-// megabytes, and so the order read model can serve indexed reads with an
-// automatic fallback to the journal scan.
+// Package history implements the retired history.db index for legacy import,
+// rotation recovery, and isolated compatibility tests.
 //
-// Phase 2 adds rotation: the three decision journals may have fully
-// ingested byte prefixes compressed into immutable gzip archives under
-// rotated/. Rotation relocates evidence, it never deletes it — archives
-// plus the live file concatenate back to the original byte stream, and
-// `src_offset` values are offsets in that logical stream (bookkeeping
-// column `base` = bytes rotated out of the live file).
+// Production history reads and mutable authority live in daemon.db through
+// package corestore. This package must not be used as a current-state,
+// freshness, submit-eligibility, freeze, or broker-write authority. Its SQLite
+// database is derived from retained journals, archives, and statements and may
+// be rebuilt after an open failure.
 //
-// Ownership and safety (docs/design/history-index.md): the daemon is the
-// sole writer and the sole runtime opener. Deleting history.db (plus its
-// -wal/-shm sidecars) is always safe — the next daemon start re-ingests
-// archives and journals from byte 0. Idempotency is a per-source
-// ingested-byte offset advanced in the same SQLite transaction as its
-// rows, so a crash replays from the last committed boundary and can
-// neither drop nor duplicate a line. Nothing here may touch submit
-// eligibility, freeze, or any broker-write path; the order journal itself
-// is never rotated, truncated, or rewritten.
+// Legacy rotation relocates only fully ingested decision-journal prefixes into
+// immutable gzip archives. Archives plus the live tail reconstruct the source
+// byte stream; the order journal is never rotated, truncated, or rewritten.
 package history
 
 import (
@@ -51,7 +36,7 @@ type Options struct {
 	// RulesJournalPath is rules-decisions.jsonl. Same missing-file
 	// semantics as the regime journal.
 	RulesJournalPath string
-	// CanaryJournalPath is canary-decisions.jsonl (phase-2 evidence).
+	// CanaryJournalPath is canary-decisions.jsonl.
 	CanaryJournalPath string
 	// CapitalJournalPath is capital-events.jsonl (never rotated).
 	CapitalJournalPath string
@@ -84,9 +69,9 @@ type Options struct {
 	Infof func(format string, args ...any)
 }
 
-// Store is the daemon-owned handle on history.db: one SQLite connection
-// that serializes ingest batches and read queries, plus the kick channel
-// the journal writers nudge after an append.
+// Store is a legacy history.db handle. One SQLite connection serializes ingest
+// batches and reads, while the kick channel lets legacy journal writers request
+// another ingest pass without carrying source data through memory.
 type Store struct {
 	db   *sql.DB
 	opts Options

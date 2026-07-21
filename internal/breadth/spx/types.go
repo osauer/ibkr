@@ -1,19 +1,15 @@
-// Package spx computes the S&P-500 stocks-above-50DMA breadth index
-// (S&P DJI's S5FI) locally from constituent daily closes. IBKR does not
-// redistribute S&P DJI's breadth-index family on retail subscriptions
-// (verified via reqContractDetails probe — see pkg/ibkr/symbols.go), so
-// the daemon reproduces the math from data it already has access to.
+// Package spx computes S&P 500 breadth measurements locally from a validated
+// constituent universe and daily closes obtained through the daemon's broker
+// connector.
 //
 // The compute is a sliding window over a stream: for each S&P-500 name
 // keep the last 50 daily closes, count names where the most recent
 // close is ≥ the window mean, divide by member count, multiply by 100.
-// This reproduces S&P DJI's published S5FI value bit-identically when
-// the membership list and constituent close data are both current.
-//
-// State footprint is ≈ 200 KB on disk (500 names × 50 floats + a
-// membership list) — small enough that a single JSON file with
-// temp-rename atomic writes is the right persistence primitive. No
-// database, no schema migration, no out-of-process cache.
+// The engine owns refresh concurrency and its in-memory view. In normal daemon
+// operation, snapshots, rolling windows, history, and refreshed membership are
+// persisted as typed daemon.db state and observations. Embedded membership is
+// the cold fallback; JSON file paths remain only for explicit legacy import and
+// isolated codec tests.
 package spx
 
 import "time"
@@ -23,15 +19,9 @@ import "time"
 // is deliberately unexported — callers should compare against Snapshot.Method
 // rather than rebuilding the string.
 //
-// The token bumps whenever the compute methodology or the snapshot's
-// payload shape changes. LoadSnapshot uses it as a version gate: a
-// snapshot whose Method doesn't match the current constant is treated
-// as no-cache and triggers a cold rebuild, which is the right move when
-// the on-disk struct gained fields (v1's Snapshot only carried Value /
-// Coverage; v2 added PctAbove200DMA, NewHighsToday, NewLowsToday,
-// NetNewHighsPct, Coverage200, CoverageHighsLows — a stale v1 file
-// silently decodes into a half-empty v2 struct otherwise, and the
-// engine reports state=ready with zeroed new fields).
+// The token changes whenever the compute methodology or snapshot payload shape
+// becomes incompatible. LoadSnapshot treats a mismatch as a cold start rather
+// than publishing partially decoded values.
 const methodConstituentFanout = "constituent-fanout-50/200dma+nh-v2"
 
 // MethodConstituentFanout is the exported form of the current breadth
@@ -78,19 +68,16 @@ const WindowSize200 = 200
 // the max of the previous 251 closes.
 const RollingMaxBars = 252
 
-// Snapshot is one breadth reading: the computed values, when they
-// were computed, which trading session they represent, and provenance
-// for every consumer to read without re-deriving anything. Persisted
-// as snapshot.json in the cache dir; serialised over the wire inside
-// the breadth.spx RPC envelope.
+// Snapshot is one breadth reading: the computed values, represented trading
+// session, and provenance carried by the breadth.spx RPC envelope and runtime
+// persistence record.
 type Snapshot struct {
 	// Value is the 50-DMA reading: percentage of constituents trading
-	// above their own 50-day SMA. In [0, 100]. Same shape as v1.
+	// above their own 50-day SMA, in [0, 100].
 	Value float64 `json:"value"`
 	// PctAbove50DMA is the 50-day reading exposed under the canonical
 	// long-form name (renderer-friendly). Equal to Value; kept
-	// alongside so the wire shape is self-documenting and a future
-	// release can drop Value without churning consumers.
+	// alongside Value so the wire shape is self-documenting.
 	PctAbove50DMA float64 `json:"pct_above_50dma"`
 	// PctAbove200DMA is the 200-day reading. Below 40% = red /
 	// 40–60% = yellow / above 60% = green per the locked plan
@@ -157,13 +144,13 @@ type ExcludedMember struct {
 
 // ConstituentWindow holds the sliding window of daily closes for one
 // S&P-500 name. Closes is chronological (oldest first); when the
-// window is full len(Closes) == WindowSize200 (in v2). LastBarAt is
+// window is full len(Closes) == WindowSize200. LastBarAt is
 // the date string of the most recent close in YYYY-MM-DD form — used
 // to decide whether the next refresh needs to fetch new bars for this
 // name.
 //
-// In v2 the window holds the trailing 200 closes per constituent
-// (enough to cover the 200-day SMA). The 50-day reading slices the
+// The window holds the trailing 200 closes per constituent, enough to cover
+// the 200-day SMA. The 50-day reading slices the
 // last 50 closes; the 200-day reading uses the full window; the
 // rolling-max/min for new-highs/lows uses a separate field tracked
 // outside the close window because the lookback (252 bars) exceeds
@@ -174,7 +161,7 @@ type ConstituentWindow struct {
 	LastBarAt string    `json:"last_bar_at"`
 	// HighWindow is the trailing 252-bar rolling max of close
 	// (~1 year), updated each refresh from the bars merged in. Kept
-	// separately from Closes so the on-disk footprint stays bounded:
+	// separately from Closes so the persisted footprint stays bounded:
 	// we don't need 252 floats per name; the rolling max compressed
 	// into a single value + the count of bars contributing is enough
 	// to detect today's-close-above-prior-252-day-max. RollingMax is
@@ -187,29 +174,23 @@ type ConstituentWindow struct {
 	LowRollingBarsHad  int     `json:"low_rolling_bars_had,omitempty"`
 }
 
-// WindowSet is the persistence shape for windows.json. The Version
-// field gates rebuilds: a future incompatible format bumps it and
-// older files on load are treated as no-cache (cold rebuild).
+// WindowSet is the versioned persistence shape for constituent windows. An
+// incompatible Version is treated as no state and triggers a cold rebuild.
 type WindowSet struct {
 	Version int                          `json:"version"`
 	AsOf    time.Time                    `json:"as_of"`
 	Windows map[string]ConstituentWindow `json:"windows"`
 }
 
-// CurrentWindowSetVersion is the schema version the engine writes.
-// v1 → v2 bump in this release: ConstituentWindow gained HighRollingMax,
-// HighRollingBarsHad, LowRollingMin, LowRollingBarsHad; the close
-// window's maximum length grew from 50 to 200 to support the 200-day
-// SMA. v1 files trigger a cold rebuild because the close windows are
-// too short to seed the 200-day reading honestly.
+// CurrentWindowSetVersion is the constituent-window schema version written by
+// the engine. Other versions are not projected into current state.
 const CurrentWindowSetVersion = 2
 
-// HistoryPoint is one day's breadth reading on the rolling history file.
-// The renderer pulls the trailing N for the dashboard sparkline. Date
+// HistoryPoint is one session's breadth reading in rolling history. The
+// renderer pulls the trailing N for the dashboard sparkline. Date
 // is the NY-tz session key (YYYY-MM-DD); the four numbers carry the
 // 50-DMA reading, the 200-DMA reading, and the constituent counts for
-// new 52-week highs and lows. v1-format files (single `value` field)
-// trigger a cold rebuild — see CurrentHistorySetVersion.
+// new 52-week highs and lows.
 type HistoryPoint struct {
 	Date           string  `json:"date"`
 	PctAbove50DMA  float64 `json:"pct_above_50dma"`
@@ -218,22 +199,19 @@ type HistoryPoint struct {
 	NewLows        int     `json:"new_lows,omitempty"`
 }
 
-// HistorySet is the persistence shape for history.json. Points are
-// stored in chronological order, oldest first, capped at
-// MaxHistoryPoints to bound the wire payload and file size.
+// HistorySet is the versioned rolling-history persistence shape. Points are
+// stored chronologically, oldest first, and capped at MaxHistoryPoints.
 type HistorySet struct {
 	Version int            `json:"version"`
 	Points  []HistoryPoint `json:"points"`
 }
 
-// CurrentHistorySetVersion is the schema version the engine writes.
-// v1 → v2 bump in this release: HistoryPoint gained PctAbove200DMA,
-// NewHighs, NewLows; the single `value` field became `pct_above_50dma`.
-// v1 files trigger a cold rebuild rather than a parse error.
+// CurrentHistorySetVersion is the history schema version written by the engine.
+// Other versions are not projected into current state.
 const CurrentHistorySetVersion = 2
 
-// MaxHistoryPoints caps how many days of S5FI history the engine
-// retains on disk. The dashboard CLI shows ~30 by default; we keep
+// MaxHistoryPoints caps how many days of S5FI history the engine retains. The
+// dashboard CLI shows ~30 by default; the engine keeps
 // twice that so a daemon that's been down for a month still ships a
 // useful sparkline on its first call after restart. After cap, oldest
 // points roll off.

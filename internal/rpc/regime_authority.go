@@ -14,6 +14,8 @@ import (
 // indicator or upstream source.
 type RegimeAuthorityStatus string
 
+// Regime authority failure codes identify why a complete last-good snapshot is
+// unavailable or why a refresh could not be published.
 const (
 	// RegimeAuthorityUnavailable means no complete last-good snapshot exists.
 	// A regime.snapshot request in this state fails with CodeRegimeUnavailable;
@@ -32,6 +34,8 @@ const (
 // persistence error text does not belong on this contract.
 type RegimeAuthorityFailureCode string
 
+// Regime authority failure codes distinguish absence, refresh failure, publish
+// failure, invalid persistence, and invalid wall-clock evidence.
 const (
 	RegimeAuthorityFailureNone                  RegimeAuthorityFailureCode = ""
 	RegimeAuthorityFailureNoLastGood            RegimeAuthorityFailureCode = "no_last_good"
@@ -125,6 +129,7 @@ func validRegimeAuthorityFailureCode(code RegimeAuthorityFailureCode) bool {
 	}
 }
 
+// MarshalJSON validates authority-state coherence before encoding.
 func (health RegimeAuthorityHealth) MarshalJSON() ([]byte, error) {
 	if err := ValidateRegimeAuthorityHealth(health); err != nil {
 		return nil, err
@@ -133,6 +138,7 @@ func (health RegimeAuthorityHealth) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire(health))
 }
 
+// UnmarshalJSON rejects unknown, missing, null, trailing, or incoherent data.
 func (health *RegimeAuthorityHealth) UnmarshalJSON(data []byte) error {
 	if health == nil {
 		return errors.New("cannot unmarshal regime authority health into nil receiver")

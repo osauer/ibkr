@@ -11,17 +11,24 @@ import (
 )
 
 const (
-	ViewFull    = "full"
-	ViewAlert   = "alert"
-	ViewDetail  = "detail"
+	// ViewFull requests the complete result shape.
+	ViewFull = "full"
+	// ViewAlert requests the compact Canary alert projection.
+	ViewAlert = "alert"
+	// ViewDetail requests expanded detail from a supporting surface.
+	ViewDetail = "detail"
+	// ViewMonitor requests the compact regime-monitor projection.
 	ViewMonitor = "monitor"
-	ViewRisk    = "risk"
+	// ViewRisk requests the compact positions-risk projection.
+	ViewRisk = "risk"
 
 	optionLowDTEThresholdDays        = 7
 	largeStaleOptionLossThresholdPct = -0.5
 	defaultRiskExposureLimit         = 5
 )
 
+// CanaryAlertResult is a bounded, alert-safe projection of Canary state. Empty
+// flags are not reassuring unless the carried source health is conclusive.
 type CanaryAlertResult struct {
 	AsOf               time.Time                `json:"as_of"`
 	Fingerprint        Fingerprint              `json:"fingerprint"`
@@ -50,12 +57,14 @@ type CanaryAlertResult struct {
 	NotExecution           string                     `json:"not_execution"`
 }
 
+// CanaryAlertFlag is one compact advisory finding.
 type CanaryAlertFlag struct {
 	Title     string               `json:"title"`
 	Direction risk.SignalDirection `json:"direction,omitempty"`
 	Severity  risk.SignalSeverity  `json:"severity"`
 }
 
+// RegimeMonitorResult is the compact regime lifecycle and indicator projection.
 type RegimeMonitorResult struct {
 	AsOf            time.Time                `json:"as_of"`
 	AuthorityHealth *RegimeAuthorityHealth   `json:"authority_health,omitempty"`
@@ -70,6 +79,8 @@ type RegimeMonitorResult struct {
 	Indicators      []RegimeMonitorIndicator `json:"indicators"`
 }
 
+// CompactSourceHealth retains the status, reason, and freshness needed to
+// interpret a compact result without raw upstream detail.
 type CompactSourceHealth struct {
 	Source       string     `json:"source"`
 	Status       string     `json:"status"`
@@ -80,6 +91,7 @@ type CompactSourceHealth struct {
 	Notes        []string   `json:"notes,omitempty"`
 }
 
+// RegimeMonitorIndicator is a compact indicator reading and its data quality.
 type RegimeMonitorIndicator struct {
 	Name    string             `json:"name"`
 	Status  string             `json:"status"`
@@ -95,6 +107,8 @@ type RegimeMonitorIndicator struct {
 	FreshnessClass string             `json:"freshness_class,omitempty"`
 }
 
+// PositionsRiskResult is a bounded portfolio-risk projection. TopRisks is
+// sorted and capped by the requested topN.
 type PositionsRiskResult struct {
 	DataType           string                     `json:"data_type,omitempty"`
 	AsOf               time.Time                  `json:"as_of"`
@@ -107,6 +121,7 @@ type PositionsRiskResult struct {
 	FlaggedOptionLegs  []OptionRiskLegSummary     `json:"flagged_option_legs,omitempty"`
 }
 
+// OptionHealthSummary summarizes availability and concentration of option risk.
 type OptionHealthSummary struct {
 	GreeksCoverage                  int     `json:"greeks_coverage"`
 	GreeksTotal                     int     `json:"greeks_total"`
@@ -121,6 +136,7 @@ type OptionHealthSummary struct {
 	FlaggedLegsReturned             int     `json:"flagged_legs_returned"`
 }
 
+// OptionRiskLegSummary is one material option-risk leg in a compact result.
 type OptionRiskLegSummary struct {
 	Symbol       string    `json:"symbol"`
 	Expiry       string    `json:"expiry,omitempty"`
@@ -141,6 +157,8 @@ type OptionRiskLegSummary struct {
 	AsOf         time.Time `json:"as_of,omitzero"`
 }
 
+// CompactCanaryAlert builds an alert-safe projection without changing the
+// authority or freshness of its source snapshots.
 func CompactCanaryAlert(c *CanaryResult, positions *PositionsResult) CanaryAlertResult {
 	if c == nil {
 		return CanaryAlertResult{}
@@ -186,6 +204,8 @@ func CompactCanaryAlert(c *CanaryResult, positions *PositionsResult) CanaryAlert
 	return out
 }
 
+// CompactRegimeMonitor builds the bounded monitor projection from a regime
+// snapshot. A nil input yields an unavailable zero-value result.
 func CompactRegimeMonitor(r *RegimeSnapshotResult) RegimeMonitorResult {
 	if r == nil {
 		return RegimeMonitorResult{}
@@ -219,6 +239,8 @@ func CompactRegimeMonitor(r *RegimeSnapshotResult) RegimeMonitorResult {
 	}
 }
 
+// CompactPositionsRisk builds the bounded portfolio-risk projection. Nonpositive
+// topN uses the package default.
 func CompactPositionsRisk(p *PositionsResult, topN int) PositionsRiskResult {
 	if p == nil {
 		return PositionsRiskResult{}

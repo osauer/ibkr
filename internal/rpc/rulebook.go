@@ -12,10 +12,9 @@ import (
 const MethodRulesSnapshot = "rules.snapshot"
 
 // RulebookPolicyFingerprintVersion labels the advisory rulebook policy
-// fingerprint. Bumped when the computation model changed from positional
-// %.4f to the JSON projection (2026-07-18). Sibling-policy pins compare ID
-// and version rather than fingerprint keys, and journals are point-in-time
-// records, so the label discloses the safe identity break.
+// fingerprint's JSON projection. Sibling-policy pins compare policy ID and
+// version rather than fingerprint keys, and journals remain point-in-time
+// records.
 const RulebookPolicyFingerprintVersion = "rulebook-fp-v3"
 
 // RulesSnapshotParams selects optional evaluation scope. Zero value means the

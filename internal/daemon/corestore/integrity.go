@@ -8,6 +8,8 @@ import (
 	"fmt"
 )
 
+// CheckIntegrity verifies SQLite structure, foreign keys, and application-level
+// content hashes without modifying the store.
 func (s *Store) CheckIntegrity(ctx context.Context) (IntegrityReport, error) {
 	return checkIntegrityDB(ctx, s.db)
 }

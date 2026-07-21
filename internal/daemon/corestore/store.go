@@ -33,6 +33,10 @@ type Store struct {
 	closeErr  error
 }
 
+// Open validates or creates the authority at opts.Path and returns a
+// single-connection store. Existing older schemas return UpgradeRequiredError;
+// future, corrupt, rolled-back, or otherwise invalid authorities are never
+// repaired or recreated.
 func Open(ctx context.Context, opts Options) (*Store, error) {
 	return openWithPlan(ctx, opts, currentMigrationPlan())
 }
@@ -248,6 +252,8 @@ func enforcePrivateModes(path string) error {
 	return nil
 }
 
+// Close releases the database handle and reapplies private modes to the
+// authority and any SQLite sidecars. It is idempotent.
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
 		s.closeErr = s.db.Close()
@@ -258,12 +264,15 @@ func (s *Store) Close() error {
 	return s.closeErr
 }
 
+// Health returns the process-lifetime mutation-health latch. A false Ready
+// value blocks later critical mutations until the store is closed and reopened.
 func (s *Store) Health() Health {
 	s.healthMu.RLock()
 	defer s.healthMu.RUnlock()
 	return s.health
 }
 
+// AuthorityHead reads the current rollback identity and monotonic write head.
 func (s *Store) AuthorityHead(ctx context.Context) (AuthorityHead, error) {
 	return readAuthorityHead(ctx, s.db)
 }
@@ -374,6 +383,9 @@ RETURNING authority_epoch, head_generation, last_event_seq, signer_generation`,
 	return h, err
 }
 
+// AdvanceSignerGeneration atomically advances the preview-token signer
+// generation from expected to a larger next value and advances the authority
+// head. A concurrent or stale expected value returns ErrAuthorityMismatch.
 func (s *Store) AdvanceSignerGeneration(ctx context.Context, expected, next int64) (AuthorityHead, error) {
 	if expected < 1 || next <= expected {
 		return AuthorityHead{}, errorsf("signer generation must increase")

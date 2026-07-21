@@ -5,12 +5,21 @@ import (
 	"time"
 )
 
-// IBKROrder represents an order in the IBKR system
+// IBKROrder is the mutable, low-level order and contract representation used by
+// Connection order-write and WhatIf methods. It is a wire request and local
+// observation, not proof that IBKR accepted, filled, cancelled, or finalized an
+// order.
+//
+// Prices use the contract's quote currency and quantities use the broker's
+// instrument units (shares for stock and contracts for options). Most optional
+// numeric fields use zero to mean unspecified. Validation and sending may fill
+// OrderID, ClientID, Account, OpenClose, and TIF and may update WhatIf,
+// Transmit, Status, Remaining, and timestamp fields in place.
 type IBKROrder struct {
-	OrderID  int
-	ClientID int
-	PermID   int
-	Account  string
+	OrderID  int    // OrderID is the session-scoped broker order ID; zero requests allocation.
+	ClientID int    // ClientID is the TWS API client ID; zero uses the connection's configured ID.
+	PermID   int    // PermID is IBKR's permanent order ID; zero means not observed.
+	Account  string // Account is the target broker account; empty uses connection account data.
 
 	// Contract details
 	Symbol       string
@@ -19,9 +28,9 @@ type IBKROrder struct {
 	Exchange     string
 	Currency     string
 	Expiry       string
-	Strike       float64
+	Strike       float64 // Strike is in the contract's quote currency; zero means unspecified.
 	Right        string
-	Multiplier   string
+	Multiplier   string // Multiplier is the broker's decimal string, such as "100" for many options.
 	PrimaryExch  string
 	LocalSymbol  string
 	TradingClass string
@@ -29,41 +38,41 @@ type IBKROrder struct {
 	SecID        string
 
 	// Order details
-	Action    string // BUY or SELL
-	TotalQty  int
-	OrderType string // MKT, LMT, STP, etc.
-	LmtPrice  float64
-	AuxPrice  float64 // Stop price for stop orders
+	Action    string  // Action must be BUY or SELL.
+	TotalQty  int     // TotalQty is a positive number of shares or contracts.
+	OrderType string  // MKT, LMT, STP, etc.
+	LmtPrice  float64 // LmtPrice is in quote-currency units; zero means unspecified.
+	AuxPrice  float64 // AuxPrice is a stop price or trailing amount; zero means unspecified.
 
 	// Time in force
-	TIF           string // DAY, GTC, IOC, FOK
+	TIF           string // TIF is the broker time-in-force code; empty defaults to DAY.
 	OcaGroup      string
 	OcaType       int
 	OrderRef      string // Our reference
-	Transmit      bool
-	WhatIf        bool
-	OpenClose     string
+	Transmit      bool   // Transmit is set true by write and WhatIf helpers before encoding.
+	WhatIf        bool   // WhatIf is forced true for previews and false for order submission.
+	OpenClose     string // OpenClose is O or C; connector helpers default an empty value to O.
 	Origin        int
 	ParentID      int
 	BlockOrder    bool
 	SweepToFill   bool
 	DisplaySize   int
 	TriggerMethod int
-	OutsideRth    bool // Allow trading outside regular hours
+	OutsideRth    bool // OutsideRth asks IBKR to permit execution outside regular trading hours.
 	Hidden        bool
 
 	// State
-	Status        string // PendingSubmit, Submitted, Filled, Cancelled, etc.
-	Filled        int
-	Remaining     int
-	AvgFillPrice  float64
-	LastFillPrice float64
+	Status        string  // Status is locally assigned or broker-observed and is not finality by itself.
+	Filled        int     // Filled is the observed filled quantity; zero may mean none or not observed.
+	Remaining     int     // Remaining is the observed open quantity; zero may mean none or not observed.
+	AvgFillPrice  float64 // AvgFillPrice is in quote-currency units; zero may mean unavailable.
+	LastFillPrice float64 // LastFillPrice is in quote-currency units; zero may mean unavailable.
 
 	// Timestamps
-	CreatedTime   time.Time
-	SubmittedTime time.Time
-	FilledTime    *time.Time
-	CancelledTime *time.Time
+	CreatedTime   time.Time  // CreatedTime is local process time; IsZero reports unknown.
+	SubmittedTime time.Time  // SubmittedTime is local socket-write time; IsZero reports unknown.
+	FilledTime    *time.Time // FilledTime is nil when no fill time is recorded locally.
+	CancelledTime *time.Time // CancelledTime is nil when no cancellation time is recorded locally.
 
 	// Error tracking
 	LastError string
@@ -101,9 +110,9 @@ type IBKROrder struct {
 	DeltaNeutralDesignatedLocation string
 	ContinuousUpdate               int
 	ReferencePriceType             int
-	TrailStopPrice                 float64
-	TrailingPercent                float64
-	LmtPriceOffset                 float64
+	TrailStopPrice                 float64 // TrailStopPrice is the initial stop price in quote-currency units.
+	TrailingPercent                float64 // TrailingPercent is the broker percentage value, not a fraction.
+	LmtPriceOffset                 float64 // LmtPriceOffset is the TRAIL LIMIT offset in price units.
 	BasisPoints                    float64
 	BasisPointsType                int
 	ScaleInitLevelSize             int
@@ -133,7 +142,15 @@ type IBKROrder struct {
 	FaProfile                      string
 }
 
-// ValidateOrder performs basic order validation
+// ValidateOrder performs local, basic validation of order. It requires a
+// non-nil order, symbol, positive quantity, BUY or SELL action, and an order
+// type, and validates the price combinations used by LMT, STP, STP LMT, TRAIL,
+// and TRAIL LIMIT orders. If TIF is empty, ValidateOrder mutates it to "DAY".
+//
+// A nil result does not mean the broker will accept the order and does not
+// provide submit authority. Connection state, account and contract details,
+// encoder support, application policy, and broker eligibility are checked
+// elsewhere.
 func ValidateOrder(order *IBKROrder) error {
 	if order == nil {
 		return fmt.Errorf("order is nil")

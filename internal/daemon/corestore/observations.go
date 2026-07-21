@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+// AppendObservation stores one immutable observation and advances the authority
+// head.
 func (s *Store) AppendObservation(ctx context.Context, input ObservationInput) (ObservationReceipt, error) {
 	receipts, err := s.AppendObservations(ctx, []ObservationInput{input})
 	if err != nil {
@@ -105,6 +107,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.ScopeKey, input.Source, input.K
 	return receipts, nil
 }
 
+// LatestObservation returns the newest retained observation regardless of its
+// decision eligibility. The boolean is false when no row matches.
 func (s *Store) LatestObservation(ctx context.Context, scopeKey, source, kind string) (Observation, bool, error) {
 	return s.latestObservation(ctx, scopeKey, source, kind, nil)
 }
@@ -148,6 +152,8 @@ FROM observations WHERE `+where+` ORDER BY observed_at_ms DESC, observation_id D
 	return out, true, nil
 }
 
+// ListObservations returns matching observations in ascending observed-time and
+// observation-ID order. A zero limit defaults to 1,000 rows.
 func (s *Store) ListObservations(ctx context.Context, query ObservationQuery) ([]Observation, error) {
 	if err := validateObservationQuery(query); err != nil {
 		return nil, err

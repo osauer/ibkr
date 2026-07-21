@@ -391,18 +391,14 @@ func runQuoteWatch(ctx context.Context, env *Env, sym string, jsonOut bool, rate
 // caller delivers frames over a channel and closes the channel after the
 // stream goroutine has deposited its error in done. Closing frames (not
 // done) is the EOF signal so any buffered frames are rendered before exit.
-// Single ownership eliminates the data race the previous shared-state
-// design carried, and the ticker is selected on directly so it can't leak
-// after Stop.
+// Single ownership prevents rendering-state races, and the ticker is selected
+// on directly so it cannot leak after Stop.
 //
 // DataType handling: prints a one-line banner the first time we learn the
 // gateway's data type AND on every subsequent change. After-hours, the
 // gateway reports `frozen` (a single static snapshot — no streaming, ever
 // — per IBKR docs), so the renderer auto-exits cleanly after rendering
 // that snapshot rather than leaving the user staring at a dead stream.
-// Pre-fix: silent hang. Commit 4-A: clear banner. Commit 4-B (here):
-// banner + clean auto-exit so the user doesn't have to Ctrl+C an
-// already-finished session.
 //
 // Error frames (rpc.Frame.Error != nil) are rendered as a final structured
 // message and trigger autoExit. They are the terminal frame on the stream:

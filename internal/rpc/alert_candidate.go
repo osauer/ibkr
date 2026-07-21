@@ -6,22 +6,38 @@ import "github.com/osauer/ibkr/v2/internal/risk"
 // single concrete definition makes conversion loss impossible and ensures RPC
 // JSON validation cannot drift into a second policy evaluator.
 type (
-	AlertSource             = risk.AlertSource
-	AlertKind               = risk.AlertKind
-	AlertEpisodeState       = risk.AlertEpisodeState
-	AlertSeverity           = risk.AlertSeverity
+	// AlertSource identifies an allowlisted alert producer.
+	AlertSource = risk.AlertSource
+	// AlertKind classifies the condition represented by a candidate.
+	AlertKind = risk.AlertKind
+	// AlertEpisodeState describes whether an episode opened, escalated, or recovered.
+	AlertEpisodeState = risk.AlertEpisodeState
+	// AlertSeverity is the stable urgency classification of a candidate.
+	AlertSeverity = risk.AlertSeverity
+	// AlertDeliveryPreference is producer advice, not delivery authorization.
 	AlertDeliveryPreference = risk.AlertDeliveryPreference
-	AlertEvidenceHealth     = risk.AlertEvidenceHealth
-	AlertDestination        = risk.AlertDestination
-	AlertCoverageState      = risk.AlertCoverageState
-	AlertCoverageFreshness  = risk.AlertCoverageFreshness
-	AlertSnapshotState      = risk.AlertSnapshotState
-	AlertCandidate          = risk.AlertCandidate
-	AlertCoverage           = risk.AlertCoverage
-	AlertCandidateSnapshot  = risk.AlertCandidateSnapshot
+	// AlertEvidenceHealth reports the quality of evidence behind a candidate.
+	AlertEvidenceHealth = risk.AlertEvidenceHealth
+	// AlertDestination identifies an allowed presentation surface.
+	AlertDestination = risk.AlertDestination
+	// AlertCoverageState reports whether the producer evaluated its full universe.
+	AlertCoverageState = risk.AlertCoverageState
+	// AlertCoverageFreshness reports whether coverage evidence is current.
+	AlertCoverageFreshness = risk.AlertCoverageFreshness
+	// AlertSnapshotState distinguishes conclusively clear, active, and unknown snapshots.
+	AlertSnapshotState = risk.AlertSnapshotState
+	// AlertCandidate is the shared pure-risk candidate contract.
+	AlertCandidate = risk.AlertCandidate
+	// AlertCoverage is the shared pure-risk coverage contract.
+	AlertCoverage = risk.AlertCoverage
+	// AlertCandidateSnapshot is the shared validated source-neutral snapshot.
+	AlertCandidateSnapshot = risk.AlertCandidateSnapshot
 )
 
+// Alert-candidate constants re-export the pure risk vocabulary unchanged so
+// RPC adapters and risk evaluation share one set of wire values.
 const (
+	// AlertCandidateSnapshotVersion identifies a stable wire schema.
 	AlertCandidateSnapshotVersion = risk.AlertCandidateSnapshotVersion
 
 	AlertSourceCanary         = risk.AlertSourceCanary
@@ -105,14 +121,18 @@ func BuildAlertAuthorityScope(account, mode string) (string, error) {
 	return risk.BuildAlertAuthorityScope(account, mode)
 }
 
+// ValidateAlertAuthorityScope rejects malformed or noncanonical scope values.
 func ValidateAlertAuthorityScope(value string) error {
 	return risk.ValidateAlertAuthorityScope(value)
 }
 
+// ValidateAlertCandidate validates a candidate against the shared risk contract.
 func ValidateAlertCandidate(candidate AlertCandidate) error {
 	return candidate.Validate()
 }
 
+// ValidateAlertCandidateSnapshot validates coverage, candidates, and snapshot
+// coherence against the shared risk contract.
 func ValidateAlertCandidateSnapshot(snapshot AlertCandidateSnapshot) error {
 	return snapshot.Validate()
 }

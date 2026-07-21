@@ -5,14 +5,16 @@ import (
 	"path/filepath"
 )
 
-// Files contains the static PWA assets served by `ibkr app`.
+// Files contains the read-only static PWA assets served by the app host. It is
+// presentation content only and carries no runtime state or authority.
 //
 //go:embed index.html app.js alert-inbox-v2.js alerts.js auth.js brief.js canary.js chrome.js lifecycle.js market-events.js opportunities.js orders.js portfolio.js protection-coverage.js protection.js settings.js shared.js shell.js state.js underlyings.js styles.css service-worker.js manifest.webmanifest icon-192.png icon-512.png favicon-16.png favicon-32.png favicon-64.png
 var Files embed.FS
 
-// EmbeddedJavaScriptFileNames returns the root-level JavaScript assets in the
-// embedded app. The embed list remains the source of truth for both the local
-// app routes and the remote relay allowlist.
+// EmbeddedJavaScriptFileNames returns a newly allocated, filename-sorted list
+// of root-level JavaScript assets in Files. The embedded set is shared by local
+// static routes and the relay path allowlist. The function panics only if the
+// compile-time embedded filesystem cannot read its root.
 func EmbeddedJavaScriptFileNames() []string {
 	entries, err := Files.ReadDir(".")
 	if err != nil {

@@ -9,9 +9,9 @@ import (
 	"strings"
 )
 
-// Regime stage buckets consumed by the regime-conditional rules (3, 4, 12).
-// The daemon buckets the regime lifecycle stage into these three before
-// mapping RuleInputs; the evaluator never sees raw lifecycle stage names.
+// RegimeBucketCalm and the related constants are normalized regime buckets
+// consumed by regime-conditional rules. The evaluator does not accept raw
+// lifecycle stage names.
 const (
 	RegimeBucketCalm         = "calm"
 	RegimeBucketEarlyWarning = "early_warning"
@@ -29,12 +29,9 @@ type RegimeThresholds struct {
 	HedgeBandMaxPct   float64 `toml:"hedge_band_max_pct" json:"hedge_band_max_pct"`
 }
 
-// RulebookPolicy carries the operator-tunable thresholds for the 14-rule
-// daily trading rulebook (docs/design/trading-rulebook.md). Sibling
-// thresholds measuring the same aggregation live in the canary policy
-// (compiled, single-name watch 35) and the protection policy (TOML,
-// risk-reduction target 25); bars differ by surface question, observations
-// must not — see the aggregation-consistency test.
+// RulebookPolicy carries the operator-tunable thresholds for the daily trading
+// rulebook. It owns rulebook verdict thresholds, not the source observations
+// that callers map into RuleInputs.
 type RulebookPolicy struct {
 	ID      string `toml:"id" json:"id"`
 	Version int    `toml:"version" json:"version"`
@@ -72,9 +69,9 @@ type RulebookPolicy struct {
 	WinnerTrimDayUpPct    float64 `toml:"winner_trim_day_up_pct" json:"winner_trim_day_up_pct"`
 	WinnerTrimMinExpoPct  float64 `toml:"winner_trim_min_exposure_pct" json:"winner_trim_min_exposure_pct"`
 
-	// Rules 3/4/12 — regime-conditional threshold sets. The calm set carries
-	// the rulebook-v1 numbers; a fresh regime stage selects its set; a
-	// carried or never-seen stage evaluates the carried set AND the calm set
+	// Rules 3/4/12 — regime-conditional threshold sets. A fresh regime stage
+	// selects its set; a carried or never-seen stage evaluates the carried set
+	// AND the calm set
 	// and keeps the worse verdict, so stale regime data can hold or tighten
 	// a verdict but never relax it.
 	RegimeCalm         RegimeThresholds `toml:"regime_calm" json:"regime_calm"`
@@ -88,8 +85,8 @@ type RulebookPolicy struct {
 	ExitWatchLossPct float64 `toml:"exit_watch_loss_pct" json:"exit_watch_loss_pct"`
 	ExitActLossPct   float64 `toml:"exit_act_loss_pct" json:"exit_act_loss_pct"`
 
-	// Rule 14 — fx_exposure (% of NLV held in non-base currencies).
-	// Watch-only in v2: a structural breach must not light a permanent act.
+	// Rule 14 — fx_exposure (% of NLV held in non-base currencies). This is a
+	// watch-only structural condition.
 	FXExposureWatchPct float64 `toml:"fx_exposure_watch_pct" json:"fx_exposure_watch_pct"`
 
 	// HedgeSymbols is the policy-owned index list whose long puts classify
@@ -106,10 +103,7 @@ type RulebookPolicy struct {
 	EarningsStaleDays int `toml:"earnings_stale_days" json:"earnings_stale_days"`
 }
 
-// DefaultRulebookPolicy returns the embedded rulebook-v2 defaults — the
-// rulebook-v1 numbers agreed with the operator on 2026-07-07, amended by the
-// dual senior review of 2026-07-08 (hedge premium tier, short-put act tier,
-// regime-conditional sets, exit discipline, FX watch).
+// DefaultRulebookPolicy returns a complete baseline policy.
 func DefaultRulebookPolicy() RulebookPolicy {
 	return RulebookPolicy{
 		ID:                     "rulebook-v2",

@@ -2,6 +2,8 @@ package rpc
 
 import "time"
 
+// Trade-proposal method names and allowlisted policy, snapshot, bucket, and
+// proposal-state values form a stable daemon wire vocabulary.
 const (
 	MethodAutoTradeStatus        = "auto_trade.status"
 	MethodTradeProposalsSnapshot = "trade_proposals.snapshot"
@@ -9,20 +11,23 @@ const (
 	MethodTradeProposalsPreview  = "trade_proposals.preview"
 	MethodTradeProposalsSubmit   = "trade_proposals.submit"
 	MethodTradeProposalsIgnore   = "trade_proposals.ignore"
-	// Reduce is a discretionary, user-initiated partial close of an existing
+	// MethodTradeProposalsReducePreview starts a discretionary, user-initiated
+	// partial close of an existing
 	// holding by a chosen percentage. Unlike the daemon-generated proposals
 	// above (keyed by key+revision), it acts directly on a live position, so
 	// it carries no proposal key. It reuses the gated order preview/place
 	// path and is always close/reduce-only.
 	MethodTradeProposalsReducePreview = "trade_proposals.reduce_preview"
 	MethodTradeProposalsReduceSubmit  = "trade_proposals.reduce_submit"
-	// Portfolio reduce is the one-tap risk-off sweep: a proportional trim of the
+	// MethodTradeProposalsReducePortfolioPreview starts the one-tap risk-off
+	// sweep: a proportional trim of the
 	// whole book by a chosen percentage. It enumerates every eligible position
 	// and drives each leg through the same gated order path as the single-position
 	// reduce, best-effort. Protective hedges are excluded unless opted in.
 	MethodTradeProposalsReducePortfolioPreview = "trade_proposals.reduce_portfolio_preview"
 	MethodTradeProposalsReducePortfolioSubmit  = "trade_proposals.reduce_portfolio_submit"
 
+	// ProtectionPolicyFingerprintVersion identifies a semantic fingerprint projection.
 	ProtectionPolicyFingerprintVersion = "protection-policy-fp-v1"
 
 	ProtectionPolicyStatusActive   = "active"
@@ -32,12 +37,8 @@ const (
 	ProtectionPolicyStatusDisabled = "disabled"
 
 	TradeProposalSnapshotKind = "ibkr.trade_proposal_snapshot"
-	// TradeProposalSnapshotSchemaVersion v2 adds account/mode scoping:
-	// account_id is a concrete single account (never the "All" aggregate)
-	// and account_mode records the paper/live session the proposals were
-	// generated under. Adoption of a persisted snapshot at daemon startup
-	// gates on the scope being concrete, not on this version string, so
-	// v1 snapshots (which lack account_mode) fail closed automatically.
+	// TradeProposalSnapshotSchemaVersion identifies the account-and-mode-scoped
+	// snapshot schema. Persisted snapshots without concrete scope fail closed.
 	TradeProposalSnapshotSchemaVersion = "trade-proposal-snapshot-v2"
 
 	TradeProposalBucketThetaHygiene  = "theta_hygiene"
@@ -48,6 +49,7 @@ const (
 	TradeProposalStateBlocked   = "blocked"
 )
 
+// ProtectionPolicyStatus reports the loaded policy identity and blockers.
 type ProtectionPolicyStatus struct {
 	Kind          string           `json:"kind,omitempty"`
 	Status        string           `json:"status"`
@@ -63,6 +65,8 @@ type ProtectionPolicyStatus struct {
 	Blockers      []TradingBlocker `json:"blockers,omitempty"`
 }
 
+// AutoTradeStatus combines proposal generation and trading readiness. It is
+// observational and does not itself authorize a broker write.
 type AutoTradeStatus struct {
 	Kind             string                 `json:"kind,omitempty"`
 	AsOf             time.Time              `json:"as_of,omitzero"`
@@ -77,6 +81,8 @@ type AutoTradeStatus struct {
 	Blockers         []TradingBlocker       `json:"blockers,omitempty"`
 }
 
+// TradeProposalSourceFingerprints identifies the snapshots used to derive a
+// proposal revision. Nil members mean that source supplied no identity.
 type TradeProposalSourceFingerprints struct {
 	Account      *Fingerprint `json:"account,omitempty"`
 	Positions    *Fingerprint `json:"positions,omitempty"`
@@ -84,6 +90,8 @@ type TradeProposalSourceFingerprints struct {
 	MarketEvents *Fingerprint `json:"market_events,omitempty"`
 }
 
+// TradeProposalSnapshot is one daemon-authored, account-and-mode-scoped
+// revision. LoadedFromState does not imply that the snapshot is fresh.
 type TradeProposalSnapshot struct {
 	Kind               string                          `json:"kind"`
 	SchemaVersion      string                          `json:"schema_version"`
@@ -105,6 +113,8 @@ type TradeProposalSnapshot struct {
 	LoadedFromState    bool                            `json:"loaded_from_state,omitempty"`
 }
 
+// TradeProposalCounts summarizes proposals and their currency-qualified money
+// values for the enclosing snapshot.
 type TradeProposalCounts struct {
 	Total                       int     `json:"total"`
 	Actionable                  int     `json:"actionable"`
@@ -127,6 +137,8 @@ type TradeProposalCounts struct {
 	BaseCurrency                    string   `json:"base_currency,omitempty"`
 }
 
+// TradeProposal is an advisory action bound to a key and revision. It is not a
+// preview token or submit authorization.
 type TradeProposal struct {
 	Key                string                           `json:"key"`
 	Revision           string                           `json:"revision"`
@@ -246,6 +258,8 @@ type TradeProposalStopRisk struct {
 	WarningCodes        []string                  `json:"warning_codes,omitempty"`
 }
 
+// TradeProposalStopRiskGap describes one modeled gap scenario. Pointer values
+// remain nil when the estimate is unavailable rather than meaning zero loss.
 type TradeProposalStopRiskGap struct {
 	Label                 string   `json:"label,omitempty"`
 	GapPct                float64  `json:"gap_pct,omitempty"`
@@ -255,6 +269,8 @@ type TradeProposalStopRiskGap struct {
 	EstimatedLossPctNLV   *float64 `json:"estimated_loss_pct_nlv,omitempty"`
 }
 
+// TradeProposalStopLadderStep is one modeled stop-distance scenario and is not
+// a broker fill guarantee.
 type TradeProposalStopLadderStep struct {
 	Label               string   `json:"label"`
 	Kind                string   `json:"kind,omitempty"`
@@ -266,14 +282,19 @@ type TradeProposalStopLadderStep struct {
 	ReferencePrice      *float64 `json:"reference_price,omitempty"`
 }
 
+// TradeProposalSnapshotParams controls rendering of the current revision.
 type TradeProposalSnapshotParams struct {
 	Show bool `json:"show,omitempty"`
 }
 
+// TradeProposalRefreshParams requests daemon recomputation; Show affects only
+// the returned presentation.
 type TradeProposalRefreshParams struct {
 	Show bool `json:"show,omitempty"`
 }
 
+// TradeProposalPreviewParams identifies an exact candidate revision for gated
+// broker preview.
 type TradeProposalPreviewParams struct {
 	Key       string `json:"key"`
 	Revision  string `json:"revision"`
@@ -282,6 +303,8 @@ type TradeProposalPreviewParams struct {
 	FastPath  bool   `json:"fast_path,omitempty"`
 }
 
+// TradeProposalPreviewResult reports broker and daemon eligibility. A token ID
+// is an audit identifier; the raw authorizing token remains private.
 type TradeProposalPreviewResult struct {
 	Accepted              bool                       `json:"accepted"`
 	Proposal              TradeProposal              `json:"proposal"`
@@ -293,6 +316,8 @@ type TradeProposalPreviewResult struct {
 	AsOf                  time.Time                  `json:"as_of"`
 }
 
+// TradeProposalOrderPreview is the sanitized broker WhatIf and order preview.
+// SubmitEligible is informative until the daemon revalidates at submission.
 type TradeProposalOrderPreview struct {
 	PreviewTokenID        string                           `json:"preview_token_id,omitempty"`
 	PreviewTokenScope     string                           `json:"preview_token_scope,omitempty"`
@@ -315,6 +340,8 @@ type TradeProposalOrderPreview struct {
 	AsOf                  time.Time                        `json:"as_of"`
 }
 
+// TradeProposalSubmitParams requests gated submission of an exact revision.
+// Origin and any earlier preview are evidence, not submit authority by themselves.
 type TradeProposalSubmitParams struct {
 	Key       string `json:"key"`
 	Revision  string `json:"revision"`
@@ -324,6 +351,7 @@ type TradeProposalSubmitParams struct {
 	Origin    string `json:"origin,omitempty"`
 }
 
+// TradeProposalSubmitResult reports the outcome of a gated submission request.
 type TradeProposalSubmitResult struct {
 	Accepted       bool                       `json:"accepted"`
 	Proposal       TradeProposal              `json:"proposal"`
@@ -336,12 +364,15 @@ type TradeProposalSubmitResult struct {
 	AsOf           time.Time                  `json:"as_of"`
 }
 
+// TradeProposalIgnoreParams dismisses an advisory revision without touching
+// broker orders or positions.
 type TradeProposalIgnoreParams struct {
 	Key      string `json:"key"`
 	Revision string `json:"revision,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 }
 
+// TradeProposalIgnoreResult reports whether the advisory dismissal was accepted.
 type TradeProposalIgnoreResult struct {
 	Accepted bool      `json:"accepted"`
 	Key      string    `json:"key"`

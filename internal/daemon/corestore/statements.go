@@ -99,6 +99,8 @@ VALUES(?,?,?,?,?,?,?,?,?)`, scopeKey, day.AccountKey, day.Day, day.EquityBaseTex
 	})
 }
 
+// LoadStatementFiles returns the current complete statement inventory for one
+// scope in file-key order.
 func (s *Store) LoadStatementFiles(ctx context.Context, scopeKey string) ([]StatementFileRecord, error) {
 	if err := validateKey("scope key", scopeKey, 512); err != nil {
 		return nil, err
@@ -148,6 +150,9 @@ func (s *Store) LoadStatementFiles(ctx context.Context, scopeKey string) ([]Stat
 	return out, nil
 }
 
+// LoadStatementEquityDays returns current statement-derived winners in
+// ascending day and row-ID order. Day bounds are inclusive; a zero limit
+// defaults to 1,000 rows.
 func (s *Store) LoadStatementEquityDays(ctx context.Context, scopeKey, fromDay, toDay string, limit int) ([]StatementEquityDayRecord, error) {
 	if err := validateKey("scope key", scopeKey, 512); err != nil {
 		return nil, err

@@ -1,10 +1,3 @@
-// setup.go hosts the `ibkr setup` subcommand: writes the MCP server entry
-// into local-AI-client config files so the user doesn't have to paste JSON
-// snippets and substitute their absolute binary path by hand.
-//
-// Currently supports `claude-desktop`. Adding more clients (cursor, zed,
-// continue) is a matter of new locator + config-shape entries in the
-// clients map — the read-merge-backup-write loop is shared.
 package main
 
 import (

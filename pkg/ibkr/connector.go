@@ -30,15 +30,15 @@ const OptionOpenInterestGenericTick = "101"
 // ErrSymbolInactive indicates IBKR has reported the contract is unavailable (e.g., delisted).
 var ErrSymbolInactive = errors.New("symbol marked inactive")
 
-// ErrContractDetailsTimeout marks the case where reqContractData was sent but
-// IBKR never emitted contractDetailsEnd within the budget. Gateway-side
-// condition: usually the security-definition data farm is degraded
-// (intermittent pre-market, after maintenance windows, or when account
-// permissions for a venue lapse). Callers wrap this with context — the
-// daemon turns it into a CLI-friendly "option chain unavailable" hint.
+// ErrContractDetailsTimeout indicates that a contract-details request did not
+// receive its end marker before the caller's timeout. A returned result slice
+// may still contain details received before the timeout.
 var ErrContractDetailsTimeout = errors.New("timeout waiting for contract details")
 
-// Connector is the main IBKR connector component
+// Connector owns one broker connection together with its subscriptions and
+// in-memory market, contract, account, and order caches. Construct a Connector
+// with [NewConnector], call [Connector.Start] to begin its lifecycle, and call
+// [Connector.Stop] when finished.
 type Connector struct {
 	name   string
 	config *ConnectorConfig
@@ -150,8 +150,9 @@ type Connector struct {
 	pnl *pnlCache
 }
 
-// DataFarmStatus is the latest IBKR farm notice tracked by the connector.
-// Status is one of "ok", "inactive", "disconnected", or "broken".
+// DataFarmStatus describes the latest notice observed for one IBKR data farm.
+// Type identifies the farm category, Status is one of "ok", "inactive",
+// "disconnected", or "broken", and AsOf is the local observation time.
 type DataFarmStatus struct {
 	Name    string
 	Type    string
@@ -161,8 +162,9 @@ type DataFarmStatus struct {
 	AsOf    time.Time
 }
 
-// DataFarmStatuses returns a stable snapshot of all farm notices currently
-// tracked by the connector. Callers decide which statuses are actionable.
+// DataFarmStatuses returns a detached snapshot of the latest tracked farm
+// notices, sorted by type and then name. It returns nil for a nil Connector;
+// callers determine freshness from each entry's [DataFarmStatus.AsOf].
 func (c *Connector) DataFarmStatuses() []DataFarmStatus {
 	if c == nil {
 		return nil
@@ -182,27 +184,19 @@ func (c *Connector) DataFarmStatuses() []DataFarmStatus {
 	return out
 }
 
-// ConnectorConfig holds configuration for the IBKR connector. The Connector
-// owns a single [*Connection] keyed by [PreferredClientID]; multi-client
-// scaffolding was subtracted in favour of a one-client-one-connection
-// design.
+// ConnectorConfig configures the single [Connection] owned by a [Connector].
+// A nil BaseConfig uses [DefaultConfig]. PreferredClientID falls back first to
+// BaseConfig.ClientID and then to 1. [NewConnector] copies both config values.
 type ConnectorConfig struct {
 	ServiceName       string
 	PreferredClientID int
 	BaseConfig        *ConnectionConfig
 }
 
-// Subscription represents a market data subscription.
-//
-// PrevClose holds tick type 9 (previous regular-session close), which IBKR
-// emits automatically on any reqMktData. It's the anchor for change-vs-
-// prev-close calculations rendered by quote and positions — pre-market /
-// after-hours it's the only price worth comparing against because the
-// live ticks (bid/ask/last) may not be flowing yet.
-//
-// Open / High / Low (ticks 14/6/7) are captured for completeness but not
-// currently rendered; they're cheap to plumb and ready for a future
-// `quote --verbose` view.
+// Subscription holds the latest values observed for one streaming market-data
+// request. Zero-valued fields may mean either an observed zero or data not yet
+// received; fields with an accompanying Observed flag distinguish those cases.
+// LastTime is the local time of the most recently observed tick.
 type Subscription struct {
 	Symbol string
 	// Right is the normalized option right ("C" or "P") for option-leg
@@ -289,13 +283,9 @@ func wireCancelNeeded(sub *Subscription) bool {
 	return sub != nil && sub.ReqID != 0 && sub.ReqID != sub.rejectedReqID
 }
 
-// SubscriptionRejection captures a terminal IBKR error for a market-data
-// subscription. The fast-abort path in the per-leg poller selects on the
-// subscription's [Subscription.RejectCh] so a code-200 ("no security
-// definition") response returns immediately instead of running out the
-// 5 s budget. Callers can inspect Code to distinguish a legitimately
-// missing contract (200) from a temporary entitlement gap (354) or a
-// competing-session forced-delayed switch (10197).
+// SubscriptionRejection records a terminal IBKR error for a market-data
+// subscription. Code is the broker error code and Message is untrusted broker
+// text. Receiving a value means that request will not produce further ticks.
 type SubscriptionRejection struct {
 	Code    int
 	Message string
@@ -347,11 +337,9 @@ type marketDataAbsence struct {
 	at      time.Time
 }
 
-// MarketDataAbsenceError is returned by the market-data subscribe paths
-// when the gateway recently rejected this subscription key with a terminal
-// entitlement error and the retry window has not elapsed. It carries the
-// original rejection so callers can render an honest "asked and missed"
-// state instead of a silent empty stream.
+// MarketDataAbsenceError reports that a recent terminal entitlement rejection
+// is suppressing another request for the same route key. ObservedAt and RetryAt
+// are local times; Message is untrusted broker text.
 type MarketDataAbsenceError struct {
 	Key        string
 	Code       int
@@ -360,6 +348,7 @@ type MarketDataAbsenceError struct {
 	RetryAt    time.Time
 }
 
+// Error returns a concise description of the suppressed market-data request.
 func (e *MarketDataAbsenceError) Error() string {
 	return fmt.Sprintf("market data for %s unavailable (IBKR %d at %s; retry after %s)",
 		e.Key, e.Code, e.ObservedAt.Format("15:04:05"), e.RetryAt.Format("15:04:05"))
@@ -441,9 +430,10 @@ const (
 	contractHydrationGrace = 5 * time.Second
 )
 
-// HistoricalBar represents a single OHLC bar returned by IBKR HMDS.
-// The Time field is parsed best-effort from the gateway response; when parsing
-// fails it will be the zero value while Date retains the original string.
+// HistoricalBar represents one OHLC bar returned by IBKR historical market
+// data. Prices and Average use the contract's price units; Volume is the
+// broker-reported volume. Time is parsed best-effort and is zero when parsing
+// fails, while Date always retains the original broker value.
 type HistoricalBar struct {
 	Time     time.Time
 	Date     string
@@ -470,13 +460,17 @@ type historicalRequest struct {
 	result chan historicalResult
 }
 
-// HistoricalRequestError encapsulates IBKR historical data error codes and retry hints.
+// HistoricalRequestError reports a broker error from a historical-data
+// request. RetryAfter is zero when the connector has no retry delay to suggest,
+// and Message is untrusted broker text.
 type HistoricalRequestError struct {
 	Code       int
 	Message    string
 	RetryAfter time.Duration
 }
 
+// Error returns the broker message when present, otherwise a code-based
+// historical-data error description.
 func (e *HistoricalRequestError) Error() string {
 	if e.Message != "" {
 		return e.Message
@@ -484,8 +478,9 @@ func (e *HistoricalRequestError) Error() string {
 	return fmt.Sprintf("historical data error %d", e.Code)
 }
 
-// NewConnector creates a new IBKR connector that will manage a single
-// [*Connection] bound to PreferredClientID.
+// NewConnector constructs a stopped Connector for one broker connection. It
+// performs no network I/O and defensively copies config and BaseConfig. A nil
+// config uses package defaults; call [Connector.Start] to connect.
 func NewConnector(config *ConnectorConfig) *Connector {
 	if config == nil {
 		config = &ConnectorConfig{
@@ -595,7 +590,9 @@ func (c *Connector) inactiveReason(symbol string) (string, bool) {
 	return state.reason, true
 }
 
-// InactiveReason reports the stored inactivity reason for a symbol, if any.
+// InactiveReason reports an unexpired in-memory inactivity mark for symbol.
+// It performs no broker request. The boolean is false when no mark exists or
+// the mark has expired; the returned reason is untrusted broker text.
 func (c *Connector) InactiveReason(symbol string) (string, bool) {
 	if symbol == "" {
 		return "", false
@@ -610,7 +607,8 @@ func (c *Connector) InactiveReason(symbol string) (string, bool) {
 	return "", false
 }
 
-// IsSymbolInactive returns true when the symbol has been marked inactive via IBKR error handling.
+// IsSymbolInactive reports whether symbol has an unexpired in-memory
+// inactivity mark. It performs no broker request.
 func (c *Connector) IsSymbolInactive(symbol string) bool {
 	_, inactive := c.InactiveReason(symbol)
 	return inactive
@@ -1099,8 +1097,10 @@ func (c *Connector) dropSubscription(symbol string) {
 	c.optMu.Unlock()
 }
 
-// SetMarketDataType proxies to the underlying connection to control data type.
-// dataType: 1=Live, 2=Frozen, 3=Delayed, 4=DelayedFrozen
+// SetMarketDataType requests the market-data mode for subsequent requests:
+// 1=live, 2=frozen, 3=delayed, and 4=delayed-frozen. A live request is reduced
+// to delayed mode when the connection has detected a competing live session.
+// It returns an error when no broker connection is active or the write fails.
 func (c *Connector) SetMarketDataType(dataType int) error {
 	c.mu.RLock()
 	conn := c.conn
@@ -1115,10 +1115,11 @@ func (c *Connector) SetMarketDataType(dataType int) error {
 	return conn.SetMarketDataType(dataType)
 }
 
-// Start initializes the IBKR connector. Attaches connect/disconnect hooks
-// and opens the single TCP connection. Returns nil even if the gateway is
-// unreachable so the daemon can run in degraded mode and rebuild later via
-// triggerReconnect.
+// Start attaches lifecycle handlers and attempts to open the Connector's
+// broker connection. It returns an error when already started. An initial
+// connection failure leaves the Connector running but not ready and is exposed
+// through [Connector.LastError], so that failure does not make Start fail.
+// Context cancellation bounds the connection attempt.
 func (c *Connector) Start(ctx context.Context) error {
 	c.mu.Lock()
 	if c.running {
@@ -1227,13 +1228,9 @@ func (c *Connector) onConnectionLost(conn *Connection) {
 	}
 }
 
-// MarketDataTypeForSymbol returns the gateway's per-reqID
-// market-data-type notice for the symbol's active subscription:
-// 1=RealTime, 2=Frozen, 3=Delayed, 4=DelayedFrozen, 0=unknown (no
-// subscription, or notice not yet received). The CLI uses this to
-// render an after-hours data-type badge — frozen mode delivers a single
-// snapshot per request and then goes silent, so the user needs to know
-// rather than watch a dead stream.
+// MarketDataTypeForSymbol returns the latest gateway data-type notice for the
+// symbol's active subscription: 1=live, 2=frozen, 3=delayed,
+// 4=delayed-frozen, or 0 when the subscription or notice is absent.
 func (c *Connector) MarketDataTypeForSymbol(symbol string) int {
 	c.subMu.RLock()
 	sub, ok := c.subscriptions[strings.ToUpper(symbol)]
@@ -1250,12 +1247,9 @@ func (c *Connector) MarketDataTypeForSymbol(symbol string) int {
 	return conn.MarketDataType(sub.ReqID)
 }
 
-// ContractDetailsLite contains the subset of details needed for calendar building.
-//
-// Option-specific fields (SecType, Expiry, Strike, Right) are populated only
-// when the underlying contractData frame describes an OPT contract — used by
-// PrewarmOptionChain to key bulk-resolved option entries by their (symbol,
-// expiry, strike, right) tuple. They stay zero/empty for stocks.
+// ContractDetailsLite contains the routing, identity, schedule, and price-tick
+// fields decoded from a broker contract-details response. Option-specific
+// fields such as Expiry, Strike, and Right are empty for non-option contracts.
 type ContractDetailsLite struct {
 	ReqID        int
 	Symbol       string
@@ -1276,9 +1270,10 @@ type ContractDetailsLite struct {
 	MinTick float64
 }
 
-// ContractDetailsFirst fetches the first contractData frame the gateway
-// returns for the contract — sufficient for venue facts such as MinTick.
-// Callers needing option-candidate preference must use the option resolver.
+// ContractDetailsFirst returns the first contract-details row the gateway
+// emits for contract. It does not apply option-candidate preference. A timeout
+// of zero or less uses five seconds; context cancellation and send or timeout
+// failures are returned to the caller.
 func (c *Connector) ContractDetailsFirst(ctx context.Context, contract Contract, timeout time.Duration) (*ContractDetailsLite, error) {
 	if !c.isConnected() {
 		return nil, fmt.Errorf("not connected to IBKR")
@@ -1337,11 +1332,11 @@ type inactiveCandidateState struct {
 	lastUpdated time.Time
 }
 
-// MarketDataKeyForContract returns the cache/subscription key for an explicit
-// market-data contract. The legacy symbol-only path stays keyed by bare symbol;
-// contracts with caller- or gateway-supplied venue/currency include those
-// routing fields so a failed speculative route (for example MBG as SMART/USD)
-// does not poison MBG on IBIS/EUR.
+// MarketDataKeyForContract returns the normalized cache and subscription key
+// for an explicitly routed market-data contract. An unrouted stock uses its
+// upper-case symbol; routed contracts join symbol, security type, exchange,
+// primary exchange, currency, local symbol, and trading class with "|". It
+// returns an empty string when Symbol is empty.
 func MarketDataKeyForContract(contract Contract) string {
 	symbol := strings.ToUpper(strings.TrimSpace(contract.Symbol))
 	if symbol == "" {
@@ -1367,10 +1362,9 @@ func MarketDataKeyForContract(contract Contract) string {
 	return strings.Join([]string{symbol, secType, exchange, primary, currency, localSymbol, tradingClass}, "|")
 }
 
-// DefaultMarketDataKeyForSymbol is the route-aware key the symbol-only
-// subscription path will use on the wire after classifySymbol applies its
-// defaults. It lets callers check a failed default route without assuming
-// every ticker is US SMART/USD.
+// DefaultMarketDataKeyForSymbol returns the same normalized route key used by
+// the symbol-only subscription path after applying package routing defaults.
+// It returns an empty string for a blank symbol.
 func DefaultMarketDataKeyForSymbol(symbol string) string {
 	upper := strings.ToUpper(strings.TrimSpace(symbol))
 	if upper == "" {
@@ -1563,25 +1557,11 @@ const (
 	minServerVerLastTradeDate    = 182
 )
 
-// SeedContractDetails inserts a known-good ContractDetailsLite into the
-// connector's in-memory cache iff no live entry already exists for the
-// symbol. The guard mirrors the late-arrival cache write in
-// FetchContractDetails: a real gateway response always wins over a
-// seeded value.
-//
-// Why this exists: IBKR rate-limits reqContractDetails per account
-// (~50 calls per 10 minutes on retail). Once that bucket is exhausted,
-// further requests sit in the gateway's queue silently — no error, no
-// late frame, just nothing. Historical data fetches that depend on
-// ConID then block the regime row's secondary fields
-// (hyg_50dma, weekly_change_pct, etc.) for the rest of the daemon
-// lifetime even though reqMktData / reqHistoricalData themselves work
-// fine. Seeding the cache with stable, well-known spot conIDs at
-// daemon startup lets the historical path short-circuit the broken
-// reqContractDetails entirely.
-//
-// Returns true iff the seed was applied (i.e. the symbol wasn't
-// already cached with a non-zero ConID).
+// SeedContractDetails adds a caller-supplied contract to the Connector's
+// in-memory cache when symbol is non-empty, detail has a non-zero ConID, and no
+// resolved entry is already cached for that symbol. It never replaces a live
+// resolved entry and performs no broker request. The result reports whether the
+// seed was applied.
 func (c *Connector) SeedContractDetails(symbol string, detail ContractDetailsLite) bool {
 	if symbol == "" || detail.ConID == 0 {
 		return false
@@ -1596,8 +1576,11 @@ func (c *Connector) SeedContractDetails(symbol string, detail ContractDetailsLit
 	return true
 }
 
-// FetchContractDetails requests contract details for a symbol and waits for completion.
-// NOTE: This implementation assumes single-flight usage per process due to global handlers.
+// FetchContractDetails returns cached contract details for symbol when a
+// resolved entry exists; otherwise it requests all matching rows and waits for
+// the broker's completion marker. Calls must be serialized because the request
+// uses shared response handlers. On timeout it returns any rows already
+// received together with [ErrContractDetailsTimeout].
 func (c *Connector) FetchContractDetails(symbol string, timeout time.Duration) ([]ContractDetailsLite, error) {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	if symbol == "" {
@@ -2078,17 +2061,10 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 	}, true
 }
 
-// Stop gracefully shuts down the IBKR connector.
-//
-// Lifecycle contract for callers: callers in internal/daemon may still
-// hold a *Connector reference and invoke methods on it after Stop
-// returns (the daemon's gatewayConnector() snapshot is mu-guarded for
-// the pointer but is released before the handler runs). Method calls
-// on a stopped connector must therefore remain memory-safe — return
-// errors or no-op, never panic or read freed memory. Do not introduce
-// sync.Pool reuse, runtime finalizers, or any teardown that frees the
-// *Connector struct itself without first refactoring the daemon to
-// hold a lifecycle lock across handler calls.
+// Stop marks the Connector stopped, cancels its P&L subscriptions, and closes
+// the broker connection. It is idempotent. The Connector remains a valid value
+// after Stop; later method calls report unavailable state or no-op as defined by
+// each method.
 func (c *Connector) Stop() error {
 	// Drop c.mu BEFORE calling into conn.Disconnect — that path fires the
 	// registered onDisconnect callback (attachConnectionHooks.func2), which
@@ -2129,16 +2105,14 @@ func (c *Connector) Stop() error {
 	return nil
 }
 
-// SubscribeMarketData subscribes to market data for a symbol. Idempotent:
-// re-subscribing to the same symbol is a no-op (returns nil), so callers
-// that race or run sequentially do not need to coordinate. Unsubscribe is
-// the symmetric tear-down.
-//
-// ctx must be non-nil and bounds the underlying market-data slot-acquire when
-// the slot pool is saturated. Pass context.Background() when no cancellation
-// is needed. Callers with a per-request deadline (regime fetchers, snapshot
-// helpers) should pass that ctx through so the budget is honoured at the slot
-// layer instead of relying on orchestrator-level wrappers.
+// SubscribeMarketData ensures a symbol-keyed streaming subscription exists.
+// Repeating the call for the same normalized symbol is a no-op, including from
+// concurrent callers. ctx must be non-nil and bounds acquisition of a
+// market-data slot. fields is retained as subscription metadata; the wire tick
+// set is selected by the Connector. The slice is not copied and must not be
+// mutated while subscribed. When disconnected, the method records a local
+// subscription with no live request. Use [Connector.UnsubscribeMarketData] for
+// cleanup.
 func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fields []string) error {
 	symbol = strings.ToUpper(symbol)
 	if reason, inactive := c.inactiveReason(symbol); inactive {
@@ -2226,10 +2200,12 @@ func (c *Connector) SubscribeMarketData(ctx context.Context, symbol string, fiel
 	return nil
 }
 
-// SubscribeMarketDataWithContract subscribes to a fully specified contract
-// under a route-aware key. It is for quote/scan paths where the caller knows
-// the venue/currency (for example German STK/IBIS/EUR) and the legacy
-// symbol-only classifier would otherwise send SMART/USD.
+// SubscribeMarketDataWithContract ensures a streaming subscription exists for
+// an explicitly routed contract and returns its [MarketDataKeyForContract] key.
+// Repeating the same route is a no-op. ctx must be non-nil and bounds slot
+// acquisition. fields is retained as metadata; the Connector selects the wire
+// tick set. The slice is not copied and must not be mutated while subscribed.
+// When disconnected, it records a local subscription with ReqID zero.
 func (c *Connector) SubscribeMarketDataWithContract(ctx context.Context, contract Contract, fields []string) (string, error) {
 	contract = normalizeMarketDataContract(contract)
 	contract = c.hydrateExplicitMarketDataContract(contract)
@@ -2330,13 +2306,12 @@ func explicitContractRouteMatches(requested, candidate Contract) bool {
 	return reqExchange == candExchange || reqExchange == candPrimary
 }
 
-// EnsureMarketDataSubscription ensures there is an active, fresh subscription for a symbol.
-// If a subscription exists but appears stale (no ticks in staleAfter), it will request again.
-// Returns true if a request was sent (new or refreshed).
-//
-// ctx must be non-nil and bounds the slot-acquire when the market-data
-// semaphore is saturated. Pass context.Background() when no cancellation is
-// needed.
+// EnsureMarketDataSubscription creates a live symbol subscription or refreshes
+// one whose last observed tick is at least staleAfter old. A staleAfter value
+// of zero or less disables age-based refresh. The boolean reports whether a new
+// wire request was sent. ctx must be non-nil and bounds market-data slot
+// acquisition; unavailable, inactive, entitlement, and request failures are
+// returned.
 func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol string, fields []string, staleAfter time.Duration) (bool, error) {
 	symbol = strings.ToUpper(symbol)
 	if reason, inactive := c.inactiveReason(symbol); inactive {
@@ -2458,11 +2433,10 @@ func (c *Connector) EnsureMarketDataSubscription(ctx context.Context, symbol str
 	return true, nil
 }
 
-// UnsubscribeMarketData unsubscribes from market data. Symbol is normalised
-// to upper-case so Unsubscribe("aapl") cleanly tears down a subscription
-// created by Subscribe("aapl") — Subscribe stores under ToUpper(symbol),
-// so a case-mismatched Unsubscribe would otherwise silently leak the
-// IBKR market-data line.
+// UnsubscribeMarketData removes the normalized symbol or route key from the
+// local subscription cache and best-effort cancels its live broker request. It
+// is idempotent when no matching subscription exists. For routed subscriptions,
+// pass the key returned by [Connector.SubscribeMarketDataWithContract].
 func (c *Connector) UnsubscribeMarketData(symbol string) error {
 	symbol = strings.ToUpper(symbol)
 	c.subMu.Lock()
@@ -2516,7 +2490,10 @@ func (c *Connector) UnsubscribeMarketData(symbol string) error {
 	return nil
 }
 
-// RawOrder represents an IBKR order
+// RawOrder contains the broker-wire fields accepted by Connector order-write
+// methods. Numeric price fields use the contract currency. Callers are
+// responsible for supplying a broker-valid combination of order type, prices,
+// quantity, time in force, account, and routing fields.
 type RawOrder struct {
 	OrderID         int
 	ClientID        int
@@ -2537,7 +2514,10 @@ type RawOrder struct {
 	OpenClose       string // O=open, C=close
 }
 
-// SubmitOrder submits an order to IBKR
+// SubmitOrder sends an unrestricted order through the active broker
+// connection. Default builds return [ErrTradingDisabled] before transmission;
+// builds with the "trading" tag enable the wire path. A successful return means
+// the frame was sent, not that the broker accepted or filled the order.
 func (c *Connector) SubmitOrder(contract *Contract, order *RawOrder) error {
 	if !tradingEnabled {
 		return ErrTradingDisabled
@@ -2545,8 +2525,10 @@ func (c *Connector) SubmitOrder(contract *Contract, order *RawOrder) error {
 	return c.submitOrder(contract, order, nil)
 }
 
-// SubmitPaperOrder submits a daemon-gated paper order without enabling the
-// unrestricted raw SubmitOrder path in default package builds.
+// SubmitPaperOrder validates gate against the configured connection and sends
+// an order to a paper account. It is available in default builds without
+// enabling [Connector.SubmitOrder]. A successful return means the frame was
+// sent, not that the broker accepted or filled the order.
 func (c *Connector) SubmitPaperOrder(gate PaperOrderGate, contract *Contract, order *RawOrder) error {
 	if err := gate.validate(); err != nil {
 		return err
@@ -2681,9 +2663,9 @@ func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *
 	return nil
 }
 
-// ReserveOrderID claims the next broker order ID for a later SubmitOrder call.
-// Callers use this when they need a durable audit record before writing the
-// placeOrder frame to the socket.
+// ReserveOrderID claims the next broker order ID without submitting an order.
+// Default builds return [ErrTradingDisabled]. The ID is consumed locally and
+// should be passed to a later [Connector.SubmitOrder] call.
 func (c *Connector) ReserveOrderID() (int, error) {
 	if !tradingEnabled {
 		return 0, ErrTradingDisabled
@@ -2700,8 +2682,10 @@ func (c *Connector) ReserveOrderID() (int, error) {
 	return conn.GetNextOrderID(), nil
 }
 
-// RegisterOrderLifecycleHandler registers a callback for broker order
-// lifecycle messages. The callback is best-effort and must return quickly.
+// RegisterOrderLifecycleHandler appends a callback for broker order lifecycle
+// messages. Callbacks run synchronously on the dispatching goroutine in
+// registration order, must return quickly, and cannot be unregistered. A nil
+// Connector or handler is ignored.
 func (c *Connector) RegisterOrderLifecycleHandler(handler func(OrderLifecycleEvent)) {
 	if c == nil || handler == nil {
 		return
@@ -2718,7 +2702,9 @@ func multiplierToString(mult int) string {
 	return strconv.Itoa(mult)
 }
 
-// CancelOrder cancels an open order by its internal ID
+// CancelOrder sends a cancellation for broker orderID. Default builds return
+// [ErrTradingDisabled]. A successful return means the cancellation frame was
+// sent, not that the broker confirmed the order cancelled.
 func (c *Connector) CancelOrder(orderID int) error {
 	if !tradingEnabled {
 		return ErrTradingDisabled
@@ -2757,8 +2743,9 @@ func (c *Connector) CancelOrder(orderID int) error {
 	return nil
 }
 
-// CancelPaperOrder cancels a daemon-gated paper order without enabling the
-// unrestricted raw CancelOrder path in default package builds.
+// CancelPaperOrder validates gate against the configured connection and sends
+// a cancellation for broker orderID in a paper account. A successful return
+// means the frame was sent, not that the broker confirmed cancellation.
 func (c *Connector) CancelPaperOrder(gate PaperOrderGate, orderID int) error {
 	if err := gate.validate(); err != nil {
 		return err
@@ -2864,7 +2851,9 @@ func (c *Connector) isConnected() bool {
 	return conn.IsConnected()
 }
 
-// IsConnected exposes connection status for API/monitoring layers
+// IsConnected reports whether the Connector currently has an active broker
+// connection. It does not imply that response handlers are ready; use
+// [Connector.IsReady] when issuing requests.
 func (c *Connector) IsConnected() bool { return c.isConnected() }
 
 // connCtx returns the underlying Connection's lifetime ctx, or
@@ -2898,7 +2887,8 @@ func (c *Connector) UsingTLS() bool {
 	return conn.UsingTLS()
 }
 
-// IsReady indicates connection established and handlers registered
+// IsReady reports whether the broker connection is established and the
+// Connector's response handlers are registered.
 func (c *Connector) IsReady() bool {
 	c.mu.RLock()
 	rd := c.ready
@@ -2917,20 +2907,13 @@ func (c *Connector) ServerVersion() int {
 	return c.conn.ServerVersion()
 }
 
-// SubscribeOption issues a streaming market-data subscription for a fully
-// specified option contract (symbol + YYYYMMDD expiry + strike + C/P right
-// + tradingClass). The result is keyed by an OPRA-style identifier so chain
-// consumers can look up the cached quote in MarketDataSnapshot. ctx cancellation
-// aborts the underlying contract-resolution round trip; callers that already
-// have a per-request deadline should pass that ctx through.
-//
-// tradingClass is required because the option-contract cache is keyed by
-// (symbol, class, expiry, strike, right) — SPX vs SPXW collide on
-// third-Friday dates without the class qualifier. For single-class
-// underlyings (SPY, equities) the symbol-as-class default is the right
-// hint, so an empty tradingClass argument is normalised to underlying.
-// Multi-class callers (SPX gamma compute) MUST pass the explicit class
-// they enumerated from secDefOptParams.
+// SubscribeOption ensures a streaming subscription exists for a fully
+// specified option contract. expiryYMD uses YYYYMMDD and right uses C or P. An
+// empty tradingClass defaults to the normalized underlying; callers handling
+// multiple classes for one underlying must supply the class explicitly. The
+// returned key addresses cached values in [Connector.MarketDataSnapshot], and
+// the request ID identifies the live subscription. ctx bounds contract
+// resolution and slot acquisition.
 func (c *Connector) SubscribeOption(ctx context.Context, underlying, tradingClass, expiryYMD string, strike float64, right string) (string, int, error) {
 	if !c.isConnected() {
 		return "", 0, ErrIBKRUnavailable
@@ -3044,9 +3027,10 @@ func (c *Connector) removePreparedOptionSubscription(key string, reqID int) {
 	c.optMu.Unlock()
 }
 
-// OptionMarketDataKey returns the stable cache key used for per-contract
-// option market-data ticks. The format is intentionally compact because it is
-// shown in diagnostic maps and persisted only in memory: UNDERLYING_YYMMDDC100.
+// OptionMarketDataKey returns the normalized in-memory cache key used for an
+// option contract, formatted as UNDERLYING_YYMMDDC100. Hyphens are removed
+// from expiryYMD, only its last six digits are retained, and strike is formatted
+// with no fractional digits.
 func OptionMarketDataKey(underlying, expiryYMD, right string, strike float64) string {
 	upperUnderlying := strings.ToUpper(strings.TrimSpace(underlying))
 	upperRight := strings.ToUpper(strings.TrimSpace(right))
@@ -3067,16 +3051,11 @@ func optionMarketDataKeyForClass(underlying, tradingClass, expiryYMD, right stri
 	return upperUnderlying + "_" + upperClass + strings.TrimPrefix(base, upperUnderlying)
 }
 
-// PrewarmOptionChain bulk-resolves an option chain for (symbol, tradingClass)
-// across the given expirations. Returns one result per expiration with
-// per-expiry cache-fill counts, durations, and errors. The resolved
-// (Strike, Right) → ConID entries are written into the connector's option
-// contract cache so subsequent SubscribeOption calls hit it instantly and
-// skip the per-leg reqContractDetails round-trip.
-//
-// This is the bulk-resolution primitive that TWS uses internally and the
-// per-leg fan-out path emulates one leg at a time. Use it before any
-// large-chain fan-out (gamma compute, chain renderer with many strikes).
+// PrewarmOptionChain resolves and caches option contracts for each expiry in a
+// symbol and trading-class pair. It returns one result per expiry with cache
+// counts, duration, and any error. The call returns nil when disconnected; ctx
+// and timeout bound the underlying bulk requests. Later [Connector.SubscribeOption]
+// calls can reuse the resolved contract identities.
 func (c *Connector) PrewarmOptionChain(
 	ctx context.Context,
 	symbol string,
@@ -3096,10 +3075,9 @@ func (c *Connector) PrewarmOptionChain(
 	return conn.PrewarmOptionChain(ctx, symbol, expiries, tradingClass, timeout)
 }
 
-// RequestAccountUpdates subscribes to streaming account + portfolio updates.
-// The gateway pushes mark prices, market values, and unrealized P&L for each
-// open position via msgPortfolioValue, populating the internal map that
-// CachedPositions reads. Pass an empty account to use the connector's bound one.
+// RequestAccountUpdates starts the singleton streaming account and portfolio
+// subscription used by [Connector.CachedPositions]. Pass an empty or aggregate
+// account value to resolve a concrete managed account from the connection.
 //
 // Aggregate values ("All", comma-separated managedAccounts lists) are not
 // account codes — TWS rejects them with error 321 and the portfolio stream
@@ -3175,20 +3153,11 @@ func accountSummaryShowsPositions(summary map[string]string) bool {
 	return false
 }
 
-// CachedPositions returns whatever positions are currently in the
-// connection's local cache without issuing a fresh reqPositions (which would
-// clear the map and lose mark/value/P&L populated by the streaming
-// portfolioValue subscription started by RequestAccountUpdates).
-//
-// Intended for the daemon: call RequestAccountUpdates at startup and let the
-// gateway keep the cache fresh; clients then call CachedPositions for a
-// non-destructive read. Returns wire-level [RawPosition] rows directly —
-// downstream consumers read typed contract fields (Symbol, SecType, Expiry,
-// Right, Strike) instead of re-parsing an encoded symbol.
-//
-// Filters out zero-quantity stale rows, degenerate STK placeholders
-// (ConID == 0), and inactive stock rows only when the broker is not
-// reporting a zero-value held position that should remain visible.
+// CachedPositions returns the latest filtered portfolio cache without issuing
+// a positions request. The returned slice is detached, but its [RawPosition]
+// pointers refer to cached rows and must be treated as read-only. Zero-quantity
+// rows and stock placeholders with ConID zero are omitted. A disconnected
+// Connector returns nil, nil; freshness is not implied by a non-empty result.
 func (c *Connector) CachedPositions() ([]*RawPosition, error) {
 	if !c.isConnected() {
 		return nil, nil
@@ -3210,9 +3179,10 @@ func (c *Connector) CachedPositions() ([]*RawPosition, error) {
 	return result, nil
 }
 
-// CachedPositionsWithHealth returns the same non-destructive portfolio cache
-// plus the reqAccountUpdates completion/heartbeat receipts needed by daemon
-// integrity checks. Existing consumers keep using CachedPositions.
+// CachedPositionsWithHealth returns the same read-only cached rows as
+// [Connector.CachedPositions] together with the latest stream completion and
+// heartbeat receipts. It performs no positions request. A disconnected
+// Connector returns nil rows, zero health, and a nil error.
 func (c *Connector) CachedPositionsWithHealth() ([]*RawPosition, PortfolioStreamHealth, error) {
 	if !c.isConnected() {
 		return nil, PortfolioStreamHealth{}, nil
@@ -3265,10 +3235,10 @@ func isZeroValueStockPosition(pos *RawPosition) bool {
 	return pos.MarketPrice <= 0 && math.Abs(pos.MarketValue) < 1e-9
 }
 
-// RefreshPositions issues a one-shot reqPositions request, waits for
-// positionEnd, then returns the same filtered shape as CachedPositions.
-// The underlying TWS API has no request ID for reqPositions, so callers should
-// use this sparingly and avoid concurrent refreshes.
+// RefreshPositions issues the broker's singleton positions request, waits up
+// to timeout for its end marker, and returns the filtered cache shape described
+// by [Connector.CachedPositions]. Because the protocol supplies no request ID,
+// callers must serialize refreshes.
 func (c *Connector) RefreshPositions(timeout time.Duration) ([]*RawPosition, error) {
 	if !c.isConnected() {
 		return nil, ErrIBKRUnavailable
@@ -3808,17 +3778,11 @@ func saneGreek(v, bound float64) bool {
 	return true
 }
 
-// SubscriptionRejectCh returns the rejection channel for a tracked
-// subscription. Consumers (e.g. the gamma compute's per-leg poll) select
-// on this channel alongside their poll ticker so the gateway pushing a
-// terminal error (200/320/321/322/354/10197) aborts the poll in
-// milliseconds instead of running out the full budget.
-//
-// Returns nil if no subscription is tracked for the key OR the
-// subscription was constructed without a channel (test fixtures that
-// bypass the Subscribe path). A nil channel in a `select` blocks
-// forever, so callers can safely use the return value unchecked — they
-// just won't get fast-abort.
+// SubscriptionRejectCh returns the terminal-rejection channel for a tracked
+// subscription key. The channel may receive at most one pending rejection and
+// is not closed when the subscription ends. It returns nil when the key is not
+// tracked or rejection signaling is unavailable; a nil channel can be used
+// directly in a select to disable that case.
 func (c *Connector) SubscriptionRejectCh(key string) <-chan SubscriptionRejection {
 	if key == "" {
 		return nil
@@ -4341,26 +4305,19 @@ func formatHistoricalDuration(lookbackDays int) string {
 	return fmt.Sprintf("%d Y", years)
 }
 
-// FetchHistoricalDailyBars requests HMDS daily bars for the provided symbol,
-// with ctx propagated through the historical request's paced send and
-// response wait. When ctx is cancelled (deadline exceeded, parent
-// cancellation), the connector leaves the HMDS pacing queue promptly and
-// best-effort cancels any already-sent historical request without blocking
-// the caller behind that same paced queue — blocking past a caller's budget
-// was the root cause of the v0.27.5 "regime: context deadline exceeded"
-// report.
-//
-// A timeout <= 0 uses the 45 s default; a ctx deadline always caps the
-// effective budget (see historicalTimeoutWithinContext).
+// FetchHistoricalDailyBars requests daily bars for symbol and waits for the
+// historical-data response. A lookbackDays value of zero or less uses 400 days;
+// a timeout of zero or less uses 45 seconds. The earlier of timeout and the ctx
+// deadline bounds both paced transmission and response waiting. Cancellation
+// best-effort cancels an already-sent broker request.
 func (c *Connector) FetchHistoricalDailyBars(ctx context.Context, symbol string, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
 	return c.fetchHistoricalDailyBars(ctx, symbol, lookbackDays, timeout, "")
 }
 
-// FetchHistoricalDailyBarsWhatToShow requests HMDS daily bars for the provided
-// symbol using exactly the requested IBKR whatToShow value. It does not fall
-// back to TRADES/MIDPOINT, so callers can make provenance claims about the
-// feed they actually asked the gateway to serve. Ctx and timeout semantics
-// match FetchHistoricalDailyBars.
+// FetchHistoricalDailyBarsWhatToShow requests daily bars using the normalized
+// IBKR whatToShow value supplied by the caller. It does not fall back to another
+// feed, so returned bars retain the requested feed provenance. Context,
+// lookback, and timeout semantics match [Connector.FetchHistoricalDailyBars].
 func (c *Connector) FetchHistoricalDailyBarsWhatToShow(ctx context.Context, symbol string, lookbackDays int, whatToShow string, timeout time.Duration) ([]HistoricalBar, error) {
 	cleanWhat, err := normalizeHistoricalWhatToShow(whatToShow)
 	if err != nil {
@@ -4414,10 +4371,10 @@ func (c *Connector) fetchHistoricalDailyBars(ctx context.Context, symbol string,
 	return c.fetchHistoricalDailyBarsWithBase(ctx, symbol, baseContract, primary, lookbackDays, timeout, true, forceWhatToShow)
 }
 
-// FetchHistoricalDailyBarsWithContract requests HMDS daily bars using an
-// already-routed contract. It is intended for callers that learned an exchange,
-// primary exchange, currency, local symbol, or conID while resolving a quote.
-// Ctx and timeout semantics match FetchHistoricalDailyBars.
+// FetchHistoricalDailyBarsWithContract requests daily bars using the routing
+// fields already present on contract, including exchange, currency, local
+// symbol, or ConID. Context, lookback, and timeout semantics match
+// [Connector.FetchHistoricalDailyBars].
 func (c *Connector) FetchHistoricalDailyBarsWithContract(ctx context.Context, contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
 	return c.fetchHistoricalDailyBarsWithContract(ctx, contract, lookbackDays, timeout)
 }
@@ -4770,7 +4727,9 @@ func (c *Connector) cancelHistoricalDataBestEffort(reqID int) {
 	}()
 }
 
-// OptionIV returns last observed implied volatility for an underlying
+// OptionIV returns the last valid implied-volatility observation for key as a
+// fraction, such as 0.30 for 30 percent. The boolean is false when no valid
+// observation has been cached; the method performs no broker request.
 func (c *Connector) OptionIV(symbol string) (float64, bool) {
 	c.optMu.RLock()
 	defer c.optMu.RUnlock()
@@ -4778,10 +4737,10 @@ func (c *Connector) OptionIV(symbol string) (float64, bool) {
 	return v, ok
 }
 
-// OptionGreeks returns the last observed model-computation Greeks for an
-// option key (the OPRA-style key produced by SubscribeOption). The boolean
-// is true only when at least one field has been populated from a valid
-// model-computation tick — callers must not infer zero from "absent".
+// OptionGreeks returns the last valid model-computation Greeks for an option
+// key returned by [Connector.SubscribeOption]. The boolean is false until at
+// least one field has been observed; callers must not interpret absence as a
+// zero-valued Greek. The returned value is a copy.
 func (c *Connector) OptionGreeks(symbol string) (Greeks, bool) {
 	c.optMu.RLock()
 	defer c.optMu.RUnlock()
@@ -4789,11 +4748,10 @@ func (c *Connector) OptionGreeks(symbol string) (Greeks, bool) {
 	return g, ok
 }
 
-// OptionUnderlyingPrice returns the underlying spot embedded in the
-// most recent model-computation tick for an option key. This is the
-// price IBKR used to price the Greeks, so callers computing dollar-
-// delta should prefer it over an independently-fetched spot to keep
-// the two values consistent.
+// OptionUnderlyingPrice returns the underlying price embedded in the latest
+// model-computation tick for an option key. The boolean is false when no valid
+// price has been observed. This is the price the broker used for the associated
+// Greeks.
 func (c *Connector) OptionUnderlyingPrice(symbol string) (float64, bool) {
 	c.optMu.RLock()
 	defer c.optMu.RUnlock()
@@ -4802,10 +4760,9 @@ func (c *Connector) OptionUnderlyingPrice(symbol string) (float64, bool) {
 }
 
 // OptionQuoteBidAsk returns the last observed bid and ask for an option key.
-// Returns (0, 0, false) when no quote has been observed; (bid, 0, true) or
-// (0, ask, true) when only one side has been seen. Use for stale-mark
-// detection on illiquid contracts where the mark can sit in the middle of
-// a wide spread without any actual trade printing.
+// It returns (0, 0, false) when neither side has been observed; one-sided
+// results return true with the absent side left at zero. The method performs no
+// broker request and does not itself determine freshness.
 func (c *Connector) OptionQuoteBidAsk(symbol string) (bid, ask float64, ok bool) {
 	c.optMu.RLock()
 	defer c.optMu.RUnlock()
@@ -4817,9 +4774,9 @@ func (c *Connector) OptionQuoteBidAsk(symbol string) (bid, ask float64, ok bool)
 	return b, a, true
 }
 
-// OptionPrevClose returns the option contract's own previous regular-
-// session close (tick 9 on the option subscription, not the underlying's).
-// Required for option-level daily P&L attribution.
+// OptionPrevClose returns the option contract's own previous regular-session
+// close, not the underlying's close. The boolean is false when no positive
+// value has been observed.
 func (c *Connector) OptionPrevClose(symbol string) (float64, bool) {
 	c.optMu.RLock()
 	defer c.optMu.RUnlock()
@@ -4862,22 +4819,20 @@ func (c *Connector) CancelOptionIV(reqID int) {
 	}
 }
 
-// SubscribeOptionIV subscribes to an ATM-ish option contract to receive implied
-// volatility ticks. The model-computation IV is routed to OptionIV(symbol),
-// preserving the historical underlying-keyed behavior for callers that ask for
-// one leg at a time.
-//
-// expiry should be in UTC; right is "C" or "P". ctx cancellation aborts the
-// underlying contract-resolution round trip. The returned reqID is the cancel
-// key — pair every Subscribe with a CancelOptionIV.
+// SubscribeOptionIV starts an option market-data subscription and routes
+// model-computation IV to the normalized underlying key read by
+// [Connector.OptionIV]. expiry is converted to a UTC YYYYMMDD date and right is
+// normalized to upper case. ctx bounds contract resolution and slot
+// acquisition. Pair the returned request ID with [Connector.CancelOptionIV].
 func (c *Connector) SubscribeOptionIV(ctx context.Context, symbol string, expiry time.Time, strike float64, right string) (int, error) {
 	return c.subscribeOptionIV(ctx, symbol, expiry, strike, right, strings.ToUpper(symbol))
 }
 
-// SubscribeOptionIVKeyed subscribes to one option leg and routes model IV to a
-// per-contract key. Use this for concurrent fan-out across expiries/strikes:
-// underlying-keyed OptionIV(symbol) would let multiple reqIDs for the same
-// stock overwrite each other.
+// SubscribeOptionIVKeyed starts one option market-data subscription and routes
+// model IV to the returned per-contract key. Use the key with [Connector.OptionIV]
+// and the request ID with [Connector.CancelOptionIV]. Unlike
+// [Connector.SubscribeOptionIV], concurrent legs for one underlying do not
+// overwrite one shared underlying-keyed value.
 func (c *Connector) SubscribeOptionIVKeyed(ctx context.Context, symbol string, expiry time.Time, strike float64, right string) (int, string, error) {
 	expStr := expiry.UTC().Format("20060102")
 	key := OptionMarketDataKey(symbol, expStr, right, strike)
@@ -5408,7 +5363,11 @@ func orderBrokerErrorMessage(code int, message, advancedRejectJSON string) strin
 	return fmt.Sprintf("broker error %d: %s", code, message)
 }
 
-// MarketDataSnapshot retrieves current market data for subscribed symbols
+// MarketDataSnapshot returns a detached point-in-time copy of all locally
+// tracked streaming subscriptions. The returned map and MarketData values may
+// be mutated by the caller. Zero fields can represent data not yet observed;
+// Timestamp is the local time of the latest tick for that subscription and does
+// not guarantee broker-source freshness.
 func (c *Connector) MarketDataSnapshot() map[string]*MarketData {
 	c.subMu.RLock()
 	defer c.subMu.RUnlock()

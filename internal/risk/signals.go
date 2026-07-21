@@ -1,7 +1,10 @@
 package risk
 
+// SignalDirection describes whether a signal supports defense, deployment,
+// rebalancing, mixed action, or data-quality confirmation.
 type SignalDirection string
 
+// DirectionDefensive and the related constants enumerate signal directions.
 const (
 	DirectionDefensive    SignalDirection = "defensive"
 	DirectionConstructive SignalDirection = "constructive"
@@ -10,8 +13,12 @@ const (
 	DirectionDataQuality  SignalDirection = "data_quality"
 )
 
+// PortfolioPosture summarizes the portfolio response implied by a set of
+// signals. The zero value is unspecified.
 type PortfolioPosture string
 
+// PortfolioPostureNeutral and the related constants enumerate portfolio
+// response summaries.
 const (
 	PortfolioPostureNeutral           PortfolioPosture = "neutral"
 	PortfolioPostureThreat            PortfolioPosture = "threat"
@@ -21,8 +28,11 @@ const (
 	PortfolioPostureConfirmData       PortfolioPosture = "confirm_data"
 )
 
+// SignalSeverity ranks the urgency of a risk signal. The zero value is
+// unspecified.
 type SignalSeverity string
 
+// SeverityObserve and the related constants enumerate signal urgency.
 const (
 	SeverityObserve SignalSeverity = "observe"
 	SeverityWatch   SignalSeverity = "watch"
@@ -30,8 +40,11 @@ const (
 	SeverityUrgent  SignalSeverity = "urgent"
 )
 
+// PlannerMode identifies the action family a downstream planner may prepare.
+// It conveys no broker-write authority.
 type PlannerMode string
 
+// PlannerModeNone and the related constants enumerate planner action modes.
 const (
 	PlannerModeNone        PlannerMode = "none"
 	PlannerModeStage       PlannerMode = "stage"
@@ -41,8 +54,11 @@ const (
 	PlannerModeConfirmData PlannerMode = "confirm_data"
 )
 
+// PlannerReadiness describes how close a planner is to presenting an action.
+// Ready still conveys no broker-write authority.
 type PlannerReadiness string
 
+// PlannerReadinessNone and the related constants enumerate preparation states.
 const (
 	PlannerReadinessNone     PlannerReadiness = "none"
 	PlannerReadinessWatch    PlannerReadiness = "watch"
@@ -51,8 +67,11 @@ const (
 	PlannerReadinessBlocked  PlannerReadiness = "blocked"
 )
 
+// SignalID identifies a stable risk or data-quality condition.
 type SignalID string
 
+// SignalMarginCushionLow and the related constants identify supported risk and
+// data-quality conditions.
 const (
 	SignalMarginCushionLow              SignalID = "margin_cushion_low"
 	SignalLookAheadCushionLow           SignalID = "lookahead_cushion_low"
@@ -79,6 +98,10 @@ const (
 	SignalMarketDataStale               SignalID = "market_data_stale"
 )
 
+// Signal is a typed, serializable risk observation. Optional numeric fields
+// remain nil when unavailable; callers must not interpret their absence as
+// zero. BlockedBy explains which missing or degraded inputs limited the
+// signal.
 type Signal struct {
 	ID               SignalID         `json:"id"`
 	Direction        SignalDirection  `json:"direction"`

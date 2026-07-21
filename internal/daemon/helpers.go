@@ -27,6 +27,7 @@ type SubscriptionRejectedError struct {
 	Rejection ibkrlib.SubscriptionRejection
 }
 
+// Error formats the subscription key and broker rejection details.
 func (e *SubscriptionRejectedError) Error() string {
 	return fmt.Sprintf("subscription %q rejected by gateway: code=%d msg=%s", e.Key, e.Rejection.Code, e.Rejection.Message)
 }

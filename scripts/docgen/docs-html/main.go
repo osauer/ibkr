@@ -1,4 +1,4 @@
-// docgen/docs-html renders the public HTML twins from their Markdown sources.
+// Command docs-html renders the public HTML twins from their Markdown sources.
 // Markdown is the only prose authority; the checked-in HTML exists because the
 // current GitHub Pages setup publishes docs/ as static files.
 package main

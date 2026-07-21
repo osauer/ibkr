@@ -12,13 +12,10 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
-// Resource template URIs exposed by the streaming MCP surface. Stock
-// quotes only — the v0.10.2-era `ibkr://option/...` template was removed
-// in v0.16.0 because the resource handlers hardcoded `SecType: "STK"` on
-// the daemon request, so option subscriptions never actually delivered
-// frames. If real demand surfaces, reintroduce with a proper OPT
-// `ContractParams` build at the resource→daemon seam plus an end-to-end
-// integration test driving the option subscribe through to a Frame.
+// Resource template URIs exposed by the streaming MCP surface. Streaming
+// resources currently support stock quotes only. An option resource requires
+// an explicit option contract at the resource-to-daemon seam and end-to-end
+// subscription verification; it must not reuse the stock template contract.
 const (
 	StockQuoteURITemplate = "ibkr://quote/{symbol}"
 
@@ -81,6 +78,8 @@ func parseQuoteURI(uri string) (parsedURI, error) {
 // uriContainsTradingVerb is the safety counterpart for resource URIs,
 // parallel to TestNoTradingTools' check on tool names. Catches a
 // contributor adding a `ibkr://order/...` template by mistake.
+//
+//lint:ignore U1000 Retained as a package-local helper for the safety test.
 func uriContainsTradingVerb(uri string) (bool, string) {
 	low := strings.ToLower(uri)
 	for _, banned := range []string{"order", "trade", "cancel", "submit", "place"} {

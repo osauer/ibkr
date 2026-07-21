@@ -15,6 +15,7 @@ import (
 	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
+// Errors reported while locating or stopping the daemon process.
 var (
 	ErrDaemonNotRunning = errors.New("daemon not running")
 	ErrDaemonUnverified = errors.New("daemon process could not be verified")
@@ -128,23 +129,15 @@ func commandHasFlag(cmdline, name string) bool {
 	return false
 }
 
-// RestartDaemon sends SIGTERM to the given PID and waits up to
-// restartTimeout for it to exit. The daemon's autospawn path means
-// no explicit re-start is needed: the next `ibkr <command>` invocation
-// notices the missing socket and re-spawns the daemon, which loads
-// the freshly-installed binary.
-//
-// Polling cadence is 100ms so a quick-shutting-down daemon (<200ms)
-// returns immediately rather than waiting out the full timeout.
-//
-// Returns a descriptive error on timeout so the caller can suggest
-// `ibkr restart --force`. Returns nil immediately if the PID is already
-// gone (e.g. daemon exited between IsDaemonRunning and this call).
+// Restart timing controls. Tests may shorten these package variables.
 var (
 	restartTimeout = 5 * time.Second
 	restartPoll    = 100 * time.Millisecond
 )
 
+// RestartDaemon stops pid with the standard graceful-shutdown timeout. The
+// next daemon-backed command may autospawn the installed binary; this function
+// does not start a replacement process. An already-exited process is success.
 func RestartDaemon(pid int) error {
 	return StopDaemon(pid, restartTimeout)
 }

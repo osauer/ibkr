@@ -19,6 +19,9 @@ type alertCandidateClient interface {
 	AlertCandidates(context.Context) (*rpc.AlertCandidateSnapshot, error)
 }
 
+// Service owns the app host's refreshable daemon snapshot, poll serialization,
+// source-freshness metadata, and best-effort event subscribers. Values stored
+// in the snapshot are treated as immutable after publication.
 type Service struct {
 	client      daemonclient.Client
 	pollEvery   time.Duration
@@ -44,6 +47,9 @@ type Service struct {
 	OnOrders func(context.Context, rpc.OrdersOpenResult)
 }
 
+// Snapshot is the app's cached adapter view of daemon results. It preserves
+// daemon-authored financial and policy semantics; callers must not reinterpret
+// quote moves as position P/L or treat the cache as runtime authority.
 type Snapshot struct {
 	Version         int64                       `json:"version"`
 	UpdatedAt       time.Time                   `json:"updated_at,omitzero"`
@@ -114,18 +120,25 @@ func (snapshot Snapshot) MarshalJSON() ([]byte, error) {
 	}{snapshotAlias: snapshotAlias(snapshot), Nudges: projectPublicNudges(snapshot.Nudges)})
 }
 
+// MarketQuotes holds observed underlying-market prices and per-symbol fetch
+// errors. These market moves are not Daily, Open, Unrealized, or Realized P/L.
 type MarketQuotes struct {
 	AsOf   time.Time            `json:"as_of,omitzero"`
 	Quotes map[string]rpc.Quote `json:"quotes,omitempty"`
 	Errors map[string]string    `json:"errors,omitempty"`
 }
 
+// SourceError is the public, allowlisted failure record for one app refresh;
+// Message omits raw broker, transport, and daemon error text.
 type SourceError struct {
 	Source  string    `json:"source"`
 	Message string    `json:"message"`
 	At      time.Time `json:"at"`
 }
 
+// SourceMeta distinguishes the last app observation from the last successful
+// refresh. State and Reason say whether retained data is current, stale, never
+// observed, or unavailable.
 type SourceMeta struct {
 	UpdatedAt     time.Time `json:"updated_at,omitzero"`
 	LastSuccessAt time.Time `json:"last_success_at,omitzero"`
@@ -134,6 +147,8 @@ type SourceMeta struct {
 	Error         string    `json:"error,omitempty"`
 }
 
+// Source states and reasons classify app transport freshness independently of
+// producer-authored data quality carried inside daemon results.
 const (
 	SourceStateNotObserved             = "not_observed"
 	SourceStateCurrent                 = "current"
@@ -156,17 +171,23 @@ var (
 	errAlertCandidatesUnavailable = errors.New("alert candidate snapshot unavailable")
 )
 
+// Event carries one typed live-cache change to SSE adapters. Subscribers must
+// recover from dropped events by reading a full snapshot.
 type Event struct {
 	Type string `json:"type"`
 	Data any    `json:"data"`
 }
 
+// Diagnostics is a concurrency-safe snapshot of live subscriber count, event
+// timestamps, and cache version.
 type Diagnostics struct {
 	Subscribers int                  `json:"subscribers"`
 	LastEventAt map[string]time.Time `json:"last_event_at,omitempty"`
 	Version     int64                `json:"version"`
 }
 
+// New constructs an unstarted live service. Non-positive intervals select the
+// default poll cadences.
 func New(client daemonclient.Client, pollEvery, canaryEvery time.Duration) *Service {
 	if pollEvery <= 0 {
 		pollEvery = 5 * time.Second
@@ -239,6 +260,9 @@ func sourceUnavailableWithReason(prior SourceMeta, now time.Time, reason string)
 	}
 }
 
+// Start performs initial refreshes, starts quote and alert-freshness workers,
+// and blocks on periodic polling until ctx is canceled. Cancellation closes all
+// subscriber channels.
 func (s *Service) Start(ctx context.Context) {
 	go s.runAlertFreshnessGuard(ctx)
 	_ = s.pollStatus(ctx)
@@ -325,6 +349,9 @@ func (s *Service) runMarketQuoteStream(ctx context.Context, item marketQuoteCont
 	}
 }
 
+// PollOnce serializes one full refresh, preserves last-known values beside
+// explicit source failure metadata, publishes change/full-snapshot events, and
+// returns a cloned post-poll view.
 func (s *Service) PollOnce(ctx context.Context) Snapshot {
 	s.pollMu.Lock()
 	defer s.pollMu.Unlock()
@@ -1326,6 +1353,9 @@ func (s *Service) expireAlertSnapshot(now time.Time) {
 	s.mu.Unlock()
 }
 
+// Snapshot returns a cloned cache view without performing daemon RPC. It ages
+// source metadata at read time and may fail-close an expired alert-candidate
+// snapshot through the configured app store.
 func (s *Service) Snapshot() Snapshot {
 	now := s.now().UTC()
 	s.expireAlertSnapshot(now)
@@ -1370,6 +1400,7 @@ func staleAlertCandidateSnapshot(now time.Time, snapshot *rpc.AlertCandidateSnap
 	return out
 }
 
+// Diagnostics returns copied subscriber and publication metadata.
 func (s *Service) Diagnostics() Diagnostics {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1378,6 +1409,9 @@ func (s *Service) Diagnostics() Diagnostics {
 	return Diagnostics{Subscribers: len(s.subs), LastEventAt: last, Version: s.snapshot.Version}
 }
 
+// Subscribe registers a bounded best-effort event channel and returns an
+// idempotent release function that unregisters and closes it. Slow subscribers
+// may miss events and must resynchronize from [Service.Snapshot].
 func (s *Service) Subscribe() (<-chan Event, func()) {
 	ch := make(chan Event, 32)
 	s.mu.Lock()

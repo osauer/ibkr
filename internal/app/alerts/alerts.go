@@ -14,6 +14,9 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
+// Monitor records legacy Canary alerts before attempting best-effort delivery
+// to the subscriptions retained by the app store. A nil Store disables both
+// recording and transport.
 type Monitor struct {
 	Store         *state.Store
 	Sender        push.Sender
@@ -35,6 +38,10 @@ type GovernanceDispatcher struct {
 	mu          sync.Mutex
 }
 
+// Observe durably reconciles one daemon-authored governance snapshot and then
+// attempts delivery for eligible occurrences and active app subscriptions.
+// The daemon remains the policy authority; this method owns transport evidence
+// only.
 func (d *GovernanceDispatcher) Observe(ctx context.Context, snapshot rpc.NudgesSnapshotResult) (state.GovernanceView, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -261,10 +268,14 @@ type governanceWork struct {
 	snapshot   rpc.NudgesSnapshotResult
 }
 
+// NewGovernanceWorker returns a worker that retains at most the latest queued
+// snapshot while one observation is running.
 func NewGovernanceWorker(dispatcher *GovernanceDispatcher) *GovernanceWorker {
 	return &GovernanceWorker{dispatcher: dispatcher, latest: make(chan governanceWork, 1)}
 }
 
+// Submit replaces any queued snapshot with snapshot and returns its local,
+// monotonically increasing generation.
 func (w *GovernanceWorker) Submit(snapshot rpc.NudgesSnapshotResult) uint64 {
 	w.submitMu.Lock()
 	defer w.submitMu.Unlock()
@@ -286,8 +297,12 @@ func (w *GovernanceWorker) Submit(snapshot rpc.NudgesSnapshotResult) uint64 {
 	return work.generation
 }
 
+// Pending reports whether the worker currently has a coalesced snapshot
+// waiting to be observed.
 func (w *GovernanceWorker) Pending() int { return len(w.latest) }
 
+// Run observes submitted snapshots until ctx is canceled. Observation errors
+// are not returned; callers inspect the dispatcher's durable delivery evidence.
 func (w *GovernanceWorker) Run(ctx context.Context) {
 	if w == nil || w.dispatcher == nil {
 		return
@@ -302,6 +317,10 @@ func (w *GovernanceWorker) Run(ctx context.Context) {
 	}
 }
 
+// Observe records a newly eligible Canary occurrence before any Web Push send
+// and returns the created redacted record plus this call's transport attempts.
+// A nil record means no new row was persisted; a returned failed attempt may
+// describe the persistence error.
 func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.AlertRecord, []state.PushAttempt) {
 	if m.Store == nil {
 		return nil, nil
@@ -423,6 +442,8 @@ func (view establishedCanaryAlertView) shouldAlert(mode string) bool {
 	}
 }
 
+// ShouldAlert reports whether the established Canary compatibility projection
+// permits an occurrence in mode. A malformed present projection fails closed.
 func ShouldAlert(mode string, canary rpc.CanaryResult) bool {
 	view, ok := establishedAlertView(canary)
 	if !ok {

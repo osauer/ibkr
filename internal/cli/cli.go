@@ -1,8 +1,9 @@
-// Package cli implements the ibkr CLI's user-facing subcommands. The CLI
-// process is stateless; each subcommand opens a Unix-socket connection to
-// the daemon, sends one or more JSON-RPC calls, formats the response, and
-// exits. A missing daemon is autospawned on demand by the dispatcher in
-// cmd/ibkr.
+// Package cli adapts typed daemon contracts and local workflows into ibkr
+// commands, machine-readable output, and terminal rendering. Broker-connected
+// and runtime-state commands call the daemon over its typed Unix-socket
+// protocol, while setup, update, watchlist, and offline research workflows run
+// locally. Handlers return process exit codes; the daemon remains authoritative
+// for broker state, policy decisions, and gated broker writes.
 package cli
 
 import (

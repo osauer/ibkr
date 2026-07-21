@@ -9,6 +9,8 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
+// Alert Inbox v2 constants identify the additive browser schema and its
+// explicitly non-authoritative shadow delivery posture.
 const (
 	AlertInboxV2SchemaVersion = "alert-inbox-v2"
 	AlertInboxV2Authority     = "shadow"
@@ -32,6 +34,8 @@ type AlertInboxV2DTO struct {
 	DeliveryHealth AlertInboxV2DeliveryHealthDTO `json:"delivery_health"`
 }
 
+// AlertInboxV2CoverageDTO exposes producer coverage and evidence freshness
+// without internal source watermarks or authority scope.
 type AlertInboxV2CoverageDTO struct {
 	State           rpc.AlertCoverageState     `json:"state"`
 	Freshness       rpc.AlertCoverageFreshness `json:"freshness"`
@@ -40,6 +44,8 @@ type AlertInboxV2CoverageDTO struct {
 	CoveredSources  []rpc.AlertSource          `json:"covered_sources"`
 }
 
+// AlertInboxV2OccurrenceDTO is a redacted browser occurrence. DisplayID is the
+// only public identity; producer keys and transport evidence remain private.
 type AlertInboxV2OccurrenceDTO struct {
 	DisplayID          string                      `json:"display_id"`
 	Source             rpc.AlertSource             `json:"source"`
@@ -58,12 +64,15 @@ type AlertInboxV2OccurrenceDTO struct {
 	AttentionSeq       uint64                      `json:"attention_seq"`
 }
 
+// AlertInboxV2AttentionRefDTO identifies one redacted unread occurrence.
 type AlertInboxV2AttentionRefDTO struct {
 	DisplayID string          `json:"display_id"`
 	Source    rpc.AlertSource `json:"source"`
 	Kind      rpc.AlertKind   `json:"kind"`
 }
 
+// AlertInboxV2AttentionDTO exposes the durable render/read cursor and its
+// redacted unread references; it is not proof of human attention.
 type AlertInboxV2AttentionDTO struct {
 	UnreadCount    int                           `json:"unread_count"`
 	HighWaterSeq   uint64                        `json:"high_water_seq"`
@@ -71,6 +80,8 @@ type AlertInboxV2AttentionDTO struct {
 	UnreadRefs     []AlertInboxV2AttentionRefDTO `json:"unread_refs"`
 }
 
+// AlertInboxV2DeliveryHealthDTO exposes classified app transport health while
+// omitting targets, attempts, receipts, and raw transport errors.
 type AlertInboxV2DeliveryHealthDTO struct {
 	State     string     `json:"state"`
 	Class     string     `json:"class"`

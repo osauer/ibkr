@@ -200,13 +200,17 @@ cfg := ibkr.DefaultConfig()    // 127.0.0.1:4001
 cfg.Port = 4002                // paper
 
 c := ibkr.NewConnector(&ibkr.ConnectorConfig{
-    ServiceName: "myapp",
-    PoolConfig:  &ibkr.PoolConfig{ClientIDs: []int{15}, BaseConfig: cfg},
+    ServiceName:       "myapp",
+    PreferredClientID: 15,
+    BaseConfig:        cfg,
 })
 if err := c.Start(ctx); err != nil { return err }
 
-snap, _ := c.RequestAccountSummary(ctx, 5*time.Second)
-fmt.Printf("NLV: %.2f %s\n", *snap.NetLiquidation, snap.Currency)
+snap, err := c.RequestAccountSummary(ctx, 5*time.Second)
+if err != nil { return err }
+if snap.NetLiquidation != nil {
+    fmt.Printf("NLV: %.2f %s\n", *snap.NetLiquidation, snap.Currency)
+}
 ```
 
 From Python, TypeScript, or Rust, shell out to the CLI: subprocess in, JSON out. Wrap each `ibkr <cmd> --json` invocation as a function and register it with your model's tool-call API.
@@ -225,7 +229,7 @@ Use `ibkr restart` after upgrading, changing daemon-loaded config, or when you w
 
 This means your shell, Claude Desktop, Claude Code, Cursor, and other MCP clients can share one IBKR connection and one client ID. Tool calls stay fast because the gateway session is already open.
 
-`pkg/ibkr` is a clean-room Go implementation of the read-side TWS protocol. Full coverage details live in [docs/reference/protocol.md](docs/reference/protocol.md), and the public package docs live in [pkg/ibkr/doc.go](pkg/ibkr/doc.go).
+`pkg/ibkr` is a clean-room Go implementation of the TWS protocol. Unrestricted order methods are disabled in default builds; the separate trading build and the narrow all-build paper-order wrappers have distinct gates described in [docs/reference/protocol.md](docs/reference/protocol.md). Public package documentation lives in [pkg/ibkr/doc.go](pkg/ibkr/doc.go).
 
 ## Configure
 
@@ -240,7 +244,7 @@ port = 7496
 
 Every section and key — `[gateway]`, `[daemon]`, `[trading]`, `[auto_trade]`, `[opportunities]`, `[spx]`, `[scans.<name>]` — is enumerated with types, defaults, and semantics in the generated [configuration reference](docs/reference/config.md), alongside every `IBKR_*` environment variable. `ibkr status` shows what the daemon ended up using and where each value came from (`pinned` or `discovered`).
 
-**Runtime platform preferences** are daemon-owned, live at `$XDG_STATE_HOME/ibkr/platform-settings.json`, and change instantly via `ibkr settings set`, the SPA Settings tab, or `PATCH /api/settings` — feature toggles, the `trading.freeze` brake, rulebook earnings overrides, and experimental trading-limit overrides. The writable keys are listed in the [configuration reference](docs/reference/config.md); ownership and semantics live in the [platform-settings design](docs/design/platform-settings.md).
+**Runtime platform preferences** are daemon-owned, live in `$XDG_STATE_HOME/ibkr/daemon.db`, and change instantly via `ibkr settings set`, the SPA Settings tab, or `PATCH /api/settings` — feature toggles, the `trading.freeze` brake, rulebook earnings overrides, and experimental trading-limit overrides. The writable keys are listed in the [configuration reference](docs/reference/config.md); ownership and semantics live in the [platform-settings design](docs/design/platform-settings.md).
 
 **Policy files** under `~/.config/ibkr/policies/` shape the advisory engines: protection proposals (`protection-policy.toml`) and option-exercise opportunities (`opportunity-policy.toml`). None need to exist — embedded defaults apply, printable with `ibkr policy default <protection|opportunity>` — and every key is enumerated in the same [configuration reference](docs/reference/config.md).
 
@@ -289,15 +293,15 @@ The catalog varies by gateway version and by your market-data subscriptions — 
 
 ## Safety
 
-`ibkr` is the stable no-broker-write line. It exposes read tools plus preview-only stock/ETF order drafts; preview tokens are local artifacts and are not broker orders. Experimental trading builds are separate, as-is, and not part of the stable update or MCP marketplace path. Five independent layers refuse broker writes in the stable line:
+`ibkr` is the stable no-broker-write binary line. It exposes read tools plus preview-only order drafts; preview tokens are local artifacts and are not broker orders. Experimental trading builds are separate, as-is, and not part of the stable update or MCP marketplace path. The Go library is not itself a complete no-write sandbox: its default build disables unrestricted order and exercise methods but retains narrowly paper-gated order wrappers for daemon use. The stable binary's no-write posture is enforced across these layers:
 
-1. Default `pkg/ibkr` builds return `ErrTradingDisabled` from `Connection.PlaceOrder`, `Connection.CancelOrder`, `Connector.SubmitOrder`, and `Connector.CancelOrder` before any wire write. The raw encoder is available only to explicit downstream forks built with `-tags trading`.
+1. Default `pkg/ibkr` builds return `ErrTradingDisabled` from unrestricted place/cancel and option-exercise methods before any wire write. Raw unrestricted methods require `-tags trading`; the all-build paper wrappers validate a concrete paper account and connection but do not grant application authority.
 2. The daemon's write-handler dispatch returns `ErrTradingDisabled` for place/cancel RPCs ([internal/daemon/trading_disabled.go](internal/daemon/trading_disabled.go)); preview can mint a token but reports `submit_eligible=false` unless broker WhatIf is accepted.
 3. The bundled [settings/ibkr.settings.json](settings/ibkr.settings.json) allowlists read/preview `ibkr` patterns only and explicitly denies destructive daemon maintenance. Broker writes are not hard-denied there; the project hook and daemon gates decide them.
 4. The plugin's `PreToolUse` hook blocks shell chaining around broker-adjacent writes and refuses broker-write patterns unless the daemon reports a paper or live write-ready trading state, failing closed for broker-adjacent `ibkr` commands if `jq` is missing from PATH.
 5. A unit test in `internal/mcp` allows only preview/read-model order tools and refuses unallowlisted order/trade/cancel/submit/place tool names.
 
-Per [semver](https://semver.org/), v1.x keeps broker writes unavailable. Preview-only CLI, JSON, and MCP additions may appear as documented minor additions.
+Stable releases keep broker-write RPC handlers unavailable. Preview-only CLI, JSON, and MCP additions may appear as documented minor additions.
 
 ## Other install paths
 

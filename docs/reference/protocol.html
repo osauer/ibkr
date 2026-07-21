@@ -25,9 +25,9 @@
   </header>
   <main class="wrap doc">
 <h1 id="tws-protocol-coverage">TWS protocol coverage</h1>
-<p>Last reviewed: 2026-07-18 18:23 CEST</p>
-<p><code>pkg/ibkr</code> is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the <code>ibkr</code> binary, daemon, CLI, and MCP server need.</p>
-<p>Order-writing methods exist only in trading-capable builds. Default builds return <code>pkg/ibkr.ErrTradingDisabled</code> before any order write reaches the socket. Trading builds expose gated daemon/CLI order paths behind trading status, pinned account/mode, preview-token, freeze, journal, and broker checks; the MCP server remains preview/read-oriented and does not expose place/modify/cancel tools.</p>
+<p>Last reviewed: 2026-07-21 CEST</p>
+<p><code>pkg/ibkr</code> is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the broker reads and narrow order-wire operations used by the <code>ibkr</code> binary and daemon.</p>
+<p>Unrestricted <code>SubmitOrder</code>/<code>CancelOrder</code>, <code>PlaceOrder</code>/<code>CancelOrder</code>, and <code>ExerciseOptions</code> methods are present in every build, but their position-changing wire paths are enabled only in trading-capable builds; default builds return <code>pkg/ibkr.ErrTradingDisabled</code> before writing such a frame. The narrower <code>SubmitPaperOrder</code>, <code>PlacePaperOrder</code>, and <code>CancelPaperOrder</code> methods are present in both builds and validate a concrete paper account plus matching connection coordinates. That library-level evidence is not submit authority. Broker WhatIf previews are also available in both builds, but they do not create working orders and never grant submit authority. The daemon adds trading status, pinned account/mode, preview-token, freeze, journal, broker, and origin checks; the MCP server remains preview/read-oriented and exposes no place/modify/cancel tools.</p>
 <h2 id="semantic-fingerprints">Semantic fingerprints</h2>
 <p>Decision surfaces that are useful to monitors expose a semantic <code>fingerprint</code> object:</p>
 <pre><code class="language-json">{&quot;version&quot;: &quot;canary-fp-v1&quot;, &quot;key&quot;: &quot;sha256:...&quot;}
@@ -151,10 +151,34 @@ paired with an existing reduce/cover proposal.</p>
 <td>ready</td>
 </tr>
 <tr>
-<td>Order placement / cancel</td>
+<td>Unrestricted order placement / cancel</td>
 <td><code>placeOrder</code> (3), <code>cancelOrder</code> (4)</td>
-<td><code>Connector.SubmitOrder</code>, <code>CancelOrder</code></td>
+<td><code>Connector.SubmitOrder</code>, <code>CancelOrder</code>; <code>Connection.PlaceOrder</code>, <code>CancelOrder</code></td>
 <td>disabled by default (<code>ErrTradingDisabled</code>); <code>-tags trading</code> only</td>
+</tr>
+<tr>
+<td>Paper-gated order placement / cancel</td>
+<td><code>placeOrder</code> (3), <code>cancelOrder</code> (4)</td>
+<td><code>Connector.SubmitPaperOrder</code>, <code>CancelPaperOrder</code>; <code>Connection.PlacePaperOrder</code>, <code>CancelPaperOrder</code></td>
+<td>all builds; validates paper account and connection coordinates, but does not replace application authorization</td>
+</tr>
+<tr>
+<td>Broker WhatIf preview</td>
+<td><code>placeOrder</code> (3) with WhatIf</td>
+<td><code>Connector.PreviewOrderWhatIf</code>, <code>Connection.PreviewOrderWhatIf</code></td>
+<td>all builds; broker evaluation that does not create a working order, never submit authority</td>
+</tr>
+<tr>
+<td>Option exercise / lapse</td>
+<td><code>exerciseOptions</code> (21)</td>
+<td><code>Connector.ExerciseOptions</code>, <code>Connection.ExerciseOptions</code></td>
+<td>disabled by default (<code>ErrTradingDisabled</code>); <code>-tags trading</code> only; position-changing when accepted</td>
+</tr>
+<tr>
+<td>API open-order snapshot</td>
+<td><code>reqAllOpenOrders</code> (5)</td>
+<td><code>Connector.SnapshotOpenOrders</code>, <code>Connection.RequestAllOpenOrders</code></td>
+<td>all builds; covers API-created orders across clients, not manual TWS orders by itself</td>
 </tr>
 <tr>
 <td>Real-time bars</td>
@@ -195,7 +219,7 @@ paired with an existing reduce/cover proposal.</p>
 </tbody>
 </table>
 </div>
-<p>Tested against IB Gateway server versions 100 through 203. Handshake auto-negotiates the highest protocol version the gateway and library agree on.</p>
+<p>Tests exercise handshake and parser behavior across IB Gateway server versions 100 through 203. Runtime connections reject versions below 124 and negotiate the highest supported protocol version with newer gateways.</p>
   </main>
   <footer>
     <div class="wrap"><a href="../index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div>

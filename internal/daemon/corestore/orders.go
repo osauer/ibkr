@@ -76,6 +76,10 @@ VALUES('authority','orders',?,'complete','0',?,?,?)`, freshOrderAuthorityFingerp
 	return saved, err
 }
 
+// StagePreTransmit atomically binds the broker scope, validates and consumes an
+// optional preview-token digest, advances conservative order-ID floors, appends
+// pre-transmit evidence, and advances the authority head. Success is durable
+// staging evidence; the caller still owns the guarded broker transmission.
 func (s *Store) StagePreTransmit(ctx context.Context, request PreTransmitRequest) (PreTransmitResult, error) {
 	if err := validateBrokerScope(request.Scope); err != nil {
 		return PreTransmitResult{}, err
@@ -406,6 +410,8 @@ func (s *Store) CommitLifecycle(ctx context.Context, commit LifecycleCommit) (Li
 	return out, err
 }
 
+// LoadOrderEvents returns matching order events in ascending event-sequence
+// order. A zero limit defaults to 1,000 rows.
 func (s *Store) LoadOrderEvents(ctx context.Context, query OrderQuery) ([]OrderEventRecord, error) {
 	if query.ScopeKey != "" {
 		if err := validateKey("scope key", query.ScopeKey, 512); err != nil {
@@ -475,10 +481,14 @@ WHERE `+strings.Join(clauses, " AND ")+` ORDER BY oe.event_seq LIMIT ?`, args...
 	return out, nil
 }
 
+// GlobalOrderIDFloor returns the greatest order ID reserved across all broker
+// scopes, or zero when no floor exists.
 func (s *Store) GlobalOrderIDFloor(ctx context.Context) (int64, error) {
 	return readFloor(ctx, s.db, "global", "")
 }
 
+// ScopedOrderIDFloor returns the greater of the global and named broker-scope
+// floors, or zero when neither exists.
 func (s *Store) ScopedOrderIDFloor(ctx context.Context, scopeKey string) (int64, error) {
 	if err := validateKey("scope key", scopeKey, 512); err != nil {
 		return 0, err

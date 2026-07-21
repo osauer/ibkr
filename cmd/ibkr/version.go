@@ -1,25 +1,3 @@
-// version.go renders `ibkr version` / `ibkr daemon --version`.
-//
-// Three independent signals describe "which binary is this":
-//
-//   - ldflags vars (`version`, `commit`, `date`) are stamped by the
-//     Makefile via `-X main.* `. They are authoritative when the build
-//     went through `make build`, but they can lag behind reality if the
-//     user rebuilt under bin/ but didn't `make install` (so $PATH still
-//     resolves to the older copy in ~/.local/bin), or if Go's link cache
-//     handed back the prior artifact.
-//   - The on-disk mtime of os.Executable() catches the
-//     rebuilt-but-not-installed case: when the timestamps disagree with
-//     "I just compiled this," the user's binary isn't the one they think
-//     it is.
-//   - runtime/debug.BuildInfo's `vcs.modified` catches the inverse: a
-//     plain `go build` without the Makefile produces a binary with no
-//     `-dirty` suffix in the version string but still records dirty-tree
-//     state in the embedded VCS metadata.
-//
-// Surfacing all three in the version block is what makes "I rebuilt but
-// version didn't change" debuggable without the user having to check
-// `which ibkr` and `stat` and `go version -m` separately.
 package main
 
 import (

@@ -24,6 +24,10 @@ import (
 	"github.com/osauer/ibkr/v2/internal/xdgcache"
 )
 
+// App is one configured Canary app-host process. New acquires exclusive
+// ownership of Options.StateDir and populates the host components; Run starts
+// their background loops and HTTP server. Close releases the process lock.
+// Exported component fields expose app-local adapters, not broker authority.
 type App struct {
 	Options          Options
 	Store            *state.Store
@@ -35,6 +39,11 @@ type App struct {
 	lock             *xdgcache.Lock
 }
 
+// New constructs an App and acquires the exclusive lock for opts.StateDir. If
+// opts.Addr is empty, opts is replaced with [DefaultOptions] for opts.Version.
+// The lock remains held until [App.Close] or the end of [App.Run], and is
+// released if construction fails. New opens app-local state and prepares the
+// relay, but it does not start the HTTP server or background loops.
 func New(opts Options) (*App, error) {
 	if opts.Addr == "" {
 		opts = DefaultOptions(opts.Version)
@@ -200,6 +209,11 @@ func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, daemo
 	return a, nil
 }
 
+// Run starts live-cache polling, alert workers, relay transport, credential
+// reaping, and the HTTP server, then blocks until the server exits. Cancelling
+// ctx stops the server and background contexts; normal cancellation and
+// [http.ErrServerClosed] return nil. Run always calls [App.Close] before
+// returning and must not be invoked concurrently on the same App.
 func (a *App) Run(ctx context.Context) error {
 	defer func() { _ = a.Close() }()
 	liveCtx, cancel := context.WithCancel(ctx)
@@ -221,6 +235,9 @@ func (a *App) Run(ctx context.Context) error {
 	return err
 }
 
+// Close releases the app state-directory lock. It is a no-op for a nil App or
+// after the first call. Close does not itself stop the HTTP server; cancel the
+// Run context to shut down a running App.
 func (a *App) Close() error {
 	if a == nil || a.lock == nil {
 		return nil

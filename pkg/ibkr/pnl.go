@@ -8,26 +8,15 @@ import (
 	"time"
 )
 
-// AccountDailyPnL captures the most recent account-level Daily P&L frame
-// IBKR has emitted on the reqPnL subscription.
+// AccountDailyPnL is the most recent account-level frame from an IBKR reqPnL
+// subscription. Monetary values are expressed in the account's base currency,
+// and AsOf is the UTC time at which this process received the frame.
 //
-// Fields:
-//   - DailyPnL: start-of-trading-day to now total P&L (this is the
-//     value TWS shows in the portfolio header).
-//   - UnrealizedTotalPnL, RealizedTotalPnL: the account's TOTAL
-//     unrealized / realized P&L, carried on the same reqPnL frame
-//     (msg 94 fields 3 & 4). Per IBKR's
-//     pnl(reqId, dailyPnL, unrealizedPnL, realizedPnL) contract these
-//     are inception-to-now totals, NOT a decomposition of DailyPnL —
-//     they do not sum to it. They measure the same quantity as the
-//     session-running unrealized/realized totals on reqAccountUpdates /
-//     reqAccountSummary, but arrive on a different feed, so the two
-//     total-unrealized measurements can legitimately differ.
-//
-// Pointers (not bare floats) so a value of zero is distinguishable from
-// "no frame yet" / "DBL_MAX sentinel". Older gateway versions only emit
-// the dailyPnL field; the two total unrealized/realized pointers stay
-// nil in that case.
+// DailyPnL covers the current trading day. UnrealizedTotalPnL and
+// RealizedTotalPnL are lifetime totals carried on the same frame, not
+// components of DailyPnL, and therefore do not sum to it. Pointer fields
+// distinguish an observed zero from a missing, unavailable, or IBKR sentinel
+// value.
 type AccountDailyPnL struct {
 	DailyPnL           *float64
 	UnrealizedTotalPnL *float64
@@ -35,12 +24,11 @@ type AccountDailyPnL struct {
 	AsOf               time.Time
 }
 
-// PositionDailyPnL captures the most recent per-conId Daily P&L frame
-// IBKR has emitted on the reqPnLSingle subscription. Same pointer
-// semantics as AccountDailyPnL — nil means "no value yet / sentinel /
-// no entitlement". As on the account frame, UnrealizedTotalPnL /
-// RealizedTotalPnL are the position's inception-to-now totals (msg 95
-// fields 4 & 5), not a decomposition of the daily figure.
+// PositionDailyPnL is the most recent per-contract frame from an IBKR
+// reqPnLSingle subscription. Monetary values are expressed in the account's
+// base currency, and AsOf is the UTC receive time. Pointer fields use the same
+// missing-versus-zero semantics as [AccountDailyPnL]. UnrealizedTotalPnL and
+// RealizedTotalPnL are lifetime totals, not components of DailyPnL.
 type PositionDailyPnL struct {
 	DailyPnL           *float64
 	UnrealizedTotalPnL *float64
@@ -48,11 +36,8 @@ type PositionDailyPnL struct {
 	AsOf               time.Time
 }
 
-// pnlCache holds the connector-side state for both account and per-
-// position PnL subscriptions. It lives on the Connector (not the
-// Connection) so a Connection-rebuild resets it naturally — handlers
-// re-register against the new conn and the daemon re-subscribes via
-// post-connect setup.
+// pnlCache holds account and per-position subscription identities and the
+// immutable snapshots published by their handlers.
 type pnlCache struct {
 	mu sync.RWMutex
 
@@ -100,12 +85,10 @@ func parsePnLFloat(s string) *float64 {
 	return &v
 }
 
-// RequestPnL sends a reqPnL subscription request for the named account.
-// modelCode is empty for non-FA accounts; FA users pass the model name.
-//
-// This is a library-callable wrapper around the wire opcode; production
-// callers go through Connector.SubscribeAccountPnL which adds caching
-// and handler registration.
+// RequestPnL starts a reqPnL stream for account using reqID. modelCode is empty
+// for accounts without a Financial Advisor model. The caller owns reqID,
+// response handling, and cancellation; [Connector.SubscribeAccountPnL]
+// provides those lifecycle and caching responsibilities.
 func (c *Connection) RequestPnL(reqID int, account, modelCode string) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
@@ -123,9 +106,9 @@ func (c *Connection) RequestPnL(reqID int, account, modelCode string) error {
 	return c.sendMessage(msg)
 }
 
-// CancelPnL tears down a reqPnL subscription. Best-effort — the gateway
-// drops subscriptions on socket close anyway, so a connection-down state
-// is not an error.
+// CancelPnL requests cancellation of the reqPnL stream identified by reqID.
+// It returns nil when the connection is already down because socket closure
+// also terminates the stream.
 func (c *Connection) CancelPnL(reqID int) error {
 	if !c.IsConnected() {
 		return nil
@@ -134,9 +117,10 @@ func (c *Connection) CancelPnL(reqID int) error {
 	return c.sendMessage(msg)
 }
 
-// RequestPnLSingle sends a reqPnLSingle subscription request for one
-// conId on the named account. Library-callable; production callers go
-// through Connector.SubscribePositionDailyPnL.
+// RequestPnLSingle starts a reqPnLSingle stream for conID on account using
+// reqID. modelCode is empty for accounts without a Financial Advisor model.
+// The caller owns request-ID correlation, response handling, and cancellation;
+// [Connector.SubscribePositionDailyPnL] provides those responsibilities.
 func (c *Connection) RequestPnLSingle(reqID int, account, modelCode string, conID int) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
@@ -157,7 +141,8 @@ func (c *Connection) RequestPnLSingle(reqID int, account, modelCode string, conI
 	return c.sendMessage(msg)
 }
 
-// CancelPnLSingle tears down a reqPnLSingle subscription.
+// CancelPnLSingle requests cancellation of the reqPnLSingle stream identified
+// by reqID. It returns nil when the connection is already down.
 func (c *Connection) CancelPnLSingle(reqID int) error {
 	if !c.IsConnected() {
 		return nil
@@ -230,15 +215,12 @@ func parsePositionPnLFields(fields []string) (reqID int, snap PositionDailyPnL, 
 	return rid, snap, true
 }
 
-// SubscribeAccountPnL starts (or re-uses) a streaming reqPnL subscription
-// for the named account. Idempotent — repeated calls with the same
-// account are noops on the wire; if the account changes, the existing
-// subscription is cancelled and a fresh one issued.
-//
-// account must be non-empty. The caller's typical entry point is the
-// daemon's post-connect setup, immediately after RequestAccountUpdates.
-// Subscription state lives on the Connector; AccountDailyPnL() reads
-// the cache without issuing wire traffic.
+// SubscribeAccountPnL starts and caches a streaming reqPnL subscription for
+// account. account must be non-empty. Repeated calls for the same account are
+// idempotent; changing the account cancels the previous stream, clears its
+// cached snapshot, and starts a new one. [Connector.Stop] cancels the active
+// stream. Use [Connector.AccountDailyPnL] for non-blocking cache reads. Callers
+// must serialize attempts to switch one connector between different accounts.
 func (c *Connector) SubscribeAccountPnL(account string) error {
 	if !c.isConnected() {
 		return ErrIBKRUnavailable
@@ -293,9 +275,10 @@ func (c *Connector) SubscribeAccountPnL(account string) error {
 }
 
 // AccountDailyPnL returns the most recently received account Daily P&L
-// snapshot. ok=false until the gateway emits the first frame after
-// SubscribeAccountPnL — typically a few hundred milliseconds. Reads do
-// not block and never issue wire traffic.
+// snapshot. ok is false until [Connector.SubscribeAccountPnL] is active and a
+// frame has been received. The method neither blocks nor issues wire traffic.
+// Handlers replace snapshots rather than mutating their pointed-to values, so
+// the returned shallow copy remains stable.
 func (c *Connector) AccountDailyPnL() (AccountDailyPnL, bool) {
 	c.pnl.mu.RLock()
 	defer c.pnl.mu.RUnlock()
@@ -307,14 +290,12 @@ func (c *Connector) AccountDailyPnL() (AccountDailyPnL, bool) {
 	return c.pnl.account, true
 }
 
-// SubscribePositionDailyPnL starts a reqPnLSingle subscription for one
-// contract. Idempotent — repeated calls for the same conId are noops.
-// Returns nil on success (subscription kicked or already active);
-// ErrIBKRUnavailable when disconnected.
-//
-// conId must be > 0; account must be non-empty. The caller (daemon)
-// typically invokes this for each held position on first positions.list
-// call.
+// SubscribePositionDailyPnL starts and caches a reqPnLSingle stream for conID
+// on account. account must be non-empty and conID must be positive. Streams are
+// keyed by conID, so repeated calls for an already subscribed contract are
+// idempotent. [Connector.Stop] cancels all active position streams. The method
+// returns [ErrIBKRUnavailable] when the connector is disconnected. One
+// connector must not reuse the same conID for different accounts.
 func (c *Connector) SubscribePositionDailyPnL(account string, conID int) error {
 	if !c.isConnected() {
 		return ErrIBKRUnavailable
@@ -358,10 +339,12 @@ func (c *Connector) SubscribePositionDailyPnL(account string, conID int) error {
 	return nil
 }
 
-// PositionDailyPnL returns the most recently received per-conId Daily
-// P&L snapshot. ok=false when no subscription has been issued for the
-// conId. The snapshot's pointers may still be nil even when ok=true —
-// that's the "subscribed but no frame yet / sentinel" state.
+// PositionDailyPnL returns the cached per-contract Daily P&L snapshot for
+// conID. ok is false when no subscription exists. ok may be true while all
+// value pointers are nil, meaning the stream is active but has not supplied
+// usable values. The method neither blocks nor issues wire traffic. Handlers
+// replace snapshots rather than mutating their pointed-to values, so the
+// returned shallow copy remains stable.
 func (c *Connector) PositionDailyPnL(conID int) (PositionDailyPnL, bool) {
 	c.pnl.mu.RLock()
 	defer c.pnl.mu.RUnlock()
@@ -369,19 +352,17 @@ func (c *Connector) PositionDailyPnL(conID int) (PositionDailyPnL, bool) {
 	return snap, ok
 }
 
-// ActiveDailyPnLSubscriptions reports how many per-conId reqPnLSingle
-// streams the connector currently holds. Callers use this to enforce
-// their own subscription caps without reaching into private state.
+// ActiveDailyPnLSubscriptions reports the number of tracked per-contract
+// reqPnLSingle streams. It does not include the account-level reqPnL stream.
 func (c *Connector) ActiveDailyPnLSubscriptions() int {
 	c.pnl.mu.RLock()
 	defer c.pnl.mu.RUnlock()
 	return len(c.pnl.positionReqIDs)
 }
 
-// AccountID returns the account code IBKR sent on the managedAccounts
-// frame at handshake. Empty string when the connector hasn't completed
-// its handshake yet. Useful for callers that need to issue per-account
-// subscriptions (reqPnL, reqPnLSingle) without re-parsing accountSummary.
+// AccountID returns the account code most recently received from IBKR's
+// managedAccounts frame. It returns an empty string before that frame is
+// observed or when the connector has no connection.
 func (c *Connector) AccountID() string {
 	c.mu.RLock()
 	conn := c.conn
@@ -392,9 +373,9 @@ func (c *Connector) AccountID() string {
 	return conn.GetAccountCode()
 }
 
-// SeedAccountIDForTest installs the managed-account code returned by AccountID.
-// Test-only — production code must learn this from the IBKR managedAccounts or
-// accountSummary frames.
+// SeedAccountIDForTest installs the managed-account code returned by
+// [Connector.AccountID]. It is intended only for tests outside package ibkr;
+// runtime callers must obtain the value from IBKR.
 func (c *Connector) SeedAccountIDForTest(account string) {
 	c.mu.RLock()
 	conn := c.conn
@@ -407,12 +388,9 @@ func (c *Connector) SeedAccountIDForTest(account string) {
 	conn.accountMu.Unlock()
 }
 
-// SeedPositionDailyPnLForTest installs a cache entry for the named
-// conId without going through the wire. Test-only — production code
-// must go through SubscribePositionDailyPnL so the gateway emits real
-// frames. Exposed (rather than test-only via an _test.go file) because
-// the daemon's own daily-pnl tests live in package daemon and can't
-// reach private fields here.
+// SeedPositionDailyPnLForTest installs snap for conID without wire traffic and
+// marks that contract as subscribed. It is intended only for tests outside
+// package ibkr; runtime callers must use [Connector.SubscribePositionDailyPnL].
 func (c *Connector) SeedPositionDailyPnLForTest(conID int, snap PositionDailyPnL) {
 	c.pnl.mu.Lock()
 	defer c.pnl.mu.Unlock()
@@ -425,8 +403,8 @@ func (c *Connector) SeedPositionDailyPnLForTest(conID int, snap PositionDailyPnL
 	}
 }
 
-// SeedAccountDailyPnLForTest installs an account-level snapshot for
-// AccountDailyPnL to read back. Test-only.
+// SeedAccountDailyPnLForTest installs an account-level snapshot without wire
+// traffic. It is intended only for tests outside package ibkr.
 func (c *Connector) SeedAccountDailyPnLForTest(account string, snap AccountDailyPnL) {
 	c.pnl.mu.Lock()
 	defer c.pnl.mu.Unlock()
@@ -486,16 +464,11 @@ func (c *Connector) pnlResubClock() time.Time {
 	return time.Now()
 }
 
-// MaybeResubscribeStaleDailyPnL force-rebuilds the reqPnL / reqPnLSingle
-// subscriptions when the account daily-P&L frame has gone stale during market
-// hours. reqPnL is subscribed once at connect and pushes on change; if the
-// gateway silently stops feeding it — observed after a pre-market subscribe
-// that never resumed post-open — the value freezes while account-updates keep
-// flowing, so NLV stays correct but daily P&L does not. SubscribeAccountPnL is
-// idempotent and cannot revive a dead-but-"subscribed" stream, so this cancels
-// and re-requests. marketOpen gates off-hours idling (the caller owns the
-// calendar). Returns true when a rebuild was issued; throttled to one attempt
-// per dailyPnLStaleResubscribe window.
+// MaybeResubscribeStaleDailyPnL rebuilds all Daily P&L streams when marketOpen
+// is true and the account-level snapshot is stale. The caller owns the market
+// calendar; off-hours inactivity is not treated as stale. It returns true when
+// a rebuild attempt is issued, not when a replacement frame is received.
+// Attempts are throttled to one per internal staleness window.
 func (c *Connector) MaybeResubscribeStaleDailyPnL(marketOpen bool) bool {
 	if !marketOpen || !c.isConnected() {
 		return false

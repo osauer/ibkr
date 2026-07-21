@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-// Rotation engine (docs/design/history-index.md, phase 2). Only the three
+// Legacy rotation engine. Only the three
 // decision journals (regime/rules/canary) are rotatable. Rotation
 // compresses a fully-ingested byte prefix of the live journal into
 // immutable per-month gzip archives under rotated/ and rewrites the live

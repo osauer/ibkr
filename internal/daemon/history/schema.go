@@ -34,7 +34,7 @@ func baseDDL() []string {
 	}
 }
 
-// bookkeepingV2DDL creates the phase-2 bookkeeping tables: the rotation
+// bookkeepingV2DDL creates the schema-v2 bookkeeping tables: the rotation
 // intent/audit log, the archive inventory, and the statement-derivation
 // records. Split from baseDDL so the v1→v2 delta migration can apply
 // exactly this set.
@@ -242,7 +242,7 @@ func ordersDDL() []string {
 	return append(stmts, appendOnlyTriggers("order_events")...)
 }
 
-// evidenceV2DDL is every phase-2 evidence table. Split out so the v1→v2
+// evidenceV2DDL is every schema-v2 evidence table. Split out so the v1→v2
 // delta migration applies exactly the set the fresh path applies.
 func evidenceV2DDL() []string {
 	var stmts []string
@@ -299,7 +299,7 @@ func openAndMigrate(path string) (*sql.DB, error) {
 }
 
 // migrate brings the file to schemaVersion. user_version 0 applies the
-// current DDL; user_version 1 applies the phase-2 delta in one transaction
+// current DDL; user_version 1 applies the schema-v2 delta in one transaction
 // (ALTER ingest_sources ADD base, create the new tables), and user_version 2
 // adds statement file fingerprints. Existing evidence rows are untouched.
 // Anything else is returned for delete-and-recreate recovery of last resort.

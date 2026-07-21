@@ -1,7 +1,6 @@
-// redact-rect masks rectangular regions of a PNG with a solid bar.
-// Born of the 2026-06-11 docs audit: published app screenshots showed the
-// real paper account ID and balances. Redaction must be opaque fill, not
-// blur/pixelation (those can be reversed for short digit strings).
+// Command redact-rect masks rectangular regions of a PNG with an opaque fill.
+// It deliberately avoids blur and pixelation because those transformations can
+// be reversed for short digit strings.
 //
 // Usage:
 //

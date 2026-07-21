@@ -1,11 +1,11 @@
-// Package rpc defines the wire types and method names for the daemon's
-// newline-delimited JSON-RPC protocol, plus the small typed payloads used
-// by both the daemon (server side) and the CLI (client side).
+// Package rpc defines the stable method names, envelopes, and typed payloads
+// shared by the daemon and its CLI, MCP, and app adapters.
 //
-// The wire envelope is intentionally tiny: one JSON object per line, an "id"
-// to correlate requests with responses, an "ok" boolean, and either a
-// "result" or "error" payload. Streaming responses share an id and emit
-// "frame" objects until a closing {"end": true}.
+// The daemon protocol is custom newline-delimited JSON, not JSON-RPC 2.0. Each
+// request and response is one JSON object. An id correlates replies, ok selects
+// either result or error, and a streaming response emits frame objects followed
+// by an end marker. Types in this package are transport contracts; runtime and
+// broker authority remain in the daemon.
 package rpc
 
 import (
@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Method names. Keep stable; the CLI sends these as strings.
+// Daemon method names are stable wire identifiers shared by every adapter.
 const (
 	MethodAccountSummary      = "account.summary"
 	MethodPositionsList       = "positions.list"
@@ -49,7 +49,7 @@ const (
 	MethodPurgeRestoreExecute = "purge.restore.execute"
 )
 
-// Error codes used in Error.Code. CLI maps these to user-facing messages.
+// Error codes classify terminal request failures carried by Error.Code.
 const (
 	CodeUnknownMethod      = "unknown_method"
 	CodeBadRequest         = "bad_request"
@@ -70,12 +70,10 @@ const CodeRegimeUnavailable = "regime_unavailable"
 
 // MarketDataType values carried on Quote.DataType, Frame.DataType, and
 // ChainResult.DataType. IBKR's tickMarketDataType message (58) maps
-// gateway feed state into one of these strings; the CLI renders a badge
+// gateway feed state into one of these strings; adapters render a badge
 // based on the value. HealthResult.DataType remains on the wire shape
 // (omitempty) for renderer-fallback compatibility but is no longer
-// written by the daemon — `status` has no per-reqID data-type to honestly
-// report (the same reasoning that retired the field for AccountResult /
-// PositionsResult / HistoryDailyResult in v0.15.0).
+// written by the daemon: status has no per-request data type to report.
 //
 // Empty string means "the gateway hasn't sent a notice yet" — typically a
 // few hundred ms after a fresh subscription. Treated as live for
@@ -143,6 +141,8 @@ func IsOptionRTH(now time.Time) bool {
 // Holidays are NOT modeled — same fall-through policy as IsOptionRTH.
 type SessionClass int
 
+// Session classes partition the U.S. equity-options day using the boundaries
+// documented on [SessionClass].
 const (
 	SessionClosed SessionClass = iota
 	SessionPre
@@ -216,9 +216,8 @@ const (
 // accepts on ContractParams (a different path; see the doc-comment there).
 //
 // Compare against these constants in renderers and filters rather than
-// literal strings — the v0.12.4 "OPT" vs "OPTION" drift was the
-// canonical "two callers, two literals" failure, prevented by a single
-// source of truth.
+// literal strings. The constants prevent adapters from drifting between
+// broker and canonical spellings.
 const (
 	SecTypeStock  = "STOCK"
 	SecTypeOption = "OPTION"
@@ -226,14 +225,18 @@ const (
 	SecTypeIndex  = "INDEX"
 )
 
-// Request is the envelope sent from CLI to daemon.
+// Request is one custom daemon-protocol request. Params contains the typed
+// method payload; an absent Params value is distinct only where that method's
+// decoder says so.
 type Request struct {
 	ID     string          `json:"id"`
 	Method string          `json:"method"`
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
-// Response is the envelope sent from daemon to CLI.
+// Response is one custom daemon-protocol response. Unary success uses Result;
+// streams emit Frame values and terminate with End. Error is terminal when Ok
+// is false.
 type Response struct {
 	ID     string          `json:"id"`
 	Ok     bool            `json:"ok"`
@@ -598,12 +601,11 @@ type BreadthDailyValue struct {
 //
 // Codified on the wire (rather than left as a side-channel via
 // engine.IsRefreshing) so every consumer reads the same state without
-// remembering to call a sibling method. Pre-v0.27.3 this gap caused
-// fetchRegimeBreadth to mis-classify a poisoned Coverage=0 snapshot
-// as "ok" because the side-channel check only fired on (value==0 AND
-// history empty), and the poisoned envelope had history len 1.
+// remembering to call a sibling method or infer readiness from zero values.
 type BreadthState string
 
+// Breadth states distinguish startup and computation progress from usable and
+// coverage-degraded snapshots.
 const (
 	BreadthStateCold      BreadthState = "cold"
 	BreadthStateComputing BreadthState = "computing"
@@ -707,9 +709,7 @@ const (
 	// session AND none is in flight. The daemon hasn't been asked to
 	// produce a value yet. Distinct from Computing so a consumer can
 	// tell "first caller of the day must kick or wait" from "wait,
-	// this'll resolve on its own." Pre-v0.27.9 the cache conflated
-	// these two states under Computing — same side-channel-inference
-	// pattern the v0.27.3 breadth State enum retired.
+	// this will resolve on its own."
 	GammaZeroStatusCold = "cold"
 	// GammaZeroStatusComputing — a background compute is in flight; the
 	// EtaSeconds / Progress fields carry refresh hints. Callers who can
@@ -803,9 +803,8 @@ type StrikeConcentration struct {
 	// "SPY" or "SPX" today. Populated by single-underlying computes
 	// with that compute's sym, and carried through the combined-scope
 	// merge so the renderer can label per-row in the top-strikes
-	// table without re-deriving from the trading class. Empty for
-	// pre-v0.31 result envelopes; renderers should treat empty as
-	// "the only underlying in scope" for back-compat.
+	// table without re-deriving from the trading class. Empty means
+	// the only underlying in scope.
 	Underlying string `json:"underlying,omitempty"`
 	// TradingClass is the listed class on the contract — "SPY",
 	// "SPX" (AM-settled monthly), "SPXW" (PM-settled weekly).
@@ -885,6 +884,8 @@ type GammaCollectionDiagnostic struct {
 	CarriedForwardObservedAt string `json:"carried_forward_observed_at,omitempty"`
 }
 
+// Gamma rankability and quality-gate values keep displayable context separate
+// from evidence that may participate in downstream regime decisions.
 const (
 	GammaRankabilityRankable    = "rankable"
 	GammaRankabilityContextOnly = "context_only"
@@ -1028,8 +1029,7 @@ type SkewFitInfo struct {
 	// smile reads as a poor fit even when residuals are tiny, and a
 	// steep one as a good fit despite large absolute errors — so the
 	// RMS is the number that actually bounds the repricing error the
-	// sticky-moneyness sweep consumes. Additive since v1.10; zero on
-	// records written before the field existed.
+	// sticky-moneyness sweep consumes. Zero means no residual was recorded.
 	ResidualRMS float64    `json:"residual_rms,omitempty"`
 	Range       [2]float64 `json:"range"`
 }
@@ -1379,6 +1379,8 @@ func StripGammaProfiles(r *GammaZeroSPXResult) {
 	stripGammaComputedProfiles(r.DiagnosticResult)
 }
 
+// StripRegimeGammaProfiles removes large gamma profiles from every regime
+// projection while preserving its summary and quality evidence.
 func StripRegimeGammaProfiles(r *RegimeSnapshotResult) {
 	if r == nil {
 		return
@@ -1472,6 +1474,8 @@ type Quality struct {
 	Source string `json:"source,omitempty"`
 }
 
+// Quality vocabulary separates observation provenance from confidence; these
+// values are descriptive and do not independently establish authority.
 const (
 	FreshnessLive     = "live"
 	FreshnessFrozen   = "frozen"
@@ -1538,6 +1542,8 @@ type RegimeFreshness struct {
 	MaxAgeSeconds int64  `json:"max_age_seconds,omitempty"`
 }
 
+// Regime freshness values compare a row with its native publication cadence;
+// not_due and overdue observations are not confirmation-eligible.
 const (
 	RegimeFreshnessFresh   = "fresh"
 	RegimeFreshnessNotDue  = "not_due"
@@ -1612,8 +1618,7 @@ type RegimeVIXTerm struct {
 	// resolvable.
 	VIXPrevClose *float64 `json:"vix_prev_close,omitempty"`
 	VIXChangePct *float64 `json:"vix_change_pct,omitempty"` // (vix − prev_close) / prev_close × 100
-	// VIXChangeBasis is the day-change provenance on closed dates, e.g.
-	// "official closes 2026-07-16 → 2026-07-17 (weekend)". Empty on
+	// VIXChangeBasis is the day-change provenance on closed dates. Empty on
 	// trading dates (live print vs tick-9 close).
 	VIXChangeBasis string `json:"vix_change_basis,omitempty"`
 	// Per-scalar provenance. Each *Quality is nil when the corresponding
@@ -1623,8 +1628,8 @@ type RegimeVIXTerm struct {
 	VIXQuality   *Quality `json:"vix_quality,omitempty"`
 	VIX3MQuality *Quality `json:"vix3m_quality,omitempty"`
 	// Streak counts how many consecutive sessions this row's value has
-	// been in its current band. Persisted across daemon restarts in
-	// $XDG_CACHE_HOME/ibkr/regime-streaks.json. Nil when the band can't
+	// been in its current band. Persisted across daemon restarts in daemon.db.
+	// Nil when the band can't
 	// be determined (computing / unavailable / error) — the streak
 	// freezes rather than resets.
 	Streak *StreakInfo `json:"streak,omitempty"`
@@ -1654,8 +1659,7 @@ type RegimeHYGSPYDivergence struct {
 	SPYPrevClose *float64 `json:"spy_prev_close,omitempty"`
 	SPYChange    *float64 `json:"spy_change,omitempty"`     // last − prev_close (dollars)
 	SPYChangePct *float64 `json:"spy_change_pct,omitempty"` // (last − prev_close) / prev_close × 100
-	// SPYChangeBasis is the day-change provenance on closed dates, e.g.
-	// "official closes 2026-07-16 → 2026-07-17 (weekend)". Empty on
+	// SPYChangeBasis is the day-change provenance on closed dates. Empty on
 	// trading dates (live print vs tick-9 close).
 	SPYChangeBasis string   `json:"spy_change_basis,omitempty"`
 	HYGDataType    string   `json:"hyg_data_type,omitempty"`
@@ -2107,7 +2111,7 @@ type WatchlistHolding struct {
 
 // Frame is a single streaming tick. DataType carries the gateway's
 // per-reqID market-data-type notice (live / frozen / delayed /
-// delayed-frozen) so the CLI can render a badge — important after
+// delayed-frozen) so adapters can render a badge — important after
 // hours, where frozen mode delivers a single snapshot and then goes
 // silent. Empty string means "unknown" (the gateway hasn't sent the
 // notice yet); the CLI treats that the same as "live" for rendering.
@@ -2136,7 +2140,7 @@ type FrameError struct {
 	Message string `json:"message"`
 }
 
-// PositionView is the wire shape of a single position returned to the CLI.
+// PositionView is the wire shape of one position returned to adapters.
 //
 // DayChange / DayChangePct describe how far the account valuation mark sits
 // from RegularClose. Pointers so "no data" (no daily bar yet, options where
@@ -2791,6 +2795,8 @@ type DataQualityHealth struct {
 	AsOf             time.Time `json:"as_of,omitzero"`
 }
 
+// Data cadence values summarize whether a decision surface has current,
+// expected-but-not-due, missed, absent, or unclassified evidence.
 const (
 	DataCadenceCurrent       = "current"
 	DataCadenceNotDue        = "not_due"
@@ -2811,6 +2817,8 @@ type DataFarmHealth struct {
 	AsOf    time.Time `json:"as_of,omitzero"`
 }
 
+// Account modes classify the connected broker account; they do not describe
+// market-data freshness or grant broker-write authority.
 const (
 	AccountModeUnknown = "unknown"
 	AccountModePaper   = "paper"
@@ -2870,6 +2878,8 @@ type HealthResult struct {
 	Trading TradingStatus `json:"trading"`
 }
 
+// Trading status values describe MCP exposure and live-override readiness;
+// readiness is local evidence, not broker permission or submit authority.
 const (
 	TradingMCPDisabled = "disabled"
 
@@ -2958,6 +2968,8 @@ type TradingPaperSmokeResult struct {
 	AsOf                  time.Time     `json:"as_of"`
 }
 
+// Order constants are the allowlisted action, order-type, time-in-force,
+// strategy, and trailing-offset vocabulary accepted by daemon order requests.
 const (
 	OrderActionBuy  = "BUY"
 	OrderActionSell = "SELL"
@@ -2980,20 +2992,30 @@ const (
 	OrderTrailOffsetPercent        = "percent"
 	OrderTrailOffsetAmount         = "amount"
 
-	OrderTriggerMethodDefault      = 0
+	// OrderTriggerMethodDefault is an allowlisted broker trigger method.
+	OrderTriggerMethodDefault = 0
+	// OrderTriggerMethodDoubleBidAsk is an allowlisted broker trigger method.
 	OrderTriggerMethodDoubleBidAsk = 1
-	OrderTriggerMethodLast         = 2
-	OrderTriggerMethodDoubleLast   = 3
-	OrderTriggerMethodBidAsk       = 4
+	// OrderTriggerMethodLast is an allowlisted broker trigger method.
+	OrderTriggerMethodLast = 2
+	// OrderTriggerMethodDoubleLast is an allowlisted broker trigger method.
+	OrderTriggerMethodDoubleLast = 3
+	// OrderTriggerMethodBidAsk is an allowlisted broker trigger method.
+	OrderTriggerMethodBidAsk = 4
+	// OrderTriggerMethodLastOrBidAsk is an allowlisted broker trigger method.
 	OrderTriggerMethodLastOrBidAsk = 7
-	OrderTriggerMethodMidpoint     = 8
+	// OrderTriggerMethodMidpoint is an allowlisted broker trigger method.
+	OrderTriggerMethodMidpoint = 8
 
+	// OrderOriginAgent identifies an audited request origin; it does not grant authority by itself.
 	// Request origins for broker writes. Adapters stamp every write request;
 	// the daemon journals origin for audit and may apply origin-specific
 	// policy. A missing or unknown origin is treated as OrderOriginAgent, so
 	// new adapters must opt in to a human origin.
-	OrderOriginAgent        = "agent"
-	OrderOriginHumanTTY     = "human-tty"
+	OrderOriginAgent = "agent"
+	// OrderOriginHumanTTY identifies an audited request origin; it does not grant authority by itself.
+	OrderOriginHumanTTY = "human-tty"
+	// OrderOriginPairedDevice identifies an audited request origin; it does not grant authority by itself.
 	OrderOriginPairedDevice = "human-paired-device"
 
 	OrderPositionEffectOpen      = "open"
@@ -3003,23 +3025,39 @@ const (
 	OrderPositionEffectFlip      = "flip"
 	OrderPositionEffectOpenShort = "open_short"
 
+	// OrderWhatIfStatusUnavailable classifies broker WhatIf evidence.
 	OrderWhatIfStatusUnavailable = "unavailable"
-	OrderWhatIfStatusAccepted    = "accepted"
-	OrderWhatIfStatusRejected    = "rejected"
+	// OrderWhatIfStatusAccepted classifies broker WhatIf evidence.
+	OrderWhatIfStatusAccepted = "accepted"
+	// OrderWhatIfStatusRejected classifies broker WhatIf evidence.
+	OrderWhatIfStatusRejected = "rejected"
 
-	OrderTokenScopePlace  = "place"
+	// OrderTokenScopePlace binds a preview token to one order operation.
+	OrderTokenScopePlace = "place"
+	// OrderTokenScopeModify binds a preview token to one order operation.
 	OrderTokenScopeModify = "modify"
 
-	OrderLifecyclePreviewed                = "previewed"
-	OrderLifecyclePendingSubmit            = "pending_submit"
-	OrderLifecyclePreSubmitted             = "pre_submitted"
-	OrderLifecycleSubmitted                = "submitted"
-	OrderLifecyclePartiallyFilled          = "partially_filled"
-	OrderLifecycleFilled                   = "filled"
-	OrderLifecyclePendingCancel            = "pending_cancel"
-	OrderLifecycleCancelled                = "cancelled"
-	OrderLifecycleRejected                 = "rejected"
-	OrderLifecycleInactive                 = "inactive"
+	// OrderLifecyclePreviewed is a durable order-lifecycle classification.
+	OrderLifecyclePreviewed = "previewed"
+	// OrderLifecyclePendingSubmit is a durable order-lifecycle classification.
+	OrderLifecyclePendingSubmit = "pending_submit"
+	// OrderLifecyclePreSubmitted is a durable order-lifecycle classification.
+	OrderLifecyclePreSubmitted = "pre_submitted"
+	// OrderLifecycleSubmitted is a durable order-lifecycle classification.
+	OrderLifecycleSubmitted = "submitted"
+	// OrderLifecyclePartiallyFilled is a durable order-lifecycle classification.
+	OrderLifecyclePartiallyFilled = "partially_filled"
+	// OrderLifecycleFilled is a durable order-lifecycle classification.
+	OrderLifecycleFilled = "filled"
+	// OrderLifecyclePendingCancel is a durable order-lifecycle classification.
+	OrderLifecyclePendingCancel = "pending_cancel"
+	// OrderLifecycleCancelled is a durable order-lifecycle classification.
+	OrderLifecycleCancelled = "cancelled"
+	// OrderLifecycleRejected is a durable order-lifecycle classification.
+	OrderLifecycleRejected = "rejected"
+	// OrderLifecycleInactive is a durable order-lifecycle classification.
+	OrderLifecycleInactive = "inactive"
+	// OrderLifecycleUnknownReconcileRequired is a durable order-lifecycle classification.
 	OrderLifecycleUnknownReconcileRequired = "unknown_reconcile_required"
 	// OrderLifecycleExpiredInferred marks a DAY order whose effective session
 	// closed without a terminal broker callback. It is local calendar
@@ -3230,6 +3268,9 @@ type OrderCancelParams struct {
 	Origin string `json:"origin,omitempty"`
 }
 
+// OrderPlaceResult reports the durable local and broker-send state of a gated
+// placement attempt. Accepted does not imply a fill; LifecycleStatus and
+// SendState describe subsequent authority.
 type OrderPlaceResult struct {
 	Accepted        bool       `json:"accepted"`
 	Mode            string     `json:"mode"`
@@ -3247,6 +3288,8 @@ type OrderPlaceResult struct {
 	AsOf            time.Time  `json:"as_of"`
 }
 
+// PurgeExecuteParams selects an explicit purge workflow. It is a broker-write
+// request and remains subject to daemon preview, origin, freeze, and limit gates.
 type PurgeExecuteParams struct {
 	PurgeID       string            `json:"purge_id"`
 	All           bool              `json:"all,omitempty"`
@@ -3257,6 +3300,7 @@ type PurgeExecuteParams struct {
 	Origin        string            `json:"origin,omitempty"`
 }
 
+// PurgeExecuteLeg identifies one exact position leg selected for purge.
 type PurgeExecuteLeg struct {
 	LegID        string         `json:"leg_id"`
 	Symbol       string         `json:"symbol"`
@@ -3268,6 +3312,8 @@ type PurgeExecuteLeg struct {
 	Multiplier   int            `json:"multiplier,omitempty"`
 }
 
+// PurgeExecuteResult reports per-leg submission, skips, blockers, and monitor
+// guidance. Submitted legs are not necessarily filled.
 type PurgeExecuteResult struct {
 	Kind                 string                   `json:"kind"`
 	PurgeID              string                   `json:"purge_id"`
@@ -3291,6 +3337,7 @@ type PurgeExecuteResult struct {
 	AsOf                 time.Time                `json:"as_of"`
 }
 
+// PurgeExecuteOrder reports the sanitized order state for one submitted leg.
 type PurgeExecuteOrder struct {
 	LegID           string             `json:"leg_id"`
 	Symbol          string             `json:"symbol"`
@@ -3308,6 +3355,8 @@ type PurgeExecuteOrder struct {
 	Quote           OrderQuoteSnapshot `json:"quote"`
 }
 
+// PurgeExecuteSkippedLeg records a selected leg that was not submitted and its
+// stable reason.
 type PurgeExecuteSkippedLeg struct {
 	LegID    string         `json:"leg_id"`
 	Symbol   string         `json:"symbol"`
@@ -3316,12 +3365,16 @@ type PurgeExecuteSkippedLeg struct {
 	Reason   string         `json:"reason"`
 }
 
+// PurgeStatusParams selects a workflow or account-scoped ledger window. Empty
+// values use daemon defaults and never broaden broker-write authority.
 type PurgeStatusParams struct {
 	PurgeID string `json:"purge_id,omitempty"`
 	Account string `json:"account,omitempty"`
 	Limit   int    `json:"limit,omitempty"`
 }
 
+// PurgeStatusResult is the daemon's durable purge-ledger and observed-order
+// view. It is not a broker statement.
 type PurgeStatusResult struct {
 	Kind            string            `json:"kind"`
 	PurgeID         string            `json:"purge_id,omitempty"`
@@ -3339,6 +3392,7 @@ type PurgeStatusResult struct {
 	AsOf            time.Time         `json:"as_of"`
 }
 
+// PurgeLedgerTotals summarizes durable purge and restore quantities and values.
 type PurgeLedgerTotals struct {
 	ActiveRows        int     `json:"active_rows"`
 	RestoredRows      int     `json:"restored_rows"`
@@ -3350,6 +3404,8 @@ type PurgeLedgerTotals struct {
 	ShadowPnL         float64 `json:"shadow_pnl"`
 }
 
+// PurgeLedgerRow is one durable leg record reduced from purge, restore, and
+// observed fill events.
 type PurgeLedgerRow struct {
 	LegID               string         `json:"leg_id"`
 	PurgeID             string         `json:"purge_id,omitempty"`
@@ -3380,6 +3436,8 @@ type PurgeLedgerRow struct {
 	Warnings            []string       `json:"warnings,omitempty"`
 }
 
+// PurgeRestoreParams selects a proportional restore request. It is a new
+// broker-write request and remains subject to current daemon gates.
 type PurgeRestoreParams struct {
 	PurgeID   string   `json:"purge_id,omitempty"`
 	All       bool     `json:"all,omitempty"`
@@ -3390,6 +3448,8 @@ type PurgeRestoreParams struct {
 	Origin    string   `json:"origin,omitempty"`
 }
 
+// PurgeRestoreResult reports modeled legs, submissions, skips, and durable
+// ledger state. Submitted legs are not necessarily filled.
 type PurgeRestoreResult struct {
 	Kind           string                   `json:"kind"`
 	PurgeID        string                   `json:"purge_id,omitempty"`
@@ -3415,6 +3475,8 @@ type PurgeRestoreResult struct {
 	AsOf           time.Time                `json:"as_of"`
 }
 
+// PurgeRestoreLeg reports the modeled preview and outcome for one restore leg.
+// WhatIf remains broker evidence rather than a fill guarantee.
 type PurgeRestoreLeg struct {
 	LegID           string              `json:"leg_id"`
 	Symbol          string              `json:"symbol"`
@@ -3433,6 +3495,8 @@ type PurgeRestoreLeg struct {
 	Warnings        []string            `json:"warnings,omitempty"`
 }
 
+// OrderModifyResult reports the durable local and broker-send state of a gated
+// modification attempt. Accepted does not imply broker acknowledgement.
 type OrderModifyResult struct {
 	Accepted        bool       `json:"accepted"`
 	Mode            string     `json:"mode"`
@@ -3450,6 +3514,8 @@ type OrderModifyResult struct {
 	AsOf            time.Time  `json:"as_of"`
 }
 
+// OrderCancelResult reports the observed state after a cancellation request.
+// Accepted does not imply the broker has confirmed cancellation.
 type OrderCancelResult struct {
 	Accepted        bool      `json:"accepted"`
 	Order           OrderView `json:"order"`
@@ -3585,6 +3651,8 @@ type OrderView struct {
 	CancelEligible         bool      `json:"cancel_eligible"`
 }
 
+// OrdersOpenResult is the daemon's locally reduced view of currently open
+// orders. It is explicitly not a broker statement.
 type OrdersOpenResult struct {
 	Orders             []OrderView `json:"orders"`
 	AsOf               time.Time   `json:"as_of"`
@@ -3595,6 +3663,8 @@ type OrdersOpenResult struct {
 	Limitations        []string    `json:"limitations"`
 }
 
+// OrderStatusResult returns local product state and bounded audit events for one
+// order identity. Found false leaves Order at its zero value.
 type OrderStatusResult struct {
 	Found              bool         `json:"found"`
 	Order              OrderView    `json:"order,omitzero"`
@@ -3607,6 +3677,7 @@ type OrderStatusResult struct {
 	Limitations        []string     `json:"limitations"`
 }
 
+// OrdersHistoryRow combines one reduced order with a bounded event window.
 type OrdersHistoryRow struct {
 	Order            OrderView    `json:"order"`
 	Events           []OrderEvent `json:"events"`
@@ -3615,6 +3686,8 @@ type OrdersHistoryRow struct {
 	EventsTruncated  bool         `json:"events_truncated"`
 }
 
+// OrdersHistoryResult is a bounded local history query. Truncated and
+// EventsTruncated disclose omitted rows and events; it is not a broker statement.
 type OrdersHistoryResult struct {
 	Orders             []OrdersHistoryRow `json:"orders"`
 	AsOf               time.Time          `json:"as_of"`

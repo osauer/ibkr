@@ -1,24 +1,8 @@
-// Package ibkr implements connectivity with the Interactive Brokers gateway:
-// connection lifecycle, request/response encoding, market data
-// subscriptions, basic contract detail queries, and lightweight caches.
-//
-// Design highlights:
-//   - Connector owns a single Connection keyed by client ID; multi-client
-//     pool scaffolding was retired in favour of one-client-one-connection.
-//   - Option IV: track real IBKR IV (tick 106). When 106 is absent, the package
-//     can also subscribe to representative option quotes to derive mid prices,
-//     but it should NOT fabricate IV; consumers must treat IV as unavailable.
-//   - ContractDetailsLite provides only fields needed for calendar building.
-//
-// Protocol notes:
-//   - Maintain reqMktData v11 field order when encoding requests.
-//   - Keep symbol→contract mapping consistent across requests.
-//   - Avoid placeholder/extra fields that shift subsequent fields.
 package ibkr
 
 import "time"
 
-// Greeks represents option sensitivities.
+// Greeks contains option sensitivities reported by the broker.
 type Greeks struct {
 	Delta float64 `json:"delta"`
 	Gamma float64 `json:"gamma"`
@@ -27,7 +11,10 @@ type Greeks struct {
 	Rho   float64 `json:"rho"`
 }
 
-// MarketData represents a market data tick.
+// MarketData is the latest set of market-data observations for a symbol.
+// Callers must use the accompanying observed, timestamp, and data-type fields
+// where provided; a numeric zero alone does not always prove the broker
+// reported a zero value.
 type MarketData struct {
 	Symbol    string    `json:"symbol"`
 	Timestamp time.Time `json:"timestamp"`
@@ -107,50 +94,75 @@ type trackedOrder struct {
 	AllowOutsideRth bool `json:"outside_rth,omitempty"`
 }
 
-// OrderSide represents order direction.
+// OrderSide identifies the buy or sell direction of an order.
 type OrderSide string
 
 const (
-	OrderSideBuy  OrderSide = "BUY"
+	// OrderSideBuy identifies a buy order.
+	OrderSideBuy OrderSide = "BUY"
+	// OrderSideSell identifies a sell order.
 	OrderSideSell OrderSide = "SELL"
 )
 
-// OrderType represents order execution type.
+// OrderType identifies the requested broker execution instruction.
 type OrderType string
 
 const (
-	OrderTypeMarket    OrderType = "MARKET"
-	OrderTypeLimit     OrderType = "LIMIT"
-	OrderTypeStop      OrderType = "STOP"
+	// OrderTypeMarket identifies a market order.
+	OrderTypeMarket OrderType = "MARKET"
+	// OrderTypeLimit identifies a limit order.
+	OrderTypeLimit OrderType = "LIMIT"
+	// OrderTypeStop identifies a stop order.
+	OrderTypeStop OrderType = "STOP"
+	// OrderTypeStopLimit identifies a stop-limit order.
 	OrderTypeStopLimit OrderType = "STOP_LIMIT"
-	OrderTypeMOC       OrderType = "MOC"
-	OrderTypeLOC       OrderType = "LOC"
-	OrderTypePegMid    OrderType = "PEG_MID"
+	// OrderTypeMOC identifies a market-on-close order.
+	OrderTypeMOC OrderType = "MOC"
+	// OrderTypeLOC identifies a limit-on-close order.
+	OrderTypeLOC OrderType = "LOC"
+	// OrderTypePegMid identifies an order pegged to the midpoint.
+	OrderTypePegMid OrderType = "PEG_MID"
 )
 
-// TimeInForce specifies order duration.
+// TimeInForce identifies how long an order remains eligible for execution.
 type TimeInForce string
 
 const (
+	// TimeInForceDay keeps an order active for the current trading day.
 	TimeInForceDay TimeInForce = "DAY"
+	// TimeInForceGTC keeps an order active until it fills or is cancelled.
 	TimeInForceGTC TimeInForce = "GTC"
+	// TimeInForceIOC requests immediate execution and cancels any remainder.
 	TimeInForceIOC TimeInForce = "IOC"
+	// TimeInForceFOK requires immediate execution of the full quantity.
 	TimeInForceFOK TimeInForce = "FOK"
+	// TimeInForceGTD keeps an order active through its specified date.
 	TimeInForceGTD TimeInForce = "GTD"
+	// TimeInForceOPG requests execution at the market open.
 	TimeInForceOPG TimeInForce = "OPG"
 )
 
-// OrderStatus represents order state.
+// OrderStatus identifies the package's normalized lifecycle state for an order.
 type OrderStatus string
 
 const (
-	OrderStatusNew       OrderStatus = "NEW"
-	OrderStatusPending   OrderStatus = "PENDING"
+	// OrderStatusNew means the order has been created locally.
+	OrderStatusNew OrderStatus = "NEW"
+	// OrderStatusPending means submission is in progress.
+	OrderStatusPending OrderStatus = "PENDING"
+	// OrderStatusSubmitted means the broker has received the order.
 	OrderStatusSubmitted OrderStatus = "SUBMITTED"
-	OrderStatusAccepted  OrderStatus = "ACCEPTED"
-	OrderStatusPartial   OrderStatus = "PARTIAL"
-	OrderStatusFilled    OrderStatus = "FILLED"
+	// OrderStatusAccepted means the broker has accepted the order.
+	OrderStatusAccepted OrderStatus = "ACCEPTED"
+	// OrderStatusPartial means part, but not all, of the quantity has filled.
+	OrderStatusPartial OrderStatus = "PARTIAL"
+	// OrderStatusFilled means the full quantity has filled.
+	OrderStatusFilled OrderStatus = "FILLED"
+	// OrderStatusCancelled means cancellation was requested locally or observed
+	// from the broker; the value alone does not prove broker-final cancellation.
 	OrderStatusCancelled OrderStatus = "CANCELLED"
-	OrderStatusRejected  OrderStatus = "REJECTED"
-	OrderStatusExpired   OrderStatus = "EXPIRED"
+	// OrderStatusRejected means the broker rejected the order.
+	OrderStatusRejected OrderStatus = "REJECTED"
+	// OrderStatusExpired means the order elapsed without filling.
+	OrderStatusExpired OrderStatus = "EXPIRED"
 )

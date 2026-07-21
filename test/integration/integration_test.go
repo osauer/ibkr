@@ -1,9 +1,9 @@
 //go:build !windows
 
-// Package integration runs end-to-end tests of the full ibkrd + ibkr CLI
-// stack against a live IB Gateway. The tests deliberately do not mock or
-// stub IBKR — they exist to prove the actual binaries connect and talk to
-// the real gateway.
+// Package integration runs end-to-end tests of the full `ibkr daemon` and CLI
+// stack against a live IB Gateway. The tests deliberately do not mock or stub
+// IBKR; they prove the shipped multi-mode binary connects and talks to the real
+// gateway.
 //
 // Tests skip if the IB Gateway is not reachable on the configured port; this
 // matches the project's "no mock" stance: when the live gateway is down we

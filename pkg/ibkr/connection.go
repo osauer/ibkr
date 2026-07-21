@@ -1,26 +1,3 @@
-// Package ibkr implements the Interactive Brokers TWS API protocol.
-//
-// TARGET API VERSION: IBKR Java API CLIENT_VERSION 66
-// MINIMUM SERVER VERSION REQUIRED: 124 (MIN_SERVER_VER_SYNT_REALTIME_BARS)
-// TESTED WITH: TWS API Gateway v10.30+ (serverVersion 203)
-//
-// This implementation follows the official IBKR Java API specification exactly,
-// with NO conditional compatibility code for legacy server versions < 124.
-//
-// REFERENCE: the canonical IBKR Java client at
-// https://github.com/InteractiveBrokers/tws-api-public — specifically
-// IBJts/source/JavaClient/com/ib/client/EClient.java. This Go package is
-// an independent re-implementation of the wire protocol; no IBKR code is
-// included or redistributed here.
-//
-// Protocol details:
-// - Binary message framing for serverVersion >= 100 (4-byte big-endian length prefix)
-// - ASCII field encoding with NULL byte (\x00) delimiters
-// - Historical data requests include explicit VERSION field (8) to align optional slots
-// - ConID field required for serverVersion >= 68 in contract specifications
-//
-// IMPORTANT: Do NOT add version-specific workarounds without consulting the official
-// IBKR API source code. Empirical testing alone can be misleading.
 package ibkr
 
 import (
@@ -50,14 +27,19 @@ import (
 	"github.com/osauer/ibkr/v2/pkg/ibkr/internal/logging"
 )
 
-// ConnectionStatus represents the state of an IBKR connection
+// ConnectionStatus identifies the lifecycle state of a [Connection].
 type ConnectionStatus int
 
 const (
+	// StatusDisconnected means no protocol session is established.
 	StatusDisconnected ConnectionStatus = iota
+	// StatusConnecting means a connection or handshake is in progress.
 	StatusConnecting
+	// StatusConnected means the protocol session is ready.
 	StatusConnected
+	// StatusReconnecting means recovery of a lost session is in progress.
 	StatusReconnecting
+	// StatusFailed means the most recent connection attempt failed.
 	StatusFailed
 )
 
@@ -86,6 +68,8 @@ func clientIDInUseError(clientID int, gatewayMsg string) error {
 	return fmt.Errorf("%w: %s", errClientIDInUse, msg)
 }
 
+// String returns the uppercase name of s, or "UNKNOWN" for an unrecognized
+// value.
 func (s ConnectionStatus) String() string {
 	switch s {
 	case StatusDisconnected:
@@ -103,7 +87,7 @@ func (s ConnectionStatus) String() string {
 	}
 }
 
-// ConnectionConfig holds IBKR connection parameters
+// ConnectionConfig configures one TWS or IB Gateway protocol session.
 type ConnectionConfig struct {
 	Host     string
 	Port     int
@@ -111,14 +95,14 @@ type ConnectionConfig struct {
 	Account  string
 
 	// PacketLogPath enables the optional packet logger when non-empty. The path
-	// may contain a %d placeholder that will be formatted with the client ID by
-	// the connection pool.
+	// may contain a %d placeholder that is formatted with the client ID. Packet
+	// logs are account-sensitive and may contain order references and details.
 	PacketLogPath string
-	LogWireHex    bool
+	LogWireHex    bool // LogWireHex emits account-sensitive raw protocol frames.
 
-	// WireInterceptor is an optional shared wire interceptor for the connection.
-	// If nil, a new interceptor will be created per connection (legacy behavior).
-	// If provided, all connections in the pool share the same interceptor (recommended).
+	// WireInterceptor records frames for this connection when non-nil. When it
+	// is nil, NewConnection creates an interceptor from the configured
+	// environment, if enabled there.
 	WireInterceptor *WireInterceptor
 
 	// startAPI retry settings for the configured client ID.
@@ -143,7 +127,8 @@ type ConnectionConfig struct {
 	TLSServerName         string
 }
 
-// RawPosition represents a position from IBKR
+// RawPosition contains the latest broker-reported position and portfolio
+// values for one contract.
 type RawPosition struct {
 	Account       string
 	Contract      Contract
@@ -155,7 +140,7 @@ type RawPosition struct {
 	RealizedPNL   float64
 }
 
-// Contract represents an IBKR contract
+// Contract identifies an instrument in TWS wire requests.
 type Contract struct {
 	ConID        int
 	Symbol       string
@@ -173,7 +158,8 @@ type Contract struct {
 	SecID        string
 }
 
-// DefaultConfig returns production-ready connection config
+// DefaultConfig returns a new connection configuration populated with the
+// package defaults. Callers may modify the returned value before use.
 func DefaultConfig() *ConnectionConfig {
 	return &ConnectionConfig{
 		Host:                  "127.0.0.1",
@@ -223,7 +209,8 @@ func (c *Connection) tlsAttempts() []bool {
 	return seq
 }
 
-// Connection represents a single IBKR connection
+// Connection owns one TWS protocol session and its request, handler, and
+// observation state. Construct one with [NewConnection].
 type Connection struct {
 	config   *ConnectionConfig
 	status   ConnectionStatus
@@ -440,6 +427,11 @@ type pendingSystemNotice struct {
 // notices; the cap only matters if a handler is never wired at all.
 const pendingSystemNoticeLimit = 256
 
+// SetSystemNoticeHandler replaces the callback for parsed gateway system
+// notices. Passing nil disables delivery. When a non-nil handler is installed,
+// buffered startup notices are replayed synchronously before this method
+// returns. The callback parameter types are internal to package ibkr, so only
+// code in this package can install a non-nil callback.
 func (c *Connection) SetSystemNoticeHandler(handler func(note *systemNotification, alias reqAliasEntry)) {
 	c.systemNoticeMu.Lock()
 	c.systemNoticeHandler = handler
@@ -519,7 +511,8 @@ func (c *Connection) waitForReadStart(timeout time.Duration) {
 	}
 }
 
-// NewConnection creates a new IBKR connection
+// NewConnection constructs a disconnected protocol session. A nil config uses
+// [DefaultConfig]; a non-nil config is copied before defaults are filled in.
 func NewConnection(config *ConnectionConfig) *Connection {
 	if config == nil {
 		config = DefaultConfig()
@@ -681,7 +674,9 @@ func (c *Connection) closeSocket() {
 }
 
 // SetPacketLogger installs a packet logger invoked for every outbound frame.
-// Passing nil disables logging. Intended for short-lived debugging sessions.
+// Passing nil disables logging. Frames may contain account IDs, order
+// references, and order details; callers must protect the sink as sensitive
+// data and use it only for short-lived debugging.
 func (c *Connection) SetPacketLogger(logger PacketLogger) {
 	c.packetLoggerMu.Lock()
 	if c.packetLoggerCloser != nil {
@@ -725,7 +720,8 @@ func isClientIDInUseError(err error) bool {
 	return errors.Is(err, errClientIDInUse)
 }
 
-// Connect establishes connection to IBKR Gateway with the configured client ID.
+// Connect establishes and handshakes a TWS or IB Gateway connection using the
+// configured client ID. Context cancellation bounds the connection attempt.
 func (c *Connection) Connect(ctx context.Context) error {
 	clientID := c.config.ClientID
 
@@ -925,7 +921,8 @@ func (c *Connection) connectAttempt(ctx context.Context, useTLS bool) error {
 	return nil
 }
 
-// Disconnect closes the IBKR connection
+// Disconnect closes the protocol session and stops its background work. It is
+// safe to call more than once.
 func (c *Connection) Disconnect() error {
 	c.statusMu.Lock()
 	wasConnected := c.status == StatusConnected
@@ -1006,8 +1003,8 @@ func (c *Connection) Disconnect() error {
 	return nil
 }
 
-// reconnectWithBackoff implements exponential backoff reconnection
-// Pattern adapted from hedge's connection_pool.py
+// reconnectWithBackoff retries a lost session using the configured exponential
+// backoff policy.
 func (c *Connection) reconnectWithBackoff(ctx context.Context) {
 	defer c.wg.Done()
 
@@ -1142,14 +1139,14 @@ func (c *Connection) handleDisconnection(err error) {
 	}
 }
 
-// Status returns the current connection status
+// Status returns the current connection lifecycle state.
 func (c *Connection) Status() ConnectionStatus {
 	c.statusMu.RLock()
 	defer c.statusMu.RUnlock()
 	return c.status
 }
 
-// IsConnected returns true if connected
+// IsConnected reports whether the protocol session is connected.
 func (c *Connection) IsConnected() bool {
 	return c.Status() == StatusConnected
 }
@@ -1161,17 +1158,18 @@ func (c *Connection) setStatus(status ConnectionStatus) {
 	c.statusMu.Unlock()
 }
 
-// SetOnConnect sets callback for successful connections
+// SetOnConnect replaces the callback invoked after a successful connection.
 func (c *Connection) SetOnConnect(fn func()) {
 	c.onConnect = fn
 }
 
-// SetOnDisconnect sets callback for disconnections
+// SetOnDisconnect replaces the callback invoked after a connection is lost.
 func (c *Connection) SetOnDisconnect(fn func(error)) {
 	c.onDisconnect = fn
 }
 
-// GetConnectionInfo returns current connection details
+// GetConnectionInfo returns a snapshot of connection diagnostics. The returned
+// map is detached from the connection's internal state.
 func (c *Connection) GetConnectionInfo() map[string]any {
 	c.statusMu.RLock()
 	defer c.statusMu.RUnlock()
@@ -1194,6 +1192,8 @@ func (c *Connection) GetConnectionInfo() map[string]any {
 	return info
 }
 
+// ServerVersion returns the protocol version negotiated with TWS or IB Gateway.
+// It returns zero before a handshake completes.
 func (c *Connection) ServerVersion() int {
 	c.statusMu.RLock()
 	defer c.statusMu.RUnlock()
@@ -1832,7 +1832,8 @@ func (c *Connection) processMessage(msgBytes []byte) {
 			c.accountMu.Lock()
 			c.account = acct
 			c.accountMu.Unlock()
-			// Only log for first connection in pool
+			// The canonical primary client logs this account-wide notice; auxiliary
+			// clients receive the same payload and would duplicate it.
 			if c.config.ClientID == 1 {
 				ibkrLogger.Infof("Managed Accounts: %s", acct)
 			}
@@ -3638,7 +3639,10 @@ func (c *Connection) MarketDataType(reqID int) int {
 	return 0
 }
 
-// PlaceOrder sends a placeOrder request to IBKR using the v45+ wire format.
+// PlaceOrder sends a placeOrder request using the v45+ wire format. The default
+// build returns [ErrTradingDisabled]; the "trading" build enables the raw write
+// but does not grant application submit authority. A nil error means the frame
+// was written, not that IBKR accepted or finalized the order.
 func (c *Connection) PlaceOrder(order *IBKROrder) error {
 	if !tradingEnabled {
 		return ErrTradingDisabled
@@ -3646,9 +3650,10 @@ func (c *Connection) PlaceOrder(order *IBKROrder) error {
 	return c.placeOrder(order)
 }
 
-// PlacePaperOrder sends a paper-gated placeOrder request. It is intentionally
-// narrower than PlaceOrder so default package builds can support daemon-owned
-// paper execution without exposing an unrestricted raw write path.
+// PlacePaperOrder validates gate against the connection and sends a paper
+// placeOrder request in either build mode. The gate is connection evidence,
+// not application submit authority. A nil error means the frame was written,
+// not that IBKR accepted or finalized the order.
 func (c *Connection) PlacePaperOrder(gate PaperOrderGate, order *IBKROrder) error {
 	if err := gate.validateConnection(c); err != nil {
 		return err
@@ -3696,7 +3701,10 @@ func (c *Connection) placeOrder(order *IBKROrder) error {
 	return nil
 }
 
-// CancelOrder sends a cancelOrder request for an existing order ID.
+// CancelOrder sends a cancelOrder request for an existing order ID. The
+// default build returns [ErrTradingDisabled]; the "trading" build enables the
+// raw write but does not grant application cancel authority. A nil error means
+// the frame was written, not that IBKR confirmed cancellation.
 func (c *Connection) CancelOrder(orderID int) error {
 	if !tradingEnabled {
 		return ErrTradingDisabled
@@ -3704,7 +3712,10 @@ func (c *Connection) CancelOrder(orderID int) error {
 	return c.cancelOrder(orderID)
 }
 
-// CancelPaperOrder sends a paper-gated cancelOrder request.
+// CancelPaperOrder validates gate against the connection and sends a paper
+// cancelOrder request in either build mode. The gate is connection evidence,
+// not application cancel authority. A nil error means the frame was written,
+// not that IBKR confirmed cancellation.
 func (c *Connection) CancelPaperOrder(gate PaperOrderGate, orderID int) error {
 	if err := gate.validateConnection(c); err != nil {
 		return err
@@ -3993,17 +4004,8 @@ func (c *Connection) IsWhatIfOrderID(orderID int) bool {
 }
 
 // RequestMarketData subscribes to market data for a symbol. ctx must be
-// non-nil and bounds the market-data slot-acquire wait when the slot pool
-// is saturated. Pass context.Background() when no cancellation is needed.
-//
-// Pre-F-26 the slot-acquire used Connection.ctx (daemon lifetime), which
-// meant a caller's per-request budget (e.g. the regime fetcher's 5 s
-// boundedSnapshot) was silently ignored at the slot layer and the only
-// deadline that mattered was daemon shutdown. The lineage: v0.27.5 fixed
-// a hard hang in the same path, v0.27.6 stopped the 45 s envelope-level
-// timeout from clobbering one-row errors, v0.27.9 added the
-// boundedSnapshot orchestrator wrapper as defense-in-depth, and F-26
-// closes the underlying structural gap so the inner budget is honoured.
+// non-nil and bounds the wait for market-data slot admission. Pass
+// context.Background when the caller does not need cancellation.
 func (c *Connection) RequestMarketData(ctx context.Context, symbol string) (int, error) {
 	secType, exchange, currency, primaryExchange := classifySymbol(symbol)
 	localSymbol, tradingClassHint := contractDisplayHints(symbol, secType)
@@ -4033,11 +4035,9 @@ func (c *Connection) RequestMarketData(ctx context.Context, symbol string) (int,
 	return c.RequestMarketDataWithContract(ctx, contract, "100,101,104,106,165,221,233,236", false, false)
 }
 
-// RequestMarketDataWithContract issues reqMktData for the given contract.
-// ctx must be non-nil and is forwarded to acquireMarketDataSlot so a
-// saturated slot pool honours the caller's deadline instead of
-// Connection.ctx. Pass context.Background() when no cancellation is needed.
-// See RequestMarketData's docstring for F-26 lineage.
+// RequestMarketDataWithContract issues reqMktData for contract. ctx must be
+// non-nil and bounds the wait for market-data slot admission. Pass
+// context.Background when the caller does not need cancellation.
 func (c *Connection) RequestMarketDataWithContract(ctx context.Context, contract Contract, genericTicks string, snapshot bool, regulatorySnap bool) (int, error) {
 	return c.requestMarketDataWithContract(ctx, contract, genericTicks, snapshot, regulatorySnap, nil)
 }
@@ -4392,11 +4392,10 @@ func (c *Connection) RequestSecDefOptParams(underlyingSymbol, futFopExchange, un
 	return reqID, nil
 }
 
-// RequestMarketDataWithPrimary subscribes to market data with an explicit primary exchange hint.
-// This helps IBKR route to venues that provide better pre/after-hours coverage.
-// ctx must be non-nil and is forwarded to acquireMarketDataSlot. Pass
-// context.Background() when no cancellation is needed.
-// See RequestMarketData's docstring for F-26 lineage.
+// RequestMarketDataWithPrimary subscribes to market data with an explicit
+// primary-exchange hint. ctx must be non-nil and bounds the wait for
+// market-data slot admission. Pass context.Background when the caller does not
+// need cancellation.
 func (c *Connection) RequestMarketDataWithPrimary(ctx context.Context, symbol string, primaryExchange string) (int, error) {
 	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected to IBKR")
@@ -4934,20 +4933,11 @@ func (c *Connection) prewarmOneExpiryAttempt(ctx context.Context, contract Contr
 		if d.SecType != "" && d.SecType != "OPT" {
 			return
 		}
-		// Store the gateway-returned Exchange verbatim. OPT contractData
-		// frames are tagged with the actual listing venue (CBOE / ISE /
-		// AMEX / BOX / ...), and the ConID is venue-specific — a CBOE
-		// ConID for a 700C strike is NOT interchangeable with the same
-		// strike's ISE ConID. The next subscriber must send reqMktData
-		// with Exchange equal to the venue the cached ConID came from,
-		// otherwise the gateway returns Error 200 ("No security
-		// definition has been found for the request"). This was the
-		// 1332-rejection failure mode observed during the v0.29.0 dev
-		// cycle when we stripped Exchange="" following the portfolio-
-		// seed convention — that convention works for held positions
-		// (the gateway already has a streaming subscription bound to
-		// the SMART-routed ConID for those) but does NOT work for
-		// fresh OPT subscribes off the bulk-resolved cache.
+		// Preserve the gateway-returned listing venue: option ConIDs are
+		// venue-specific, and a later reqMktData must pair the cached ConID
+		// with that venue. The empty-exchange convention used for held
+		// positions does not apply to fresh subscriptions built from this
+		// bulk-resolved cache.
 		key := optionContractKey(contract.Symbol, d.TradingClass, contract.Expiry, d.Strike, d.Right)
 		c.optionContractMu.Lock()
 		if existing, ok := c.optionContractCache[key]; ok && existing.ConID != 0 {
@@ -4987,7 +4977,7 @@ func (c *Connection) prewarmOneExpiryAttempt(ctx context.Context, contract Contr
 	}
 }
 
-// CancelMarketData cancels market data subscription
+// CancelMarketData cancels the market-data subscription identified by reqID.
 func (c *Connection) CancelMarketData(reqID int) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
@@ -5103,7 +5093,8 @@ func (c *Connection) signalSummaryEnd(fields []string) {
 	}
 }
 
-// RequestAccountSummary requests account summary data
+// RequestAccountSummary starts an account-summary request for reqID. An empty
+// tags string requests the package's default set of account values.
 func (c *Connection) RequestAccountSummary(reqID int, tags string) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
@@ -5136,7 +5127,8 @@ func (c *Connection) RequestAccountSummary(reqID int, tags string) error {
 	return nil
 }
 
-// WaitForAccountSummaryEnd waits for account summary to complete with timeout
+// WaitForAccountSummaryEnd waits until an account-summary request completes or
+// timeout elapses.
 func (c *Connection) WaitForAccountSummaryEnd(timeout time.Duration) error {
 	select {
 	case <-c.acctSummaryEndChan:
@@ -5169,7 +5161,7 @@ func (c *Connection) awaitAccountSummarySnapshot(reqID int, timeout time.Duratio
 	}
 }
 
-// CancelAccountSummary cancels account summary subscription
+// CancelAccountSummary cancels the account-summary request identified by reqID.
 func (c *Connection) CancelAccountSummary(reqID int) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
@@ -5179,7 +5171,7 @@ func (c *Connection) CancelAccountSummary(reqID int) error {
 	return c.sendMessage(msg)
 }
 
-// GetPositions returns all current positions
+// GetPositions returns a detached map containing the current position cache.
 func (c *Connection) GetPositions() map[string]*RawPosition {
 	c.positionsMu.RLock()
 	defer c.positionsMu.RUnlock()
@@ -5204,7 +5196,7 @@ func (c *Connection) GetPositionsWithPortfolioHealth() (map[string]*RawPosition,
 	return result, health
 }
 
-// GetPosition returns a specific position by key
+// GetPosition returns the cached position for key, if present.
 func (c *Connection) GetPosition(key string) (*RawPosition, bool) {
 	c.positionsMu.RLock()
 	defer c.positionsMu.RUnlock()
@@ -5220,7 +5212,8 @@ func (c *Connection) GetAccountCode() string {
 	return c.account
 }
 
-// GetAccountSummary returns the account summary data
+// GetAccountSummary returns a detached copy of the current account-summary
+// cache.
 func (c *Connection) GetAccountSummary() map[string]string {
 	c.accountMu.RLock()
 	defer c.accountMu.RUnlock()
@@ -5231,7 +5224,7 @@ func (c *Connection) GetAccountSummary() map[string]string {
 	return result
 }
 
-// GetAccountValue returns a specific account value
+// GetAccountValue returns the cached account value for key, if present.
 func (c *Connection) GetAccountValue(key string) (string, bool) {
 	c.accountMu.RLock()
 	defer c.accountMu.RUnlock()
@@ -5240,7 +5233,8 @@ func (c *Connection) GetAccountValue(key string) (string, bool) {
 	return value, exists
 }
 
-// RequestAccountUpdates subscribes to account updates
+// RequestAccountUpdates subscribes to streaming account and portfolio updates
+// for account.
 func (c *Connection) RequestAccountUpdates(account string) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
@@ -5258,7 +5252,8 @@ func (c *Connection) RequestAccountUpdates(account string) error {
 	return c.sendMessage(msg)
 }
 
-// RequestCurrentTime requests the current server time (used for heartbeat)
+// RequestCurrentTime asks the gateway for its current time. The connection uses
+// this request as a heartbeat.
 func (c *Connection) RequestCurrentTime() error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
@@ -5325,7 +5320,8 @@ func (c *Connection) withTransport(allowDuringPause bool, fn func() error) error
 	return fn()
 }
 
-// RegisterHandler registers a handler for a specific message type and returns an identifier.
+// RegisterHandler adds a handler for msgID and returns the identifier accepted
+// by [Connection.UnregisterHandler]. A nil handler is ignored and returns zero.
 func (c *Connection) RegisterHandler(msgID int, handler func([]string)) uint64 {
 	if handler == nil {
 		return 0
@@ -5342,7 +5338,7 @@ func (c *Connection) RegisterHandler(msgID int, handler func([]string)) uint64 {
 	return entry.id
 }
 
-// GetNextRequestID returns the next available request ID
+// GetNextRequestID reserves and returns the next connection-local request ID.
 func (c *Connection) GetNextRequestID() int {
 	c.reqIDMu.Lock()
 	defer c.reqIDMu.Unlock()

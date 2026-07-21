@@ -2,6 +2,8 @@ package rpc
 
 import "time"
 
+// Opportunity method names and allowlisted policy, snapshot, action, state,
+// position-effect, and risk-change values form a stable wire vocabulary.
 const (
 	MethodOpportunitiesStatus          = "opportunities.status"
 	MethodOpportunitiesSnapshot        = "opportunities.snapshot"
@@ -10,6 +12,7 @@ const (
 	MethodOpportunitiesSubmitExercise  = "opportunities.submit_exercise"
 	MethodOpportunitiesIgnore          = "opportunities.ignore"
 
+	// OpportunityPolicyFingerprintVersion identifies a semantic fingerprint projection.
 	OpportunityPolicyFingerprintVersion = "opportunity-policy-fp-v1"
 
 	OpportunityPolicyStatusActive   = "active"
@@ -18,7 +21,8 @@ const (
 	OpportunityPolicyStatusError    = "error"
 	OpportunityPolicyStatusDisabled = "disabled"
 
-	OpportunitySnapshotKind          = "ibkr.opportunity_snapshot"
+	OpportunitySnapshotKind = "ibkr.opportunity_snapshot"
+	// OpportunitySnapshotSchemaVersion identifies a stable wire schema.
 	OpportunitySnapshotSchemaVersion = "opportunity-snapshot-v1"
 	OpportunityStatusKind            = "ibkr.opportunity_status"
 
@@ -47,6 +51,8 @@ const (
 	ExerciseRiskChangeUnknown   = "unknown"
 )
 
+// OpportunityPolicyStatus reports the loaded policy identity and blockers. A
+// status of active is required before absence of blockers is meaningful.
 type OpportunityPolicyStatus struct {
 	Kind          string           `json:"kind,omitempty"`
 	Status        string           `json:"status"`
@@ -62,6 +68,8 @@ type OpportunityPolicyStatus struct {
 	Blockers      []TradingBlocker `json:"blockers,omitempty"`
 }
 
+// OpportunityStatus combines opportunity-policy and trading readiness. It is
+// status evidence only and does not authorize exercise submission.
 type OpportunityStatus struct {
 	Kind           string                  `json:"kind,omitempty"`
 	AsOf           time.Time               `json:"as_of,omitzero"`
@@ -75,11 +83,16 @@ type OpportunityStatus struct {
 	Blockers       []TradingBlocker        `json:"blockers,omitempty"`
 }
 
+// OpportunitySourceFingerprints carries optional semantic identities for the
+// account and position snapshots used to derive an opportunity revision.
 type OpportunitySourceFingerprints struct {
 	Account   *Fingerprint `json:"account,omitempty"`
 	Positions *Fingerprint `json:"positions,omitempty"`
 }
 
+// OpportunitySnapshot is one daemon-authored, account-and-mode-scoped revision.
+// LoadedFromState identifies retained output; callers must still honor status
+// and blockers rather than treating persistence as freshness.
 type OpportunitySnapshot struct {
 	Kind               string                        `json:"kind"`
 	SchemaVersion      string                        `json:"schema_version"`
@@ -100,6 +113,7 @@ type OpportunitySnapshot struct {
 	LoadedFromState    bool                          `json:"loaded_from_state,omitempty"`
 }
 
+// OpportunityCounts summarizes the opportunities in the enclosing revision.
 type OpportunityCounts struct {
 	Total                int     `json:"total"`
 	Actionable           int     `json:"actionable"`
@@ -109,6 +123,8 @@ type OpportunityCounts struct {
 	ExpectedGainCurrency string  `json:"expected_gain_currency,omitempty"`
 }
 
+// Opportunity is an advisory exercise candidate bound to its key and revision.
+// It is not a preview token or exercise authorization.
 type Opportunity struct {
 	Key                      string                        `json:"key"`
 	Revision                 string                        `json:"revision"`
@@ -170,14 +186,19 @@ type OpportunityPostExerciseRisk struct {
 	WarningCodes                    []string `json:"warning_codes,omitempty"`
 }
 
+// OpportunitySnapshotParams controls adapter rendering only; Show does not
+// expand daemon authority or eligibility.
 type OpportunitySnapshotParams struct {
 	Show bool `json:"show,omitempty"`
 }
 
+// OpportunityRefreshParams requests recomputation; Show controls rendering.
 type OpportunityRefreshParams struct {
 	Show bool `json:"show,omitempty"`
 }
 
+// OpportunityExercisePreviewParams identifies an exact candidate revision for
+// gated broker preview. Origin is audit evidence, not authority by itself.
 type OpportunityExercisePreviewParams struct {
 	Key       string `json:"key"`
 	Revision  string `json:"revision"`
@@ -186,6 +207,8 @@ type OpportunityExercisePreviewParams struct {
 	Origin    string `json:"origin,omitempty"`
 }
 
+// OpportunityExercisePreviewResult reports daemon and broker eligibility. A
+// token ID is an audit identifier; the raw authorizing token remains private.
 type OpportunityExercisePreviewResult struct {
 	Accepted              bool             `json:"accepted"`
 	Opportunity           Opportunity      `json:"opportunity"`
@@ -197,6 +220,8 @@ type OpportunityExercisePreviewResult struct {
 	AsOf                  time.Time        `json:"as_of"`
 }
 
+// OpportunityExerciseSubmitParams requests gated exercise of an exact revision.
+// The daemon revalidates current authority; prior preview is not submit consent.
 type OpportunityExerciseSubmitParams struct {
 	Key       string `json:"key"`
 	Revision  string `json:"revision"`
@@ -205,6 +230,8 @@ type OpportunityExerciseSubmitParams struct {
 	Origin    string `json:"origin,omitempty"`
 }
 
+// OpportunityExerciseSubmitResult reports the terminal outcome of a gated
+// submission request. Accepted is false when blockers prevented submission.
 type OpportunityExerciseSubmitResult struct {
 	Accepted       bool                              `json:"accepted"`
 	Opportunity    Opportunity                       `json:"opportunity"`
@@ -216,12 +243,15 @@ type OpportunityExerciseSubmitResult struct {
 	AsOf           time.Time                         `json:"as_of"`
 }
 
+// OpportunityIgnoreParams dismisses an advisory candidate revision; it does
+// not alter positions or broker orders.
 type OpportunityIgnoreParams struct {
 	Key      string `json:"key"`
 	Revision string `json:"revision,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 }
 
+// OpportunityIgnoreResult reports whether the advisory dismissal was accepted.
 type OpportunityIgnoreResult struct {
 	Accepted bool      `json:"accepted"`
 	Key      string    `json:"key"`

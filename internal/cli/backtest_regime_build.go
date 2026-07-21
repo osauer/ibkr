@@ -17,6 +17,8 @@ const (
 	regimeBuilderSource  = "point-in-time panel"
 )
 
+// RegimePointInTimeRow is a captured market panel and forward stress target
+// used to rebuild a regime observation without future data.
 type RegimePointInTimeRow struct {
 	Date             string                    `json:"date,omitempty"`
 	AsOf             time.Time                 `json:"as_of,omitzero"`
@@ -34,6 +36,8 @@ type RegimePointInTimeRow struct {
 	Notes            string                    `json:"notes,omitempty"`
 }
 
+// RegimePointInTimeMeta carries source, status, and observation time shared by
+// captured regime clusters.
 type RegimePointInTimeMeta struct {
 	Status   string    `json:"status,omitempty"`
 	Source   string    `json:"source,omitempty"`
@@ -41,6 +45,8 @@ type RegimePointInTimeMeta struct {
 	AsOfDate string    `json:"as_of_date,omitempty"`
 }
 
+// RegimePointInTimeVIXTerm captures VIX term-structure inputs and their shared
+// point-in-time metadata.
 type RegimePointInTimeVIXTerm struct {
 	RegimePointInTimeMeta
 	VIX          *float64 `json:"vix,omitempty"`
@@ -50,12 +56,15 @@ type RegimePointInTimeVIXTerm struct {
 	VIXChangePct *float64 `json:"vix_change_pct,omitempty"`
 }
 
+// RegimePointInTimeVolOfVol captures volatility-of-volatility inputs.
 type RegimePointInTimeVolOfVol struct {
 	RegimePointInTimeMeta
 	Last      *float64 `json:"last,omitempty"`
 	Change20D *float64 `json:"change_20d_pct,omitempty"`
 }
 
+// RegimePointInTimeHYGSPY captures high-yield credit and equity divergence
+// inputs.
 type RegimePointInTimeHYGSPY struct {
 	RegimePointInTimeMeta
 	HYGPrice     *float64 `json:"hyg_price,omitempty"`
@@ -67,6 +76,8 @@ type RegimePointInTimeHYGSPY struct {
 	SPYChangePct *float64 `json:"spy_change_pct,omitempty"`
 }
 
+// RegimePointInTimeCredit captures investment-grade and high-yield spread
+// inputs.
 type RegimePointInTimeCredit struct {
 	RegimePointInTimeMeta
 	HYOAS       *float64 `json:"hy_oas,omitempty"`
@@ -75,6 +86,8 @@ type RegimePointInTimeCredit struct {
 	HY20DChange *float64 `json:"hy_oas_20d_change,omitempty"`
 }
 
+// RegimePointInTimeFunding captures commercial-paper and Treasury-bill funding
+// spread inputs.
 type RegimePointInTimeFunding struct {
 	RegimePointInTimeMeta
 	CP3M      *float64 `json:"cp_3m_rate,omitempty"`
@@ -82,6 +95,7 @@ type RegimePointInTimeFunding struct {
 	SpreadBps *float64 `json:"spread_bps,omitempty"`
 }
 
+// RegimePointInTimeUSDJPY captures USD/JPY level and weekly-change inputs.
 type RegimePointInTimeUSDJPY struct {
 	RegimePointInTimeMeta
 	Last         *float64 `json:"last,omitempty"`
@@ -89,6 +103,8 @@ type RegimePointInTimeUSDJPY struct {
 	WeeklyChange *float64 `json:"weekly_change_pct,omitempty"`
 }
 
+// RegimePointInTimeGamma captures a gamma envelope with its source and trust
+// classification.
 type RegimePointInTimeGamma struct {
 	Trusted  bool                   `json:"trusted,omitempty"`
 	Method   string                 `json:"method,omitempty"`
@@ -97,6 +113,8 @@ type RegimePointInTimeGamma struct {
 	Envelope rpc.GammaZeroSPXResult `json:"envelope"`
 }
 
+// RegimePointInTimeBreadth captures moving-average participation and new-high
+// versus new-low inputs.
 type RegimePointInTimeBreadth struct {
 	RegimePointInTimeMeta
 	PctAbove50DMA  *float64 `json:"pct_above_50dma,omitempty"`

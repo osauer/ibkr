@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+// AppendEvents records a non-empty event batch, its typed projections, and one
+// authority-head advance atomically.
 func (s *Store) AppendEvents(ctx context.Context, inputs []EventInput) ([]EventReceipt, error) {
 	if len(inputs) == 0 {
 		return nil, errorsf("at least one event is required")
@@ -39,6 +41,8 @@ func (s *Store) AppendEvents(ctx context.Context, inputs []EventInput) ([]EventR
 	return receipts, err
 }
 
+// CompareAndSwapStateDocumentWithEvents commits a state revision, a non-empty
+// event batch, its projections, and one authority-head advance atomically.
 func (s *Store) CompareAndSwapStateDocumentWithEvents(ctx context.Context, update StateDocumentCAS, inputs []EventInput) (StateDocument, []EventReceipt, error) {
 	if err := validateStateCAS(update); err != nil {
 		return StateDocument{}, nil, err
@@ -76,6 +80,8 @@ func (s *Store) CompareAndSwapStateDocumentWithEvents(ctx context.Context, updat
 	return saved, receipts, err
 }
 
+// LoadEvents returns matching events in ascending event-sequence order. A zero
+// limit defaults to 1,000 rows.
 func (s *Store) LoadEvents(ctx context.Context, query EventQuery) ([]EventRecord, error) {
 	if query.ScopeKey != "" {
 		if err := validateKey("scope key", query.ScopeKey, 512); err != nil {

@@ -13,16 +13,10 @@ import (
 	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 )
 
-// Store persists the engine's on-disk artefacts: the latest snapshot
-// (~200 bytes), the constituent-window map (~250 KB), and the
-// membership list (~5 KB). Files live under a single directory which
-// the caller chooses — typically $XDG_CACHE_HOME/ibkr/breadth-spx/.
-//
-// The store is a thin wrapper, not a general-purpose KV: each field
-// has its own filename, single-writer (the engine), and atomic writes
-// via temp+rename so a daemon crash mid-write can't corrupt the file.
-// Reads do not lock — the engine holds its own RWMutex around the
-// in-memory copy.
+// Store persists the engine's current snapshot, constituent windows, and
+// rolling history. UseCoreStore binds normal daemon operation to typed
+// daemon.db state and observations. The directory supplied to NewStore remains
+// for explicit legacy import and isolated codec use.
 type Store struct {
 	dir       string // sealed legacy cache; never used after UseCoreStore
 	authority *corestore.Store
@@ -62,19 +56,9 @@ func (s *Store) UseCoreStore(store *corestore.Store) error {
 	return nil
 }
 
-// LoadSnapshot returns the persisted snapshot or (nil, nil) when no
-// file exists yet (cold start). Returns an error only for actual I/O
-// problems or JSON corruption — neither should happen in steady state
-// but both must surface clearly when they do.
-//
-// Method-token gate: a snapshot whose Method doesn't match the current
-// methodConstituentFanout is treated as no-cache — the on-disk struct
-// is presumed to come from an older methodology whose payload shape
-// might not match what the engine now expects. Without this gate a v1
-// snapshot.json (Value-only) silently decodes into a v2 struct with the
-// new fields zeroed, the engine reports state=ready, and the renderer
-// publishes 0% breadth + 0 new highs as if they were real readings.
-// Cold-rebuilding instead is the honest move on a methodology bump.
+// LoadSnapshot returns the persisted snapshot or (nil, nil) when no current
+// state exists. A methodology-token mismatch is also treated as no state so an
+// incompatible payload cannot publish zero-valued measurements as current.
 func (s *Store) LoadSnapshot() (*Snapshot, error) {
 	data, ok, err := s.load("snapshot.json", breadthSnapshotStateKind)
 	if err != nil || !ok {
@@ -273,6 +257,8 @@ func ImportLegacySnapshot(ctx context.Context, authority *corestore.Store, paylo
 	return err
 }
 
+// ImportLegacyWindows preserves legacy window JSON as a non-authorizing
+// observation without publishing it as current state.
 func ImportLegacyWindows(ctx context.Context, authority *corestore.Store, payload, metadata []byte, observedAt time.Time) error {
 	_, err := authority.AppendObservation(ctx, corestore.ObservationInput{
 		ScopeKey: breadthAuthorityScope, Source: breadthSource, Kind: breadthWindowsObservationKind,
@@ -281,6 +267,8 @@ func ImportLegacyWindows(ctx context.Context, authority *corestore.Store, payloa
 	return err
 }
 
+// ImportLegacyHistory preserves legacy history JSON as a non-authorizing
+// observation without publishing it as current state.
 func ImportLegacyHistory(ctx context.Context, authority *corestore.Store, payload, metadata []byte, observedAt time.Time) error {
 	_, err := authority.AppendObservation(ctx, corestore.ObservationInput{
 		ScopeKey: breadthAuthorityScope, Source: breadthSource, Kind: breadthHistoryObservationKind,

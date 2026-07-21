@@ -17,15 +17,34 @@ var canaryPolicy = risk.DefaultPolicy()
 
 const canaryHeldStressLimit = 5
 
+// CanaryInput is the shared typed input contract defined by package rpc.
 type CanaryInput = rpc.CanaryInput
+
+// CanaryResult is the shared typed result contract defined by package rpc.
 type CanaryResult = rpc.CanaryResult
+
+// CanarySourceAsOf carries the source timestamps used by an assessment.
 type CanarySourceAsOf = rpc.CanarySourceAsOf
+
+// CanarySourceFingerprints carries semantic identities for source snapshots.
 type CanarySourceFingerprints = rpc.CanarySourceFingerprints
+
+// CanaryRow is one classified row in the assessment.
 type CanaryRow = rpc.CanaryRow
+
+// CanaryMarketIndicator is one market indicator exposed with its provenance.
 type CanaryMarketIndicator = rpc.CanaryMarketIndicator
+
+// CanaryPortfolioSummary is the redacted portfolio context used by Canary.
 type CanaryPortfolioSummary = rpc.CanaryPortfolioSummary
+
+// CanaryMarketSummary is the classified market context used by Canary.
 type CanaryMarketSummary = rpc.CanaryMarketSummary
 
+// ComputeCanary evaluates one typed snapshot. A zero input clock uses the
+// current time. Missing, stale, or incomplete sources remain explicit and do
+// not become healthy zero values. The result is advisory and performs no broker
+// writes.
 func ComputeCanary(in CanaryInput) CanaryResult {
 	now := in.Now
 	if now.IsZero() {

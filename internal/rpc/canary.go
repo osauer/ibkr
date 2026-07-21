@@ -78,6 +78,8 @@ type CanaryResult struct {
 	EstablishedAlertProjection *EstablishedAlertProjection `json:"established_alert_projection,omitempty"`
 }
 
+// EstablishedAlertProjectionSchemaVersion identifies the strict compatibility
+// projection schema consumed by the established Canary monitor.
 const EstablishedAlertProjectionSchemaVersion = "canary-established-alert-v1"
 
 // EstablishedAlertProjection atomically carries every producer-owned field
@@ -176,6 +178,7 @@ func establishedAlertSeverityAtLeastAct(severity risk.SignalSeverity) bool {
 	return severity == risk.SeverityAct || severity == risk.SeverityUrgent
 }
 
+// MarshalJSON validates the projection before encoding it.
 func (projection EstablishedAlertProjection) MarshalJSON() ([]byte, error) {
 	if err := ValidateEstablishedAlertProjection(projection); err != nil {
 		return nil, err
@@ -184,6 +187,7 @@ func (projection EstablishedAlertProjection) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire(projection))
 }
 
+// UnmarshalJSON rejects unknown, missing, null, trailing, or inconsistent data.
 func (projection *EstablishedAlertProjection) UnmarshalJSON(data []byte) error {
 	if projection == nil {
 		return errors.New("cannot unmarshal established alert projection into nil receiver")
@@ -233,6 +237,8 @@ func (projection *EstablishedAlertProjection) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// CanarySourceAsOf records each source snapshot's observation time. Zero times
+// mean the source timestamp is unavailable, not current.
 type CanarySourceAsOf struct {
 	Account      time.Time `json:"account,omitzero"`
 	Positions    time.Time `json:"positions,omitzero"`
@@ -240,6 +246,8 @@ type CanarySourceAsOf struct {
 	MarketEvents time.Time `json:"market_events,omitzero"`
 }
 
+// CanarySourceFingerprints carries optional semantic source identities. Nil
+// means the source did not provide an identity.
 type CanarySourceFingerprints struct {
 	Account      *Fingerprint `json:"account,omitempty"`
 	Positions    *Fingerprint `json:"positions,omitempty"`
@@ -247,6 +255,7 @@ type CanarySourceFingerprints struct {
 	MarketEvents *Fingerprint `json:"market_events,omitempty"`
 }
 
+// CanaryRow is one bounded, daemon-derived advisory finding.
 type CanaryRow struct {
 	Title     string               `json:"title"`
 	Direction risk.SignalDirection `json:"direction,omitempty"`
@@ -255,6 +264,8 @@ type CanaryRow struct {
 	Evidence  string               `json:"evidence,omitempty"`
 }
 
+// CanaryMarketIndicator is a display-ready market observation; its status is
+// advisory evidence rather than execution authority.
 type CanaryMarketIndicator struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"` // green | amber | red | context | n/a
@@ -263,6 +274,8 @@ type CanaryMarketIndicator struct {
 	Comment string `json:"comment,omitempty"`
 }
 
+// CanaryPortfolioSummary is a redacted portfolio-risk projection. Pointer
+// metrics distinguish unavailable observations from measured zero values.
 type CanaryPortfolioSummary struct {
 	BaseCurrency         string                     `json:"base_currency,omitempty"`
 	NetLiquidation       float64                    `json:"net_liquidation,omitempty"`
@@ -298,6 +311,8 @@ type CanaryHeldStress struct {
 	SignalIDs             []risk.SignalID   `json:"signal_ids,omitempty"`
 }
 
+// CanaryMarketSummary combines regime, tape, and source-quality context used by
+// Canary. Its cluster counts retain rankability and confirmation distinctions.
 type CanaryMarketSummary struct {
 	RegimeVerdict string        `json:"regime_verdict,omitempty"`
 	RegimePosture RegimePosture `json:"regime_posture,omitzero"`
@@ -342,8 +357,10 @@ type CanaryMarketSummary struct {
 // entering or holding tape-driven lifecycle stages until the next open
 // re-evaluates them from live prints.
 const (
+	// TapeSessionTradingDate means the calendar date has an official session.
 	TapeSessionTradingDate = "trading_date"
-	TapeSessionClosedDate  = "closed_date"
+	// TapeSessionClosedDate means direct tape changes are frozen context only.
+	TapeSessionClosedDate = "closed_date"
 )
 
 // TapeSessionFor classifies the official US cash-equity calendar date at now

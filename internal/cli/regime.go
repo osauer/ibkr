@@ -741,8 +741,8 @@ const verdictFloor = 3
 // regimeServedVerdict prefers the daemon's served verdict — the single
 // wording table in internal/rpc that posture.label shares — and only falls
 // back to the shared function over the renderer-local tally (older daemon /
-// synthetic snapshot). The former renderer-local verdict() copy was one of
-// the four drifting headline implementations behind the 2026-06-12 incident.
+// synthetic snapshot). The fallback uses the same shared policy function so
+// the renderer does not create an independent verdict definition.
 func regimeServedVerdict(r *rpc.RegimeSnapshotResult, c regimeComposite) string {
 	if v := strings.TrimSpace(r.Composite.Verdict); v != "" {
 		return v

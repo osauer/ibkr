@@ -12,10 +12,9 @@ import (
 	"time"
 )
 
+// AlertCandidateSnapshotVersion identifies the scope-bound source-neutral
+// alert candidate wire contract. It does not approve routing or pageability.
 const (
-	// AlertCandidateSnapshotVersion identifies the scope-bound source-neutral
-	// alert candidate wire contract. It does not approve any routing or
-	// pageability policy.
 	AlertCandidateSnapshotVersion  = "alert-candidate-snapshot-v2"
 	alertEpisodeKeyPrefix          = "alert-episode-v1:"
 	alertOccurrenceKeyPrefix       = "alert-occurrence-v1:"
@@ -31,6 +30,8 @@ const (
 // identifiers.
 type AlertSource string
 
+// AlertSourceCanary and the related constants identify candidate-producing
+// subsystems without carrying private subject identity.
 const (
 	AlertSourceCanary         AlertSource = "canary"
 	AlertSourceRegime         AlertSource = "regime"
@@ -48,6 +49,8 @@ const (
 // and kind remain independent so adapters do not recreate producer policy.
 type AlertKind string
 
+// AlertKindMarketState and the related constants classify the root operator
+// condition independently of its producer.
 const (
 	AlertKindMarketState             AlertKind = "market_state"
 	AlertKindPortfolioRisk           AlertKind = "portfolio_risk"
@@ -69,14 +72,19 @@ const (
 // only revisions and recovery do not.
 type AlertEpisodeState string
 
+// AlertEpisodeOpen and the related constants describe a producer-owned episode
+// transition.
 const (
 	AlertEpisodeOpen      AlertEpisodeState = "open"
 	AlertEpisodeEscalated AlertEpisodeState = "escalated"
 	AlertEpisodeRecovered AlertEpisodeState = "recovered"
 )
 
+// AlertSeverity expresses the producer-classified urgency of an alert
+// candidate. The zero value is invalid.
 type AlertSeverity string
 
+// AlertSeverityObserve and the related constants rank candidate urgency.
 const (
 	AlertSeverityObserve AlertSeverity = "observe"
 	AlertSeverityWatch   AlertSeverity = "watch"
@@ -84,12 +92,13 @@ const (
 	AlertSeverityUrgent  AlertSeverity = "urgent"
 )
 
-// AlertDeliveryPreference is advisory input to a future app-owned delivery
-// policy. The zero value is invalid. Unapproved is an explicit, non-pageable
-// state; Page is representable for a future approved policy but no constructor
-// or evaluator in this contract selects it.
+// AlertDeliveryPreference is advisory input to app-owned delivery policy. The
+// zero value is invalid. Unapproved is explicitly non-pageable; Page is part of
+// the contract, but no constructor or evaluator in this package selects it.
 type AlertDeliveryPreference string
 
+// AlertDeliveryUnapproved and the related constants express advisory delivery
+// policy without selecting a concrete target.
 const (
 	AlertDeliveryUnapproved AlertDeliveryPreference = "unapproved"
 	AlertDeliveryRecordOnly AlertDeliveryPreference = "record_only"
@@ -98,8 +107,12 @@ const (
 	AlertDeliveryPage       AlertDeliveryPreference = "page"
 )
 
+// AlertEvidenceHealth describes whether a candidate's supporting observation
+// is usable and current. The zero value is invalid.
 type AlertEvidenceHealth string
 
+// AlertEvidenceCurrent and the related constants classify the supporting
+// evidence's usability.
 const (
 	AlertEvidenceCurrent     AlertEvidenceHealth = "current"
 	AlertEvidencePartial     AlertEvidenceHealth = "partial"
@@ -112,30 +125,42 @@ const (
 // Per-target delivery identity belongs to the app delivery ledger.
 type AlertDestination string
 
+// AlertDestinationMonitor and the related constants name redacted product
+// surfaces rather than delivery targets.
 const (
 	AlertDestinationMonitor AlertDestination = "monitor"
 	AlertDestinationAlerts  AlertDestination = "alerts"
 	AlertDestinationBrief   AlertDestination = "brief"
 )
 
+// AlertCoverageState describes how much of the expected source set was
+// evaluated. The zero value is invalid.
 type AlertCoverageState string
 
+// AlertCoverageComplete and the related constants classify expected-source
+// coverage.
 const (
 	AlertCoverageComplete    AlertCoverageState = "complete"
 	AlertCoveragePartial     AlertCoverageState = "partial"
 	AlertCoverageUnavailable AlertCoverageState = "unavailable"
 )
 
+// AlertCoverageFreshness describes the timeliness of the covered sources. An
+// unavailable source set must use AlertCoverageUnknown.
 type AlertCoverageFreshness string
 
+// AlertCoverageCurrent and the related constants classify coverage freshness.
 const (
 	AlertCoverageCurrent AlertCoverageFreshness = "current"
 	AlertCoverageStale   AlertCoverageFreshness = "stale"
 	AlertCoverageUnknown AlertCoverageFreshness = "unknown"
 )
 
+// AlertSnapshotState is the state derived from validated candidates and
+// coverage. Clear requires complete, current coverage.
 type AlertSnapshotState string
 
+// AlertSnapshotClear and the related constants are derived snapshot states.
 const (
 	AlertSnapshotClear   AlertSnapshotState = "clear"
 	AlertSnapshotActive  AlertSnapshotState = "active"
@@ -311,6 +336,8 @@ func BuildAlertOccurrenceKey(episodeKey string, identityParts ...string) (string
 	return alertOccurrenceKeyPrefix + hex.EncodeToString(sum[:]), nil
 }
 
+// Validate checks the candidate's opaque identities, enum values, timestamps,
+// and recovery coherence.
 func (candidate AlertCandidate) Validate() error {
 	if !validOpaqueSHA256(candidate.EpisodeKey, alertEpisodeKeyPrefix) {
 		return errors.New("invalid alert candidate episode_key")
@@ -357,6 +384,8 @@ func (candidate AlertCandidate) Validate() error {
 	return nil
 }
 
+// Validate checks coverage set membership and the coherence of state and
+// freshness. CoveredSources must be non-nil even when it is empty.
 func (coverage AlertCoverage) Validate() error {
 	if !validAlertCoverageState(coverage.State) {
 		return errors.New("invalid alert coverage state")
@@ -413,6 +442,8 @@ func (coverage AlertCoverage) Validate() error {
 	return nil
 }
 
+// Validate checks the complete snapshot contract and verifies that
+// CurrentState is the state implied by its candidates and coverage.
 func (snapshot AlertCandidateSnapshot) Validate() error {
 	if snapshot.SchemaVersion != AlertCandidateSnapshotVersion {
 		return errors.New("invalid alert candidate snapshot schema_version")
@@ -487,6 +518,7 @@ func (snapshot AlertCandidateSnapshot) IsClear() bool {
 	return snapshot.CurrentState == AlertSnapshotClear && snapshot.Validate() == nil
 }
 
+// MarshalJSON validates candidate before encoding it.
 func (candidate AlertCandidate) MarshalJSON() ([]byte, error) {
 	if err := candidate.Validate(); err != nil {
 		return nil, err
@@ -495,6 +527,8 @@ func (candidate AlertCandidate) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire(candidate))
 }
 
+// UnmarshalJSON rejects unknown or missing fields and validates the decoded
+// candidate before assigning it to the receiver.
 func (candidate *AlertCandidate) UnmarshalJSON(data []byte) error {
 	type wire AlertCandidate
 	var decoded wire
@@ -513,6 +547,7 @@ func (candidate *AlertCandidate) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON validates coverage before encoding it.
 func (coverage AlertCoverage) MarshalJSON() ([]byte, error) {
 	if err := coverage.Validate(); err != nil {
 		return nil, err
@@ -521,6 +556,8 @@ func (coverage AlertCoverage) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire(coverage))
 }
 
+// UnmarshalJSON rejects unknown or missing fields and validates the decoded
+// coverage before assigning it to the receiver.
 func (coverage *AlertCoverage) UnmarshalJSON(data []byte) error {
 	type wire AlertCoverage
 	var decoded wire
@@ -537,6 +574,7 @@ func (coverage *AlertCoverage) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON validates snapshot before encoding it.
 func (snapshot AlertCandidateSnapshot) MarshalJSON() ([]byte, error) {
 	if err := snapshot.Validate(); err != nil {
 		return nil, err
@@ -545,6 +583,8 @@ func (snapshot AlertCandidateSnapshot) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire(snapshot))
 }
 
+// UnmarshalJSON rejects unknown or missing fields and validates the decoded
+// snapshot before assigning it to the receiver.
 func (snapshot *AlertCandidateSnapshot) UnmarshalJSON(data []byte) error {
 	type wire AlertCandidateSnapshot
 	var decoded wire

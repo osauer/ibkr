@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+// Store errors classify authority, concurrency, and durability failures that
+// callers may handle without parsing error text.
 var (
 	ErrRevisionConflict       = errors.New("corestore: revision conflict")
 	ErrPreviewTokenConsumed   = errors.New("corestore: preview token already consumed")
@@ -54,14 +56,19 @@ type UpgradeRequiredError struct {
 	TargetVersion  int
 }
 
+// Error describes the current and target schema versions.
 func (e *UpgradeRequiredError) Error() string {
 	return fmt.Sprintf("%v: database version %d, target version %d", ErrUpgradeRequired, e.CurrentVersion, e.TargetVersion)
 }
 
+// Is reports whether the error matches ErrUpgradeRequired.
 func (e *UpgradeRequiredError) Is(target error) bool { return target == ErrUpgradeRequired }
 
+// InspectionStatus classifies whether a validated authority is directly
+// serviceable by this build or requires an out-of-place upgrade.
 type InspectionStatus string
 
+// Inspection statuses returned by Inspect.
 const (
 	InspectionCurrent         InspectionStatus = "current"
 	InspectionUpgradeRequired InspectionStatus = "upgrade_required"
@@ -126,6 +133,9 @@ type Health struct {
 	BlockedAt time.Time
 }
 
+// StateDocument is the current revision of one scope- and kind-addressed JSON
+// document. JSON contains verified stored bytes and UpdatedAt is the commit
+// timestamp.
 type StateDocument struct {
 	ScopeKey  string
 	Kind      string
@@ -134,6 +144,10 @@ type StateDocument struct {
 	UpdatedAt time.Time
 }
 
+// StateDocumentCAS requests a compare-and-swap update. ExpectedRevision zero
+// creates a missing document at revision one; a positive value updates exactly
+// that revision. UpdatedAtNotBefore can reject a commit whose clock would move
+// behind a retained authority timestamp.
 type StateDocumentCAS struct {
 	ScopeKey         string
 	Kind             string
@@ -146,12 +160,15 @@ type StateDocumentCAS struct {
 	UpdatedAtNotBefore time.Time
 }
 
+// RevisionConflictError reports the actual state observed after a failed
+// compare-and-swap.
 type RevisionConflictError struct {
 	Expected int64
 	Actual   int64
 	Exists   bool
 }
 
+// Error describes the expected revision and the state observed in the store.
 func (e *RevisionConflictError) Error() string {
 	if !e.Exists {
 		return fmt.Sprintf("%v: expected revision %d, document does not exist", ErrRevisionConflict, e.Expected)
@@ -159,6 +176,7 @@ func (e *RevisionConflictError) Error() string {
 	return fmt.Sprintf("%v: expected revision %d, actual revision %d", ErrRevisionConflict, e.Expected, e.Actual)
 }
 
+// Is reports whether the error matches ErrRevisionConflict.
 func (e *RevisionConflictError) Is(target error) bool { return target == ErrRevisionConflict }
 
 // ObservationInput stores Payload byte-for-byte. ContentType and MetadataJSON
@@ -174,12 +192,16 @@ type ObservationInput struct {
 	DecisionEligible bool
 }
 
+// ObservationReceipt identifies one immutable observation and the exact
+// payload digest recorded for it.
 type ObservationReceipt struct {
 	ID            int64
 	PayloadSHA256 [sha256.Size]byte
 	RecordedAt    time.Time
 }
 
+// Observation is a retained source measurement. Payload is evidence, not
+// trusted authority; only DecisionEligible rows may feed live decisions.
 type Observation struct {
 	ID            int64
 	ScopeKey      string
@@ -196,6 +218,9 @@ type Observation struct {
 	DecisionEligible bool
 }
 
+// ObservationQuery filters observations within one required scope. Time bounds
+// are inclusive Unix milliseconds, AfterObservationID provides forward
+// pagination, and a nil DecisionEligible includes both eligibility classes.
 type ObservationQuery struct {
 	ScopeKey           string
 	Source             string
@@ -218,6 +243,8 @@ type BrokerScope struct {
 	Mode     string
 }
 
+// PreviewTokenDigest is the persisted SHA-256 identity of a canonical preview
+// token identifier. Raw signed preview tokens do not belong in the store.
 type PreviewTokenDigest [sha256.Size]byte
 
 // HashPreviewTokenID hashes the canonical preview-token identifier. Callers
@@ -226,8 +253,11 @@ func HashPreviewTokenID(previewTokenID string) PreviewTokenDigest {
 	return sha256.Sum256([]byte(previewTokenID))
 }
 
+// ActionKind classifies the broker-side action represented by durable order
+// evidence.
 type ActionKind string
 
+// Supported broker action kinds.
 const (
 	ActionPlace        ActionKind = "place"
 	ActionModify       ActionKind = "modify"
@@ -238,14 +268,20 @@ const (
 	ActionSmokeCleanup ActionKind = "smoke_cleanup"
 )
 
+// TransmitOrigin identifies the allowlisted path that initiated a broker-side
+// action.
 type TransmitOrigin string
 
+// Supported broker-write origins.
 const (
 	OriginAgentCLI TransmitOrigin = "agent_gated_cli"
 	OriginHumanCLI TransmitOrigin = "human_cli"
 	OriginDaemon   TransmitOrigin = "daemon_internal"
 )
 
+// OrderEventRecord is one append-only order lifecycle event bound to an exact
+// broker scope. RawJSON is retained evidence and is not interpreted as
+// authorization.
 type OrderEventRecord struct {
 	EventSeq        int64
 	Scope           BrokerScope
@@ -262,6 +298,9 @@ type OrderEventRecord struct {
 	RawJSON         []byte
 }
 
+// OrderQuery filters order events in ascending event-sequence order.
+// AfterEventSeq provides forward pagination; nil order-ID pointers omit those
+// filters, while zero-valued time bounds are open.
 type OrderQuery struct {
 	ScopeKey        string
 	FromAtMS        int64
@@ -288,29 +327,40 @@ type PreTransmitRequest struct {
 	Events                []OrderEventRecord
 }
 
+// LifecycleCommit couples order lifecycle events with an optional state CAS in
+// one transaction.
 type LifecycleCommit struct {
 	Scope  BrokerScope
 	Events []OrderEventRecord
 	State  *StateDocumentCAS
 }
 
+// LifecycleResult reports the committed event sequences, optional state
+// revision, and resulting authority head.
 type LifecycleResult struct {
 	EventSeqs []int64
 	State     *StateDocument
 	Head      AuthorityHead
 }
 
+// LegacyConsumedToken is a consumed canonical preview-token identifier and
+// broker scope recovered during one-time legacy import.
 type LegacyConsumedToken struct {
 	Scope          BrokerScope
 	PreviewTokenID string
 	ConsumedAt     time.Time
 }
 
+// LegacyOrderFloor is a broker-scoped conservative order-ID floor recovered
+// during one-time legacy import.
 type LegacyOrderFloor struct {
 	Scope BrokerScope
 	Floor int64
 }
 
+// LegacyOrderImport is the complete one-time order-authority cutover input.
+// SourceFingerprint makes replay of the same source idempotent and rejects a
+// different source after import.
 type LegacyOrderImport struct {
 	SourceFingerprint string
 	GlobalFloor       int64
@@ -319,27 +369,36 @@ type LegacyOrderImport struct {
 	Events            []OrderEventRecord
 }
 
+// LegacyOrderImportResult reports whether this call performed the import and
+// the resulting event sequences and authority head.
 type LegacyOrderImportResult struct {
 	Imported  bool
 	EventSeqs []int64
 	Head      AuthorityHead
 }
 
+// PreTransmitResult is durable proof that the pre-transmit transaction
+// succeeded. It does not itself authorize or confirm a broker transmission.
 type PreTransmitResult struct {
 	EffectiveOrderIDFloor int64
 	EventSeqs             []int64
 	Head                  AuthorityHead
 }
 
+// IntegrityReport combines SQLite structural and foreign-key results. Content
+// hash mismatches are returned as errors rather than represented in this value.
 type IntegrityReport struct {
 	QuickCheckResults    []string
 	ForeignKeyViolations []ForeignKeyViolation
 }
 
+// OK reports whether SQLite returned exactly one successful quick-check row
+// and no foreign-key violations.
 func (r IntegrityReport) OK() bool {
 	return len(r.QuickCheckResults) == 1 && r.QuickCheckResults[0] == "ok" && len(r.ForeignKeyViolations) == 0
 }
 
+// ForeignKeyViolation describes one row returned by SQLite foreign_key_check.
 type ForeignKeyViolation struct {
 	Table       string
 	RowID       *int64
@@ -347,6 +406,7 @@ type ForeignKeyViolation struct {
 	ForeignKey  int64
 }
 
+// BackupInfo describes a validated standalone authority backup.
 type BackupInfo struct {
 	Path          string
 	SchemaVersion int
@@ -354,6 +414,8 @@ type BackupInfo struct {
 	Integrity     IntegrityReport
 }
 
+// StatementFileRecord is one file in the current retained-statement inventory.
+// The digest, rather than the file name or size, identifies a restatement.
 type StatementFileRecord struct {
 	ScopeKey             string
 	FileKey              string
@@ -365,6 +427,8 @@ type StatementFileRecord struct {
 	UpdatedAt            time.Time
 }
 
+// StatementEquityDayRecord is the current statement-derived winner for one
+// account and day, linked to the exact retained statement digest.
 type StatementEquityDayRecord struct {
 	ID                  int64
 	ScopeKey            string
@@ -377,12 +441,16 @@ type StatementEquityDayRecord struct {
 	RawJSON             []byte
 }
 
+// CheckpointResult reports SQLite WAL checkpoint progress. A nonzero Busy value
+// means the authority was not fully quiesced.
 type CheckpointResult struct {
 	Busy               int
 	LogFrames          int
 	CheckpointedFrames int
 }
 
+// EventInput is one append-only event and an optional typed projection written
+// in the same transaction. PayloadJSON is retained byte-for-byte.
 type EventInput struct {
 	ScopeKey    string
 	EventKey    string
@@ -394,12 +462,15 @@ type EventInput struct {
 	Projection  EventProjection
 }
 
+// EventReceipt identifies a committed event and the single resulting authority
+// head shared by its mutation batch.
 type EventReceipt struct {
 	EventSeq   int64
 	RecordedAt time.Time
 	Head       AuthorityHead
 }
 
+// EventRecord is one retained append-only event in event-sequence order.
 type EventRecord struct {
 	EventSeq    int64
 	ScopeKey    string
@@ -412,6 +483,8 @@ type EventRecord struct {
 	PayloadJSON []byte
 }
 
+// EventQuery filters append-only events. Zero-valued filters are open and
+// AfterEventSeq provides forward pagination.
 type EventQuery struct {
 	ScopeKey      string
 	Type          string
@@ -432,6 +505,8 @@ type EventProjection struct {
 	ProposalOutcome  *ProposalOutcomeProjection
 }
 
+// RegimeDecisionProjection is the typed searchable projection of a regime
+// decision event.
 type RegimeDecisionProjection struct {
 	DecisionKey string
 	Stage       string
@@ -443,6 +518,8 @@ type RegimeDecisionProjection struct {
 	Indicators  []RegimeIndicatorProjection
 }
 
+// RegimeIndicatorProjection is one indicator row attached to a projected
+// regime decision.
 type RegimeIndicatorProjection struct {
 	Indicator       string
 	Status          string
@@ -456,17 +533,31 @@ type RegimeIndicatorProjection struct {
 	ThresholdsLabel string
 }
 
+// RuleTransitionProjection is the typed searchable projection of a rule
+// transition event.
 type RuleTransitionProjection struct {
 	RuleID, Status, PreviousStatus, PolicyID, PolicyFingerprint string
 	PolicyVersion                                               *int64
 }
+
+// CanaryTransitionProjection is the typed searchable projection of a Canary
+// transition event.
 type CanaryTransitionProjection struct {
 	Action, Severity, Direction, MarketStage, InputHealth string
 	PortfolioAlertRelevant                                *bool
 }
+
+// CapitalEventProjection is the typed searchable projection of a capital
+// event.
 type CapitalEventProjection struct{ Kind, AmountBaseText, EffectiveAt, ReportID string }
+
+// RiskPolicyEventProjection is the typed searchable projection of a risk-policy
+// governance event.
 type RiskPolicyEventProjection struct {
 	Kind, PolicyID, PolicyFingerprint string
 	PolicyVersion                     *int64
 }
+
+// ProposalOutcomeProjection is the typed searchable projection of a proposal
+// outcome event.
 type ProposalOutcomeProjection struct{ ProposalKey, Revision, Bucket, Symbol, SecType, Action, State string }

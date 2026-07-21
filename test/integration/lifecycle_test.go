@@ -20,11 +20,10 @@ import (
 	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
-// Lifecycle tests exercise the CLI's daemon-management surface — the path
-// that broke in the user-reported "daemon socket did not appear within 6s"
-// bug. They don't need a live gateway: the daemon stays up in degraded
-// mode when its handshake fails, which is exactly the state these tests
-// want to drive against.
+// Lifecycle tests exercise the CLI's daemon-management surface, including
+// delayed socket appearance. They don't need a live gateway: the daemon stays
+// up in degraded mode when its handshake fails, which is exactly the state
+// these tests drive against.
 //
 // Each test gets its own socket/log and complete XDG persistence roots via env
 // vars so it can run in parallel without sharing daemon.db, recovery artifacts,

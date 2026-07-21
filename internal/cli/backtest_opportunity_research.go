@@ -31,6 +31,8 @@ type opportunitySignalPlan struct {
 	Evaluate    func(OpportunityPointInTimeFeatures) OpportunityBacktestSignal
 }
 
+// OpportunityResearchPlan describes one named signal hypothesis evaluated by
+// the offline opportunity research workflow.
 type OpportunityResearchPlan struct {
 	ID          string `json:"id"`
 	Family      string `json:"family,omitempty"`
@@ -38,6 +40,8 @@ type OpportunityResearchPlan struct {
 	Hypothesis  string `json:"hypothesis,omitempty"`
 }
 
+// OpportunityResearchResult ranks evaluated plans and retains their metrics,
+// evidence status, findings, and simulation outputs.
 type OpportunityResearchResult struct {
 	RunAt          time.Time                       `json:"run_at"`
 	Rows           int                             `json:"rows"`
@@ -49,6 +53,8 @@ type OpportunityResearchResult struct {
 	NotAdvice      string                          `json:"not_advice"`
 }
 
+// OpportunityResearchPlanResult contains tuning and holdout results for one
+// ranked research plan.
 type OpportunityResearchPlanResult struct {
 	Rank           int                           `json:"rank"`
 	Plan           OpportunityResearchPlan       `json:"plan"`
@@ -61,15 +67,20 @@ type OpportunityResearchPlanResult struct {
 	Findings       []string                      `json:"findings,omitempty"`
 }
 
+// OpportunityBacktestDiagnostics groups missed or blocked observations by
+// reason and feature.
 type OpportunityBacktestDiagnostics struct {
 	Reasons  []OpportunityBacktestDiagnosticBucket `json:"reasons,omitempty"`
 	Features []OpportunityBacktestDiagnosticBucket `json:"features,omitempty"`
 }
 
+// IsZero reports whether the diagnostic contains no reason or feature buckets.
 func (d OpportunityBacktestDiagnostics) IsZero() bool {
 	return len(d.Reasons) == 0 && len(d.Features) == 0
 }
 
+// OpportunityBacktestDiagnosticBucket aggregates metrics for one diagnostic
+// class and optional research plan.
 type OpportunityBacktestDiagnosticBucket struct {
 	Name    string                     `json:"name"`
 	Class   string                     `json:"class,omitempty"`

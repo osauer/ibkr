@@ -7,21 +7,38 @@ import (
 	"strings"
 )
 
+// OptionExerciseRequest describes one exerciseOptions wire request. It is an
+// instruction with position-changing side effects if IBKR accepts it, not a
+// preview. The request does not itself carry paper-gate or application-level
+// submit authority.
 type OptionExerciseRequest struct {
-	TickerID         int
+	// TickerID correlates broker callbacks. Connector.ExerciseOptions allocates
+	// one when it is zero; Connection.ExerciseOptions requires a positive value.
+	TickerID int
+
+	// Contract must be a non-nil OPT contract with symbol, expiry, positive
+	// strike, and a C or P right.
 	Contract         *Contract
-	ExerciseAction   int
-	ExerciseQuantity int
-	Account          string
-	Override         int
-	ManualOrderTime  string
+	ExerciseAction   int    // ExerciseAction must be OptionExerciseActionExercise or OptionExerciseActionLapse.
+	ExerciseQuantity int    // ExerciseQuantity is a positive number of option contracts.
+	Account          string // Account is required and is trimmed before encoding.
+	Override         int    // Override is the broker exercise override flag and must be 0 or 1.
+	ManualOrderTime  string // ManualOrderTime is sent only when the negotiated server version supports it.
 }
 
 const (
+	// OptionExerciseActionExercise asks IBKR to exercise the specified quantity.
 	OptionExerciseActionExercise = 1
-	OptionExerciseActionLapse    = 2
+	// OptionExerciseActionLapse asks IBKR to let the specified quantity lapse.
+	OptionExerciseActionLapse = 2
 )
 
+// ExerciseOptions sends an option exercise or lapse instruction through the
+// connector's active connection. A zero TickerID is replaced with a new request
+// ID. The method checks ctx only before sending and does not wait for broker
+// acknowledgement; a nil error means only that the frame was accepted for the
+// socket write. Once the call reaches an active Connection, the default build
+// returns [ErrTradingDisabled] before validation or transmission.
 func (c *Connector) ExerciseOptions(ctx context.Context, req OptionExerciseRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -41,10 +58,12 @@ func (c *Connector) ExerciseOptions(ctx context.Context, req OptionExerciseReque
 	return conn.ExerciseOptions(req)
 }
 
-// ExerciseOptions sends an IBKR option exercise instruction. The surrounding
-// daemon keeps this behind its own trading, origin, and account/mode gates;
-// this low-level method only validates and encodes the documented
-// EClient.exerciseOptions request.
+// ExerciseOptions validates and sends an IBKR option exercise or lapse
+// instruction. It can change a position if IBKR accepts it. A nil error means
+// only that the frame was accepted for the socket write; the method does not
+// wait for broker acknowledgement or finality. In the default build it returns
+// [ErrTradingDisabled] before validation or transmission. The "trading" build
+// tag enables this low-level wire method but does not grant submit authority.
 func (c *Connection) ExerciseOptions(req OptionExerciseRequest) error {
 	if !tradingEnabled {
 		return ErrTradingDisabled

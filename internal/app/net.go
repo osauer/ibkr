@@ -8,8 +8,9 @@ import (
 type interfaceAddrsFunc func() ([]net.Addr, error)
 
 // PublicURLForAddr returns the browser-visible URL for an app listen address.
-// Wildcard binds need a concrete LAN address because phones cannot resolve the
-// Mac's loopback address.
+// A wildcard host is replaced with the first usable LAN IPv4 address, falling
+// back to 127.0.0.1 when none is available. An empty addr uses [DefaultAddr].
+// The result uses HTTP and preserves the listen port.
 func PublicURLForAddr(addr string) string {
 	return publicURLForAddr(addr, net.InterfaceAddrs)
 }
@@ -33,8 +34,10 @@ func publicURLForAddr(addr string, addrs interfaceAddrsFunc) string {
 	return "http://" + net.JoinHostPort(host, port)
 }
 
-// LoopbackAddrForLocalConnect returns an address the Mac-side CLI can use to
-// reach the local app server. It intentionally differs from PublicURLForAddr.
+// LoopbackAddrForLocalConnect returns a host:port address suitable for a local
+// client connecting to the app server. Wildcard hosts are replaced with
+// 127.0.0.1, an empty value uses [DefaultAddr], and non-host:port input is
+// returned unchanged.
 func LoopbackAddrForLocalConnect(addr string) string {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {

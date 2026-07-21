@@ -1,19 +1,7 @@
-// Package update implements the `ibkr update` self-update path: fetch
-// the latest GitHub release tarball for the host OS/arch, verify the
-// SHA256, extract the binary, and atomically install it over
-// $IBKR_INSTALL_DIR/ibkr (default ~/.local/bin/ibkr). All cache state
-// lives under ~/.cache/ibkr/update/ via the shared xdgcache primitives.
-//
-// The package has three concerns split across files:
-//
-//   - github.go (this file) — release metadata + asset download.
-//   - install.go             — flock + verify + extract + atomic rename.
-//   - daemon.go              — best-effort daemon restart after install.
-//
-// All three are pure orchestration; the CLI command lives in
-// internal/cli/update.go and stitches the flow together so the package
-// has no dependency on the cli package (and is exercisable headlessly
-// from tests).
+// Package update implements the local self-update lifecycle: discover a
+// published release, download and verify its signed artifacts, install the
+// binary atomically under an install lock, and coordinate explicitly requested
+// process restarts. It does not own CLI rendering or daemon runtime state.
 package update
 
 import (
@@ -32,9 +20,7 @@ import (
 )
 
 // GitHubReleasesURL is the latest-release endpoint for the public repo.
-// /releases/latest filters out prerelease tags server-side, so today's
-// "stable channel only" behaviour is free — no client-side filter
-// required (see the design's "No --prerelease flag in v0.33.0" note).
+// The endpoint excludes prereleases, so callers receive the stable channel.
 const GitHubReleasesURL = "https://api.github.com/repos/osauer/ibkr/releases/latest"
 
 // httpTimeout bounds any single HTTP request (metadata or download).

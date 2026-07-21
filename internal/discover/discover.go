@@ -1,9 +1,8 @@
 // Package discover finds an IB Gateway or TWS endpoint on the local host
 // when the user hasn't pinned one in config. The probe is TCP-only with a
 // short timeout — we do not exchange the IBKR handshake here. The actual
-// handshake runs against the winner via pkg/ibkr's normal Connect path,
-// gated by the daemon's watchdog (#2) so a TCP-listening but
-// non-responsive gateway still surfaces a verdict.
+// handshake runs against the winner through the daemon's broker connector,
+// whose bounded connect path reports non-responsive listeners explicitly.
 package discover
 
 import (
@@ -29,6 +28,7 @@ var StandardPorts = []int{4001, 4002, 7496, 7497}
 // config (binding), discovered by probe, or filled from a built-in default.
 type Origin string
 
+// Origin values classify how endpoint settings were resolved.
 const (
 	OriginPinned     Origin = "pinned"
 	OriginDiscovered Origin = "discovered"
@@ -49,7 +49,6 @@ type Endpoint struct {
 	// EnableTLSFallback flips the SDK's tlsAttempts to retry the alternate
 	// TLS mode on failure. We set this true only when the user left TLS
 	// unpinned (auto). Pinned tls (true or false) → strict, no fallback.
-	// This is the daemon-side resolution of issue #3.
 	EnableTLSFallback bool
 
 	ClientID int

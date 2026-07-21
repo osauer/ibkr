@@ -22,8 +22,13 @@ import (
 	"github.com/osauer/ibkr/v2/internal/app/state"
 )
 
+// SessionTTL is the lifetime of an in-memory bearer session minted after
+// successful device authentication.
 const SessionTTL = 12 * time.Hour
 
+// Manager coordinates process-local pairing sessions, challenges, and bearer
+// sessions with durable device grants in the app state store. Its in-memory
+// credential maps are mutex-protected for concurrent HTTP handlers.
 type Manager struct {
 	store      *state.Store
 	pairingTTL time.Duration
@@ -35,6 +40,8 @@ type Manager struct {
 	sessions   map[string]Session
 }
 
+// PairingSession is a short-lived, one-use invitation to enroll a device. ID,
+// Nonce, and URL are sensitive because URL embeds both credentials.
 type PairingSession struct {
 	ID        string    `json:"id"`
 	Nonce     string    `json:"nonce"`
@@ -43,12 +50,16 @@ type PairingSession struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Challenge is a two-minute, one-use proof challenge for a previously paired
+// device. Challenge is sensitive until it has been consumed or expired.
 type Challenge struct {
 	DeviceID  string    `json:"device_id"`
 	Challenge string    `json:"challenge"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// Session is a process-local authenticated device session. Token is a bearer
+// secret and must not be logged or persisted; ExpiresAt is fixed at issuance.
 type Session struct {
 	Token     string    `json:"token"`
 	DeviceID  string    `json:"device_id"`
@@ -56,6 +67,10 @@ type Session struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// CompletePairingRequest contains untrusted device enrollment proof. Nonce,
+// Signature, and DeviceSecret are sensitive. When DeviceSecret is present it is
+// validated and hashed; otherwise PublicKeyJWK and Signature prove possession
+// of the device key.
 type CompletePairingRequest struct {
 	PairingID    string          `json:"pairing_id"`
 	Nonce        string          `json:"nonce"`
@@ -65,12 +80,17 @@ type CompletePairingRequest struct {
 	DeviceSecret string          `json:"device_secret"`
 }
 
+// CompletePairingResult identifies the durable device grant and its initial
+// process-local session. Token is a bearer secret.
 type CompletePairingResult struct {
 	DeviceID  string    `json:"device_id"`
 	Token     string    `json:"token"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// NewManager constructs a Manager backed by store. A pairingTTL of zero or less
+// uses five minutes. It allocates only process-local maps and performs no store
+// mutation; store must be non-nil before authentication methods are used.
 func NewManager(store *state.Store, pairingTTL time.Duration) *Manager {
 	if pairingTTL <= 0 {
 		pairingTTL = 5 * time.Minute
@@ -85,6 +105,10 @@ func NewManager(store *state.Store, pairingTTL time.Duration) *Manager {
 	}
 }
 
+// StartPairing creates a one-use pairing ID and nonce using cryptographic
+// randomness. The returned URL appends both values to publicURL and expires
+// after the Manager's pairing TTL. publicURL is trimmed but otherwise trusted
+// as supplied by the caller.
 func (m *Manager) StartPairing(publicURL string) (PairingSession, error) {
 	id, err := randomToken(18)
 	if err != nil {
@@ -108,6 +132,10 @@ func (m *Manager) StartPairing(publicURL string) (PairingSession, error) {
 	return s, nil
 }
 
+// CompletePairing consumes the referenced pairing session, validates its
+// expiry, nonce, and device proof, persists a new device grant, and returns a
+// [SessionTTL] bearer session. Any completion attempt consumes a known pairing
+// ID even when later validation fails, so the invitation cannot be retried.
 func (m *Manager) CompletePairing(req CompletePairingRequest) (CompletePairingResult, error) {
 	now := m.now().UTC()
 	m.mu.Lock()
@@ -160,6 +188,9 @@ func (m *Manager) CompletePairing(req CompletePairingRequest) (CompletePairingRe
 	return CompletePairingResult{DeviceID: deviceID, Token: sess.Token, ExpiresAt: sess.ExpiresAt}, nil
 }
 
+// StartChallenge creates a two-minute, one-use challenge for a device that is
+// present in the durable grant store. The challenge uses cryptographic
+// randomness and is held only in memory.
 func (m *Manager) StartChallenge(deviceID string) (Challenge, error) {
 	if _, ok := m.store.Device(deviceID); !ok {
 		return Challenge{}, errors.New("unknown device")
@@ -175,6 +206,10 @@ func (m *Manager) StartChallenge(deviceID string) (Challenge, error) {
 	return ch, nil
 }
 
+// CompleteChallenge consumes challenge and verifies the paired device using
+// its stored device-secret hash when present, otherwise its P-256 public key.
+// A successful proof returns a new [SessionTTL] bearer session. A known
+// challenge is consumed even when device, expiry, or proof validation fails.
 func (m *Manager) CompleteChallenge(deviceID, challenge, signature, deviceSecret string) (Session, error) {
 	now := m.now().UTC()
 	m.mu.Lock()
@@ -205,11 +240,10 @@ func (m *Manager) CompleteChallenge(deviceID, challenge, signature, deviceSecret
 	return m.newSession(deviceID, now)
 }
 
-// IssueDeviceCookie mints the long-lived device-cookie value for a paired
-// device and stores its hash on the grant. The cookie is the continuity
-// credential for clients whose script storage does not survive (the iOS
-// home-screen web-app container gets Safari's cookies but not its
-// localStorage/IndexedDB, so a key-based re-login can never run there).
+// IssueDeviceCookie creates a durable continuity credential for a paired
+// device, stores only its SHA-256 hash on the device grant, and returns the raw
+// deviceID.secret value once. The returned value is a bearer secret and must be
+// protected by the HTTP cookie layer. This method does not mint a session.
 func (m *Manager) IssueDeviceCookie(deviceID string) (string, error) {
 	if _, ok := m.store.Device(deviceID); !ok {
 		return "", errors.New("unknown device")
@@ -228,9 +262,10 @@ func (m *Manager) IssueDeviceCookie(deviceID string) (string, error) {
 	return deviceID + "." + secret, nil
 }
 
-// AuthenticateDeviceCookie exchanges a valid device-cookie value for a
-// fresh session. It reports why the cookie was rejected so the auth log can
-// name the failure instead of a silent 401.
+// AuthenticateDeviceCookie verifies a deviceID.secret continuity credential
+// against the hashes on the durable grant and returns a new [SessionTTL]
+// session. It updates the device's last-seen time on a best-effort basis. The
+// input and returned token are bearer secrets and must not be logged.
 func (m *Manager) AuthenticateDeviceCookie(value string) (Session, error) {
 	deviceID, secret, ok := strings.Cut(strings.TrimSpace(value), ".")
 	if !ok || deviceID == "" || secret == "" {
@@ -258,6 +293,9 @@ func (m *Manager) AuthenticateDeviceCookie(value string) (Session, error) {
 	return m.newSession(deviceID, now)
 }
 
+// Authenticate validates a process-local bearer token, removes it if expired,
+// and confirms that its durable device grant still exists. On success it
+// returns a copy of the Session and best-effort updates device last-seen time.
 func (m *Manager) Authenticate(token string) (Session, bool) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -281,10 +319,9 @@ func (m *Manager) Authenticate(token string) (Session, bool) {
 	return s, true
 }
 
-// StartReaper prunes expired pairing sessions, challenges, and sessions every
-// interval until ctx is cancelled. The maps are otherwise pruned only lazily
-// on access, and a session token that is never presented again (the phone
-// always uses its newest token) would leak forever.
+// StartReaper blocks while periodically removing expired pairing sessions,
+// challenges, and bearer sessions. An every value of zero or less uses one
+// minute. The loop returns when ctx is cancelled.
 func (m *Manager) StartReaper(ctx context.Context, every time.Duration) {
 	if every <= 0 {
 		every = time.Minute
@@ -360,6 +397,10 @@ type jwkP256 struct {
 	Y   string `json:"y"`
 }
 
+// VerifyJWKSignature verifies a SHA-256 ECDSA signature over message using an
+// EC P-256 public JWK. sigB64 must use unpadded base64url and may contain either
+// a 64-byte raw r||s signature or an ASN.1 DER signature. Invalid JSON, key
+// coordinates, encoding, curve, or signature returns an error.
 func VerifyJWKSignature(raw json.RawMessage, message []byte, sigB64 string) error {
 	var jwk jwkP256
 	if err := json.Unmarshal(raw, &jwk); err != nil {

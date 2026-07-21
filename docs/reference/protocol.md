@@ -1,10 +1,10 @@
 # TWS protocol coverage
 
-Last reviewed: 2026-07-18 18:23 CEST
+Last reviewed: 2026-07-21 CEST
 
-`pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the read-side calls that the `ibkr` binary, daemon, CLI, and MCP server need.
+`pkg/ibkr` is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the broker reads and narrow order-wire operations used by the `ibkr` binary and daemon.
 
-Order-writing methods exist only in trading-capable builds. Default builds return `pkg/ibkr.ErrTradingDisabled` before any order write reaches the socket. Trading builds expose gated daemon/CLI order paths behind trading status, pinned account/mode, preview-token, freeze, journal, and broker checks; the MCP server remains preview/read-oriented and does not expose place/modify/cancel tools.
+Unrestricted `SubmitOrder`/`CancelOrder`, `PlaceOrder`/`CancelOrder`, and `ExerciseOptions` methods are present in every build, but their position-changing wire paths are enabled only in trading-capable builds; default builds return `pkg/ibkr.ErrTradingDisabled` before writing such a frame. The narrower `SubmitPaperOrder`, `PlacePaperOrder`, and `CancelPaperOrder` methods are present in both builds and validate a concrete paper account plus matching connection coordinates. That library-level evidence is not submit authority. Broker WhatIf previews are also available in both builds, but they do not create working orders and never grant submit authority. The daemon adds trading status, pinned account/mode, preview-token, freeze, journal, broker, and origin checks; the MCP server remains preview/read-oriented and exposes no place/modify/cancel tools.
 
 ## Semantic fingerprints
 
@@ -84,7 +84,11 @@ paired with an existing reduce/cover proposal.
 | Daily historical bars | `reqHistoricalData` (20), `historicalData` (17) | `Connector.FetchHistoricalDailyBars` | ready |
 | Market scanner | `reqScannerSubscription` (22), `reqScannerParameters` (24) | `Connector.RunScannerSubscription`, `RunScannerParameters` | ready |
 | Market-data type switch | `reqMarketDataType` (59), `marketDataType` (58) | `Connector.SetMarketDataType` | ready |
-| Order placement / cancel | `placeOrder` (3), `cancelOrder` (4) | `Connector.SubmitOrder`, `CancelOrder` | disabled by default (`ErrTradingDisabled`); `-tags trading` only |
+| Unrestricted order placement / cancel | `placeOrder` (3), `cancelOrder` (4) | `Connector.SubmitOrder`, `CancelOrder`; `Connection.PlaceOrder`, `CancelOrder` | disabled by default (`ErrTradingDisabled`); `-tags trading` only |
+| Paper-gated order placement / cancel | `placeOrder` (3), `cancelOrder` (4) | `Connector.SubmitPaperOrder`, `CancelPaperOrder`; `Connection.PlacePaperOrder`, `CancelPaperOrder` | all builds; validates paper account and connection coordinates, but does not replace application authorization |
+| Broker WhatIf preview | `placeOrder` (3) with WhatIf | `Connector.PreviewOrderWhatIf`, `Connection.PreviewOrderWhatIf` | all builds; broker evaluation that does not create a working order, never submit authority |
+| Option exercise / lapse | `exerciseOptions` (21) | `Connector.ExerciseOptions`, `Connection.ExerciseOptions` | disabled by default (`ErrTradingDisabled`); `-tags trading` only; position-changing when accepted |
+| API open-order snapshot | `reqAllOpenOrders` (5) | `Connector.SnapshotOpenOrders`, `Connection.RequestAllOpenOrders` | all builds; covers API-created orders across clients, not manual TWS orders by itself |
 | Real-time bars | `reqRealTimeBars` (50) | - | not implemented |
 | Market depth (L2) | `reqMktDepth` (10), `reqMktDepthL2` (13) | - | not implemented |
 | Fundamental data | `reqFundamentalData` (52) | - | not implemented |
@@ -92,4 +96,4 @@ paired with an existing reduce/cover proposal.
 | Financial Advisor (FA) | `reqFA` (18) | - | not implemented |
 | IV / option-price calculators | `reqCalcImpliedVolatility` (54), `reqCalcOptionPrice` (55) | - | not implemented |
 
-Tested against IB Gateway server versions 100 through 203. Handshake auto-negotiates the highest protocol version the gateway and library agree on.
+Tests exercise handshake and parser behavior across IB Gateway server versions 100 through 203. Runtime connections reject versions below 124 and negotiate the highest supported protocol version with newer gateways.

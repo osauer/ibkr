@@ -6,6 +6,8 @@ import (
 	"github.com/osauer/ibkr/v2/internal/risk"
 )
 
+// Brief constants define the daemon methods and the bounded status, kind,
+// monthly-pulse, and acknowledgement vocabularies carried on the wire.
 const (
 	// MethodBriefSnapshot composes the operator's daily brief. It is a pure
 	// read: callers do not supply an origin and the daemon must not stamp,
@@ -15,6 +17,7 @@ const (
 	// brief. The daemon accepts human origins only.
 	MethodBriefAck = "brief.ack"
 
+	// BriefStatusOK is the normal member of the brief row status vocabulary.
 	// Brief row statuses separate risk conditions from data conditions:
 	// attention means the underlying VALUES describe a state a trader must
 	// look at (latched drawdown, breached tier, active override); degraded
@@ -25,16 +28,23 @@ const (
 	BriefStatusDegraded    = "degraded"
 	BriefStatusUnavailable = "unavailable"
 
+	// BriefKindMorning identifies the pre-trade morning brief.
 	BriefKindMorning = "morning"
-	BriefKindEOD     = "eod"
+	// BriefKindEOD identifies the end-of-day brief.
+	BriefKindEOD = "eod"
+	// BriefKindMonthly identifies the monthly governance pulse.
 	BriefKindMonthly = "monthly"
 
-	BriefMonthlyPulseNotDue    = "not_due"
-	BriefMonthlyPulseDue       = "due"
+	// BriefMonthlyPulseNotDue means the monthly pulse has no current action.
+	BriefMonthlyPulseNotDue = "not_due"
+	// BriefMonthlyPulseDue means the current pulse awaits completion.
+	BriefMonthlyPulseDue = "due"
+	// BriefMonthlyPulseCompleted means the current pulse has valid evidence.
 	BriefMonthlyPulseCompleted = "completed"
-	BriefMonthlyPulseBlocked   = "blocked"
+	// BriefMonthlyPulseBlocked means completion prerequisites are unavailable.
+	BriefMonthlyPulseBlocked = "blocked"
 
-	// Render evidence proves only that a paired surface rendered the brief;
+	// BriefAckEvidenceRender proves only that a paired surface rendered the brief;
 	// origin alone must never be treated as stronger proof of human attention.
 	BriefAckEvidenceRender = risk.MonthlyPulseEvidenceRender
 )
@@ -74,6 +84,7 @@ type BriefRowState struct {
 	Detail string `json:"detail"`
 }
 
+// BriefMarketSection groups broad-market and Canary rows.
 type BriefMarketSection struct {
 	BriefRowState
 	Regime  BriefRegimeRow  `json:"regime"`
@@ -82,12 +93,15 @@ type BriefMarketSection struct {
 	Canary  BriefCanaryRow  `json:"canary"`
 }
 
+// BriefRegimeRow summarizes the current regime lifecycle and verdict.
 type BriefRegimeRow struct {
 	BriefRowState
 	Stage   string `json:"stage,omitempty"`
 	Verdict string `json:"verdict,omitempty"`
 }
 
+// BriefBreadthRow summarizes breadth values and their observation time. Nil
+// metrics mean unavailable, not zero.
 type BriefBreadthRow struct {
 	BriefRowState
 	PctAbove50DMA  *float64  `json:"pct_above_50dma,omitempty"`
@@ -97,6 +111,8 @@ type BriefBreadthRow struct {
 	DataType       string    `json:"data_type,omitempty"`
 }
 
+// BriefGammaRow summarizes the current zero-gamma relationship. Nil values
+// mean unavailable, not zero.
 type BriefGammaRow struct {
 	BriefRowState
 	Spot      *float64  `json:"spot,omitempty"`
@@ -106,6 +122,7 @@ type BriefGammaRow struct {
 	AsOf      time.Time `json:"as_of,omitzero"`
 }
 
+// BriefCanaryRow summarizes the current advisory action and severity.
 type BriefCanaryRow struct {
 	BriefRowState
 	Action   string `json:"action,omitempty"`
@@ -113,12 +130,14 @@ type BriefCanaryRow struct {
 	Summary  string `json:"summary,omitempty"`
 }
 
+// BriefCalendarSection groups session and held-name event context.
 type BriefCalendarSection struct {
 	BriefRowState
 	Session      BriefSessionRow       `json:"session"`
 	MarketEvents []BriefMarketEventRow `json:"market_events"`
 }
 
+// BriefSessionRow reports the official market session and next opening time.
 type BriefSessionRow struct {
 	BriefRowState
 	Market   string    `json:"market,omitempty"`
@@ -137,6 +156,8 @@ type BriefMarketEventRow struct {
 	Symbols []string `json:"symbols,omitempty"`
 }
 
+// BriefPortfolioSection groups account, attribution, option-money, and order
+// observations.
 type BriefPortfolioSection struct {
 	BriefRowState
 	Account       BriefAccountRow       `json:"account"`
@@ -146,6 +167,8 @@ type BriefPortfolioSection struct {
 	WorkingOrders BriefCountRow         `json:"working_orders"`
 }
 
+// BriefAccountRow reports base-currency equity and P&L. Nil amounts mean the
+// observation is unavailable.
 type BriefAccountRow struct {
 	BriefRowState
 	EquityBase   *float64  `json:"equity_base,omitempty"`
@@ -154,6 +177,7 @@ type BriefAccountRow struct {
 	AsOf         time.Time `json:"as_of,omitzero"`
 }
 
+// BriefMover is one underlying's base-currency daily P&L contribution.
 type BriefMover struct {
 	Symbol       string  `json:"symbol"`
 	DailyPnLBase float64 `json:"daily_pnl_base"`
@@ -170,6 +194,8 @@ type BriefMoversRow struct {
 	OtherCount   int          `json:"other_count,omitempty"`
 }
 
+// BriefMoneyCoverageRow reports a base-currency aggregate and explicit leg
+// coverage. AmountBase is nil when complete conversion is unavailable.
 type BriefMoneyCoverageRow struct {
 	BriefRowState
 	AmountBase   *float64 `json:"amount_base,omitempty"`
@@ -178,11 +204,13 @@ type BriefMoneyCoverageRow struct {
 	ExcludedLegs int      `json:"excluded_legs"`
 }
 
+// BriefCountRow reports an optional count; nil means unavailable, not zero.
 type BriefCountRow struct {
 	BriefRowState
 	Count *int `json:"count,omitempty"`
 }
 
+// BriefRiskSection groups capital, latch, override, and policy-drift evidence.
 type BriefRiskSection struct {
 	BriefRowState
 	Capital     BriefCapitalRow     `json:"capital"`
@@ -191,6 +219,8 @@ type BriefRiskSection struct {
 	PolicyDrift BriefPolicyDriftRow `json:"policy_drift"`
 }
 
+// BriefCapitalRow reports drawdown capacity and peak provenance. Pointer
+// amounts remain nil when unavailable.
 type BriefCapitalRow struct {
 	BriefRowState
 	Tier             string   `json:"tier,omitempty"`
@@ -205,6 +235,7 @@ type BriefCapitalRow struct {
 	BaseCurrency string    `json:"base_currency,omitempty"`
 }
 
+// BriefLatchRow reports durable drawdown-latch state and its original trigger.
 type BriefLatchRow struct {
 	BriefRowState
 	Latched bool      `json:"latched"`
@@ -215,21 +246,26 @@ type BriefLatchRow struct {
 	ConsumedPctAtLatch *float64 `json:"consumed_pct_at_latch,omitempty"`
 }
 
+// BriefOverride identifies one active control override and expiry.
 type BriefOverride struct {
 	Control   string    `json:"control"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// BriefOverridesRow lists active overrides; an empty list is conclusive only
+// when the embedded row state is OK.
 type BriefOverridesRow struct {
 	BriefRowState
 	Rows []BriefOverride `json:"rows"`
 }
 
+// BriefPolicyDriftRow lists sibling-policy pin status.
 type BriefPolicyDriftRow struct {
 	BriefRowState
 	Rows []PolicyPinStatus `json:"rows"`
 }
 
+// BriefProcessSection groups reconciliation and recurring process evidence.
 type BriefProcessSection struct {
 	BriefRowState
 	Reconcile    BriefReconcileRow     `json:"reconcile"`
@@ -250,6 +286,7 @@ type BriefMonthlyPulseRow struct {
 	CompletedAt time.Time `json:"completed_at,omitzero"`
 }
 
+// BriefReconcileRow reports the latest reconciliation and its next deadline.
 type BriefReconcileRow struct {
 	BriefRowState
 	LastReconciledAt time.Time `json:"last_reconciled_at,omitzero"`
@@ -258,12 +295,15 @@ type BriefReconcileRow struct {
 	DaysRemaining    *int      `json:"days_remaining,omitempty"`
 }
 
+// BriefAutoExtendRow reports clean-report automatic extension evidence.
 type BriefAutoExtendRow struct {
 	BriefRowState
 	ReportID string    `json:"report_id,omitempty"`
 	At       time.Time `json:"at,omitzero"`
 }
 
+// BriefOneTapRow reports whether the referenced reconciliation report can be
+// signed and, if not, its stable blockers.
 type BriefOneTapRow struct {
 	BriefRowState
 	ReportID string   `json:"report_id,omitempty"`
@@ -271,12 +311,14 @@ type BriefOneTapRow struct {
 	Blockers []string `json:"blockers,omitempty"`
 }
 
+// BriefRuleTransition records one rule's state change.
 type BriefRuleTransition struct {
 	RuleID string `json:"rule_id"`
 	From   string `json:"from"`
 	To     string `json:"to"`
 }
 
+// BriefRulesDeltaRow compares the current rulebook with its retained baseline.
 type BriefRulesDeltaRow struct {
 	BriefRowState
 	BaselineAt                 time.Time             `json:"baseline_at,omitzero"`
@@ -288,6 +330,7 @@ type BriefRulesDeltaRow struct {
 	CurrentFingerprint         string                `json:"current_fingerprint,omitempty"`
 }
 
+// BriefArtefact reports declared cadence evidence and completion time.
 type BriefArtefact struct {
 	BriefRowState
 	Kind        string    `json:"kind"`
@@ -297,6 +340,7 @@ type BriefArtefact struct {
 	CompletedAt time.Time `json:"completed_at,omitzero"`
 }
 
+// BriefArtefactsRow lists cadence artefacts and rolls up their row state.
 type BriefArtefactsRow struct {
 	BriefRowState
 	Rows []BriefArtefact `json:"rows"`

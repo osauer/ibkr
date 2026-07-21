@@ -8,18 +8,8 @@ import (
 	"time"
 )
 
-// The trading rulebook: 14 advisory rules evaluated against a mapped
-// snapshot of the book (docs/design/trading-rulebook.md). Pure package —
-// the daemon maps RPC state into RuleInputs; this file only computes.
-//
-// The load-bearing invariant is NEVER FALSE PASS: any absent, pending, or
-// partial input degrades the affected rows to unknown/not_evaluated. A rule
-// may only report pass when its inputs were present and healthy. Partial
-// inputs may still support a breach when the breach is provable from what
-// is present (rule 1's lower bound, carried regime stage worse-of) — the
-// asymmetry is deliberate: incomplete data may indict, never acquit.
-
-// Rule row statuses.
+// RuleStatusPass and the related constants are rule-row outcomes. Missing,
+// pending, or partial inputs cannot produce a false pass.
 const (
 	RuleStatusPass         = "pass"
 	RuleStatusInfo         = "info"
@@ -29,7 +19,8 @@ const (
 	RuleStatusNotEvaluated = "not_evaluated"
 )
 
-// Rule ids, in rulebook order.
+// RuleSingleNameExposure and the related constants identify rules in stable
+// display order.
 const (
 	RuleSingleNameExposure = "single_name_exposure"
 	RuleOptionLinePremium  = "option_line_premium"
@@ -47,8 +38,9 @@ const (
 	RuleFXExposure         = "fx_exposure"
 )
 
-// LegInput.UnderlyingSource values. Empty means greeks_tick (the historical
-// source) so existing constructors stay valid.
+// UnderlyingSourceGreeksTick and UnderlyingSourceStockLegMark identify how a
+// LegInput obtained its underlying price. The empty value has greeks-tick
+// semantics for compatibility.
 const (
 	UnderlyingSourceGreeksTick   = "greeks_tick"
 	UnderlyingSourceStockLegMark = "stock_leg_mark"
@@ -724,7 +716,7 @@ func (c *ruleContext) catalystCoverage() RuleRow {
 			if l.Underlying == nil {
 				// OTM-ness unassessable — a named unknown, never a silent
 				// skip: skipping here once produced a false pass on a leg
-				// that died before its earnings (2026-07-08).
+				// that expired before its earnings date.
 				unassessable++
 				continue
 			}

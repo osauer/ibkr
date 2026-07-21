@@ -8,10 +8,7 @@ import (
 // This file is the single copy of regime confirmation policy: eligibility
 // gates, cluster combination with isolated-red downgrades, and headline
 // wording. Daemon composite, lifecycle builder, CLI renderer, canary, and
-// the backtest builder all consume these functions or their served outputs —
-// per docs/design/regime-calibration.md, after the 2026-06-12 incident where
-// four drifting copies let two marginal reds escalate to "act" on a green
-// tape.
+// the backtest builder all consume these functions or their served outputs.
 
 // Indicator keys, shared with the daemon streak store and the eligibility
 // gates table. Stable strings — they key persisted state.
@@ -71,8 +68,7 @@ var regimeGates = map[string]RegimeGate{
 	// depth = VVIX level. 120 keeps the existing isolated-VVIX rule's level.
 	RegimeIndicatorVolOfVol: {MinSessions: 2, MinDepth: 110, FastDepth: 120},
 	// depth = percent below the 50DMA ((dma-price)/dma*100). 0.25% is the
-	// noise floor (the 2026-06-12 incident fired on 0.07%); a 1% break is
-	// eligible day one.
+	// noise floor; a 1% break is eligible day one.
 	RegimeIndicatorHYGSPY: {MinSessions: 2, MinDepth: 0.25, FastDepth: 1.0},
 	// Official daily series: red levels are already deep, streak 1.
 	RegimeIndicatorCredit:  {MinSessions: 1},
@@ -254,8 +250,7 @@ func (b RegimeClusterBands) ProvisionalRedCount() int {
 // bands. Row banding (classification + hysteresis) happens daemon-side once;
 // every consumer of this function reads the served result. Independence
 // rescue counts ELIGIBLE reds only — a marginal or stale red can no longer
-// rescue another cluster from its isolated-red downgrade (the 2026-06-12
-// mutual-confirmation defect).
+// rescue another cluster from its isolated-red downgrade.
 func BuildRegimeClusterBands(r *RegimeSnapshotResult) RegimeClusterBands {
 	if r == nil {
 		return RegimeClusterBands{}

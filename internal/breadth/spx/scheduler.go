@@ -53,12 +53,6 @@ const maxBelowThresholdRetries = 15
 // right. 30 s is long enough not to retry-storm a recovering gateway
 // and short enough that a one-shot blip clears within one user-visible
 // poll cycle.
-//
-// Before this distinction existed (≤v0.30.0) an errored Refresh
-// incremented `retries` the same as a below-threshold result, so a
-// startup-time gateway hiccup put the scheduler in a 12-min back-off
-// loop for up to 3 hours (15 × 12 min) before falling through to the
-// daily cadence — silent and surprising.
 const errorRetryDelay = 30 * time.Second
 
 // nyLocation returns the America/New_York time.Location, falling back
@@ -307,9 +301,8 @@ func (e *Engine) Run(ctx context.Context) {
 // Otherwise we're in the steady-state daily cadence and wait until
 // 16:35 ET.
 //
-// The error path and coverage path are deliberately distinct: a
-// startup-time gateway hiccup must not steal 12-min budget from the
-// coverage retry mechanism (Bug 3 fix, v0.30.1).
+// The error path and coverage path are deliberately distinct: a startup-time
+// gateway hiccup must not consume the coverage retry budget.
 func (e *Engine) nextWait(retries int, lastErrored bool) time.Duration {
 	if lastErrored {
 		return errorRetryDelay

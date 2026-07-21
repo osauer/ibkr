@@ -27,15 +27,12 @@ type SizeInput struct {
 	Currency    string  // base currency code, surfaced in output only
 }
 
-// SizeResult is the wire shape of `ibkr size --json` and the input to the
-// CLI text renderer. Keep this struct stable — Claude consumes it.
+// SizeResult is the wire shape of `ibkr size --json` and the input to the CLI
+// text renderer.
 //
 // Target / R / RewardQuote / RewardBase / BreakevenWinRate are populated
 // only when the input carries a non-zero Target. R is the reward-to-risk
-// ratio (|target − entry| / |entry − stop|), the canonical "is this trade
-// worth taking" filter; ≥ 2R is the common discretionary threshold.
-// BreakevenWinRate is 1 / (1 + R) — at this win rate the strategy breaks
-// even, so any sustained edge above it is profitable.
+// ratio (|target − entry| / |entry − stop|). BreakevenWinRate is 1 / (1 + R).
 type SizeResult struct {
 	Symbol           string   `json:"symbol"`
 	Side             string   `json:"side"`
@@ -60,11 +57,9 @@ type SizeResult struct {
 	Status           string   `json:"status"`                       // "ok" | "tight_risk" | "exceeds_buying_power"
 }
 
-// ComputeSize is the pure fixed-fractional sizing function. All validation
-// lives here so callers stay thin wiring layers; tests cover the math and
-// the validations without spinning up a daemon. The CLI runner and the MCP
-// ibkr_size tool both consume it — the daemon has no size RPC; sizing is
-// account-snapshot + local arithmetic.
+// ComputeSize validates and applies fixed-fractional sizing. It returns a
+// result with zero shares and status tight_risk when the risk budget is below
+// one lot; buying power excess is reported in Status rather than as an error.
 func ComputeSize(in SizeInput) (SizeResult, error) {
 	side, err := validateSizePlan(in, true)
 	if err != nil {

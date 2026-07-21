@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+// Lifecycle stages, timing classes, and fingerprint stability are the stable
+// vocabulary used by regime and Canary monitor projections.
 const (
 	LifecycleQuiet           = "quiet"
 	LifecycleEarlyWarning    = "early_warning"
@@ -23,6 +25,8 @@ const (
 	FingerprintStabilitySemanticBuckets = "semantic_buckets_only"
 )
 
+// Source-health statuses distinguish complete observations from partial,
+// stale, unknown, and degraded evidence.
 const (
 	SourceStatusOK       = "ok"
 	SourceStatusPartial  = "partial"
@@ -31,6 +35,7 @@ const (
 	SourceStatusDegraded = "degraded"
 )
 
+// Regime tones are presentation classifications derived from lifecycle state.
 const (
 	RegimeToneNormal      = "normal"
 	RegimeToneWatch       = "watch"
@@ -77,6 +82,8 @@ type GovernorAction struct {
 	Clusters []string `json:"clusters,omitempty"`
 }
 
+// LifecycleEvidence is one classified input to a lifecycle decision. Confirmed
+// distinguishes qualifying evidence from context retained for explanation.
 type LifecycleEvidence struct {
 	Source    string `json:"source,omitempty"`
 	Signal    string `json:"signal,omitempty"`
@@ -106,6 +113,8 @@ type SourceHealth struct {
 	Notes        []string   `json:"notes,omitempty"`
 }
 
+// Source-refresh states describe scheduler progress separately from the
+// observation's evidence quality.
 const (
 	SourceRefreshCurrent            = "current"
 	SourceRefreshNotDue             = "not_due"
@@ -297,9 +306,7 @@ func severityRank(severity string) int {
 // VIX-term inversion. While threshold sets are pending_backtest, "act"
 // requires one of these as the second witness. The SPY/VIX change arms
 // (arms 1-2) require a confirmable tape — a frozen closed-date print cannot
-// co-sign — which closes the closed-date slice of the arms-1-2 freshness gap
-// from the 2026-07-18 calibration review; their intraweek staleness gap
-// remains open. Arm 3 keeps its own status gate unchanged.
+// co-sign. Arm 3 keeps its own status gate unchanged.
 func regimeTapeCosign(r *RegimeSnapshotResult) bool {
 	if regimeTapeConfirmable(*r) &&
 		(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -1.5) || pctAtLeast(r.VIXTermStructure.VIXChangePct, 10.0)) {
@@ -413,6 +420,8 @@ func regimeClusterNamesWithBand(bands []string, want string) []string {
 	return out
 }
 
+// BuildRegimePosture derives a stable display posture from the daemon-authored
+// snapshot. A nil snapshot produces a blocked data-quality posture.
 func BuildRegimePosture(r *RegimeSnapshotResult) RegimePosture {
 	if r == nil {
 		return RegimePosture{
@@ -515,6 +524,8 @@ func regimeLifecycleReadinessDegraded(readiness string) bool {
 	}
 }
 
+// BuildRegimeSourceHealth derives per-cluster freshness and confidence. It
+// returns nil for a nil snapshot; nil therefore means unavailable, not healthy.
 func BuildRegimeSourceHealth(r *RegimeSnapshotResult, now time.Time) []SourceHealth {
 	if r == nil {
 		return nil
@@ -585,6 +596,8 @@ func RegimeSourceMaxAgeSeconds(source string) int64 {
 	}
 }
 
+// BuildLifecycleFingerprint returns a semantic identity that ignores
+// continuous values and wall-clock churn while retaining classified changes.
 func BuildLifecycleFingerprint(state LifecycleState) Fingerprint {
 	return lifecycleFingerprint(state)
 }
@@ -915,8 +928,7 @@ func strongestLifecycleBand(bands ...string) string {
 
 // isolatedLifecycleEquityVolConfirmed corroborates an isolated equity-vol
 // red inside cluster-band combination (BuildRegimeClusterBands). The SPY/VIX
-// change terms here deliberately stay session-blind (Oliver, 2026-07-19,
-// closed-date gating pass): they only preserve a red that live-session
+// change terms here deliberately stay session-blind: they only preserve a red that live-session
 // banding already produced, and with the stage tape arms closed-date-gated
 // the worst residual is cluster-grade early warning. Revisit with journal
 // evidence if weekend audits show frozen corroboration mattering.

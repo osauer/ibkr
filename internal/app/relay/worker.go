@@ -21,6 +21,8 @@ import (
 	appweb "github.com/osauer/ibkr/v2/web/app"
 )
 
+// DefaultWorkerURL is the public relay origin used when WorkerOptions.BaseURL
+// is empty.
 const DefaultWorkerURL = "https://remote.osauer.dev"
 
 // defaultRouteTTL mirrors ROUTE_TTL_MS in the Cloudflare relay worker. The
@@ -42,6 +44,11 @@ var errRouteExpired = errors.New("remote relay route expired")
 // matches what this Mac holds, and only a re-registration can reconcile it.
 var errRouteRejected = errors.New("remote relay route rejected")
 
+// WorkerOptions configures one outbound relay connector. OriginURL is the local
+// app-host origin to which allowlisted requests are forwarded. ResumeRouteID
+// and ResumeConnectorToken must be supplied together; the token is a bearer
+// secret. OnRoute receives new or extended route credentials for durable
+// app-local storage and must protect ConnectorToken.
 type WorkerOptions struct {
 	BaseURL              string
 	OriginURL            string
@@ -52,6 +59,9 @@ type WorkerOptions struct {
 	OnRoute              func(RouteRegistration) error
 }
 
+// RouteRegistration contains relay-issued transport coordinates. RouteID is a
+// non-authorizing route selector; ConnectorToken is a bearer secret used only
+// by the outbound connector. ExpiresAt is the relay-reported route expiry.
 type RouteRegistration struct {
 	RouteID        string
 	PublicURL      string
@@ -60,6 +70,11 @@ type RouteRegistration struct {
 	ExpiresAt      time.Time
 }
 
+// Worker maintains one outbound relay registration and WebSocket connection to
+// the local app host. It forwards only package-allowlisted paths and delegates
+// authentication and authorization to the local HTTP server. Status, PairingURL,
+// and PublicURL may be called concurrently with Run; Run itself should be
+// started only once.
 type Worker struct {
 	baseURL    string
 	originURL  string
@@ -107,6 +122,10 @@ type frame struct {
 
 type frameSender func(context.Context, frame) error
 
+// NewWorker validates opts and constructs a stopped Worker without performing
+// network I/O. An empty BaseURL uses [DefaultWorkerURL], OriginURL is required,
+// and resume route ID and connector token must be either both present or both
+// absent. A nil HTTPClient uses the package's dual-stack client.
 func NewWorker(opts WorkerOptions) (*Worker, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(opts.BaseURL), "/")
 	if baseURL == "" {
@@ -252,6 +271,11 @@ func (w *Worker) register(ctx context.Context, rrq registerRequest) error {
 	return nil
 }
 
+// Run registers or resumes the relay route and maintains its outbound
+// WebSocket until ctx is cancelled. Transient registration and connection
+// failures are retried with bounded backoff and reported through
+// [Worker.Status]. Definitive route rejection triggers fresh registration.
+// Run returns no error and must not be invoked concurrently on one Worker.
 func (w *Worker) Run(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
@@ -462,6 +486,9 @@ func (w *Worker) serveRequest(ctx context.Context, reqFrame frame, send frameSen
 	}
 }
 
+// Status returns a detached, concurrency-safe snapshot of the relay connection.
+// Connected describes the WebSocket transport only; it does not establish
+// device authentication, daemon availability, or broker readiness.
 func (w *Worker) Status() Status {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -473,6 +500,10 @@ func (w *Worker) Status() Status {
 	}
 }
 
+// PairingURL adds the current non-authorizing route ID as the remote query
+// parameter unless raw already supplies one. It returns raw unchanged for a nil
+// Worker, an unavailable route, or an invalid URL, and never includes the
+// connector token.
 func (w *Worker) PairingURL(raw string) string {
 	if w == nil {
 		return raw
@@ -495,6 +526,9 @@ func (w *Worker) PairingURL(raw string) string {
 	return u.String()
 }
 
+// PublicURL returns the current public relay origin. Before registration this
+// is the configured base URL; after registration it is the relay-issued URL. A
+// nil Worker returns an empty string.
 func (w *Worker) PublicURL() string {
 	if w == nil {
 		return ""

@@ -12,10 +12,19 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
+// CanaryInput is the typed input consumed by the shared canary evaluator.
 type CanaryInput = rpc.CanaryInput
+
+// CanaryResult is the complete typed output of a canary evaluation.
 type CanaryResult = rpc.CanaryResult
+
+// CanaryRow is one evidence row in a canary result.
 type CanaryRow = rpc.CanaryRow
+
+// CanaryMarketIndicator is one normalized market input in a canary summary.
 type CanaryMarketIndicator = rpc.CanaryMarketIndicator
+
+// CanaryMarketSummary is the market-side evidence summarized for the canary.
 type CanaryMarketSummary = rpc.CanaryMarketSummary
 
 const (
@@ -30,6 +39,7 @@ const (
 	canaryPortfolioFitUnknown = canary.PortfolioFitUnknown
 )
 
+// ComputeCanary evaluates in through the shared pure canary engine.
 func ComputeCanary(in CanaryInput) CanaryResult {
 	return canary.ComputeCanary(in)
 }

@@ -2,11 +2,15 @@ package rpc
 
 import "time"
 
+// Market-event method, schema, kind, flag, status, severity, and role constants
+// form the stable allowlisted vocabulary of the market-events wire contract.
 const (
 	MethodMarketEventsSnapshot = "market_events.snapshot"
 
-	MarketEventsKind               = "ibkr.market_events"
-	MarketEventsSchemaVersion      = "market-events-v1"
+	MarketEventsKind = "ibkr.market_events"
+	// MarketEventsSchemaVersion identifies a stable wire schema.
+	MarketEventsSchemaVersion = "market-events-v1"
+	// MarketEventsFingerprintVersion identifies a semantic fingerprint projection.
 	MarketEventsFingerprintVersion = "market-events-fp-v1"
 
 	MarketEventBorrowInventoryTight = "borrow_inventory_tight"
@@ -33,11 +37,15 @@ const (
 	MarketEventRoleHardBlocker      = "hard_blocker"
 )
 
+// MarketEventsParams selects one or more held-name symbols. Empty scope asks
+// the daemon for its default observed universe; callers do not select sources.
 type MarketEventsParams struct {
 	Symbol  string   `json:"symbol,omitempty"`
 	Symbols []string `json:"symbols,omitempty"`
 }
 
+// MarketEventsResult is the daemon-authored market-event snapshot. Empty flags
+// are conclusive only when SourceHealth establishes complete, current coverage.
 type MarketEventsResult struct {
 	Kind           string                       `json:"kind"`
 	SchemaVersion  string                       `json:"schema_version"`
@@ -51,6 +59,8 @@ type MarketEventsResult struct {
 	NotExecution   string                       `json:"not_execution,omitempty"`
 }
 
+// MarketEventFlag is one allowlisted observed-data finding. Optional timestamps
+// and Value remain absent when unavailable rather than being zero-filled.
 type MarketEventFlag struct {
 	ID             string        `json:"id"`
 	Symbol         string        `json:"symbol"`

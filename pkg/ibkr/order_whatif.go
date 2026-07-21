@@ -10,19 +10,30 @@ import (
 )
 
 const (
+	// OrderWhatIfStatusUnavailable means no broker decision was obtained.
 	OrderWhatIfStatusUnavailable = "unavailable"
-	OrderWhatIfStatusAccepted    = "accepted"
-	OrderWhatIfStatusRejected    = "rejected"
+	// OrderWhatIfStatusAccepted means the matching callback was not classified as rejected.
+	// It is preview evidence, not order acceptance, submit authority, or a working order.
+	OrderWhatIfStatusAccepted = "accepted"
+	// OrderWhatIfStatusRejected means the broker callback or error rejected the preview.
+	OrderWhatIfStatusRejected = "rejected"
 
 	placeOrderFieldWhatIf = 100
 )
 
+// ErrOrderWhatIfUnavailable is the package sentinel for unavailable WhatIf
+// evaluation. PreviewOrderWhatIf currently reports this condition through an
+// [OrderWhatIfResult] with Status set to [OrderWhatIfStatusUnavailable] and a
+// nil error; validation failures still return non-nil errors.
 var ErrOrderWhatIfUnavailable = errors.New("order whatif unavailable")
 
 // OrderWhatIfMargin is the broker's pre-trade margin and commission estimate
-// returned on a WhatIf openOrder callback.
+// returned on a WhatIf openOrder callback. Margin values are monetary amounts
+// in Currency, while commission values use CommissionCurrency. A nil numeric
+// pointer means the broker omitted the field or supplied an unusable sentinel;
+// zero is a reported numeric value.
 type OrderWhatIfMargin struct {
-	Currency                string
+	Currency                string // Currency is the currency of the margin and equity values.
 	InitialMarginBefore     *float64
 	InitialMarginAfter      *float64
 	MaintenanceMarginBefore *float64
@@ -32,25 +43,35 @@ type OrderWhatIfMargin struct {
 	Commission              *float64
 	MinCommission           *float64
 	MaxCommission           *float64
-	CommissionCurrency      string
-	WarningText             string
+	CommissionCurrency      string // CommissionCurrency is the currency of commission values.
+	WarningText             string // WarningText is untrusted broker text and does not authorize submission.
 }
 
-// OrderWhatIfResult is the narrow broker preview result used by the daemon's
-// order-preview gate. It is not an order submission receipt.
+// OrderWhatIfResult is a broker WhatIf evaluation. Status is one of the
+// OrderWhatIfStatus constants. OrderID correlates this preview only, Message and
+// AdvancedRejectJSON are untrusted broker text, and nil margin pointers mean
+// the corresponding estimates were absent. The result is neither submit
+// authority nor an order receipt.
 type OrderWhatIfResult struct {
-	OrderID            int
-	Status             string
-	BrokerStatus       string
-	Message            string
-	AdvancedRejectJSON string
+	OrderID            int    // OrderID is the request's broker order ID; zero means unavailable before allocation.
+	Status             string // Status is the package-level WhatIf classification.
+	BrokerStatus       string // BrokerStatus is the unnormalized status from the matching callback.
+	Message            string // Message explains rejection or unavailability and may contain broker text.
+	AdvancedRejectJSON string // AdvancedRejectJSON is opaque, untrusted broker rejection data.
 	Margin             OrderWhatIfMargin
 }
 
 // PreviewOrderWhatIf sends a broker WhatIf order preview and waits for the
-// matching broker openOrder/error callback. It is intentionally available in
-// the default build because WhatIf=true makes the broker evaluate without
-// creating a working order; PlaceOrder/CancelOrder remain guarded.
+// matching openOrder or error callback. It is available in both build modes:
+// the encoded request has WhatIf and Transmit set true for broker evaluation,
+// but does not create a working order. Preview evidence never grants submit
+// authority; unrestricted PlaceOrder and CancelOrder remain build-tag guarded.
+//
+// The method mutates order by applying defaults and IDs and by setting WhatIf
+// and Transmit. Local validation or encoding failures are returned as errors.
+// A disconnected connection, send failure, or ctx completion instead returns a
+// result with Status [OrderWhatIfStatusUnavailable] and a nil error. Accepted
+// and rejected results reflect callback classification, not order finality.
 func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (OrderWhatIfResult, error) {
 	if order == nil {
 		return OrderWhatIfResult{}, fmt.Errorf("order is nil")
@@ -114,15 +135,17 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 }
 
 // PreviewOrderWhatIf sends a broker WhatIf preview for a connector-level
-// contract/order pair. It deliberately does not update Connector.openOrders
-// because no working order should exist.
+// contract/order pair. Nil inputs fail validation. It does not mutate order or
+// add to Connector.openOrders because no working order should exist. Status and
+// error behavior match [Connection.PreviewOrderWhatIf].
 func (c *Connector) PreviewOrderWhatIf(ctx context.Context, contract *Contract, order *RawOrder) (OrderWhatIfResult, error) {
 	return c.previewOrderWhatIf(ctx, contract, order, 0)
 }
 
-// PreviewOrderWhatIfWithOrderID sends a broker WhatIf preview using an
-// existing broker order ID. It is used for paper modify previews where IBKR
-// must evaluate the exact replacement draft for a tracked order.
+// PreviewOrderWhatIfWithOrderID sends a broker WhatIf preview using a positive,
+// caller-supplied broker order ID. This supports evaluating a replacement draft
+// for a tracked order, but does not modify that order or grant authority to do
+// so. Status and error behavior match [Connection.PreviewOrderWhatIf].
 func (c *Connector) PreviewOrderWhatIfWithOrderID(ctx context.Context, contract *Contract, order *RawOrder, orderID int) (OrderWhatIfResult, error) {
 	if orderID <= 0 {
 		return OrderWhatIfResult{}, fmt.Errorf("order ID must be positive")

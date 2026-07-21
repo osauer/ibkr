@@ -12,11 +12,17 @@ import (
 	"github.com/osauer/ibkr/v2/internal/risk"
 )
 
+// Fingerprint versions identify the semantic projection used for each source.
+// They are not data-freshness or authority versions.
 const (
-	RegimeFingerprintVersion    = "regime-fp-v1"
-	AccountFingerprintVersion   = "account-fp-v1"
+	// RegimeFingerprintVersion identifies a semantic fingerprint projection.
+	RegimeFingerprintVersion = "regime-fp-v1"
+	// AccountFingerprintVersion identifies a semantic fingerprint projection.
+	AccountFingerprintVersion = "account-fp-v1"
+	// PositionsFingerprintVersion identifies a semantic fingerprint projection.
 	PositionsFingerprintVersion = "positions-fp-v1"
-	CanaryFingerprintVersion    = "canary-fp-v1"
+	// CanaryFingerprintVersion identifies a semantic fingerprint projection.
+	CanaryFingerprintVersion = "canary-fp-v1"
 )
 
 // BuildMarketEventsFingerprint returns the semantic identity of current

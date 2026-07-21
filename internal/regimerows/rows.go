@@ -35,6 +35,8 @@ const (
 // composite count (user-confirmed decision; honest about coverage).
 type Band int
 
+// Indicator bands. BandUnranked represents unavailable or non-comparable
+// evidence and does not contribute to ranked counts.
 const (
 	BandUnranked Band = iota
 	BandGreen
@@ -385,8 +387,8 @@ func rowUSDJPY(now time.Time, r rpc.RegimeUSDJPY) Row {
 // gammaRowLabel returns the regime row's indicator name, varying with
 // the underlying gamma envelope's Scope so combined runs don't claim
 // to be SPY. Falls back to "SPY γ-zero" for envelopes without a Scope
-// (legacy daemons / pre-step-5 fixtures) or when no Result has landed
-// yet — the legacy label keeps existing tests and dashboards stable.
+// (older or incomplete envelopes) or when no Result has landed yet; the
+// fallback label preserves the established rendering contract.
 func gammaRowLabel(r rpc.RegimeGammaZero) string {
 	res := r.Envelope.Result
 	if res == nil {
@@ -1070,9 +1072,11 @@ func gammaRegimeWord(c *rpc.GammaZeroComputed) string {
 
 // gammaHeaderForScope returns the renderer's section header — varies
 // with Result.Scope so SPX-only and combined runs don't claim to be
-// SPY. Falls back to the SPY title for empty Scope (pre-step-5 result
-// envelopes) so old daemon → new CLI mixes render unchanged.
+// SPY. Falls back to the SPY title for an empty Scope so incomplete envelopes
+// retain the established rendering contract.
 
+// String returns the stable lowercase band label, or an empty string for an
+// unranked value.
 func (b Band) String() string {
 	switch b {
 	case BandGreen:
@@ -1086,82 +1090,106 @@ func (b Band) String() string {
 	}
 }
 
+// StreakMarker formats a positive consecutive-session count for a row.
 func StreakMarker(s *rpc.StreakInfo) string {
 	return streakMarker(s)
 }
 
+// QualityTag returns a compact worst-source provenance and age label.
 func QualityTag(now time.Time, qualities ...*rpc.Quality) string {
 	return qualityTag(now, qualities...)
 }
 
+// AsOfLabel returns the producer label when present and otherwise derives a
+// conservative label from status.
 func AsOfLabel(meta *rpc.RegimeAsOfSummary, status string) string {
 	return asOfLabel(meta, status)
 }
 
+// VIXTerm builds the VIX term-structure presentation row.
 func VIXTerm(now time.Time, row rpc.RegimeVIXTerm) Row {
 	return rowVIXTerm(now, row)
 }
 
+// VolOfVol builds the volatility-of-volatility presentation row.
 func VolOfVol(now time.Time, row rpc.RegimeVolOfVol) Row {
 	return rowVolOfVol(now, row)
 }
 
+// HYGSPY builds the credit-versus-equity divergence presentation row.
 func HYGSPY(now time.Time, row rpc.RegimeHYGSPYDivergence) Row {
 	return rowHYGSPY(now, row)
 }
 
+// CreditSpreads builds the official credit-spread presentation row.
 func CreditSpreads(now time.Time, row rpc.RegimeCreditSpreads) Row {
 	return rowCreditSpreads(now, row)
 }
 
+// FundingStress builds the short-term funding-stress presentation row.
 func FundingStress(now time.Time, row rpc.RegimeFundingStress) Row {
 	return rowFundingStress(now, row)
 }
 
+// USDJPY builds the dollar-yen carry-stress presentation row.
 func USDJPY(now time.Time, row rpc.RegimeUSDJPY) Row {
 	return rowUSDJPY(now, row)
 }
 
+// GammaRowLabel returns the scope-aware label for a gamma row.
 func GammaRowLabel(row rpc.RegimeGammaZero) string {
 	return gammaRowLabel(row)
 }
 
+// Gamma builds the dealer-gamma presentation row with provenance disclosure.
 func Gamma(now time.Time, row rpc.RegimeGammaZero) Row {
 	return rowGamma(now, row)
 }
 
+// Breadth builds the S&P 500 breadth presentation row.
 func Breadth(now time.Time, row rpc.RegimeBreadth) Row {
 	return rowBreadth(now, row)
 }
 
+// IfNonEmpty returns value when non-empty and fallback otherwise.
 func IfNonEmpty(value, fallback string) string {
 	return ifNonEmpty(value, fallback)
 }
 
+// GammaPlainQualityReason summarizes gamma quality without terminal styling.
 func GammaPlainQualityReason(quality *rpc.GammaSignalQuality) string {
 	return gammaPlainQualityReason(quality)
 }
 
+// GammaIsSPYProxy reports whether an SPX-context result is backed by the SPY
+// proxy rather than canonical SPX data.
 func GammaIsSPYProxy(result *rpc.GammaZeroComputed) bool {
 	return gammaIsSPYProxy(result)
 }
 
+// FormatSpotPrice formats a spot value for regime presentation.
 func FormatSpotPrice(value float64) string {
 	return formatSpotPrice(value)
 }
 
+// FormatRegimeAgreement summarizes SPY/SPX gamma agreement.
 func FormatRegimeAgreement(result *rpc.GammaZeroComputed) string {
 	return formatRegimeAgreement(result)
 }
 
+// GammaRegimeWord returns the plain-language gamma regime classification.
 func GammaRegimeWord(result *rpc.GammaZeroComputed) string {
 	return gammaRegimeWord(result)
 }
 
+// GammaSingleRegimeBand maps a single-scope gamma result to a presentation
+// band.
 func GammaSingleRegimeBand(result *rpc.GammaZeroComputed) Band {
 	return gammaSingleRegimeBand(result)
 }
 
+// GammaCombinedRegimeBand maps a combined SPY/SPX gamma result to a
+// presentation band.
 func GammaCombinedRegimeBand(result *rpc.GammaZeroComputed) Band {
 	return gammaCombinedRegimeBand(result)
 }

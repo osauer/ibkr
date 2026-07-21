@@ -20,6 +20,8 @@ func FetchCanary(ctx context.Context, conn interface {
 	return res, err
 }
 
+// FetchCanarySnapshot returns the computed assessment and the positions input
+// used to produce it.
 func FetchCanarySnapshot(ctx context.Context, conn interface {
 	Call(context.Context, string, any, any) error
 }) (CanaryResult, rpc.PositionsResult, error) {
@@ -27,6 +29,10 @@ func FetchCanarySnapshot(ctx context.Context, conn interface {
 	return res, positions, err
 }
 
+// FetchCanarySnapshotWithRegime reads account, positions, regime, and relevant
+// held-name market-event context sequentially, then returns the assessment,
+// positions input, and compacted regime input. Required-source errors abort the call;
+// market-event failure is retained as unknown source health.
 func FetchCanarySnapshotWithRegime(ctx context.Context, conn interface {
 	Call(context.Context, string, any, any) error
 }) (CanaryResult, rpc.PositionsResult, rpc.RegimeSnapshotResult, error) {

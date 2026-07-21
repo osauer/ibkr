@@ -2,6 +2,8 @@ package rpc
 
 import "time"
 
+// Protection-coverage states distinguish reconciled coverage from partial,
+// absent, orphaned, uncertain, and reconciliation-required observations.
 const (
 	ProtectionCoverageStateCovered           = "covered"
 	ProtectionCoverageStatePartial           = "partial"
@@ -29,6 +31,7 @@ type ProtectionCoverageSummary struct {
 	Message                         string                    `json:"message,omitempty"`
 }
 
+// ProtectionCoverageCounts summarizes the mutually exclusive coverage rows.
 type ProtectionCoverageCounts struct {
 	Covered           int `json:"covered,omitempty"`
 	Partial           int `json:"partial,omitempty"`
@@ -38,6 +41,8 @@ type ProtectionCoverageCounts struct {
 	Unknown           int `json:"unknown,omitempty"`
 }
 
+// ProtectionCoverageRow reports reconciled coverage for one held underlying.
+// Pointer notionals are nil when base-currency conversion is unavailable.
 type ProtectionCoverageRow struct {
 	Underlying                      string                    `json:"underlying"`
 	State                           string                    `json:"state"`
@@ -53,6 +58,8 @@ type ProtectionCoverageRow struct {
 	Message                         string                    `json:"message,omitempty"`
 }
 
+// ProtectionCoverageOrder is a redacted protective-order observation. Its
+// coverage and reconciliation flags are daemon-derived, not broker authority.
 type ProtectionCoverageOrder struct {
 	OrderRef            string    `json:"order_ref,omitempty"`
 	Symbol              string    `json:"symbol,omitempty"`

@@ -12,17 +12,9 @@ import (
 // ScannerParameters is the parsed catalog of scan codes, location codes,
 // and instruments supported by the gateway this connector is attached to.
 //
-// IBKR returns its full scanner catalog as a single XML document via the
-// reqScannerParameters call. The catalog varies by gateway version and by
-// the user's market-data subscriptions — a name that works on a US Pro
-// account may be absent on an account without OPRA, etc. Pulling this at
-// runtime is the only reliable way to know which scanCode / locationCode
-// values can be used in an ad-hoc scan against this specific gateway.
-//
-// Only the fields agents actually need to compose a scanner subscription
-// are surfaced as typed Go fields (ScanTypes, Locations, Instruments).
-// The full XML stays available via RawXML for one-off debugging without
-// having to extend this struct every time someone wants a new field.
+// The catalog is a live gateway capability response and may vary by gateway
+// version and market-data entitlements. RawXML retains the untrusted broker
+// response for fields not represented by the typed slices.
 type ScannerParameters struct {
 	Instruments []ScannerInstrument `json:"instruments"`
 	Locations   []ScannerLocation   `json:"locations"`
@@ -30,41 +22,35 @@ type ScannerParameters struct {
 	RawXML      string              `json:"raw_xml,omitempty"`
 }
 
-// ScannerInstrument names one instrument-group the gateway supports
-// (STK, BOND, FUT, etc.). The Type field is the wire-level identifier
-// passed to reqScannerSubscription's `instrument` slot.
+// ScannerInstrument names one instrument group supported by the gateway. Type
+// is the wire identifier passed as [ScannerSubscription.Instrument].
 type ScannerInstrument struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
 }
 
-// ScannerLocation is one valid locationCode (the universe selector in
-// the TWS Market Scanner UI). Codes are dot-separated paths like
-// "STK.US.MAJOR" or "STK.HK"; DisplayName is the human label TWS shows.
+// ScannerLocation is one valid scanner location code. Code is the wire value
+// passed as [ScannerSubscription.Exchange], and DisplayName is broker-provided
+// display text.
 type ScannerLocation struct {
 	Code        string `json:"code"`
 	DisplayName string `json:"display_name"`
 }
 
-// ScannerScanType is one valid scanCode (the metric selector in the
-// TWS Market Scanner UI). Code is what ibkr scan --type expects;
-// DisplayName is the human label; Instruments is the comma-separated
-// list of instrument types this scan is valid for (e.g. "STK,ETF").
+// ScannerScanType is one valid scanner metric. Code is the wire value passed as
+// [ScannerSubscription.Type], DisplayName is broker-provided text, and
+// Instruments contains the parsed instrument identifiers accepted by the scan.
 type ScannerScanType struct {
 	Code        string   `json:"code"`
 	DisplayName string   `json:"display_name"`
 	Instruments []string `json:"instruments,omitempty"`
 }
 
-// RunScannerParameters fetches and parses the gateway's full scanner
-// catalog. One-shot: the gateway returns a single XML payload, we parse
-// it, and the connector unregisters its handler. Timeout defaults to 10s.
-//
-// The XML payload is large (typical US Pro account: ~200KB) but the
-// parser only walks it once, surfacing the three lists agents and humans
-// actually need to compose a scan. RawXML is preserved on the result so
-// callers that want to grep for a less-common field (e.g. filter values)
-// can do so without re-querying.
+// RunScannerParameters fetches and parses the gateway's scanner catalog. ctx
+// must be non-nil, and a timeout of zero or less uses ten seconds. The returned
+// value owns its typed slices and preserves the exact broker XML in RawXML.
+// Because this broker request has no request ID, callers should serialize
+// concurrent catalog requests.
 func (c *Connector) RunScannerParameters(ctx context.Context, timeout time.Duration) (*ScannerParameters, error) {
 	if !c.IsReady() {
 		return nil, ErrIBKRUnavailable
@@ -199,10 +185,10 @@ func parseScannerParametersXML(body string) (*ScannerParameters, error) {
 	return out, nil
 }
 
-// FilterByInstrument returns the scan types whose instruments list
-// contains the given type token (e.g. "STK"). Empty filter returns
-// every scan type. Useful from agent code to narrow the catalog to
-// stocks-only before suggesting a scanCode.
+// FilterByInstrument returns scan types whose Instruments contain instrument,
+// matched case-insensitively after trimming a non-empty query. An empty string
+// returns all scan types. Returned values share nested slice data with p and
+// must be treated as read-only.
 func (p *ScannerParameters) FilterByInstrument(instrument string) []ScannerScanType {
 	if instrument == "" {
 		return p.ScanTypes

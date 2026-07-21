@@ -1,7 +1,7 @@
-// Package mcp serves the `ibkr` daemon's no-broker-write RPC surface as an
-// MCP (Model Context Protocol) server over stdio. Spoken by Claude Desktop
-// and any other local MCP client; the tool inventory mirrors the CLI 1:1 and
-// is gated by a parity test (see tools_test.go).
+// Package mcp adapts the daemon's read, research, and preview capabilities to
+// the Model Context Protocol over stdio. Its curated tools and resources use
+// short-lived typed daemon calls where required; they do not expose broker
+// place, modify, cancel, exercise, purge, or restore operations.
 //
 // Wire: newline-delimited JSON-RPC 2.0 over stdin/stdout, no framing headers.
 // The MCP lifecycle is initialize → initialized (notification) → repeated
@@ -73,6 +73,8 @@ func NewServer(conn *dial.Conn, version string) *Server {
 	}
 }
 
+// SetProfile selects the tool and resource profile exposed by the server.
+// An empty profile selects [ProfileFull].
 func (s *Server) SetProfile(profile Profile) {
 	if profile == "" {
 		profile = ProfileFull
@@ -125,8 +127,8 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 // unblock the read. We instead drive the main loop off the scanned-line
 // channel and ctx.Done(), and on cancel we return immediately — the
 // reader goroutine stays parked on the kernel read and is reaped when the
-// process exits. Without this, SIGTERM was a no-op on the MCP server and
-// only SIGKILL terminated it.
+// process exits. This keeps context and signal cancellation authoritative even
+// when stdin itself cannot be interrupted.
 func (s *Server) ServeWithOptions(ctx context.Context, in io.Reader, out io.Writer, opts ServeOptions) error {
 	s.out = bufio.NewWriter(out)
 	s.serveCtx = ctx

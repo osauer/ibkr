@@ -14,12 +14,16 @@ import (
 	"time"
 )
 
+// Alert delivery modes control app-side notification eligibility without
+// changing daemon policy or the durable occurrence record.
 const (
 	AlertModeNone        = "none"
 	AlertModeActOnly     = "act_only"
 	AlertModeWatchAndAct = "watch_and_act"
 )
 
+// Governance transport and delivery constants classify app-local Web Push
+// attempts and aggregate delivery health.
 const (
 	GovernanceTransportAccepted       = "push_service_accepted"
 	GovernanceTransportPartial        = "partial_acceptance"
@@ -35,8 +39,9 @@ const (
 	GovernanceTransportNetworkRetry   = "transport_retry"
 	GovernanceTransportHTTPRetry      = "http_retry"
 	GovernanceTransportHTTPRejected   = "http_rejected"
-	// Legacy classes remain readable for state written by the first app
-	// implementation; new transport code uses the specific classes above.
+	// GovernanceTransportTimeoutRetry and the following legacy classes remain
+	// readable for state written by the first app implementation; new transport
+	// code uses the specific classes above.
 	GovernanceTransportTimeoutRetry = "timeout_retry"
 	GovernanceTransportRejected     = "rejected"
 	GovernanceTransportDead         = "dead_subscription"
@@ -52,6 +57,8 @@ const (
 	GovernanceDeliveryOverflow    = "overflow"
 )
 
+// App-state errors describe fail-closed capacity, cursor, and persisted-state
+// validation failures without exposing private record identity.
 var (
 	ErrGovernanceOverflow            = errors.New("governance evidence overflow")
 	ErrAlertHistoryOverflow          = errors.New("alert history overflow: unread retention limit reached")
@@ -62,11 +69,15 @@ var (
 	ErrInvalidPersistedState         = errors.New("invalid persisted app state")
 )
 
+// Attention kinds identify the two legacy inbox record families sharing the
+// app's durable read cursor.
 const (
 	AttentionKindCanary     = "canary"
 	AttentionKindGovernance = "governance"
 )
 
+// Governance delivery dispositions freeze whether an occurrence was eligible
+// when the app first persisted it.
 const (
 	GovernanceDispositionEligible             = "eligible"
 	GovernanceDispositionSuppressedAtCreation = "suppressed_at_creation"
@@ -86,6 +97,9 @@ const (
 	defaultGovernanceMaxItems = 4096
 )
 
+// Store serializes access to the app's private state.json and returns copies or
+// redacted projections at its public read boundaries. Its zero value is not
+// usable; callers open a store with [Open].
 type Store struct {
 	path                            string
 	mu                              sync.Mutex
@@ -106,6 +120,9 @@ type Store struct {
 	loadedAlertDeliveryDecodeErr    error
 }
 
+// Data is the persisted app-state envelope. AlertDelivery remains an internal
+// independently versioned section even though the surrounding legacy fields
+// are exported for JSON persistence and tests.
 type Data struct {
 	Devices                 []DeviceGrant               `json:"devices,omitempty"`
 	AlertSettings           AlertSettings               `json:"alert_settings"`
@@ -127,6 +144,8 @@ type Data struct {
 	AlertDelivery           *alertDeliveryData          `json:"alert_delivery,omitempty"`
 }
 
+// DeviceGrant is an app-owned paired-device identity. RevokedAt is terminal:
+// re-pairing creates a new identity instead of reviving this one.
 type DeviceGrant struct {
 	ID               string `json:"id"`
 	Name             string `json:"name,omitempty"`
@@ -146,6 +165,8 @@ type DeviceGrant struct {
 	RevokedAt          time.Time `json:"revoked_at,omitzero"`
 }
 
+// RelayRoute stores the app connector's resumable remote-relay registration.
+// ExpiresAt is informational because a token-matched reconnect may revive it.
 type RelayRoute struct {
 	RemoteURL      string    `json:"remote_url"`
 	RouteID        string    `json:"route_id"`
@@ -157,10 +178,13 @@ type RelayRoute struct {
 	ExpiresAt      time.Time `json:"expires_at"`
 }
 
+// AlertSettings holds the operator-selected app notification mode.
 type AlertSettings struct {
 	Mode string `json:"mode"`
 }
 
+// PushSubscription is an app-owned Web Push target bound to one paired device.
+// Its endpoint and keys are private transport material.
 type PushSubscription struct {
 	ID         string    `json:"id"`
 	DeviceID   string    `json:"device_id"`
@@ -171,6 +195,8 @@ type PushSubscription struct {
 	LastSeenAt time.Time `json:"last_seen_at,omitzero"`
 }
 
+// AlertRecord is a redacted durable inbox row. AttentionSeq zero identifies a
+// legacy row outside the shared unread cursor.
 type AlertRecord struct {
 	ID          string    `json:"id"`
 	Fingerprint string    `json:"fingerprint"`
@@ -189,6 +215,8 @@ type AlertRecord struct {
 	AttentionSeq  uint64    `json:"attention_seq"`
 }
 
+// PushAttempt records one classified Web Push transport result. OK means the
+// push service accepted the request, not that a device displayed it.
 type PushAttempt struct {
 	At             time.Time `json:"at"`
 	SubscriptionID string    `json:"subscription_id,omitempty"`
@@ -220,13 +248,15 @@ type GovernanceOccurrence struct {
 	DeliveryDisposition string    `json:"delivery_disposition"`
 }
 
-// Attention is the shared durable unread cursor for the Alerts inbox. Legacy
-// rows have sequence zero and are intentionally excluded from UnreadCount.
+// AttentionRef identifies one redacted legacy inbox row without exposing its
+// private fingerprint or transport identity.
 type AttentionRef struct {
 	Kind string `json:"kind"`
 	ID   string `json:"id"`
 }
 
+// Attention is the shared durable unread cursor for the legacy Alerts inbox.
+// Rows with sequence zero are intentionally excluded from UnreadCount.
 type Attention struct {
 	UnreadCount    int            `json:"unread_count"`
 	HighWaterSeq   uint64         `json:"high_water_seq"`
@@ -239,6 +269,8 @@ type attentionEntry struct {
 	ref AttentionRef
 }
 
+// GovernanceAttempt is durable app-local evidence for one occurrence-target
+// transport decision. An incomplete reservation is uncertain after restart.
 type GovernanceAttempt struct {
 	ID             string    `json:"id"`
 	OccurrenceID   string    `json:"occurrence_id,omitempty"`
@@ -252,6 +284,8 @@ type GovernanceAttempt struct {
 	TransportCount int       `json:"transport_count,omitempty"`
 }
 
+// GovernanceReceipt records push-service acceptance for one occurrence-target
+// pair; it is not proof of device display or human attention.
 type GovernanceReceipt struct {
 	OccurrenceID string    `json:"occurrence_id"`
 	TargetRef    string    `json:"target_ref"`
@@ -261,6 +295,8 @@ type GovernanceReceipt struct {
 	RetiredAt    time.Time `json:"target_retired_at,omitzero"`
 }
 
+// GovernanceDeliveryHealth summarizes the legacy governance transport ledger.
+// A zero LastAcceptedAt means no acceptance has been retained.
 type GovernanceDeliveryHealth struct {
 	State          string    `json:"state"`
 	Class          string    `json:"class,omitempty"`
@@ -268,22 +304,31 @@ type GovernanceDeliveryHealth struct {
 	LastAcceptedAt time.Time `json:"last_push_service_acceptance_at,omitzero"`
 }
 
+// GovernanceDiagnosticStatus stores the latest safe notification-test result.
 type GovernanceDiagnosticStatus struct {
 	State string    `json:"state,omitempty"`
 	At    time.Time `json:"at,omitzero"`
 }
 
+// GovernanceCompletionDisposition reports whether a completed transport still
+// belonged to its target or returned after target retirement.
 type GovernanceCompletionDisposition string
 
+// Governance completion dispositions distinguish an applied result from a
+// late result for a retired target.
 const (
 	GovernanceCompletionApplied GovernanceCompletionDisposition = "applied"
 	GovernanceCompletionRetired GovernanceCompletionDisposition = "retired"
 )
 
+// GovernanceCompletionOutcome reports how a completed governance reservation
+// was reconciled with current durable target state.
 type GovernanceCompletionOutcome struct {
 	Disposition GovernanceCompletionDisposition
 }
 
+// GovernanceAttemptTotals contains cumulative durable transport dispositions;
+// RetryPending is a current derived count rather than a persisted total.
 type GovernanceAttemptTotals struct {
 	CumulativeAttempts int `json:"cumulative_attempts"`
 	Accepted           int `json:"push_service_accepted"`
@@ -306,6 +351,8 @@ type GovernanceAttemptTotals struct {
 	LegacyOverflow      int `json:"overflow,omitempty"`
 }
 
+// GovernanceHealthEventTotals counts app-local delivery-health transitions
+// separately from actual transport attempts.
 type GovernanceHealthEventTotals struct {
 	PartialEpisodes int `json:"partial_episodes"`
 	StateFailures   int `json:"state_write_failures"`
@@ -313,6 +360,9 @@ type GovernanceHealthEventTotals struct {
 	Overflows       int `json:"overflows"`
 }
 
+// GovernanceOccurrenceView is the redacted operator projection of a durable
+// governance occurrence; its producer fingerprint and attention sequence stay
+// private.
 type GovernanceOccurrenceView struct {
 	DisplayID   string    `json:"display_id"`
 	Kind        string    `json:"kind"`
@@ -329,6 +379,8 @@ type GovernanceOccurrenceView struct {
 	ResolvedAt  time.Time `json:"resolved_at,omitzero"`
 }
 
+// GovernanceAttemptView exposes classified timing without attempt IDs, receipt
+// keys, subscription endpoints, or transport error text.
 type GovernanceAttemptView struct {
 	OccurrenceID   string    `json:"occurrence_id,omitempty"`
 	TargetRef      string    `json:"target_ref,omitempty"`
@@ -340,6 +392,8 @@ type GovernanceAttemptView struct {
 	TransportCount int       `json:"transport_count,omitempty"`
 }
 
+// GovernanceReceiptView exposes acceptance timing without its private receipt
+// key or subscription endpoint.
 type GovernanceReceiptView struct {
 	OccurrenceID string    `json:"occurrence_id"`
 	TargetRef    string    `json:"target_ref"`
@@ -347,6 +401,7 @@ type GovernanceReceiptView struct {
 	RetiredAt    time.Time `json:"target_retired_at,omitzero"`
 }
 
+// GovernanceView is the redacted app-local governance delivery projection.
 type GovernanceView struct {
 	Occurrences    []GovernanceOccurrenceView  `json:"occurrences"`
 	Attempts       []GovernanceAttemptView     `json:"attempts"`
@@ -357,12 +412,16 @@ type GovernanceView struct {
 	Diagnostic     GovernanceDiagnosticStatus  `json:"diagnostic"`
 }
 
+// VAPIDKeys stores the app-owned signing key pair. PrivateKey must never cross
+// an authenticated app response or logging boundary.
 type VAPIDKeys struct {
 	PublicKey  string    `json:"public_key"`
 	PrivateKey string    `json:"private_key"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// ProposalAuditItem is a durable app-side audit row for paired-device proposal
+// actions; Payload may contain private request data and is not a public DTO.
 type ProposalAuditItem struct {
 	ID        string          `json:"id"`
 	DeviceID  string          `json:"device_id,omitempty"`
@@ -371,6 +430,10 @@ type ProposalAuditItem struct {
 	CreatedAt time.Time       `json:"created_at"`
 }
 
+// Open loads or initializes the private app store under dir, validates its
+// persisted invariants, and recovers interrupted delivery reservations. It
+// quarantines an invalid optional alert-delivery ledger without fabricating a
+// replacement authority.
 func Open(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, errors.New("state dir required")
@@ -488,12 +551,15 @@ func (s *Store) migrateGovernanceTotals() {
 	totals.LegacyOverflow = 0
 }
 
+// AlertSettings returns the current app notification mode.
 func (s *Store) AlertSettings() AlertSettings {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.data.AlertSettings
 }
 
+// Attention returns a snapshot of the legacy inbox's shared durable unread
+// cursor and redacted unread references.
 func (s *Store) Attention() Attention {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -635,6 +701,8 @@ func (s *Store) nextAttentionSeqLocked() (uint64, error) {
 	return s.data.AttentionHighWaterSeq, nil
 }
 
+// SetAlertMode validates and durably replaces the app notification mode. It
+// does not change daemon policy or retroactively alter stored occurrences.
 func (s *Store) SetAlertMode(mode string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -650,6 +718,9 @@ func (s *Store) SetAlertMode(mode string) error {
 	return nil
 }
 
+// AddDevice durably inserts or updates a paired device. Revocation atomically
+// retires that device's targets in both delivery ledgers and cannot be undone
+// by updating the same identity.
 func (s *Store) AddDevice(d DeviceGrant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -710,6 +781,8 @@ func (s *Store) AddDevice(d DeviceGrant) error {
 	return nil
 }
 
+// Device returns the active paired device with id. Revoked and unknown devices
+// both return false.
 func (s *Store) Device(id string) (DeviceGrant, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -726,6 +799,8 @@ func (s *Store) Device(id string) (DeviceGrant, bool) {
 // small enough that a leaked state file exposes a bounded credential set.
 const maxDeviceCookieHashes = 5
 
+// AddDeviceCookieHash retains a bounded set of cookie generations for one
+// paired device so Safari and installed-app cookie jars can coexist.
 func (s *Store) AddDeviceCookieHash(id, hash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -747,6 +822,8 @@ func (s *Store) AddDeviceCookieHash(id, hash string) error {
 	return fmt.Errorf("device %s not found", id)
 }
 
+// Devices returns a shallow copy of all paired-device records, including
+// revoked devices retained as audit state.
 func (s *Store) Devices() []DeviceGrant {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -820,6 +897,7 @@ func (s *Store) PruneDevices(cutoff time.Time) (int, error) {
 	return len(removed), nil
 }
 
+// SetDeviceSeen durably records the supplied last-seen time for a known device.
 func (s *Store) SetDeviceSeen(id string, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -832,6 +910,9 @@ func (s *Store) SetDeviceSeen(id string, at time.Time) error {
 	return fmt.Errorf("device %s not found", id)
 }
 
+// AddPushSubscription durably inserts or refreshes an app-owned push target.
+// Moving an endpoint between devices requires a fresh, never-retired target
+// identity and atomically retires the prior target's delivery evidence.
 func (s *Store) AddPushSubscription(sub PushSubscription) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -935,6 +1016,8 @@ func (s *Store) pushTargetIdentityRetiredLocked(deviceID, subscriptionID string)
 	return false
 }
 
+// PushSubscriptions returns a shallow copy of all retained subscriptions,
+// including targets whose device activity is not checked by this legacy read.
 func (s *Store) PushSubscriptions() []PushSubscription {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -964,6 +1047,8 @@ func (s *Store) ActivePushSubscriptions() []PushSubscription {
 	return out
 }
 
+// ActivePushSubscriptionsForDevice returns subscriptions only when deviceID is
+// a current, non-revoked paired device; otherwise it returns nil.
 func (s *Store) ActivePushSubscriptionsForDevice(deviceID string) []PushSubscription {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -986,10 +1071,14 @@ func (s *Store) ActivePushSubscriptionsForDevice(deviceID string) []PushSubscrip
 	return out
 }
 
+// RemovePushSubscription retires a subscription at the current UTC time.
 func (s *Store) RemovePushSubscription(id string) error {
 	return s.RemovePushSubscriptionAt(id, time.Now().UTC())
 }
 
+// RemovePushSubscriptionAt atomically removes a subscription selected by ID or
+// endpoint and retires its targets in both delivery ledgers. A zero retiredAt
+// uses the current UTC time.
 func (s *Store) RemovePushSubscriptionAt(id string, retiredAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1064,10 +1153,14 @@ func (s *Store) retireGovernanceTargetsLocked(targets map[string]bool, retiredAt
 	}
 }
 
+// GovernanceTargetRef derives the opaque stable identity of an app-owned
+// device/subscription pair.
 func GovernanceTargetRef(deviceID, subscriptionID string) string {
 	return governanceHash("target", strings.TrimSpace(deviceID), strings.TrimSpace(subscriptionID))
 }
 
+// GovernanceReceiptKey derives the opaque deduplication key for one legacy
+// governance occurrence-target pair.
 func GovernanceReceiptKey(occurrenceID, targetRef string) string {
 	return governanceHash("receipt", strings.TrimSpace(occurrenceID), strings.TrimSpace(targetRef))
 }
@@ -1086,6 +1179,8 @@ func governanceDisplayID(fingerprint string, episode int, at time.Time) string {
 	return fmt.Sprintf("gov-%x", sum[:8])
 }
 
+// UpsertGovernanceOccurrence records one non-authoritative observation and
+// reports the active durable occurrence plus whether a new episode was created.
 func (s *Store) UpsertGovernanceOccurrence(rec GovernanceOccurrence, now time.Time) (GovernanceOccurrence, bool, error) {
 	if strings.TrimSpace(rec.Fingerprint) == "" {
 		return GovernanceOccurrence{}, false, errors.New("governance occurrence fingerprint required")
@@ -1265,6 +1360,9 @@ func sameGovernanceOccurrenceSemantics(a, b GovernanceOccurrence) bool {
 		a.DeliveryDisposition == b.DeliveryDisposition
 }
 
+// ResolveGovernanceOccurrences ends active occurrences omitted from the given
+// fingerprint set and stops their pending retries. The fingerprints remain
+// private and never enter [GovernanceView].
 func (s *Store) ResolveGovernanceOccurrences(activeFingerprints []string, now time.Time) error {
 	now = now.UTC()
 	active := make(map[string]bool, len(activeFingerprints))
@@ -1494,6 +1592,8 @@ func (s *Store) CompleteGovernanceAttempt(id, class string, accepted bool, now t
 	return GovernanceCompletionOutcome{Disposition: disposition}, nil
 }
 
+// RecordGovernanceAttempt appends a completed legacy transport decision and,
+// when accepted is true, its deduplicating receipt in the same durable write.
 func (s *Store) RecordGovernanceAttempt(attempt GovernanceAttempt, accepted bool) error {
 	if attempt.At.IsZero() || !validGovernanceTransportClass(attempt.Class) {
 		return errors.New("invalid governance attempt")
@@ -1559,6 +1659,8 @@ func governanceRetryBackoff(attempts []GovernanceAttempt, receiptKey string) tim
 	return backoffs[count]
 }
 
+// GovernanceAttemptDue reports whether an occurrence-target pair lacks an
+// active receipt and has no attempt or a retry whose deadline has arrived.
 func (s *Store) GovernanceAttemptDue(receiptKey string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1591,6 +1693,8 @@ func isGovernanceRetryable(class string) bool {
 	}
 }
 
+// HasGovernanceReceipt reports whether receiptKey has a current, non-retired
+// push-service acceptance receipt.
 func (s *Store) HasGovernanceReceipt(receiptKey string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1602,6 +1706,9 @@ func (s *Store) HasGovernanceReceipt(receiptKey string) bool {
 	return false
 }
 
+// SetGovernanceDeliveryHealth validates and persists aggregate app-local
+// governance transport health while preserving the last acceptance timestamp
+// when the caller leaves it zero.
 func (s *Store) SetGovernanceDeliveryHealth(health GovernanceDeliveryHealth) error {
 	if !validGovernanceDeliveryHealth(health) {
 		return errors.New("invalid governance delivery health")
@@ -1629,6 +1736,8 @@ func (s *Store) SetGovernanceDeliveryHealth(health GovernanceDeliveryHealth) err
 	return nil
 }
 
+// RecordDiagnosticStatus validates and persists the latest safe notification
+// test result.
 func (s *Store) RecordDiagnosticStatus(status GovernanceDiagnosticStatus) error {
 	if status.At.IsZero() || !validDiagnosticState(status.State) {
 		return errors.New("invalid diagnostic status")
@@ -1644,6 +1753,8 @@ func (s *Store) RecordDiagnosticStatus(status GovernanceDiagnosticStatus) error 
 	return nil
 }
 
+// Governance returns a redacted snapshot of app-local legacy governance
+// occurrences and delivery evidence. RetryPending is derived at now.
 func (s *Store) Governance(now time.Time) GovernanceView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1707,6 +1818,8 @@ func (s *Store) currentGovernanceRetryPendingLocked(now time.Time) int {
 	return pending
 }
 
+// CompactGovernance removes read, resolved occurrences and retired transport
+// evidence older than the retention window while retaining unread evidence.
 func (s *Store) CompactGovernance(now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1868,6 +1981,9 @@ func validDiagnosticState(state string) bool {
 	}
 }
 
+// RecordAlert appends one redacted legacy inbox record and assigns its durable
+// attention sequence. It rejects duplicate IDs and refuses to evict unread
+// history when the bounded store is full.
 func (s *Store) RecordAlert(rec AlertRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1936,6 +2052,8 @@ func (s *Store) recordAlertLocked(rec AlertRecord) error {
 	return nil
 }
 
+// AlertHistory returns a copy of the newest legacy inbox rows. A non-positive
+// limit returns all retained rows.
 func (s *Store) AlertHistory(limit int) []AlertRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1947,6 +2065,8 @@ func (s *Store) AlertHistory(limit int) []AlertRecord {
 	return out
 }
 
+// ClearAlertHistory removes only rows already covered by the durable read
+// cursor and returns the number removed; unread rows are always retained.
 func (s *Store) ClearAlertHistory() (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2028,6 +2148,8 @@ func alertRecordMatchesContext(rec AlertRecord, canaryFingerprint, account, mode
 	return true
 }
 
+// HasAlertFingerprint reports whether the legacy inbox retains a record with
+// the private semantic fingerprint fp.
 func (s *Store) HasAlertFingerprint(fp string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2039,6 +2161,7 @@ func (s *Store) HasAlertFingerprint(fp string) bool {
 	return false
 }
 
+// RecordPush replaces the legacy last-attempt diagnostic with attempt.
 func (s *Store) RecordPush(attempt PushAttempt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2046,6 +2169,8 @@ func (s *Store) RecordPush(attempt PushAttempt) error {
 	return s.save()
 }
 
+// LastPush returns a copy of the legacy last-attempt diagnostic, or nil when
+// no attempt has been recorded.
 func (s *Store) LastPush() *PushAttempt {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2056,6 +2181,9 @@ func (s *Store) LastPush() *PushAttempt {
 	return &cp
 }
 
+// EnsureVAPID returns the retained app signing keys or generates and durably
+// stores one pair. gen is called while the store is locked and only when a
+// complete retained pair is unavailable.
 func (s *Store) EnsureVAPID(now time.Time, gen func() (privateKey, publicKey string, err error)) (VAPIDKeys, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2074,6 +2202,8 @@ func (s *Store) EnsureVAPID(now time.Time, gen func() (privateKey, publicKey str
 	return keys, nil
 }
 
+// VAPID returns a copy of the app's retained signing keys. False means no key
+// record exists; callers must also validate non-empty key material as needed.
 func (s *Store) VAPID() (VAPIDKeys, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2083,6 +2213,9 @@ func (s *Store) VAPID() (VAPIDKeys, bool) {
 	return *s.data.VAPID, true
 }
 
+// RelayRoute returns the resumable route only when remoteURL and its required
+// credentials match. An expired route is still returned for token-matched
+// revival.
 func (s *Store) RelayRoute(remoteURL string) (RelayRoute, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2099,6 +2232,8 @@ func (s *Store) RelayRoute(remoteURL string) (RelayRoute, bool) {
 	return route, true
 }
 
+// SetRelayRoute validates and durably stores a relay registration, preserving
+// CreatedAt when the same route identity is refreshed.
 func (s *Store) SetRelayRoute(route RelayRoute) error {
 	if route.RemoteURL == "" {
 		return errors.New("relay remote URL required")

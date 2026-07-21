@@ -6,24 +6,35 @@ import (
 )
 
 const (
-	OrderLifecycleEventOpenOrder   = "openOrder"
-	OrderLifecycleEventStatus      = "orderStatus"
+	// OrderLifecycleEventOpenOrder identifies an openOrder callback.
+	OrderLifecycleEventOpenOrder = "openOrder"
+	// OrderLifecycleEventStatus identifies an orderStatus callback.
+	OrderLifecycleEventStatus = "orderStatus"
+	// OrderLifecycleEventExecDetails identifies an execDetails callback.
 	OrderLifecycleEventExecDetails = "execDetails"
-	OrderLifecycleEventError       = "error"
+	// OrderLifecycleEventError identifies a correlated broker error synthesized by Connector.
+	OrderLifecycleEventError = "error"
 )
 
-// OrderLifecycleEvent is the typed subset of IBKR order callbacks needed by
-// daemon reconciliation. It is intentionally independent from Connector.Order
-// mutation: socket writes do not imply broker acknowledgement.
+// OrderLifecycleEvent is a typed subset of one broker order callback. Type
+// identifies which fields are meaningful. Status remains the broker's text and
+// no individual callback, socket write, or local mutation proves lifecycle
+// finality; consumers must reconcile the callback sequence and broker truth.
+//
+// Quantities are in the broker's instrument units and prices are in the
+// contract's quote currency. Numeric zero can be a real value or an absent or
+// unparsable field because the wire callbacks do not preserve that distinction.
+// Raw is a copied slice of untrusted wire fields and may be nil for synthesized
+// error events.
 type OrderLifecycleEvent struct {
-	Type            string
-	OrderID         int
-	PermID          int
-	ClientID        int
-	RequestID       int
-	Status          string
-	ErrorCode       int
-	Message         string
+	Type            string // Type is one of the OrderLifecycleEvent constants.
+	OrderID         int    // OrderID is session-scoped; zero means absent.
+	PermID          int    // PermID is IBKR's permanent order ID; zero means absent.
+	ClientID        int    // ClientID identifies the TWS API client; zero means absent.
+	RequestID       int    // RequestID correlates execDetails requests; zero means absent.
+	Status          string // Status is unnormalized broker state and may be empty.
+	ErrorCode       int    // ErrorCode is populated for synthesized error events.
+	Message         string // Message is untrusted broker warning or error text.
 	Symbol          string
 	SecType         string
 	Expiry          string
@@ -35,38 +46,39 @@ type OrderLifecycleEvent struct {
 	LocalSymbol     string
 	TradingClass    string
 	Action          string
-	TotalQuantity   float64
+	TotalQuantity   float64 // TotalQuantity is in shares or contracts.
 	OrderType       string
-	LimitPrice      float64
-	AuxPrice        float64
-	TrailingPercent float64
-	TrailStopPrice  float64
-	LmtPriceOffset  float64
+	LimitPrice      float64 // LimitPrice is in quote-currency units.
+	AuxPrice        float64 // AuxPrice is a stop price or trailing amount.
+	TrailingPercent float64 // TrailingPercent is the broker percentage value, not a fraction.
+	TrailStopPrice  float64 // TrailStopPrice is in quote-currency units.
+	LmtPriceOffset  float64 // LmtPriceOffset is in price units.
 	TIF             string
 	TriggerMethod   int
 	OutsideRth      bool
 	WhatIf          bool
-	Filled          float64
-	Remaining       float64
-	AvgFillPrice    float64
-	LastFillPrice   float64
+	Filled          float64 // Filled is the callback's cumulative filled quantity.
+	Remaining       float64 // Remaining is the callback's unfilled quantity.
+	AvgFillPrice    float64 // AvgFillPrice is in quote-currency units.
+	LastFillPrice   float64 // LastFillPrice is in quote-currency units.
 	WhyHeld         string
 	MktCapPrice     float64
 	ExecID          string
 	ExecTime        string
 	Account         string
 	ExecutionSide   string
-	Shares          float64
-	Price           float64
-	CumQty          float64
+	Shares          float64 // Shares is this execution's quantity in shares or contracts.
+	Price           float64 // Price is this execution's price in quote-currency units.
+	CumQty          float64 // CumQty is the execution's cumulative filled quantity.
 	OrderRef        string
 	Raw             []string
 }
 
-// ParseOrderLifecycleEvent parses the three broker callbacks that move product
-// order state: openOrder, orderStatus, and execDetails. Unknown or malformed
-// messages return ok=false so the general connection dispatcher can ignore
-// them without manufacturing state.
+// ParseOrderLifecycleEvent parses openOrder, orderStatus, and execDetails wire
+// callbacks. It accepts both legacy and summarized protobuf forms. Unknown or
+// malformed messages return ok=false and a zero event; broker error events are
+// correlated and synthesized separately by Connector. Parsed events are
+// observations, not a finality decision.
 func ParseOrderLifecycleEvent(fields []string) (ev OrderLifecycleEvent, ok bool) {
 	if len(fields) == 0 {
 		return OrderLifecycleEvent{}, false

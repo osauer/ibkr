@@ -25,6 +25,8 @@ const (
 	opportunityBuilderMaxGapPct        = 25.0
 )
 
+// OpportunityPointInTimeRow is a captured, pre-signal research row whose
+// features, split assignment, and labels retain their provenance.
 type OpportunityPointInTimeRow struct {
 	Date              string                         `json:"date,omitempty"`
 	AsOf              time.Time                      `json:"as_of,omitzero"`
@@ -42,6 +44,8 @@ type OpportunityPointInTimeRow struct {
 	Notes             string                         `json:"notes,omitempty"`
 }
 
+// OpportunitySplitProvenance records how and when a tuning or holdout split was
+// assigned, including whether it was preregistered before labels were known.
 type OpportunitySplitProvenance struct {
 	Source                  string    `json:"source,omitempty"`
 	Method                  string    `json:"method,omitempty"`
@@ -51,18 +55,22 @@ type OpportunitySplitProvenance struct {
 	PreRegistered           bool      `json:"pre_registered,omitempty"`
 }
 
+// OpportunityFeatureProvenance identifies the source, construction method, and
+// integrity checksum for captured point-in-time features.
 type OpportunityFeatureProvenance struct {
 	Source   string `json:"source,omitempty"`
 	Method   string `json:"method,omitempty"`
 	Checksum string `json:"checksum,omitempty"`
 }
 
+// IsZero reports whether no feature provenance fields are populated.
 func (p OpportunityFeatureProvenance) IsZero() bool {
 	return strings.TrimSpace(p.Source) == "" &&
 		strings.TrimSpace(p.Method) == "" &&
 		strings.TrimSpace(p.Checksum) == ""
 }
 
+// IsZero reports whether no split-assignment provenance is populated.
 func (p OpportunitySplitProvenance) IsZero() bool {
 	return strings.TrimSpace(p.Source) == "" &&
 		strings.TrimSpace(p.Method) == "" &&
@@ -72,6 +80,8 @@ func (p OpportunitySplitProvenance) IsZero() bool {
 		!p.PreRegistered
 }
 
+// OpportunityPointInTimeFeatures contains the market, liquidity, trend, and
+// optional macro inputs available at capture time.
 type OpportunityPointInTimeFeatures struct {
 	Instrument         string                   `json:"instrument,omitempty"`
 	SecType            string                   `json:"sec_type,omitempty"`
@@ -111,6 +121,8 @@ type OpportunityPointInTimeFeatures struct {
 	Macro              *OpportunityMacroContext `json:"macro,omitempty"`
 }
 
+// OpportunityMacroContext captures the regime evidence attached to an
+// opportunity row, including its source time and semantic fingerprint.
 type OpportunityMacroContext struct {
 	Source                     string          `json:"source,omitempty"`
 	AsOf                       time.Time       `json:"as_of,omitzero"`

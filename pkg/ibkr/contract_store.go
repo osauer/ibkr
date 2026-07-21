@@ -17,26 +17,18 @@ import (
 	"time"
 )
 
-// ContractStore persists the connector's contractCache (symbol → conID
-// + routing fields) so daemon restarts don't pay IBKR's
-// per-account reqContractDetails rate-limit tax for every known
-// member of the watchlist. The cache is a one-way win: each successful
-// resolution is a fact about the world (conID is globally unique and
-// stable for years), and re-fetching it on every restart costs ~50
-// resolutions per 10-minute IBKR bucket per restart.
+// ContractStore serializes snapshots of resolved contracts for reuse across
+// connector lifetimes. It is safe for concurrent use.
 //
-// Production attaches a daemon-owned ContractCacheAuthority before the first
-// load. The JSON file at dir/contracts.json is now only a legacy cutover codec
-// and an isolated-test fixture. Both representations carry a version, as-of
-// timestamp, SPX-members hash, and symbol→details map.
+// Before [ContractStore.UseAuthority] succeeds, the store uses the legacy
+// JSON codec at dir/contracts.json. That path exists for cutover and isolated
+// tests, not as runtime authority. After an authority is attached, every load
+// and save uses it exclusively; the store does not merge or fall back to the
+// legacy file.
 //
-// Stock + index + cash entries (long-lived, ConID stable across years)
-// live under the top-level "contracts" key. Option entries live under
-// "options" — same ContractDetailsLite shape but keyed by the OPRA-style
-// optionContractKey (symbol|expiry|strike|right). Options are garbage-
-// collected on save: any entry whose Expiry has passed is dropped, so
-// the projection stabilises around ~1-3K live entries even though gamma
-// computes touch ~1600 strikes per session.
+// Ordinary contracts are keyed by symbol. Options are keyed by their
+// normalized symbol, trading class, expiry, strike, and right. Expired option
+// entries are excluded from loaded and saved snapshots.
 type ContractStore struct {
 	dir string
 
@@ -44,30 +36,30 @@ type ContractStore struct {
 	authority ContractCacheAuthority
 }
 
-// ContractCacheAuthority is the daemon-owned persistence boundary for the
-// connector cache. The ibkr package deliberately knows nothing about the
-// daemon's database: the daemon supplies an adapter that publishes the state
-// document and its immutable observation in one transaction.
+// ContractCacheAuthority stores the encoded contract-cache envelope for a
+// [ContractStore]. SaveContractCache must publish payload and observedAt as one
+// logical update; observedAt is the same UTC timestamp encoded in the payload.
 //
-// Once UseAuthority succeeds, ContractStore never reads or writes its legacy
-// JSON path. An empty authority is a deliberate cold start; legacy contract
-// details are acceleration data and must not seed the clean-slate epoch.
+// Once [ContractStore.UseAuthority] succeeds, the store never reads or writes
+// its legacy JSON path. An authority that reports ok=false represents an empty
+// cache, not permission to fall back to that file.
 type ContractCacheAuthority interface {
 	LoadContractCache() (payload []byte, ok bool, err error)
 	SaveContractCache(payload []byte, observedAt time.Time) error
 }
 
-// NewContractStore returns a store rooted at dir. Lazy mkdir on first
-// write so a test that passes an unwritable dir doesn't fail at
-// construction.
+// NewContractStore returns a store whose legacy JSON codec is rooted at dir.
+// It performs no I/O and creates dir only on the first legacy save. dir is
+// ignored after [ContractStore.UseAuthority] succeeds.
 func NewContractStore(dir string) *ContractStore {
 	return &ContractStore{dir: dir}
 }
 
-// UseAuthority switches all subsequent loads and saves to authority. Any
-// existing SQLite document is validated before the switch is published so a
-// malformed row fails daemon startup rather than partially seeding a live
-// connector. Missing state is valid and starts cold.
+// UseAuthority validates authority's current payload and, on success, switches
+// all subsequent loads and saves to it. A missing payload is a valid cold
+// start. A nil store, nil authority, load failure, or invalid current envelope
+// returns an error and leaves the existing backend unchanged. UseAuthority
+// does not import or merge the legacy JSON file.
 func (s *ContractStore) UseAuthority(authority ContractCacheAuthority) error {
 	if s == nil {
 		return errors.New("contract cache: nil store")
@@ -90,28 +82,10 @@ func (s *ContractStore) UseAuthority(authority ContractCacheAuthority) error {
 	return nil
 }
 
-// contractStoreVersion is the persisted payload schema version. A future
-// incompatible format bump increments this; Load returns a cold result
-// for files at any other version so the daemon cold-starts cleanly
-// rather than mis-interpreting an unknown schema. Matches the pattern
-// used by internal/breadth/spx.WindowSet.
-//
-// v1 → v2 added the top-level "options" map, keyed by optionContractKey,
-// for bulk-prewarmed option contracts. v1 files are read transparently:
-// the options map appears as nil and the daemon refills it from the
-// next prewarm.
-//
-// v2 → v3 widened optionContractKey to include the trading class
-// (`symbol|class|expiry|strike|right` instead of `symbol|expiry|strike|right`).
-// Required for SPX/SPXW disambiguation — see
-// docs/design/gamma-spx-coverage.md §4.4. v2 keys are migrated forward
-// on read: each `S|E|K|R` becomes `S||E|K|R` (empty class slot). Empty
-// class never collides with a real entry because the connector always
-// fills TradingClass for OPT contracts; only the v2-read migration
-// produces empty-class entries, and the next prewarm overwrites them
-// with class-qualified keys.
-//
-// New writes always go out at v3.
+// contractStoreVersion is the current encoded payload version. Legacy-file
+// reads accept older envelopes and migrate their option keys in memory; newer
+// envelopes produce a cold-cache result. Authority payloads must match the
+// current version exactly.
 const contractStoreVersion = 3
 
 // contractStoreFile is the filename inside ContractStore.dir.
@@ -126,18 +100,12 @@ type contractCacheFile struct {
 	Options     map[string]ContractDetailsLite `json:"options,omitempty"`
 }
 
-// Load returns the persisted (symbol → details) map and the
-// members-hash they were saved with. The caller compares that hash
-// against the current sp500Members hash to decide whether to prune
-// stale entries before seeding the live connectors.
-//
-// Returns (nil, "", nil) when:
-//   - no file exists (cold install)
-//   - file exists but on-disk version doesn't match contractStoreVersion
-//     (future-format files trigger a cold rebuild rather than parse error)
-//
-// I/O errors and JSON corruption surface as non-nil error — callers
-// log and proceed with an empty cache rather than aborting the daemon.
+// Load returns a caller-owned symbol-to-contract map and the membership hash
+// stored with it. Calls are serialized with [ContractStore.Save]. A nil store,
+// missing payload, or newer legacy-file envelope returns (nil, "", nil) as a
+// cold cache. Read and decode failures return an error. Older legacy envelopes
+// are accepted; attached authorities are validated as current by
+// [ContractStore.UseAuthority].
 func (s *ContractStore) Load() (map[string]ContractDetailsLite, string, error) {
 	if s == nil {
 		return nil, "", nil
@@ -148,31 +116,21 @@ func (s *ContractStore) Load() (map[string]ContractDetailsLite, string, error) {
 	if err != nil || !ok {
 		return nil, "", err
 	}
-	// Accept any version ≤ contractStoreVersion. v1 files have no
-	// "options" key; they load cleanly because the field is optional.
-	// Newer-version files (forward compatibility, hypothetical) trigger
-	// a cold rebuild — the daemon doesn't try to interpret a schema
-	// it doesn't know.
+	// Older legacy envelopes remain readable; newer ones produce a cold result
+	// rather than being interpreted with an older schema.
 	if f.Version > contractStoreVersion {
 		return nil, "", nil
 	}
 	return f.Contracts, f.MembersHash, nil
 }
 
-// LoadOptions returns the persisted (optionContractKey → details) map.
-// Expired entries are pruned in-place: any entry whose Expiry has
-// passed in NY time is dropped silently. The returned map can be empty
-// (cold install or all entries expired) but never nil.
-//
-// v2 → v3 key-format migration runs here: v2 files keyed entries as
-// `symbol|expiry|strike|right` (4 fields, 3 pipes); v3 added trading
-// class as a second field (5 fields, 4 pipes). v2 keys are rewritten
-// on the fly to `symbol||expiry|strike|right` (empty class slot) so
-// the daemon picks up the persisted entries; the next prewarm
-// overwrites them with class-qualified keys.
-//
-// Same return convention as Load: missing file or future-version
-// mismatch yields an empty map without error.
+// LoadOptions returns a caller-owned option-key-to-contract map. Options whose
+// expiry precedes the current New York date are omitted from the returned
+// snapshot without rewriting persistence. Legacy keys without a trading class
+// are migrated in memory to an empty class segment; malformed legacy keys are
+// skipped. A nil store, missing payload, newer legacy envelope, or a snapshot
+// containing no live options returns an empty non-nil map. Read and decode
+// failures return an error. Calls are serialized with [ContractStore.Save].
 func (s *ContractStore) LoadOptions() (map[string]ContractDetailsLite, error) {
 	if s == nil {
 		return map[string]ContractDetailsLite{}, nil
@@ -195,11 +153,8 @@ func (s *ContractStore) LoadOptions() (map[string]ContractDetailsLite, error) {
 		if v.Expiry != "" && v.Expiry < today {
 			continue
 		}
-		// v2 → v3 key migration. A v2 key has 3 pipes (symbol|expiry|
-		// strike|right); v3 has 4 (symbol|class|expiry|strike|right).
-		// Anything else is malformed and skipped (defensive — the
-		// file came from our own writer, so this branch fires only
-		// on hand-edited / corrupted files).
+		// Migrate the legacy key shape, which omitted the trading-class
+		// segment. Any other shape is malformed and skipped.
 		if pipes := strings.Count(k, "|"); pipes == 3 {
 			parts := strings.SplitN(k, "|", 2)
 			if len(parts) == 2 {
@@ -264,11 +219,9 @@ func decodeContractCache(raw []byte, strictCurrent bool) (contractCacheFile, err
 	return f, nil
 }
 
-// normalizeCurrentOptionDetail makes the canonical v3 cache key the source of
-// truth for tuple fields that an older portfolio-seed writer omitted from the
-// value. This is a deterministic payload migration, not a permissive repair:
-// malformed keys, zero ConIDs, and any value field that contradicts the key
-// still fail authority attachment.
+// normalizeCurrentOptionDetail makes the canonical cache key the source of
+// truth for tuple fields omitted from the value. Malformed keys, zero ConIDs,
+// and fields that contradict the key remain errors.
 func normalizeCurrentOptionDetail(key string, detail ContractDetailsLite) (ContractDetailsLite, error) {
 	parts := strings.Split(key, "|")
 	if len(parts) != 5 {
@@ -328,15 +281,15 @@ func nyDateString(now time.Time) string {
 	return now.UTC().Format("20060102")
 }
 
-// Save filters and writes contracts atomically. Only entries that pass
-// shouldPersistContract are included. options is the parallel OPT
-// entry map (keyed by optionContractKey); entries whose Expiry has
-// passed are dropped in the GC pass. membersHash is stored alongside
-// so a future Load can detect SPX reconstitution; pass "" if the
-// caller doesn't track membership.
+// Save publishes one filtered contract-cache snapshot. It copies its map
+// inputs and does not mutate them. Contracts with a zero ConID and options
+// expired before the current New York date are omitted. Every option key and
+// value must form a valid, matching tuple; otherwise Save returns an error
+// without publishing. membersHash may be empty when membership is not tracked.
 //
-// Concurrent Save calls serialise on the store's mutex; the disk write
-// is single-flight per store instance.
+// Calls on one store are serialized. An attached authority receives one
+// encoded envelope; the legacy codec writes a temporary file and renames it
+// over dir/contracts.json.
 func (s *ContractStore) Save(contracts map[string]ContractDetailsLite, options map[string]ContractDetailsLite, membersHash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -413,40 +366,16 @@ func (s *ContractStore) Save(contracts map[string]ContractDetailsLite, options m
 	return nil
 }
 
-// shouldPersistContract returns true iff the entry is worth keeping on
-// disk: a resolved (ConID != 0) STK / IND / CASH contract. Options
-// and futures expire — their entries churn far faster than the file
-// can usefully cache them, and persisting them just bloats the file.
-// Empty SecType is treated as STK for backward compatibility with old
-// in-memory entries that pre-dated the SecType-on-cache convention.
+// shouldPersistContract reports whether a contract is resolved. The ordinary
+// cache does not retain security type, so ConID is the only reliable filter.
 func shouldPersistContract(d ContractDetailsLite) bool {
-	if d.ConID == 0 {
-		return false
-	}
-	// Look at the trading class as a SecType hint when available.
-	// ContractDetailsLite doesn't carry SecType directly, but the
-	// trading class for non-STK is distinctive: options have OPRA-style
-	// classes, futures have GLOBEX classes, etc. For STK on US listings
-	// the TradingClass is typically equal to the Symbol or "NMS".
-	//
-	// Practically the contractCache is populated almost entirely by
-	// stock + index lookups (the breadth and regime paths). Options
-	// from the gamma path go through a different code path that
-	// doesn't seed contractCache. So a permissive filter — accept all
-	// non-zero ConIDs — captures the right entries without needing
-	// to track SecType per-entry.
-	return true
+	return d.ConID != 0
 }
 
-// MembersHash returns a deterministic SHA-256 (hex-encoded, first 16
-// chars) of the supplied member list. Order doesn't matter and case /
-// surrounding whitespace are normalised — changes in member ordering
-// between `make refresh-spx-members` runs and stray formatting from
-// the Wikipedia scrape don't invalidate the cache.
-//
-// 16 hex chars (64 bits) is plenty for collision detection in this
-// use case: the only consumer is "did the SPX membership change?",
-// and adversarial collisions don't matter.
+// MembersHash returns the first 16 lowercase hexadecimal characters of a
+// SHA-256 hash of members. It trims and uppercases each element before sorting,
+// so input order, case, and surrounding whitespace do not affect the result.
+// Duplicate elements remain significant.
 func MembersHash(members []string) string {
 	// Normalise BEFORE sorting so case/whitespace variants collapse to
 	// the same sort position. Sort-then-normalise would have left
@@ -465,14 +394,10 @@ func MembersHash(members []string) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// DefaultContractStoreDir returns the retired file-codec root:
-// $XDG_CACHE_HOME/ibkr/, falling back to $HOME/.cache/ibkr/. The daemon uses
-// this only to locate cutover input; runtime persistence attaches
-// ContractCacheAuthority.
-//
-// Returns an error only if neither XDG_CACHE_HOME nor HOME is set —
-// on a real OS user account that doesn't happen. Tests should
-// construct NewContractStore directly with t.TempDir().
+// DefaultContractStoreDir returns the root for the retired legacy JSON codec:
+// $XDG_CACHE_HOME/ibkr when XDG_CACHE_HOME is set, otherwise
+// $HOME/.cache/ibkr as resolved by [os.UserHomeDir]. It does not create the
+// directory. Authority-backed stores do not use this path.
 func DefaultContractStoreDir() (string, error) {
 	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
 		return filepath.Join(v, "ibkr"), nil
@@ -484,11 +409,10 @@ func DefaultContractStoreDir() (string, error) {
 	return filepath.Join(home, ".cache", "ibkr"), nil
 }
 
-// SnapshotContracts returns a defensive copy of the connector's in-
-// memory contractCache, filtered to entries with ConID != 0. The copy
-// is built under contractMu's read lock so concurrent updates don't
-// race the iteration. Callers — typically the daemon's periodic
-// ContractStore.Save tick — must not mutate the returned map.
+// SnapshotContracts returns a caller-owned copy of the connector's resolved
+// ordinary-contract cache. Entries with a zero ConID are omitted. Concurrent
+// cache updates are synchronized, and mutating the returned map does not affect
+// the connector.
 func (c *Connector) SnapshotContracts() map[string]ContractDetailsLite {
 	c.contractMu.RLock()
 	defer c.contractMu.RUnlock()
@@ -501,11 +425,12 @@ func (c *Connector) SnapshotContracts() map[string]ContractDetailsLite {
 	return out
 }
 
-// SnapshotOptionContracts returns a defensive copy of the connection's
-// in-memory optionContractCache (keyed by optionContractKey), filtered
-// to entries with ConID != 0. Used by the daemon's periodic save tick to
-// persist resolved option contracts through its authority so a daemon restart
-// within the same trading session skips the prewarm cost.
+// SnapshotOptionContracts returns a caller-owned copy of the active
+// connection's resolved option-contract cache, keyed by normalized symbol,
+// trading class, expiry, strike, and right. Entries with a zero ConID are
+// omitted. It returns nil when no connection is attached. Concurrent cache
+// updates are synchronized, and mutating the returned map does not affect the
+// connection.
 func (c *Connector) SnapshotOptionContracts() map[string]ContractDetailsLite {
 	c.mu.RLock()
 	conn := c.conn
@@ -524,18 +449,11 @@ func (c *Connector) SnapshotOptionContracts() map[string]ContractDetailsLite {
 	return out
 }
 
-// IsOptionContractCached reports whether the connection's option contract
-// cache has a resolved entry for (symbol, tradingClass, expiry, strike,
-// right). Used by the gamma compute to filter its enumerated job list to
-// strikes that actually exist as listed contracts — secDefOptParams
-// returns a superset across exchanges, and asking reqMktData for a
-// non-listed (Strike, Right) just burns time and trips the throttle
-// detector.
-//
-// tradingClass is required for SPX-style multi-class underlyings (SPX vs
-// SPXW share expiry+strike on third-Fridays). For single-class
-// underlyings (SPY, equities) callers pass the symbol — that matches the
-// TradingClass IBKR fills in for those contracts.
+// IsOptionContractCached reports whether the active connection has a resolved
+// option entry matching symbol, tradingClass, expiry, strike, and right.
+// Symbol, tradingClass, and right are trimmed and matched case-insensitively;
+// expiry is trimmed, while strike is encoded to six decimal places. It returns
+// false when no connection is attached or the matching entry has a zero ConID.
 func (c *Connector) IsOptionContractCached(symbol, tradingClass, expiry string, strike float64, right string) bool {
 	c.mu.RLock()
 	conn := c.conn
@@ -550,10 +468,10 @@ func (c *Connector) IsOptionContractCached(symbol, tradingClass, expiry string, 
 	return ok && entry.ConID != 0
 }
 
-// SeedOptionContracts pre-populates the connection's optionContractCache
-// from the persisted store. Called once on daemon startup before any
-// gamma compute kicks. Entries already in the cache (from in-flight
-// resolution races) are preserved; only empty slots get seeded.
+// SeedOptionContracts copies resolved entries into the active connection's
+// option cache and returns the number inserted. Entries with a zero ConID are
+// ignored, and an existing resolved entry always wins. The input map is not
+// retained or mutated. It returns zero when no connection is attached.
 func (c *Connector) SeedOptionContracts(options map[string]ContractDetailsLite) int {
 	c.mu.RLock()
 	conn := c.conn

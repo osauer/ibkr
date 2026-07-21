@@ -133,8 +133,8 @@ func renderAccountTextTo(env *Env, out io.Writer, a *rpc.AccountResult) int {
 // writeDailyPnLLine prints the hero-row Daily P&L line. When the gateway
 // hasn't delivered a frame yet, the line still renders with a dim em-dash
 // + "(subscribing — value lands on next call)" hint so a first-time user
-// sees the field exists. The lazy reqPnL kickoff is documented in
-// CHANGELOG v0.17.0 — first call subscribes, next call has values.
+// sees the field exists. The first call starts the lazy reqPnL subscription;
+// a later call can carry the observed value.
 func writeDailyPnLLine(env *Env, out io.Writer, a *rpc.AccountResult, base string, w int) {
 	if a.DailyPnL == nil {
 		fmt.Fprintf(out, "  Daily P&L               %s  %s\n",

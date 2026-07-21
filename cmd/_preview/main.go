@@ -312,8 +312,7 @@ func fixtureHistory() *rpc.HistoryDailyResult {
 
 // fixtureScan is a 6-row mixed-exchange screen — USD-quoted US rows,
 // one EUR row, one HKD row, plus a partial row (no IV, no 52w range,
-// no Currency) so the em-dash + fallback paths both render. Exercises
-// the per-row Currency rendering introduced in v0.13.
+// no Currency) so the per-row currency, em-dash, and fallback paths render.
 func fixtureScan() *rpc.ScanResult {
 	mkRow := func(rank int, sym, ccy string, last, pct, iv, lo, hi float64, vol int64) rpc.ScanRow {
 		return rpc.ScanRow{

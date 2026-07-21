@@ -16,6 +16,9 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
+// Alert-delivery constants version the app-local ledger and classify durable
+// attempt transitions, aggregate health, occurrence endings, and completion
+// dispositions. They do not grant transport eligibility.
 const (
 	AlertDeliveryVersion       = "alert-delivery-v2"
 	legacyAlertDeliveryVersion = "alert-delivery-v1"
@@ -77,6 +80,8 @@ const (
 		"0000000000000000000000000000000000000000000000000000000000000000"
 )
 
+// Alert-delivery errors expose bounded, redacted failure classes while
+// occurrence, target, attempt, and persisted artifact identities stay private.
 var (
 	ErrAlertDeliveryOverflow          = errors.New("alert delivery evidence overflow")
 	ErrAlertDeliveryOldSnapshot       = errors.New("alert delivery snapshot is older than source authority")
@@ -340,12 +345,16 @@ type AlertDeliveryOccurrenceView struct {
 	TransportEligible  bool                        `json:"-"`
 }
 
+// AlertDeliveryAttentionRef identifies one redacted unread occurrence without
+// exposing its private producer key or evidence fingerprint.
 type AlertDeliveryAttentionRef struct {
 	DisplayID string          `json:"display_id"`
 	Source    rpc.AlertSource `json:"source"`
 	Kind      rpc.AlertKind   `json:"kind"`
 }
 
+// AlertDeliveryAttention is the source-neutral ledger's durable unread cursor.
+// UnreadCount counts references above ReadThroughSeq through HighWaterSeq.
 type AlertDeliveryAttention struct {
 	UnreadCount    int                         `json:"unread_count"`
 	HighWaterSeq   uint64                      `json:"high_water_seq"`
@@ -353,6 +362,8 @@ type AlertDeliveryAttention struct {
 	UnreadRefs     []AlertDeliveryAttentionRef `json:"unread_refs"`
 }
 
+// AlertDeliveryAttemptTotals is a redacted projection of durable attempt
+// dispositions; RetryPending is derived from current retained evidence.
 type AlertDeliveryAttemptTotals struct {
 	Attempts       int `json:"attempts"`
 	Confirmed      int `json:"confirmed_pending_outcome"`
@@ -366,6 +377,8 @@ type AlertDeliveryAttemptTotals struct {
 	Unapproved     int `json:"policy_unapproved"`
 }
 
+// AlertDeliveryHealth summarizes app-local delivery readiness and outcomes.
+// LastAcceptedAt records push-service acceptance, not device display or read.
 type AlertDeliveryHealth struct {
 	State          string    `json:"state"`
 	Class          string    `json:"class,omitempty"`
@@ -373,6 +386,9 @@ type AlertDeliveryHealth struct {
 	LastAcceptedAt time.Time `json:"last_push_service_acceptance_at,omitzero"`
 }
 
+// AlertDeliveryView is the redacted app projection of the source-neutral
+// delivery ledger. Private authority scope, producer keys, target identities,
+// attempts, and receipts are excluded from JSON.
 type AlertDeliveryView struct {
 	Initialized      bool                          `json:"initialized"`
 	Version          string                        `json:"version,omitempty"`
@@ -390,6 +406,9 @@ type AlertDeliveryView struct {
 	AuthorityScope string `json:"-"`
 }
 
+// AlertDeliveryReservation is the durable-before-send handoff for one
+// occurrence-target attempt. Candidate is populated only after confirmation
+// rechecks current eligibility under the store lock.
 type AlertDeliveryReservation struct {
 	AttemptID     string    `json:"-"`
 	DisplayID     string    `json:"display_id"`
@@ -403,9 +422,16 @@ type AlertDeliveryReservation struct {
 	Candidate rpc.AlertCandidate `json:"-"`
 }
 
+// AlertDeliveryCompletion classifies the transport result supplied when a
+// confirmed reservation is completed.
 type AlertDeliveryCompletion string
+
+// AlertDeliveryCompletionDisposition reports whether completion was applied,
+// already known, inactive, or reconciled after target retirement.
 type AlertDeliveryCompletionDisposition string
 
+// AlertDeliveryCompletionOutcome reports the durable disposition and retry
+// state produced by completing one reservation.
 type AlertDeliveryCompletionOutcome struct {
 	Disposition AlertDeliveryCompletionDisposition `json:"disposition"`
 	Class       string                             `json:"class"`
@@ -1143,6 +1169,9 @@ func latestAlertDeliveryPreviousContext(data *alertDeliveryData, authorityScope,
 	return alertDeliveryPreviousContext{}, false
 }
 
+// MarkAlertDeliveryAttentionRead durably advances the source-neutral inbox
+// cursor only across a complete contiguous set of retained references. It is
+// evidence of rendered app state, not human attention or physical delivery.
 func (s *Store) MarkAlertDeliveryAttentionRead(throughSeq uint64) (AlertDeliveryAttention, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1791,6 +1820,9 @@ func (s *Store) enforceAlertDeliveryRuntimePolicy(now time.Time) error {
 	return nil
 }
 
+// CompactAlertDelivery removes read, ended evidence older than the retention
+// window and retired targets no longer referenced by active subscriptions or
+// retained attempts. Unread occurrences are never compacted.
 func (s *Store) CompactAlertDelivery(now time.Time) error {
 	now = now.UTC()
 	cutoff := now.Add(-alertDeliveryRetention)

@@ -724,9 +724,8 @@ func (e *Env) formatGreeksLine(o rpc.PositionView) string {
 // next to a $3 mark. Dividing by multiplier on OPT restores symmetry.
 // JSON output stays IBKR-faithful; only the rendered column normalises.
 //
-// The SecType compare uses rpc.SecTypeOption rather than a literal so
-// the v0.12.4-class "OPT" vs "OPTION" drift can't recur silently — the
-// constant is the single source of truth for the wire value.
+// The SecType comparison uses rpc.SecTypeOption as the single source of truth
+// for the wire value.
 func avgCostPerShare(p rpc.PositionView) float64 {
 	if p.SecType == rpc.SecTypeOption && p.Multiplier > 0 {
 		return p.AvgCost / float64(p.Multiplier)

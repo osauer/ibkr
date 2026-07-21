@@ -1,13 +1,8 @@
-// ibkr is the Interactive Brokers command-line client. The binary is
-// stateless: each invocation opens a Unix socket to the long-lived daemon
-// process, sends one or more JSON-RPC calls, formats the response, and
-// exits.
-//
-// The same binary runs the daemon under the `daemon` subcommand —
-// invoked manually for foreground debugging, or auto-spawned by the CLI
-// when no socket exists. There is no separate `ibkrd` binary in v0.4+;
-// the previous two-binary layout was collapsed to simplify packaging
-// and remove the binary-discovery dance.
+// Command ibkr provides terminal, MCP, app-host, and daemon entry points for
+// the local trading harness. Broker-connected commands adapt typed requests to
+// the long-running daemon, while setup, update, watchlist, and offline research
+// workflows may run locally. The daemon subcommand owns broker connectivity and
+// runtime state; the MCP subcommand exposes no broker-write tools.
 package main
 
 import (

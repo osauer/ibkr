@@ -35,6 +35,9 @@ type OrderMismatchWatch struct {
 	lastPass map[string]bool
 }
 
+// Observe records and sends only protective-order mismatches seen on two
+// consecutive observations. The stored and pushed record is redacted; order
+// references and position details remain on authenticated order views.
 func (w *OrderMismatchWatch) Observe(ctx context.Context, orders rpc.OrdersOpenResult) {
 	if w == nil || w.Store == nil {
 		return

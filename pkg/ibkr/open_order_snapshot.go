@@ -7,15 +7,20 @@ import (
 	"time"
 )
 
-// OpenOrderSnapshot is a one-shot broker truth read of every open order the
-// gateway reports for the session (API clients and manual TWS orders alike).
-// Complete is true only when the gateway's openOrderEnd terminator arrived;
-// an incomplete snapshot proves nothing about absent orders and must never be
-// used to infer that an order is gone.
+// OpenOrderSnapshot is a one-shot read of the API-created open orders the
+// gateway reports across client IDs. It does not bind or include manual TWS
+// orders merely because Complete is true; those require the separate client-0
+// open-order binding flow, which this request does not perform.
+//
+// Complete is true only when openOrderEnd arrived. When Complete is false,
+// Orders may contain callbacks collected before the context ended, but that
+// proves nothing about absent orders. A request failure returns no collected
+// orders.
+// AsOf is the local UTC completion or failure time, not a broker timestamp.
 type OpenOrderSnapshot struct {
-	Complete bool
-	Orders   []OrderLifecycleEvent
-	AsOf     time.Time
+	Complete bool                  // Complete reports whether openOrderEnd arrived.
+	Orders   []OrderLifecycleEvent // Orders contains collected openOrder events and may be empty.
+	AsOf     time.Time             // AsOf is the local UTC time at which the method returned.
 }
 
 // openOrderSnapshotCollector accumulates openOrder callbacks between a
@@ -52,11 +57,10 @@ func (col *openOrderSnapshotCollector) snapshot() []OrderLifecycleEvent {
 	return append([]OrderLifecycleEvent{}, col.orders...)
 }
 
-// RequestAllOpenOrders asks the gateway for a snapshot of all open orders for
-// the session; results arrive as openOrder/orderStatus callbacks terminated
-// by openOrderEnd. This is a read request — deliberately not gated behind the
-// tradingEnabled build flag, so read-only builds can reconcile stale journal
-// rows too.
+// RequestAllOpenOrders sends reqAllOpenOrders to the gateway. Results arrive
+// asynchronously as openOrder and orderStatus callbacks followed by
+// openOrderEnd; a nil error means only that the request frame was accepted for
+// the socket write. This read request is available in both build modes.
 func (c *Connection) RequestAllOpenOrders() error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
@@ -75,11 +79,16 @@ func (c *Connector) requestAllOpenOrdersDefault() error {
 	return conn.RequestAllOpenOrders()
 }
 
-// SnapshotOpenOrders performs a one-shot broker open-order snapshot. It
-// installs a collector, issues reqAllOpenOrders, and waits for openOrderEnd
-// or ctx expiry. WhatIf preview echoes never reach the collector because
-// notifyOrderLifecycle drops them before collection. Callers are serialized;
-// one in-flight snapshot at a time.
+// SnapshotOpenOrders performs a one-shot broker open-order snapshot and waits
+// for openOrderEnd or ctx completion. Concurrent calls are serialized, and a
+// call waiting for another snapshot does not observe ctx until it acquires the
+// serialization lock. WhatIf preview echoes are excluded.
+//
+// On openOrderEnd it returns Complete=true and a nil error. On ctx completion it
+// returns Complete=false, callbacks collected so far, a local UTC AsOf, and
+// ctx.Err(). A request failure returns Complete=false, no collected orders, a
+// local UTC AsOf, and the request error. An incomplete or empty snapshot must
+// not be used to infer that an order is absent or final.
 func (c *Connector) SnapshotOpenOrders(ctx context.Context) (OpenOrderSnapshot, error) {
 	if c == nil {
 		return OpenOrderSnapshot{}, fmt.Errorf("connector is nil")

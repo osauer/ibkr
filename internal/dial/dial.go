@@ -1,8 +1,7 @@
-// Package dial is the CLI's small Unix-socket client for the daemon.
-//
-// One Conn handles one request at a time: either a unary call (Call) or a
-// streaming subscription (Stream). The newline-delimited JSON wire format
-// is symmetric with what internal/daemon writes.
+// Package dial connects local adapters to the daemon's typed, newline-delimited
+// JSON protocol over a Unix socket. A Conn serializes one unary call or stream
+// at a time; connection recovery and autospawn coordinate process availability
+// without taking ownership of daemon state.
 package dial
 
 import (
@@ -155,18 +154,11 @@ func (c *Conn) Close() error {
 
 // Call performs a unary request/response round trip and decodes result into
 // out. ctx cancellation forces an immediate read deadline so the in-flight
-// ReadBytes returns and Call surfaces ctx.Err() — matching the Stream
-// path's cancellation semantics. Pre-fix, only ctx.Deadline() was honored
-// (via applyDeadline once at start), so SIGINT-driven cancellation by
-// signal.NotifyContext in cmd/ibkr did nothing and the user saw no
-// reaction to Ctrl+C until the deadline fired.
+// read returns and Call surfaces ctx.Err(), matching Stream cancellation.
 //
 // The socket deadline is cleared on return, success or failure, so a
-// subsequent caller (especially Stream) starts with a fresh state. Without
-// this, a tight-deadline Call (e.g. the 1s version-skew check at startup)
-// leaks its deadline into the next operation on the same Conn — a
-// long-lived `quote --watch` Stream then hits the stale deadline ~1s in,
-// gets a net.Timeout, and exits silently with no error message.
+// subsequent caller, including a long-lived stream, starts with fresh timing
+// state rather than inheriting the unary call's deadline.
 func (c *Conn) Call(ctx context.Context, method string, params any, out any) error {
 	req, err := newRequest(method, params)
 	if err != nil {

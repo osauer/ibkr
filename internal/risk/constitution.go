@@ -10,27 +10,11 @@ import (
 	"time"
 )
 
-// The risk constitution (docs/design/risk-policy.md) is the operator's
-// authoritative personal capital policy: protected floor, declared risk
-// capital, drawdown response ladder, override governance, cadence artefact
-// declarations, and sibling-policy pins. It is loaded from
-// ~/.config/ibkr/policies/risk-policy.toml by the daemon manager.
-//
-// Two properties distinguish it from the sibling policies:
-//
-//   - No embedded default. A missing file or a missing material key is
-//     "unapproved", never a code value — material limits must be written by
-//     the operator (interview decisions of 2026-07-12). Material keys are
-//     pointers; nil means unapproved.
-//   - Non-overridable safety invariants (account/route pins, WhatIf, preview
-//     tokens, journaling, agent-origin gating, freeze) deliberately have no
-//     keys in this schema, so no revision or override can reach them.
-
+// ConstitutionKind identifies the operator-authored risk constitution schema.
 const ConstitutionKind = "ibkr.risk_policy"
 
-// Capital tier vocabulary. Data absence never renders ok: unapproved and
-// unknown are load-bearing non-ok states (rulebook never-false-pass
-// precedent).
+// CapitalTierOK and the related constants are capital-evaluation outcomes.
+// Missing observations and unapproved policy remain explicit non-OK tiers.
 const (
 	CapitalTierOK         = "ok"
 	CapitalTierWarn       = "warn"
@@ -39,17 +23,15 @@ const (
 	CapitalTierUnapproved = "unapproved"
 )
 
-// Enforcement classes a constitution control may declare. "hard" is
-// deliberately not accepted by v1 validation: promotion to a real pre-trade
-// gate is a later human policy revision made after the shadow period
-// (phase-1 decision; docs/design/risk-policy.md).
+// EnforcementShadow and EnforcementAdvisory are the enforcement classes a
+// constitution control may declare. Validation rejects unsupported classes.
 const (
 	EnforcementShadow   = "shadow"
 	EnforcementAdvisory = "advisory"
 )
 
-// Constitution is the typed schema of risk-policy.toml. Material limits are
-// pointers: nil = unapproved, and validation never backfills them.
+// Constitution is the typed operator-authored capital policy. Material limits
+// are pointers: nil means unapproved, and validation never backfills them.
 type Constitution struct {
 	Kind          string `toml:"kind" json:"kind"`
 	SchemaVersion int    `toml:"schema_version" json:"schema_version"`
@@ -75,11 +57,10 @@ type ConstitutionCapital struct {
 	ProtectedFloor      *float64 `toml:"protected_floor" json:"protected_floor"`
 	DeclaredRiskCapital *float64 `toml:"declared_risk_capital" json:"declared_risk_capital"`
 	// MaxEquityAgeMinutes bounds trust in the last equity observation;
-	// beyond it the capital state is stale (tier unknown while advisory,
-	// fail-closed once the block control is promoted to hard).
+	// beyond it the evaluator marks the capital state stale and does not pass it.
 	MaxEquityAgeMinutes *int `toml:"max_equity_age_minutes" json:"max_equity_age_minutes"`
 	// MaxUnreconciledDays bounds trust in the declared capital-event ledger
-	// between reconcile attestations; same posture as equity age.
+	// between reconciliation evidence; expiry is reported as stale.
 	MaxUnreconciledDays *int `toml:"max_unreconciled_days" json:"max_unreconciled_days"`
 }
 
@@ -87,7 +68,7 @@ type ConstitutionCapital struct {
 // percentages of declared risk capital consumed from the cash-flow-adjusted
 // equity peak. Warn is advisory and self-clearing; block latches in daemon
 // state and clears only through a journaled human reset that re-bases the
-// peak (interview decisions 4 and 5).
+// peak.
 type ConstitutionDrawdown struct {
 	WarnConsumedPct  *float64 `toml:"warn_consumed_pct" json:"warn_consumed_pct"`
 	BlockConsumedPct *float64 `toml:"block_consumed_pct" json:"block_consumed_pct"`
@@ -125,10 +106,8 @@ type ConstitutionRecon struct {
 	MaxEquityDivergencePct *float64 `toml:"max_equity_divergence_pct" json:"max_equity_divergence_pct"`
 }
 
-// ConstitutionCadence declares the operating-cadence artefacts so their
-// completion can be journaled (phase-2 adherence data). All artefacts are
-// advisory in v1: a missed artefact is recorded, never blocking (interview
-// decision 8).
+// ConstitutionCadence declares operating-cadence artefacts whose completion
+// can be journaled. Artefact validation accepts only advisory declarations.
 type ConstitutionCadence struct {
 	Morning ConstitutionArtefact `toml:"morning" json:"morning"`
 	EOD     ConstitutionArtefact `toml:"eod" json:"eod"`
@@ -156,8 +135,9 @@ type ConstitutionMonthlyCadence struct {
 	NudgeAtLocal *string `toml:"nudge_at_local" json:"nudge_at_local"`
 }
 
-// ConstitutionArtefact declares one cadence artefact. Class "" means the
-// artefact is not declared; "advisory" is the only accepted class in v1.
+// ConstitutionArtefact declares one cadence artefact. An empty Class means the
+// artefact is undeclared; validation accepts advisory as the only non-empty
+// class.
 type ConstitutionArtefact struct {
 	Class string `toml:"class" json:"class,omitempty"`
 }

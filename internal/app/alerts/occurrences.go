@@ -17,6 +17,8 @@ const (
 	defaultOccurrenceSweepInterval = time.Minute
 )
 
+// Source-neutral dispatcher errors intentionally omit occurrence, target,
+// subscription, endpoint, and transport-error identity.
 var (
 	ErrOccurrenceDispatcherUnavailable = errors.New("alert occurrence dispatcher unavailable")
 	ErrOccurrenceObservationFailed     = errors.New("alert occurrence observation failed")

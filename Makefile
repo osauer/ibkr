@@ -56,7 +56,7 @@ MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publis
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-service-worker-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish registry-publish-verify-first release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-regen account-data-check hook-behavior-check agent-config-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check go-doc-check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-service-worker-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish registry-publish-verify-first release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-regen account-data-check hook-behavior-check agent-config-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -234,10 +234,13 @@ test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overla
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
 CHECK_JOBS ?= 8
-CHECK_TARGETS = $(CHECK_DEPS) agent-config-check modernize-check docs-check docs-html-check changelog-check account-data-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-service-worker-check remote-relay-check gofmt-check vet-check staticcheck-check govulncheck-check
+CHECK_TARGETS = $(CHECK_DEPS) agent-config-check modernize-check docs-check docs-html-check changelog-check account-data-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-service-worker-check remote-relay-check go-doc-check gofmt-check vet-check staticcheck-check govulncheck-check
 CHECK_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(CHECK_JOBS),)
-check: ## agent config/hooks + gofmt + go vet + staticcheck + govulncheck + modernize-check + plugin/parity/docs/changelog/account/app checks (binding pre-commit gate)
+check: ## agent config/hooks + Go docs/format/vet/staticcheck/vulns + modernize/plugin/parity/docs/changelog/account/app checks (binding pre-commit gate)
 	$(MAKE) $(CHECK_MAKEFLAGS) $(CHECK_TARGETS)
+
+go-doc-check: ## Verify package and exported API documentation across all tracked Go build variants
+	go run ./scripts/go-doc-audit -check
 
 gofmt-check: ## Verify tracked / non-gitignored Go files are gofmt'd
 	@# `gofmt -l .` walks every subdirectory and trips on gitignored paths

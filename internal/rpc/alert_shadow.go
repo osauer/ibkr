@@ -16,8 +16,13 @@ const MethodAlertShadowStatus = "alerts.shadow_status"
 // requirements through request parameters.
 type AlertCandidatesParams struct{}
 
+// AlertShadowStatusParams is intentionally empty because shadow scope and
+// source coverage are daemon-owned.
 type AlertShadowStatusParams struct{}
 
+// AlertShadowStatusResult is the redacted, read-only commissioning view of the
+// daemon alert registry. DeliveryActive is authoritative; measurements never
+// imply permission to deliver.
 type AlertShadowStatusResult struct {
 	AsOf                  time.Time                 `json:"as_of,omitzero"`
 	Authority             string                    `json:"authority"`
@@ -32,6 +37,8 @@ type AlertShadowStatusResult struct {
 	Sources               []AlertShadowSourceStatus `json:"sources"`
 }
 
+// AlertShadowSourceStatus reports coverage and calibration health for one
+// allowlisted source without exposing candidate or account identities.
 type AlertShadowSourceStatus struct {
 	Source       AlertSource             `json:"source"`
 	Status       string                  `json:"status"`
@@ -43,6 +50,8 @@ type AlertShadowSourceStatus struct {
 	Measurements AlertShadowMeasurements `json:"measurements"`
 }
 
+// AlertShadowMeasurements contains cumulative, redacted commissioning counts.
+// Zero values mean no recorded observation, not successful coverage.
 type AlertShadowMeasurements struct {
 	Evaluations              uint64  `json:"evaluations"`
 	CoveredEvaluations       uint64  `json:"covered_evaluations"`

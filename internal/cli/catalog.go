@@ -7,6 +7,7 @@ import "slices"
 // still enforce the real safety policy.
 type GuardClass string
 
+// Guard classifications used by the command catalog.
 const (
 	GuardReadOnly GuardClass = "read-only"
 	GuardLocal    GuardClass = "local"
@@ -19,6 +20,7 @@ const (
 // lifecycle outside the TUI's prompt/output model.
 type TUISupport string
 
+// TUI support classifications used by the command catalog.
 const (
 	TUISupported TUISupport = "supported"
 	TUIExternal  TUISupport = "external"

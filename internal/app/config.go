@@ -9,6 +9,8 @@ import (
 	"github.com/osauer/ibkr/v2/internal/dial"
 )
 
+// Default app-host settings cover the LAN-capable listen address, pairing
+// lifetime, and local snapshot refresh intervals.
 const (
 	DefaultAddr        = "0.0.0.0:8765"
 	DefaultPairingTTL  = 5 * time.Minute
@@ -16,6 +18,10 @@ const (
 	DefaultCanaryEvery = time.Minute
 )
 
+// Options configures one Canary app-host process. Durations control app-local
+// pairing expiry and refresh cadence; SocketPath addresses the daemon's typed
+// RPC socket. StateDir contains private grants and app delivery state and is
+// protected by an exclusive process lock for the App lifetime.
 type Options struct {
 	Addr             string
 	PublicURL        string
@@ -30,6 +36,10 @@ type Options struct {
 	CanaryEvery      time.Duration
 }
 
+// DefaultOptions returns environment-aware defaults for an app host serving
+// version. It reads the documented IBKR_APP_* variables, chooses the daemon
+// socket and state directory defaults, and performs no network or filesystem
+// writes.
 func DefaultOptions(version string) Options {
 	// docgen:env IBKR_APP_ADDR | HTTP listen address for `ibkr app`. Defaults to `0.0.0.0:8765` so a paired phone on the LAN can reach the app.
 	addr := strings.TrimSpace(os.Getenv("IBKR_APP_ADDR"))
@@ -78,10 +88,9 @@ func relayDefaultURL() string {
 	return "https://remote.osauer.dev"
 }
 
-// DefaultStateDir returns the state directory an `ibkr app` process uses
-// when no --state-dir flag is given. The app lock lives in this directory,
-// so `ibkr restart --app` resolves argv state dirs through it to decide
-// whether two app processes contend for the same lock.
+// DefaultStateDir returns the app-owned state directory selected from
+// IBKR_APP_STATE_DIR, XDG_STATE_HOME, or the user's home directory, in that
+// order. It does not create the directory.
 func DefaultStateDir() string {
 	// docgen:env IBKR_APP_STATE_DIR | Directory for `ibkr app` paired devices, alert settings, VAPID keys, and alert history. Defaults to `$XDG_STATE_HOME/ibkr/app` or `$HOME/.local/state/ibkr/app`.
 	if v := strings.TrimSpace(os.Getenv("IBKR_APP_STATE_DIR")); v != "" {

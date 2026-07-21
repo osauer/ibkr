@@ -13,6 +13,9 @@ import (
 	"unicode/utf8"
 )
 
+// GetStateDocument returns the current verified document for scopeKey and kind.
+// The boolean is false when no document exists; a digest mismatch is an error,
+// never absence.
 func (s *Store) GetStateDocument(ctx context.Context, scopeKey, kind string) (StateDocument, bool, error) {
 	if err := validateKey("scope key", scopeKey, 512); err != nil {
 		return StateDocument{}, false, err
@@ -44,6 +47,8 @@ FROM state_documents WHERE scope_key=? AND kind=?`, scopeKey, kind).Scan(&doc.Re
 	return doc, true, nil
 }
 
+// CompareAndSwapStateDocument commits one revision and advances the authority
+// head atomically. A stale expected revision returns RevisionConflictError.
 func (s *Store) CompareAndSwapStateDocument(ctx context.Context, update StateDocumentCAS) (StateDocument, error) {
 	if err := validateStateCAS(update); err != nil {
 		return StateDocument{}, err

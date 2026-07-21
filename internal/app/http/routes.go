@@ -27,6 +27,9 @@ import (
 	appweb "github.com/osauer/ibkr/v2/web/app"
 )
 
+// Dependencies supplies the app host's explicit adapters and authorities to
+// the HTTP layer. Registering a daemon client makes RPC methods reachable but
+// does not transfer daemon policy or broker-write authority to HTTP.
 type Dependencies struct {
 	Server     *hyperserve.Server
 	Store      *state.Store
@@ -48,6 +51,8 @@ type contextKey string
 
 const sessionKey contextKey = "ibkr-app-session"
 
+// Register installs the embedded SPA, pairing, authenticated read, settings,
+// preview, and paired-device action routes on deps.Server.
 func Register(deps Dependencies) {
 	h := &handler{deps: deps}
 	sub, err := fs.Sub(appweb.Files, ".")
@@ -356,6 +361,8 @@ func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) 
 	})
 }
 
+// GovernancePollSource describes freshness of the app-to-daemon poll itself;
+// daemon evaluator/source health remains a separate typed field.
 type GovernancePollSource struct {
 	State         string    `json:"state"`
 	Reason        string    `json:"reason,omitempty"`
@@ -363,6 +370,8 @@ type GovernancePollSource struct {
 	LastSuccessAt time.Time `json:"last_success_at,omitzero"`
 }
 
+// GovernanceAttemptAggregate summarizes app transport dispositions. Accepted
+// means push-service acceptance, not device display or human attention.
 type GovernanceAttemptAggregate struct {
 	CumulativeAttempts int `json:"cumulative_attempts"`
 	Accepted           int `json:"push_service_accepted"`
@@ -376,6 +385,8 @@ type GovernanceAttemptAggregate struct {
 	TargetRetired      int `json:"target_retired"`
 }
 
+// GovernanceHealthAggregate counts app-local delivery-health events separately
+// from transport attempts.
 type GovernanceHealthAggregate struct {
 	PartialEpisodes int `json:"partial_episodes"`
 	StateFailures   int `json:"state_write_failures"`
@@ -467,6 +478,8 @@ func (h *handler) handleGovernance(w nethttp.ResponseWriter, _ *nethttp.Request)
 	writeJSON(w, h.governanceDTO())
 }
 
+// ReconciliationReportDTO is the allowlisted browser projection of report
+// generation cadence and coverage; empty timestamps mean unavailable evidence.
 type ReconciliationReportDTO struct {
 	State              string `json:"state"`
 	Reason             string `json:"reason,omitempty"`
@@ -479,11 +492,15 @@ type ReconciliationReportDTO struct {
 	CanCheckNow        bool   `json:"can_check_now"`
 }
 
+// ReconciliationEvaluationDTO reports the daemon's distinct policy-evaluation
+// state and reason without conflating it with report generation.
 type ReconciliationEvaluationDTO struct {
 	State  string `json:"state"`
 	Reason string `json:"reason,omitempty"`
 }
 
+// ReconciliationDTO keeps report production and policy evaluation as separate
+// browser concepts.
 type ReconciliationDTO struct {
 	Report     ReconciliationReportDTO     `json:"report"`
 	Evaluation ReconciliationEvaluationDTO `json:"evaluation"`
@@ -939,6 +956,8 @@ func (h *handler) handlePushDelete(w nethttp.ResponseWriter, r *nethttp.Request)
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+// SafePushTestResult reports a redacted diagnostic transport class. A true
+// PushServiceAccepted is not proof of device display or human attention.
 type SafePushTestResult struct {
 	State               string `json:"state"`
 	PushServiceAccepted bool   `json:"push_service_accepted"`

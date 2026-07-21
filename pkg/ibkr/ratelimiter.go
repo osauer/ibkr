@@ -69,6 +69,7 @@ type RateLimitedRequest struct {
 // RequestType categorizes different IBKR request types for proper rate limiting
 type RequestType int
 
+// Request types select the limiter bucket and pacing policy used for a call.
 const (
 	RequestTypeGeneral RequestType = iota
 	RequestTypeMarketData

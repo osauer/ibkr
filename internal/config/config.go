@@ -1,10 +1,9 @@
-// Package config loads and validates the ibkr daemon's TOML configuration.
+// Package config loads and validates operator-owned TOML configuration for
+// gateway identity, daemon behavior, and capability enablement.
 //
-// Schema is auto-by-default: a missing config file (or absent fields) tells
-// the daemon to discover the gateway endpoint and TLS mode at startup. Any
-// field the user does write is binding — discovery skips that dimension.
-// This avoids the "loose by default but strict only on tls=true" asymmetry
-// the v0.3.x layout had.
+// A missing file or absent gateway field leaves that dimension discoverable;
+// an explicitly configured value is binding. Runtime platform preferences are
+// separate daemon.db state and are not read or written by this package.
 package config
 
 import (
@@ -132,6 +131,9 @@ type Trading struct {
 	PaperSmokeMaxAge duration `toml:"paper_smoke_max_age"`
 }
 
+// AutoTrade configures advisory protection-proposal production and policy
+// reloads. Despite the historical section name, these fields do not authorize
+// automatic broker submission.
 type AutoTrade struct {
 	// ProposalsEnabled controls whether the daemon may produce advisory protection proposals; default true, and proposals are not broker orders unless separately submitted by an explicitly enabled trading path — the `[auto_trade]` section name is historical: nothing auto-trades, and the policy's auto_submit stays false.
 	ProposalsEnabled *bool `toml:"proposals_enabled"`
@@ -149,6 +151,8 @@ type AutoTrade struct {
 	FastPathEnabled *bool `toml:"fast_path_enabled"`
 }
 
+// Opportunities configures advisory opportunity production and policy
+// reloads. Broker submission remains subject to the independent trading path.
 type Opportunities struct {
 	// Enabled controls whether the daemon may produce advisory opportunities; default true, and opportunities are not broker writes unless separately submitted by an explicitly enabled trading path.
 	Enabled *bool `toml:"enabled"`
@@ -162,12 +166,15 @@ type Opportunities struct {
 	ReloadInterval duration `toml:"reload_interval"`
 }
 
+// Supported local trading modes.
 const (
 	TradingModeDisabled = "disabled"
 	TradingModePaper    = "paper"
 	TradingModeLive     = "live"
 )
 
+// WithDefaults returns the protection-proposal configuration with missing
+// operational values resolved. It does not enable broker submission.
 func (a AutoTrade) WithDefaults() AutoTrade {
 	if a.PolicyFile == "" {
 		a.PolicyFile = "~/.config/ibkr/policies/protection-policy.toml"
@@ -192,6 +199,8 @@ func (a AutoTrade) WithDefaults() AutoTrade {
 // are governed separately by the engine's backoff cap.
 const defaultProposalCadence = 30 * time.Second
 
+// ProposalsEnabledResolved reports the effective advisory-proposal toggle;
+// absence defaults to enabled.
 func (a AutoTrade) ProposalsEnabledResolved() bool {
 	if a.ProposalsEnabled == nil {
 		return true
@@ -216,6 +225,7 @@ type Flex struct {
 	TokenPath string `toml:"token_path"`
 }
 
+// WithDefaults returns the Flex configuration with its default token path.
 func (f Flex) WithDefaults() Flex {
 	if f.TokenPath == "" {
 		f.TokenPath = "~/.config/ibkr/flex-token"
@@ -223,6 +233,8 @@ func (f Flex) WithDefaults() Flex {
 	return f
 }
 
+// FastPathEnabledResolved reports whether manual proposal actions may use the
+// immediate revalidation path; absence defaults to enabled.
 func (a AutoTrade) FastPathEnabledResolved() bool {
 	if a.FastPathEnabled == nil {
 		return true
@@ -230,6 +242,8 @@ func (a AutoTrade) FastPathEnabledResolved() bool {
 	return *a.FastPathEnabled
 }
 
+// HotReloadEnabled reports the effective protection-policy reload toggle;
+// absence defaults to enabled.
 func (a AutoTrade) HotReloadEnabled() bool {
 	if a.HotReload == nil {
 		return true
@@ -237,6 +251,8 @@ func (a AutoTrade) HotReloadEnabled() bool {
 	return *a.HotReload
 }
 
+// ReloadIntervalDuration returns the effective protection-policy reload
+// interval.
 func (a AutoTrade) ReloadIntervalDuration() time.Duration {
 	if a.ReloadInterval == 0 {
 		return 30 * time.Second
@@ -244,6 +260,8 @@ func (a AutoTrade) ReloadIntervalDuration() time.Duration {
 	return a.ReloadInterval.Std()
 }
 
+// ProposalCadenceDuration returns the effective advisory-proposal refresh
+// cadence.
 func (a AutoTrade) ProposalCadenceDuration() time.Duration {
 	if a.ProposalCadence == 0 {
 		return defaultProposalCadence
@@ -251,6 +269,8 @@ func (a AutoTrade) ProposalCadenceDuration() time.Duration {
 	return a.ProposalCadence.Std()
 }
 
+// WithDefaults returns the opportunity configuration with missing operational
+// values resolved. It does not enable broker submission.
 func (o Opportunities) WithDefaults() Opportunities {
 	if o.PolicyFile == "" {
 		o.PolicyFile = "~/.config/ibkr/policies/opportunity-policy.toml"
@@ -270,6 +290,8 @@ func (o Opportunities) WithDefaults() Opportunities {
 
 const defaultOpportunityRefreshCadence = 2 * time.Minute
 
+// EnabledResolved reports the effective advisory-opportunity toggle; absence
+// defaults to enabled.
 func (o Opportunities) EnabledResolved() bool {
 	if o.Enabled == nil {
 		return true
@@ -277,6 +299,8 @@ func (o Opportunities) EnabledResolved() bool {
 	return *o.Enabled
 }
 
+// HotReloadEnabled reports the effective opportunity-policy reload toggle;
+// absence defaults to enabled.
 func (o Opportunities) HotReloadEnabled() bool {
 	if o.HotReload == nil {
 		return true
@@ -284,6 +308,8 @@ func (o Opportunities) HotReloadEnabled() bool {
 	return *o.HotReload
 }
 
+// ReloadIntervalDuration returns the effective opportunity-policy reload
+// interval.
 func (o Opportunities) ReloadIntervalDuration() time.Duration {
 	if o.ReloadInterval == 0 {
 		return 30 * time.Second
@@ -291,6 +317,8 @@ func (o Opportunities) ReloadIntervalDuration() time.Duration {
 	return o.ReloadInterval.Std()
 }
 
+// RefreshCadenceDuration returns the effective advisory-opportunity refresh
+// cadence.
 func (o Opportunities) RefreshCadenceDuration() time.Duration {
 	if o.RefreshCadence == 0 {
 		return defaultOpportunityRefreshCadence
@@ -557,9 +585,8 @@ func SPXMembersAutoRefreshFromEnv() (enabled bool, forced bool) {
 
 // defaultScans is the built-in preset set, used when the user has no
 // [scans.*] block in config.toml. Every Type / Exchange string here was
-// validated against a live IB Gateway server-version 203 catalog via
-// `ibkr scan params` before being committed — see the validation script
-// in the v0.11 PR. If a future gateway drops one of these scanCodes the
+// validated against an IB Gateway scanner catalog via `ibkr scan params`.
+// If a future gateway drops one of these scanCodes the
 // preset will return an error to the user; `ibkr scan params` is the
 // canonical recovery path.
 //

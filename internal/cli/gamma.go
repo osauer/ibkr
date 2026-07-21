@@ -32,17 +32,9 @@ func runGamma(ctx context.Context, env *Env, args []string) int {
 	// Default: block up to 3 s for the result. Cached runs return
 	// instantly (the ceiling never kicks in); in-flight runs come back
 	// almost immediately with a "computing N%" envelope the renderer
-	// turns into a progress row. The earlier 50 s default was sized for
-	// a one-shot synchronous feel ("block once, get the answer if the
-	// compute is fast"), but the combined SPY+SPX compute runs 5–20
-	// minutes — well past 50 s — so every call paid the full wait and
-	// then returned "still computing." Polling especially suffered:
-	// each iteration burned 50 s of wall-clock waiting for `<-job.done`
-	// or the timer, regardless of how recently progress had moved.
-	//
-	// 3 s is the new default — short enough that polling doesn't feel
-	// chained to the wire, long enough to absorb a snappy cache-hit
-	// or a near-end-of-compute landing without an extra round trip.
+	// turns into a progress row. The short wait keeps polling responsive while
+	// still absorbing a cache hit or near-complete computation without another
+	// round trip.
 	// --no-wait still returns immediately (WaitMs=0) for callers that
 	// want zero blocking.
 	waitMs := 3_000

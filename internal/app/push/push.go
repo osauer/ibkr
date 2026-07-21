@@ -16,10 +16,15 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
+// Sender transports one caller-selected, redacted payload and returns a
+// classified attempt for the caller to persist. It does not grant eligibility.
 type Sender interface {
 	Send(context.Context, state.PushSubscription, state.VAPIDKeys, Payload) state.PushAttempt
 }
 
+// Payload is the allowlisted lock-screen surface. Callers must construct it
+// from redacted presentation data rather than producer evidence or account
+// state.
 type Payload struct {
 	Title       string `json:"title"`
 	Body        string `json:"body"`
@@ -67,6 +72,8 @@ func validGovernanceDisplayID(displayID string) bool {
 	return true
 }
 
+// SafeDiagnosticPayload returns a fixed notification test containing no
+// account, position, order, occurrence, or subscription data.
 func SafeDiagnosticPayload() Payload {
 	return Payload{
 		Title: "IBKR notification test", Body: "Safe test notification. No account data is included.",
@@ -82,15 +89,22 @@ func SafeDiagnosticPayload() Payload {
 // with 403 BadJwtToken, surfacing as http_rejected on every delivery.
 const Subscriber = "https://osauer.dev"
 
+// WebPushSender sends payloads through a Web Push service. A nil Client uses
+// the webpush library's default HTTP client.
 type WebPushSender struct {
 	Subscriber string
 	Client     webpush.HTTPClient
 }
 
+// GenerateVAPIDKeys creates a private/public VAPID key pair for app-owned push
+// subscriptions.
 func GenerateVAPIDKeys() (privateKey, publicKey string, err error) {
 	return webpush.GenerateVAPIDKeys()
 }
 
+// Send validates sub, sends payload once, and classifies the response without
+// persisting it. OK means the push service accepted the request, not that a
+// device displayed or a human read the notification.
 func (s WebPushSender) Send(ctx context.Context, sub state.PushSubscription, keys state.VAPIDKeys, payload Payload) state.PushAttempt {
 	attempt := state.PushAttempt{At: time.Now().UTC(), SubscriptionID: sub.ID, AlertID: payload.AlertID}
 	if err := ValidateSubscription(sub); err != nil {
@@ -149,6 +163,8 @@ func classifyTransport(err error, status int) string {
 	}
 }
 
+// ValidateSubscription requires the endpoint and both Web Push key fields;
+// it does not establish that the subscription's paired device is active.
 func ValidateSubscription(sub state.PushSubscription) error {
 	if sub.Endpoint == "" {
 		return fmt.Errorf("endpoint required")

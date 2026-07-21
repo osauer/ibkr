@@ -1,4 +1,4 @@
-// docgen/mcp-tools emits docs/reference/mcp-tools.md from the
+// Command mcp-tools emits docs/reference/mcp-tools.md from the
 // canonical tool registry at internal/mcp.Tools. Source of truth is
 // the Go code; this script is the bridge that surfaces it as a
 // human-readable reference.

@@ -19,6 +19,8 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
+// CanaryBacktestObservation is one point-in-time canary input and its labelled
+// forward stress target.
 type CanaryBacktestObservation struct {
 	Date          string                   `json:"date,omitempty"`
 	AsOf          time.Time                `json:"as_of,omitzero"`
@@ -31,6 +33,8 @@ type CanaryBacktestObservation struct {
 	Notes         string                   `json:"notes,omitempty"`
 }
 
+// CanaryBacktestTarget records the forward-window stress label used to score a
+// canary observation.
 type CanaryBacktestTarget struct {
 	Stress            bool     `json:"stress"`
 	Kind              string   `json:"kind,omitempty"`
@@ -42,6 +46,8 @@ type CanaryBacktestTarget struct {
 	Notes             string   `json:"notes,omitempty"`
 }
 
+// CanaryBacktestResult contains row-level canary evaluations and aggregate
+// detection, lifecycle, and regime-lift metrics for one replay.
 type CanaryBacktestResult struct {
 	RunAt        time.Time                      `json:"run_at"`
 	Policy       string                         `json:"policy"`
@@ -57,6 +63,8 @@ type CanaryBacktestResult struct {
 	NotAdvice    string                         `json:"not_advice"`
 }
 
+// CanaryBacktestRowResult records the canary decision and scoring flags for one
+// labelled observation.
 type CanaryBacktestRowResult struct {
 	Date               string                `json:"date,omitempty"`
 	Case               string                `json:"case,omitempty"`
@@ -95,6 +103,8 @@ type CanaryBacktestRowResult struct {
 	Canary             *rpc.CanaryResult     `json:"canary,omitempty"`
 }
 
+// CanaryBacktestMetrics summarizes row-level watch and defensive-action
+// classification performance.
 type CanaryBacktestMetrics struct {
 	Observations         int      `json:"observations"`
 	TargetStress         int      `json:"target_stress"`
@@ -128,11 +138,15 @@ type CanaryBacktestMetrics struct {
 	ActAvgLeadDays       *float64 `json:"act_avg_lead_days,omitempty"`
 }
 
+// CanaryBacktestClusterMetrics associates canary metrics with one named
+// category or market cluster.
 type CanaryBacktestClusterMetrics struct {
 	Name    string                `json:"name"`
 	Metrics CanaryBacktestMetrics `json:"metrics"`
 }
 
+// RegimeBacktestObservation is one point-in-time regime snapshot and its
+// labelled forward stress target.
 type RegimeBacktestObservation struct {
 	Date          string                   `json:"date,omitempty"`
 	AsOf          time.Time                `json:"as_of,omitzero"`
@@ -143,6 +157,8 @@ type RegimeBacktestObservation struct {
 	Notes         string                   `json:"notes,omitempty"`
 }
 
+// RegimeBacktestTarget records the forward-window stress label used to score a
+// regime observation.
 type RegimeBacktestTarget struct {
 	Stress            bool     `json:"stress"`
 	Kind              string   `json:"kind,omitempty"`
@@ -154,6 +170,8 @@ type RegimeBacktestTarget struct {
 	Notes             string   `json:"notes,omitempty"`
 }
 
+// RegimeBacktestResult contains row-level regime evaluations and aggregate
+// detection, lifecycle, and baseline metrics for one replay.
 type RegimeBacktestResult struct {
 	RunAt        time.Time                      `json:"run_at"`
 	Policy       string                         `json:"policy"`
@@ -167,6 +185,8 @@ type RegimeBacktestResult struct {
 	NotAdvice    string                         `json:"not_advice"`
 }
 
+// RegimeBacktestRowResult records the regime verdict, evidence counts, and
+// scoring flags for one labelled observation.
 type RegimeBacktestRowResult struct {
 	Date              string                    `json:"date,omitempty"`
 	Case              string                    `json:"case,omitempty"`
@@ -199,6 +219,8 @@ type RegimeBacktestRowResult struct {
 	Regime            *rpc.RegimeSnapshotResult `json:"regime,omitempty"`
 }
 
+// RegimeBacktestMetrics summarizes scored regime watch and stress-signal
+// performance; out-of-scope rows are counted separately.
 type RegimeBacktestMetrics struct {
 	Observations         int      `json:"observations"`
 	ScoredObservations   int      `json:"scored_observations"`
@@ -224,11 +246,15 @@ type RegimeBacktestMetrics struct {
 	StressAvgLeadDays    *float64 `json:"stress_avg_lead_days,omitempty"`
 }
 
+// RegimeBacktestClusterMetrics associates regime metrics with one named market
+// cluster.
 type RegimeBacktestClusterMetrics struct {
 	Name    string                `json:"name"`
 	Metrics RegimeBacktestMetrics `json:"metrics"`
 }
 
+// BacktestLifecycleMetrics summarizes detection and false-start behavior across
+// stress lifecycle stages.
 type BacktestLifecycleMetrics struct {
 	Observations                        int      `json:"observations"`
 	TargetStress                        int      `json:"target_stress"`
@@ -259,6 +285,8 @@ type BacktestLifecycleMetrics struct {
 	DataQualityBlocked                  int      `json:"data_quality_blocked"`
 }
 
+// BacktestEventMetrics summarizes episode-level detection so consecutive rows
+// from one stress event are not treated as independent events.
 type BacktestEventMetrics struct {
 	Events                       int      `json:"events"`
 	TargetStressEvents           int      `json:"target_stress_events"`
@@ -279,6 +307,8 @@ type BacktestEventMetrics struct {
 	PanicOrForcedDefenseRecall   *float64 `json:"panic_or_forced_defense_recall,omitempty"`
 }
 
+// CanaryBacktestRegimeLift compares canary watch recall with the regime-only
+// baseline on portfolio-stress rows.
 type CanaryBacktestRegimeLift struct {
 	PortfolioStressRows         int      `json:"portfolio_stress_rows"`
 	RegimeOnlyWatchTruePositive int      `json:"regime_only_watch_true_positive"`
@@ -288,6 +318,8 @@ type CanaryBacktestRegimeLift struct {
 	CanaryRecall                *float64 `json:"canary_recall,omitempty"`
 }
 
+// OpportunityBacktestObservation is one point-in-time research signal, trade
+// model, realized outcome, and labelled opportunity target.
 type OpportunityBacktestObservation struct {
 	Date              string                         `json:"date,omitempty"`
 	AsOf              time.Time                      `json:"as_of,omitzero"`
@@ -306,6 +338,8 @@ type OpportunityBacktestObservation struct {
 	Notes             string                         `json:"notes,omitempty"`
 }
 
+// OpportunityBacktestSignal records whether a research rule fired and the
+// provenance and reasons it reported.
 type OpportunityBacktestSignal struct {
 	Fired      bool     `json:"fired"`
 	Kind       string   `json:"kind,omitempty"`
@@ -314,6 +348,8 @@ type OpportunityBacktestSignal struct {
 	Reasons    []string `json:"reasons,omitempty"`
 }
 
+// OpportunityBacktestTrade describes the instrument, horizon, benchmark, and
+// execution-cost assumptions used to score an observation.
 type OpportunityBacktestTrade struct {
 	Instrument       string   `json:"instrument,omitempty"`
 	EntryRule        string   `json:"entry_rule,omitempty"`
@@ -323,6 +359,8 @@ type OpportunityBacktestTrade struct {
 	CostModel        string   `json:"cost_model,omitempty"`
 }
 
+// OpportunityBacktestOutcome contains the observed forward return, benchmark,
+// excursion, and source-integrity measurements for a trade horizon.
 type OpportunityBacktestOutcome struct {
 	EntryDate                string   `json:"entry_date,omitempty"`
 	ExitDate                 string   `json:"exit_date,omitempty"`
@@ -341,6 +379,8 @@ type OpportunityBacktestOutcome struct {
 	MaxFavorableExcursionPct float64  `json:"max_favorable_excursion_pct"`
 }
 
+// OpportunityBacktestTarget records the labelled opportunity outcome and its
+// source and method.
 type OpportunityBacktestTarget struct {
 	Opportunity bool   `json:"opportunity"`
 	Scope       string `json:"scope,omitempty"`
@@ -350,6 +390,8 @@ type OpportunityBacktestTarget struct {
 	Notes       string `json:"notes,omitempty"`
 }
 
+// OpportunityBacktestResult contains evaluated rows, portfolio simulation,
+// evidence sufficiency, diagnostics, and aggregate metrics for one replay.
 type OpportunityBacktestResult struct {
 	RunAt        time.Time                           `json:"run_at"`
 	Policy       string                              `json:"policy"`
@@ -363,6 +405,8 @@ type OpportunityBacktestResult struct {
 	NotAdvice    string                              `json:"not_advice"`
 }
 
+// OpportunityBacktestSimulation summarizes a bounded-slot portfolio replay and
+// its explicit limitations.
 type OpportunityBacktestSimulation struct {
 	Model                string                             `json:"model,omitempty"`
 	Signals              int                                `json:"signals"`
@@ -385,6 +429,8 @@ type OpportunityBacktestSimulation struct {
 	Holdout              *OpportunityBacktestSimulation     `json:"holdout,omitempty"`
 }
 
+// OpportunityMarkToMarketSimulation summarizes bar-by-bar portfolio and
+// benchmark performance with source provenance and data-quality limits.
 type OpportunityMarkToMarketSimulation struct {
 	Model                      string   `json:"model,omitempty"`
 	Trades                     int      `json:"trades"`
@@ -424,6 +470,8 @@ type opportunitySimulationTrade struct {
 	benchReturn float64
 }
 
+// OpportunityBacktestEvidence reports whether a replay satisfies the minimum
+// sample, holdout, concentration, cost, and mark-to-market evidence gates.
 type OpportunityBacktestEvidence struct {
 	Status                          string                           `json:"status"`
 	MinObservations                 int                              `json:"min_observations"`
@@ -450,6 +498,8 @@ type OpportunityBacktestEvidence struct {
 	Reasons                         []string                         `json:"reasons,omitempty"`
 }
 
+// OpportunityBacktestEvidenceNeeds quantifies remaining evidence deficits for
+// an opportunity replay.
 type OpportunityBacktestEvidenceNeeds struct {
 	AdditionalObservations             int `json:"additional_observations"`
 	AdditionalSignalFired              int `json:"additional_signal_fired"`
@@ -469,6 +519,8 @@ type OpportunityBacktestEvidenceNeeds struct {
 	SignalContextBlocked               int `json:"signal_context_blocked"`
 }
 
+// OpportunityBacktestRowResult records signal classification and cost-adjusted
+// outcome measurements for one observation.
 type OpportunityBacktestRowResult struct {
 	Date                 string                     `json:"date,omitempty"`
 	Case                 string                     `json:"case,omitempty"`
@@ -500,6 +552,8 @@ type OpportunityBacktestRowResult struct {
 	sourceObservation    *OpportunityBacktestObservation
 }
 
+// OpportunityBacktestMetrics summarizes classification, holdout, cost-adjusted
+// return, concentration, and excursion measurements.
 type OpportunityBacktestMetrics struct {
 	Observations                         int      `json:"observations"`
 	TargetOpportunity                    int      `json:"target_opportunity"`
@@ -597,6 +651,8 @@ type OpportunityBacktestMetrics struct {
 	AvgMaxFavorableExcursionPct          *float64 `json:"avg_max_favorable_excursion_pct,omitempty"`
 }
 
+// OpportunityBacktestClusterMetrics associates opportunity metrics with one
+// named market cluster.
 type OpportunityBacktestClusterMetrics struct {
 	Name    string                     `json:"name"`
 	Metrics OpportunityBacktestMetrics `json:"metrics"`
@@ -2369,10 +2425,9 @@ func backfillBacktestRegimeEligibility(r *rpc.RegimeSnapshotResult) {
 	set(&r.Breadth.RegimeIndicatorMeta, rpc.RegimeIndicatorBreadth, breadthDepth)
 }
 
-// Cluster combination, isolated-red rescue, and headline wording all live
-// in internal/rpc/regime_policy.go — the single shared copy. The former
-// backtest-local implementations were one of the four drifting headline
-// copies behind the 2026-06-12 incident.
+// Cluster combination, isolated-red rescue, and headline wording live in
+// internal/rpc/regime_policy.go so offline replay uses the same semantics as
+// daemon and rendering adapters.
 
 func canaryBacktestDefensiveAtLeast(res CanaryResult, severity risk.SignalSeverity) bool {
 	if !severityRankAtLeast(res.Severity, severity) {

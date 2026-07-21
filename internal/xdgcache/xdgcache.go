@@ -1,25 +1,6 @@
-// Package xdgcache holds the three filesystem primitives shared by every
-// on-disk cache the ibkr daemon and CLI maintain: an atomic temp+rename
-// write, a flock-backed lock, and an XDG-aware cache-directory resolver.
-//
-// The primitives are inlined ad-hoc in several existing call sites
-// (internal/breadth/spx/store.go, internal/daemon/gamma_zero_store.go,
-// internal/daemon/lock.go). New call sites in v0.33.0 — the SPX members
-// runtime refresh (internal/breadth/spx/refresh.go) and the `ibkr update`
-// CLI (internal/update/*) — share these three concerns and pull them
-// here rather than copying the inlined code a third and fourth time.
-//
-// The existing stores are deliberately NOT migrated to this package in
-// the same change: that's mechanical churn for no behaviour delta, and
-// the per-store `writeAtomic` methods carry callsite-specific comments
-// (method-token gates, schema-version semantics) that don't translate
-// cleanly to a shared helper. A future cleanup pass can collapse them.
-//
-// Three functions, no abstractions:
-//
-//   - WriteAtomic — bytes → file in a single os.Rename.
-//   - OpenLock    — non-blocking flock on a sentinel file.
-//   - CacheDir    — $XDG_CACHE_HOME/ibkr/<sub>, fallback $HOME/.cache/ibkr/<sub>.
+// Package xdgcache provides shared filesystem primitives for user data and
+// caches: same-directory temp-and-rename replacement, non-blocking process
+// locks, and XDG-aware cache-directory resolution.
 package xdgcache
 
 import (
@@ -30,22 +11,12 @@ import (
 	"syscall"
 )
 
-// WriteAtomic writes data to path via a temp file in the same directory,
-// then os.Renames it into place. The rename is atomic on every supported
-// filesystem; a crash mid-write leaves either the prior file intact or
-// (rarely) the temp file orphaned next to it.
-//
-// The parent directory is created with 0o755 if missing — first-write
-// cases (cold start, fresh install) don't need an explicit MkdirAll at
-// the call site.
-//
-// Mode is the final file mode for the renamed result. The temp file is
-// created with the default os.CreateTemp mode (0o600); os.Rename
-// preserves the destination's existing mode if it exists, so callers
-// passing 0o644 on a first write get 0o600 until a chmod follows.
-// Existing call sites all use 0o644 implicitly via os.CreateTemp's
-// default, so this matches today's behaviour; documented because the
-// next round of consolidation may want to chmod-before-rename.
+// WriteAtomic replaces path with data by renaming a temporary file created in
+// the same directory. Readers therefore observe either the old or new name on
+// supported local filesystems. The parent directory is created with mode 0755;
+// the resulting inode retains the temporary file's mode, normally 0600.
+// WriteAtomic does not fsync the file or directory and therefore does not claim
+// power-loss durability.
 func WriteAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

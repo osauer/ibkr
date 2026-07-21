@@ -35,10 +35,15 @@ const (
 )
 
 const (
-	ReconCheckOutcomeStarted         = "started"
+	// ReconCheckOutcomeStarted means a new asynchronous check was accepted.
+	ReconCheckOutcomeStarted = "started"
+	// ReconCheckOutcomeAlreadyChecking means an existing check remains active.
 	ReconCheckOutcomeAlreadyChecking = "already_checking"
-	ReconCheckOutcomeCooldown        = "cooldown"
-	ReconCheckOutcomeActionRequired  = "action_required"
+	// ReconCheckOutcomeCooldown means retry is deferred by daemon cadence.
+	ReconCheckOutcomeCooldown = "cooldown"
+	// ReconCheckOutcomeActionRequired means automation cannot proceed without
+	// resolving the redacted status reason.
+	ReconCheckOutcomeActionRequired = "action_required"
 )
 
 // ReconCheckParams is deliberately an exact empty object. The paired app
@@ -46,8 +51,10 @@ const (
 // read-only action.
 type ReconCheckParams struct{}
 
+// MarshalJSON emits the canonical empty-object request.
 func (ReconCheckParams) MarshalJSON() ([]byte, error) { return []byte("{}"), nil }
 
+// UnmarshalJSON accepts only an exact empty object.
 func (params *ReconCheckParams) UnmarshalJSON(data []byte) error {
 	type wire ReconCheckParams
 	var decoded wire
@@ -58,10 +65,14 @@ func (params *ReconCheckParams) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ReconStatusParams is an exact empty object because status scope is
+// daemon-owned and callers cannot request private report detail.
 type ReconStatusParams struct{}
 
+// MarshalJSON emits the canonical empty-object request.
 func (ReconStatusParams) MarshalJSON() ([]byte, error) { return []byte("{}"), nil }
 
+// UnmarshalJSON accepts only an exact empty object.
 func (params *ReconStatusParams) UnmarshalJSON(data []byte) error {
 	type wire ReconStatusParams
 	var decoded wire
@@ -140,7 +151,7 @@ const (
 
 // ReconBaseline is not an exception category. It identifies pre-genesis
 // statement flows whose one valid treatment is inclusion in the seeded
-// baseline (operator decision 2026-07-18).
+// baseline.
 const ReconBaseline = "baseline"
 
 // ReconConfirmed is a normal v3 statement-authoritative flow. It is
@@ -297,10 +308,13 @@ type ReconCheckResult struct {
 	Status  ReconAutomationStatus `json:"status"`
 }
 
+// ReconStatusResult wraps the redacted automation status returned by
+// MethodReconStatus.
 type ReconStatusResult struct {
 	Status ReconAutomationStatus `json:"status"`
 }
 
+// MarshalJSON validates automation-state coherence before encoding.
 func (result ReconStatusResult) MarshalJSON() ([]byte, error) {
 	if err := ValidateReconAutomationStatus(result.Status); err != nil {
 		return nil, err
@@ -309,6 +323,7 @@ func (result ReconStatusResult) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire(result))
 }
 
+// UnmarshalJSON accepts only the exact validated status wrapper.
 func (result *ReconStatusResult) UnmarshalJSON(data []byte) error {
 	type wire ReconStatusResult
 	var decoded wire
@@ -323,6 +338,7 @@ func (result *ReconStatusResult) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON validates the outcome and automation state before encoding.
 func (result ReconCheckResult) MarshalJSON() ([]byte, error) {
 	if err := ValidateReconCheckResult(result); err != nil {
 		return nil, err
@@ -331,6 +347,7 @@ func (result ReconCheckResult) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire(result))
 }
 
+// UnmarshalJSON accepts only the exact validated check receipt.
 func (result *ReconCheckResult) UnmarshalJSON(data []byte) error {
 	type wire ReconCheckResult
 	var decoded wire
@@ -345,6 +362,7 @@ func (result *ReconCheckResult) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ValidateReconCheckResult rejects unknown outcomes and incoherent status.
 func ValidateReconCheckResult(result ReconCheckResult) error {
 	switch result.Outcome {
 	case ReconCheckOutcomeStarted, ReconCheckOutcomeAlreadyChecking,

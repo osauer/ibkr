@@ -19,13 +19,17 @@ import (
 	"sync/atomic"
 )
 
-// Level mirrors the legacy four-level scheme.
+// Level identifies the minimum severity accepted by the logging shim.
 type Level int
 
 const (
+	// LevelDebug enables debug and higher-severity messages.
 	LevelDebug Level = iota
+	// LevelInfo enables informational and higher-severity messages.
 	LevelInfo
+	// LevelWarn enables warning and error messages.
 	LevelWarn
+	// LevelError enables only error messages.
 	LevelError
 )
 
@@ -117,7 +121,14 @@ type Entry struct{ prefix string }
 // Component returns a logger entry tagged with the component name.
 func Component(name string) Entry { return Entry{prefix: name} }
 
+// Debugf emits a formatted debug message when debug logging is enabled.
 func (e Entry) Debugf(format string, args ...any) { emit(LevelDebug, e.prefix, format, args...) }
-func (e Entry) Infof(format string, args ...any)  { emit(LevelInfo, e.prefix, format, args...) }
-func (e Entry) Warnf(format string, args ...any)  { emit(LevelWarn, e.prefix, format, args...) }
+
+// Infof emits a formatted informational message when info logging is enabled.
+func (e Entry) Infof(format string, args ...any) { emit(LevelInfo, e.prefix, format, args...) }
+
+// Warnf emits a formatted warning message when warning logging is enabled.
+func (e Entry) Warnf(format string, args ...any) { emit(LevelWarn, e.prefix, format, args...) }
+
+// Errorf emits a formatted error message.
 func (e Entry) Errorf(format string, args ...any) { emit(LevelError, e.prefix, format, args...) }

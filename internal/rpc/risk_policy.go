@@ -28,8 +28,7 @@ const (
 	// re-bases the adjusted peak. Human-only.
 	MethodRiskPolicyResetDrawdown = "policy.reset_drawdown"
 	// MethodRiskPolicyCorrectPeak lowers a corrupted adjusted peak to an
-	// evidence-anchored value without touching the drawdown latch (2026-07-19
-	// incident: a paper-session equity observation ratcheted the live peak).
+	// evidence-anchored value without touching the drawdown latch.
 	// Corrections may only lower the peak; higher peaks are what the
 	// observation path is for. Human-only.
 	MethodRiskPolicyCorrectPeak = "policy.correct_peak"
@@ -41,8 +40,11 @@ const (
 // RiskConstitutionFingerprintVersion labels the constitution fingerprint.
 // Distinct from the canary threshold policy's CanaryPolicyFingerprintVersion
 // so the two identities can never be conflated in journals.
+// RiskConstitutionFingerprintVersion identifies a semantic fingerprint projection.
 const RiskConstitutionFingerprintVersion = "risk-constitution-fp-v1"
 
+// Capital-flow and reconciliation source values distinguish declared facts,
+// broker-statement evidence, and human or automated reconciliation.
 const (
 	CapitalFlowSourceDeclared  = "declared"
 	CapitalFlowSourceStatement = "statement"
@@ -50,9 +52,8 @@ const (
 	ReconcileSourceAutomatic   = "automatic"
 )
 
-// Risk policy manager statuses (protection-policy manager vocabulary, plus
-// absent: the constitution has no embedded default, so a missing file is a
-// first-class disclosed state, not a silent fallback).
+// Risk-policy statuses include absent because the constitution has no embedded
+// default; a missing file is disclosed rather than silently substituted.
 const (
 	RiskPolicyStatusActive = "active"
 	RiskPolicyStatusAbsent = "absent"

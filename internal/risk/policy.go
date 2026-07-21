@@ -6,15 +6,12 @@ import (
 	"encoding/json"
 )
 
-// CanaryPolicyFingerprintVersion labels the canary threshold policy's
-// fingerprint. Renamed from "risk-policy-fp-v1" (2026-07-12) when the risk
-// constitution claimed the risk-policy name for the operator-authored
-// risk-policy.toml; the two identities must never be conflatable.
+// CanaryPolicyFingerprintVersion labels fingerprints of the canary threshold
+// policy and keeps that identity domain separate from the constitution.
 const CanaryPolicyFingerprintVersion = "canary-policy-fp-v1"
 
-// Policy holds the shared risk thresholds used by live monitors and protection
-// proposal policy. The first version is intentionally small: it captures the
-// canary's current policy vocabulary in one place.
+// Policy holds the shared canary thresholds used by live monitors and
+// protection proposal policy.
 type Policy struct {
 	Name    string `json:"name"`
 	Profile string `json:"profile"`
@@ -69,6 +66,8 @@ type Policy struct {
 	Reduce ReducePolicy `json:"reduce"`
 }
 
+// ReducePolicy contains the option-selection and order-shape constraints used
+// when constructing risk-reduction proposals. It does not authorize an order.
 type ReducePolicy struct {
 	FrontDTE                int     `json:"front_dte"`
 	MidDTE                  int     `json:"mid_dte"`
@@ -81,6 +80,7 @@ type ReducePolicy struct {
 	AllowMarketOrders       bool    `json:"allow_market_orders"`
 }
 
+// DefaultPolicy returns the complete compiled canary policy.
 func DefaultPolicy() Policy {
 	return Policy{
 		Name:    "active-v1",
@@ -147,6 +147,7 @@ func DefaultPolicy() Policy {
 	}
 }
 
+// PolicyProfile returns Profile, falling back to Name for older policy values.
 func (p Policy) PolicyProfile() string {
 	if p.Profile != "" {
 		return p.Profile
@@ -154,10 +155,14 @@ func (p Policy) PolicyProfile() string {
 	return p.Name
 }
 
+// PolicyVersion returns the policy's version label.
 func (p Policy) PolicyVersion() string {
 	return p.Version
 }
 
+// FingerprintKey returns a deterministic digest of the policy profile,
+// version, and every threshold field. Name is represented through the
+// PolicyProfile fallback and is otherwise not part of the digest.
 func (p Policy) FingerprintKey() string {
 	projection := struct {
 		Profile string       `json:"profile"`

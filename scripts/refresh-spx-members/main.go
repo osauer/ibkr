@@ -1,4 +1,4 @@
-// refresh-spx-members pulls the current S&P-500 constituent list from
+// Command refresh-spx-members pulls the current S&P-500 constituent list from
 // Wikipedia's "List of S&P 500 companies" article and rewrites
 // internal/breadth/spx/members_data.go with the result. Runs as a
 // developer tool — the daemon itself ALSO scrapes Wikipedia at runtime

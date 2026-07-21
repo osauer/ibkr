@@ -23,6 +23,8 @@ type opportunityScoreOptions struct {
 	TargetPolicy string
 }
 
+// OpportunityPriceBarRow is one dated market-data bar used to score forward
+// opportunity outcomes and mark-to-market simulations.
 type OpportunityPriceBarRow struct {
 	Symbol        string  `json:"symbol"`
 	Date          string  `json:"date"`

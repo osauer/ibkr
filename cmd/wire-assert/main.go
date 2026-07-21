@@ -1,4 +1,5 @@
-// wire-assert reads a JSONL wire log (as emitted by IBKR_WIRE_LOG_PATH)
+// Command wire-assert reads a JSONL wire log (as emitted by
+// IBKR_WIRE_LOG_PATH)
 // and evaluates one named invariant against the frames produced after a
 // given byte offset. Exit 0 = pass; non-zero = fail with a one-screen
 // failure report on stderr.
@@ -64,6 +65,7 @@ type CheckResult struct {
 	Highlight  []WireFrame
 }
 
+// Print writes a bounded failure report to standard error.
 func (r CheckResult) Print(jsonlPath string, total int) {
 	fmt.Fprintf(os.Stderr, "wire-assert: FAIL [%s]\n\n", r.Name)
 	fmt.Fprintf(os.Stderr, "Expected:\n  %s\n\n", r.Expected)
@@ -397,11 +399,9 @@ func checkAccountSummary(in checkInputs) CheckResult {
 func checkChainIVSource(in checkInputs) CheckResult {
 	frames := in.Frames
 	loose := in.Loose
-	// The IV-source bug (v0.24.x): productionLegFetcher polled
-	// MarketData.IV (fed only by generic tick 106 which IBKR doesn't
-	// deliver for OPT) instead of OptionIV(key) (fed by msg 21).
-	// This check catches the wire-side evidence: msg 21 frames must
-	// arrive for at least one OPT subscribe with a non-NaN IV value.
+	// The invariant requires msg 21 option-computation frames rather than
+	// relying on the generic tick 106 stock-IV field. At least one OPT
+	// subscription must receive a non-NaN IV value.
 	// Frames are filtered to msg_id=21 and we read fields[4] (IV).
 	// In loose mode (frozen/off-hours), the check WARNS instead of
 	// failing — model engine doesn't fire when options aren't trading.

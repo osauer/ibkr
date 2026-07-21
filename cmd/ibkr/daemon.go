@@ -1,6 +1,3 @@
-// daemon.go hosts the in-binary daemon subcommand. Invoked manually for
-// foreground debugging (`ibkr daemon --foreground`) or automatically by
-// the CLI's autospawn path (`ibkr daemon`, detached, output to log).
 package main
 
 import (

@@ -13,18 +13,30 @@ import (
 )
 
 const (
-	MethodNudgesSnapshot      = "nudges.snapshot"
+	// MethodNudgesSnapshot returns the current redacted advisory snapshot.
+	MethodNudgesSnapshot = "nudges.snapshot"
+	// MethodNudgesCutoverReview records authenticated paired-device review
+	// evidence; it does not complete a pulse or authorize broker activity.
 	MethodNudgesCutoverReview = "nudges.cutover_review"
 )
 
+// NudgeCutoverReviewOrigin identifies the authenticated surface supplying
+// cutover-review evidence.
 type NudgeCutoverReviewOrigin string
 
+// NudgeCutoverReviewOriginPairedDevice is the only accepted review origin.
 const NudgeCutoverReviewOriginPairedDevice NudgeCutoverReviewOrigin = "paired_device"
 
+// NudgeCutoverReviewEvidence identifies the fixed evidence class recorded by
+// a cutover review.
 type NudgeCutoverReviewEvidence string
 
+// NudgeCutoverReviewEvidencePairedDeviceForegroundRender means the paired
+// device visibly rendered the review in the foreground.
 const NudgeCutoverReviewEvidencePairedDeviceForegroundRender NudgeCutoverReviewEvidence = "paired_device_foreground_render_review"
 
+// Nudge candidate kinds, states, severities, destinations, and the blocking
+// drawdown tier mirror the pure risk contract.
 const (
 	NudgeKindReconcileDue       = risk.NudgeKindReconcileDue
 	NudgeKindReconcileException = risk.NudgeKindReconcileException
@@ -50,6 +62,8 @@ const (
 	NudgeDrawdownTierBlock = risk.CapitalTierBlock
 )
 
+// Nudge input and aggregate health values distinguish ready evidence from
+// inactive, suppressed, stale, unavailable, and erroneous inputs.
 const (
 	NudgeInputStatusOK          = "ok"
 	NudgeInputStatusInactive    = "inactive"
@@ -82,10 +96,12 @@ const (
 // gateway-independent, side-effect-free read.
 type NudgesSnapshotParams struct{}
 
+// MarshalJSON emits the canonical empty object and never JSON null.
 func (NudgesSnapshotParams) MarshalJSON() ([]byte, error) {
 	return []byte("{}"), nil
 }
 
+// UnmarshalJSON accepts only an exact empty object.
 func (params *NudgesSnapshotParams) UnmarshalJSON(data []byte) error {
 	type wire NudgesSnapshotParams
 	var decoded wire
@@ -104,6 +120,7 @@ type NudgesCutoverReviewParams struct {
 	Evidence NudgeCutoverReviewEvidence `json:"evidence"`
 }
 
+// MarshalJSON validates the fixed origin and evidence values before encoding.
 func (params NudgesCutoverReviewParams) MarshalJSON() ([]byte, error) {
 	if err := validateNudgesCutoverReviewParams(params); err != nil {
 		return nil, err
@@ -112,6 +129,8 @@ func (params NudgesCutoverReviewParams) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire(params))
 }
 
+// UnmarshalJSON rejects null, missing, duplicate, or unknown fields and
+// validates the resulting review evidence.
 func (params *NudgesCutoverReviewParams) UnmarshalJSON(data []byte) error {
 	type wire NudgesCutoverReviewParams
 	var decoded wire
@@ -146,6 +165,7 @@ type NudgesCutoverReviewResult struct {
 	Evidence        NudgeCutoverReviewEvidence `json:"evidence"`
 }
 
+// MarshalJSON validates success, timestamps, and evidence before encoding.
 func (result NudgesCutoverReviewResult) MarshalJSON() ([]byte, error) {
 	if err := validateNudgesCutoverReviewResult(result); err != nil {
 		return nil, err
@@ -154,6 +174,7 @@ func (result NudgesCutoverReviewResult) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire(result))
 }
 
+// UnmarshalJSON accepts only the exact validated result shape.
 func (result *NudgesCutoverReviewResult) UnmarshalJSON(data []byte) error {
 	type wire NudgesCutoverReviewResult
 	var decoded wire
@@ -262,6 +283,8 @@ type NudgeCandidate struct {
 	Destination string    `json:"destination"`
 }
 
+// NudgeInputHealth reports one input's allowlisted status and reason. A zero
+// AsOf is invalid and is normalized to error rather than treated as current.
 type NudgeInputHealth struct {
 	Status string    `json:"status"` // ok | unapproved | stale | unavailable | error
 	Reason string    `json:"reason,omitempty"`
@@ -377,6 +400,8 @@ func (health NudgeSourceHealth) MarshalJSON() ([]byte, error) {
 	return json.Marshal(nudgeSourceHealthWire(normalized))
 }
 
+// NudgesSnapshotResult is the daemon-authored advisory nudge snapshot. An
+// empty Candidates slice is reassuring only when SourceHealth is ready.
 type NudgesSnapshotResult struct {
 	AsOf                  time.Time                   `json:"as_of"`
 	Candidates            []NudgeCandidate            `json:"candidates"`
@@ -393,10 +418,13 @@ type NudgeSnapshotContext struct {
 	Drawdown *NudgeDrawdownSummary `json:"drawdown,omitempty"`
 }
 
+// NudgeShadowSummary reports the redacted number of shadow findings.
 type NudgeShadowSummary struct {
 	Count int `json:"count"`
 }
 
+// NudgeDrawdownSummary reports the active tier and optional consumption. A nil
+// percentage means the value is unavailable, not zero.
 type NudgeDrawdownSummary struct {
 	Tier        string   `json:"tier"`
 	ConsumedPct *float64 `json:"consumed_pct"`
@@ -409,6 +437,8 @@ type NudgeConfirmedFlowCoverage struct {
 	PreCutoverFlowsUnreviewed bool      `json:"pre_cutover_flows_unreviewed"`
 }
 
+// MarshalJSON validates and canonicalizes health and candidates before
+// encoding the snapshot.
 func (result NudgesSnapshotResult) MarshalJSON() ([]byte, error) {
 	normalizedHealth, candidates, err := validateNudgeSnapshot(result)
 	if err != nil {
@@ -432,6 +462,8 @@ func (result NudgesSnapshotResult) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire)
 }
 
+// IsCleanEmpty reports whether the snapshot is valid, fully covered, and has
+// neither candidates nor contextual findings.
 func (result NudgesSnapshotResult) IsCleanEmpty() bool {
 	normalized, candidates, err := validateNudgeSnapshot(result)
 	if err != nil {

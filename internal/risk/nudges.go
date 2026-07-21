@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// NudgeKindReconcileDue and the related constants define the closed nudge
+// vocabulary accepted by CanonicalizeNudgeCandidate. Zero and unknown values
+// are invalid.
 const (
 	NudgeKindReconcileDue       = "reconcile_due"
 	NudgeKindReconcileException = "reconcile_exception"
@@ -43,10 +46,10 @@ const (
 	MonthlyPulseEvidenceRender = "render"
 )
 
-// NudgeCandidate is the pure semantic result consumed by a future daemon
-// adapter. It deliberately has no details, URL, raw source identity, money,
-// symbol, account, or order fields. Title and Body are selected only by
-// candidate kind/state in candidateTemplate.
+// NudgeCandidate is the pure semantic result consumed by daemon adapters. It
+// deliberately has no details, URL, raw source identity, money,
+// symbol, account, or order fields. CanonicalizeNudgeCandidate replaces Title,
+// Body, Severity, and Destination from the candidate's kind and state.
 type NudgeCandidate struct {
 	Fingerprint string    `json:"fingerprint"`
 	Kind        string    `json:"kind"`
@@ -60,6 +63,8 @@ type NudgeCandidate struct {
 	Destination string    `json:"destination"`
 }
 
+// ReconcileDueInput supplies the current instant, reconciliation deadline, and
+// approved warning horizon. A nil WarningDays leaves the evaluation inactive.
 type ReconcileDueInput struct {
 	Now         time.Time
 	Deadline    time.Time
@@ -110,6 +115,8 @@ type ReconcileExceptionIdentity struct {
 	Material []string
 }
 
+// EvaluateReconcileException returns one order-independent candidate for the
+// valid unresolved identities. It returns nil when no usable identity remains.
 func EvaluateReconcileException(unresolved []ReconcileExceptionIdentity, occurredAt time.Time) *NudgeCandidate {
 	type normalizedException struct {
 		Kind     string   `json:"kind"`
@@ -139,6 +146,9 @@ func EvaluateReconcileException(unresolved []ReconcileExceptionIdentity, occurre
 	return newNudgeCandidate(NudgeKindReconcileException, NudgeStateOpen, occurredAt, time.Time{}, time.Time{}, rows)
 }
 
+// ShadowWouldBlockInput describes one risk-increasing preview against a stable
+// policy and latch episode. PriorCount is the previously persisted episode
+// count and negative values are treated as zero.
 type ShadowWouldBlockInput struct {
 	PolicyFingerprint string
 	LatchEpisode      string
@@ -149,6 +159,8 @@ type ShadowWouldBlockInput struct {
 	OccurredAt        time.Time
 }
 
+// ShadowWouldBlockEvaluation carries the updated episode count and, only for
+// the first qualifying preview, its candidate.
 type ShadowWouldBlockEvaluation struct {
 	Candidate *NudgeCandidate
 	Count     int
@@ -173,6 +185,8 @@ func EvaluateShadowWouldBlock(input ShadowWouldBlockInput) ShadowWouldBlockEvalu
 	return result
 }
 
+// EvaluateDrawdownLatched returns an open drawdown candidate for a non-empty
+// latch episode. It returns nil when the latch is closed or unidentified.
 func EvaluateDrawdownLatched(latchEpisode string, open bool, occurredAt time.Time) *NudgeCandidate {
 	episode := strings.TrimSpace(latchEpisode)
 	if !open || episode == "" {
@@ -181,6 +195,8 @@ func EvaluateDrawdownLatched(latchEpisode string, open bool, occurredAt time.Tim
 	return newNudgeCandidate(NudgeKindDrawdownLatched, NudgeStateOpen, occurredAt, time.Time{}, time.Time{}, episode)
 }
 
+// NudgePinMismatch compares one constitution pin with the corresponding live
+// policy identity.
 type NudgePinMismatch struct {
 	Policy        string
 	PinnedID      string
@@ -189,6 +205,8 @@ type NudgePinMismatch struct {
 	LiveVersion   string
 }
 
+// EvaluatePolicyDrift returns one order-independent candidate for valid policy
+// identity mismatches. Equal or incomplete identities are ignored.
 func EvaluatePolicyDrift(mismatches []NudgePinMismatch, occurredAt time.Time) *NudgeCandidate {
 	type normalizedMismatch struct {
 		Policy        string `json:"policy"`
@@ -224,6 +242,9 @@ func EvaluatePolicyDrift(mismatches []NudgePinMismatch, occurredAt time.Time) *N
 	return newNudgeCandidate(NudgeKindPolicyDrift, NudgeStateOpen, occurredAt, time.Time{}, time.Time{}, rows)
 }
 
+// EvaluateConfirmedFlow returns a candidate keyed by a normalized, non-empty
+// statement-row identity. The identity is hashed and is not copied into the
+// returned candidate.
 func EvaluateConfirmedFlow(statementRowIdentity string, occurredAt time.Time) *NudgeCandidate {
 	identity := strings.TrimSpace(statementRowIdentity)
 	if identity == "" {
@@ -232,6 +253,9 @@ func EvaluateConfirmedFlow(statementRowIdentity string, occurredAt time.Time) *N
 	return newNudgeCandidate(NudgeKindConfirmedFlow, NudgeStateObserved, occurredAt, time.Time{}, time.Time{}, identity)
 }
 
+// MonthlyPulseCompletion carries daemon-authored evidence that the pulse for
+// one policy fingerprint and local calendar month was completed. The pure
+// evaluator validates the evidence fields but cannot establish their origin.
 type MonthlyPulseCompletion struct {
 	Month             string
 	PolicyFingerprint string
@@ -241,6 +265,8 @@ type MonthlyPulseCompletion struct {
 	Evidence    string
 }
 
+// MonthlyPulseInput supplies the current instant, approved cadence, policy
+// identity, evidence readiness, and optional completion evidence.
 type MonthlyPulseInput struct {
 	Now               time.Time
 	Cadence           ConstitutionCadence
@@ -251,6 +277,9 @@ type MonthlyPulseInput struct {
 	Completion          *MonthlyPulseCompletion
 }
 
+// MonthlyPulseEvaluation reports the local policy month, its resolved due
+// instant, and an optional due candidate. Invalid or ambiguous schedules are
+// blocked rather than assigned a fallback time.
 type MonthlyPulseEvaluation struct {
 	Status    string
 	Month     string
@@ -258,6 +287,9 @@ type MonthlyPulseEvaluation struct {
 	Candidate *NudgeCandidate
 }
 
+// EvaluateMonthlyPulse derives the monthly cadence state. Completion is
+// accepted only for the current month and policy fingerprint at or after the
+// unambiguous due instant.
 func EvaluateMonthlyPulse(input MonthlyPulseInput) MonthlyPulseEvaluation {
 	zone, day, hour, minute, ok := monthlySchedule(input.Cadence)
 	policyFingerprint := strings.TrimSpace(input.PolicyFingerprint)
@@ -411,7 +443,7 @@ func candidateTemplate(kind, state string) (title, body, severity string) {
 
 // CanonicalizeNudgeCandidate validates the narrow candidate contract and
 // replaces all caller-authored display fields with approved template copy.
-// It is pure so RPC and future adapters share the same semantic boundary.
+// It is pure so RPC and other adapters share the same semantic boundary.
 func CanonicalizeNudgeCandidate(candidate NudgeCandidate) (NudgeCandidate, error) {
 	title, body, severity := candidateTemplate(candidate.Kind, candidate.State)
 	if title == "" {

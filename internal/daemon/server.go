@@ -1,6 +1,7 @@
-// Package daemon implements the ibkrd background process: a single owner of
-// the IB Gateway connection that fans out account/quote/chain/scan reads and
-// streaming subscriptions to short-lived CLI clients over a Unix socket.
+// Package daemon implements the long-running runtime authority for ibkr. It
+// owns broker connectivity, durable and in-memory runtime state, background
+// schedulers, policy execution, and the gated coordination of broker writes;
+// other processes access those capabilities through typed daemon requests.
 package daemon
 
 import (

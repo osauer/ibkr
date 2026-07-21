@@ -16,6 +16,7 @@ import (
 // WireDirection indicates message flow relative to the IBKR gateway.
 type WireDirection string
 
+// Wire directions are relative to the client connection.
 const (
 	WireOutbound WireDirection = "OUT"
 	WireInbound  WireDirection = "IN"

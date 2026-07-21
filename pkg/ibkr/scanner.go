@@ -8,9 +8,10 @@ import (
 	"time"
 )
 
-// ScannerSubscription is a minimal scanner subscription request. Only the
-// fields commonly needed for the v1 presets are surfaced; less-used filters
-// (rating, market cap, etc.) are sent as empty strings as IBKR expects.
+// ScannerSubscription contains the broker scanner fields supported by
+// [Connector.RunScannerSubscription]. Type is the scan code, Exchange is the
+// location code, Instrument defaults to "STK", and Limit values of zero or less
+// use the broker default. Unsupported scanner filters are sent empty.
 type ScannerSubscription struct {
 	Type       string // scanCode, e.g. TOP_PERC_GAIN
 	Exchange   string // locationCode, e.g. STK.US.MAJOR
@@ -18,7 +19,10 @@ type ScannerSubscription struct {
 	Limit      int    // numberOfRows; <=0 means default
 }
 
-// ScannerRow is one element of the scanner result set.
+// ScannerRow is one broker-ranked entry from the first scanner result frame.
+// Distance, Benchmark, Projection, and Comment are opaque broker strings. The
+// row carries no broker timestamp; callers should treat it as observed during
+// the [Connector.RunScannerSubscription] call.
 type ScannerRow struct {
 	Rank         int
 	Symbol       string
@@ -43,12 +47,11 @@ type scannerSession struct {
 	once  sync.Once
 }
 
-// RunScannerSubscription issues a one-shot scanner subscription, waits for
-// the gateway's first scannerData payload, then cancels the subscription.
-//
-// IBKR streams the same scanner result repeatedly while the subscription is
-// active; v1 only needs the first frame so the daemon does not pay for an
-// open-ended stream of duplicates.
+// RunScannerSubscription starts a scanner subscription, returns a newly
+// allocated copy of the first result frame, and then cancels the subscription.
+// ctx must be non-nil. A timeout of zero or less uses 20 seconds. Context
+// cancellation, timeout, request failures, and request-scoped broker errors are
+// returned; informational farm notices do not fail the call.
 func (c *Connector) RunScannerSubscription(ctx context.Context, sub ScannerSubscription, timeout time.Duration) ([]ScannerRow, error) {
 	if !c.IsReady() {
 		return nil, ErrIBKRUnavailable

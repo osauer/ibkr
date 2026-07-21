@@ -16,9 +16,11 @@ import (
 // than fall back to stale data.
 var ErrIBKRUnavailable = errors.New("ibkr connection unavailable")
 
-// RawAccountSummary captures the essential account values returned by IBKR
-// reqAccountSummary. All currency-denominated fields are reported in the
-// account base currency unless Currency identifies a non-BASE override.
+// RawAccountSummary is a point-in-time view of the account values returned by
+// IBKR. Currency-denominated top-level fields use the account's base-currency
+// row when IBKR supplied one. If a base row is absent, the parser selects a
+// currency-specific row deterministically. Currency records the first such
+// fallback; Raw preserves the currency suffix for every field.
 //
 // Fields are pointers when their absence is meaningful (IBKR may omit tags
 // the user does not have permission for, e.g., margin fields on a cash
@@ -56,12 +58,12 @@ type RawAccountSummary struct {
 	Raw map[string]string
 }
 
-// CurrencyLedger is one IBKR $LEDGER row decomposed by currency. All
-// values are reported in that currency (so `CashBalance` for a USD
-// row is the USD figure, not a base-currency conversion). ExchangeRate
-// is base/CCY (consistent with what the gateway emits) so multiplying
-// any of the *Ccy values by ExchangeRate yields the base-currency
-// contribution.
+// CurrencyLedger is one non-base-currency IBKR $LEDGER row. Monetary values
+// are denominated in that row's currency, not converted to the account base
+// currency. ExchangeRate is base-currency units per ledger-currency unit, so
+// multiplying a monetary field by ExchangeRate yields its base-currency
+// contribution. A zero field may be either an observed zero or an omitted
+// value; the wire format does not preserve that distinction here.
 type CurrencyLedger struct {
 	NetLiquidationByCurrency float64
 	CashBalance              float64
@@ -80,17 +82,15 @@ const (
 	// `<Field>_<CCY>`. This is the canonical mechanism for multi-currency
 	// exposure surfacing — without it we'd have no FX rate at all.
 	//
-	// MaintMarginReq is the IBKR canonical tag name; the longer
-	// "MaintenanceMarginReq" we used pre-v0.10.0 happened to work on some
-	// account types but stopped returning a bare-form row once we added
-	// $LEDGER:ALL. The parser accepts both forms so an account that does
-	// still echo the long form is read correctly.
+	// MaintMarginReq is the canonical tag. The parser also accepts the longer
+	// MaintenanceMarginReq alias emitted by some gateway/account combinations.
 	accountSummaryTags = "NetLiquidation,BuyingPower,AvailableFunds,ExcessLiquidity,TotalCashValue,MaintMarginReq,InitMarginReq,GrossPositionValue,UnrealizedPnL,RealizedPnL,Cushion,LookAheadInitMarginReq,LookAheadMaintMarginReq,LookAheadAvailableFunds,LookAheadExcessLiquidity,AccountType,$LEDGER:ALL"
 )
 
-// RequestAccountSummary issues a synchronous reqAccountSummary against IBKR
-// and returns the parsed snapshot. The call blocks until the gateway emits
-// accountSummaryEnd, the supplied context is cancelled, or timeout elapses.
+// RequestAccountSummary issues a synchronous reqAccountSummary request and
+// returns a caller-owned parsed snapshot. ctx must be non-nil. The call blocks
+// until the gateway emits accountSummaryEnd, ctx is cancelled, or timeout
+// elapses.
 //
 // Behavior:
 //   - Returns ErrIBKRUnavailable immediately if the connector is not
@@ -100,8 +100,9 @@ const (
 //   - timeout <= 0 falls back to defaultAccountSummaryTimeout (5s).
 //
 // The method is safe to call concurrently; each invocation uses a fresh
-// reqID and reads a per-request snapshot of the rows the gateway emitted
-// for that reqID, isolated from the streaming account-updates cache.
+// request ID and normally reads only that request's rows. If the gateway emits
+// an end marker without rows, it falls back to a defensive copy of the
+// streaming account-updates cache.
 func (c *Connector) RequestAccountSummary(ctx context.Context, timeout time.Duration) (*RawAccountSummary, error) {
 	if !c.isConnected() {
 		return nil, ErrIBKRUnavailable
@@ -147,12 +148,9 @@ func (c *Connector) RequestAccountSummary(ctx context.Context, timeout time.Dura
 		return nil, ctx.Err()
 	}
 
-	// The per-request snapshot keeps this read isolated from the streaming
-	// reqAccountUpdates writes that share the connection cache — a zeroed
-	// or foreign-account batch arriving mid-request must not clobber the
-	// values this request received (issue #12). A request that produced
-	// no rows at all (end marker only) falls back to the streaming cache,
-	// matching the pre-isolation behavior.
+	// Keep normal reads isolated from concurrent streaming account updates. An
+	// end marker without rows falls back to the streaming cache so callers can
+	// still consume a previously observed snapshot.
 	if len(raw) == 0 {
 		raw = c.conn.GetAccountSummary()
 	}
@@ -234,22 +232,22 @@ func parseAccountSummary(raw map[string]string, accountID string) *RawAccountSum
 	return summary
 }
 
-// CurrencyLedgerSnapshot returns the per-currency ledger derived from the
-// connector's continuously-updated accountSummary state (kept fresh by the
-// reqAccountUpdates subscription started at connect time). Reads do not
-// issue a new gateway round trip and never block — callers that arrived
-// pre-handshake will see an empty map, which they should treat the same
-// as "no non-base exposure available yet".
+// CurrencyLedgerSnapshot returns a caller-owned map derived from the
+// connector's streaming account-summary cache. It neither blocks nor issues
+// gateway traffic. An empty map means either no non-base exposure was observed
+// or the cache is not populated yet; use connection state to distinguish them.
+// The method is safe to call concurrently with streaming cache updates.
 func (c *Connector) CurrencyLedgerSnapshot() map[string]CurrencyLedger {
 	raw := c.AccountSummaryRaw()
 	return extractCurrencyLedger(raw)
 }
 
-// AccountSummaryRaw returns a defensive copy of the connector's current
-// accountSummary map, populated by the streaming reqAccountUpdates
-// subscription. Empty map when the connector isn't ready or no values
-// have been received yet — callers must not infer connection state
-// from emptiness alone.
+// AccountSummaryRaw returns a defensive copy of the connector's current raw
+// account-summary cache. The map uses IBKR keys: bare tags for base-currency
+// values and `<tag>_<currency>` for currency-specific values. It is empty when
+// no connection or observations are available; emptiness alone does not
+// describe connection state. The method is safe to call concurrently with
+// streaming cache updates.
 func (c *Connector) AccountSummaryRaw() map[string]string {
 	c.mu.RLock()
 	conn := c.conn
@@ -260,10 +258,10 @@ func (c *Connector) AccountSummaryRaw() map[string]string {
 	return conn.GetAccountSummary()
 }
 
-// CachedAccountSummary returns the connector's current account-summary cache
-// parsed through the same typed path as RequestAccountSummary. It does not
-// issue a gateway request and returns nil until the streaming account update
-// path has delivered at least one core account value.
+// CachedAccountSummary returns a caller-owned typed snapshot of the connector's
+// streaming account-summary cache. It does not issue gateway traffic and
+// returns nil until at least one core account value has been observed. The
+// method is safe to call concurrently with streaming cache updates.
 func (c *Connector) CachedAccountSummary() *RawAccountSummary {
 	raw := c.AccountSummaryRaw()
 	if len(raw) == 0 {

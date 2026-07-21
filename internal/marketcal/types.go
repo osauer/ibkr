@@ -1,5 +1,8 @@
-// Package marketcal provides official exchange-session calendars for the
-// markets ibkr can explain without consulting IBKR contract metadata.
+// Package marketcal queries embedded official exchange-session calendars
+// without consulting broker contract metadata or the network.
+//
+// Coverage is finite and disclosed on every result. Dates outside the embedded
+// range return StateUnknown rather than being inferred from weekdays.
 package marketcal
 
 import "time"
@@ -10,8 +13,8 @@ type Market string
 const (
 	// MarketUSEquity is the regular U.S. cash-equity / ETF session.
 	MarketUSEquity Market = "us_equity"
-	// MarketUSOptions is the regular U.S. listed-options session. v1
-	// intentionally models only the regular Cboe-style session, not SPX/VIX
+	// MarketUSOptions is the regular U.S. listed-options session. It models the
+	// regular Cboe-style session, not SPX/VIX
 	// global/curb trading or per-class late-close exceptions.
 	MarketUSOptions Market = "us_options"
 	// MarketDEXetra is Deutsche Boerse Xetra's cash-equity session.
@@ -21,6 +24,8 @@ const (
 // State classifies a market at an instant or a calendar date.
 type State string
 
+// Calendar states. StateUnknown is reserved for dates outside verified
+// embedded coverage.
 const (
 	StateRegular    State = "regular"
 	StateClosed     State = "closed"

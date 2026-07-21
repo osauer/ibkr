@@ -8,6 +8,10 @@ import (
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
+// BrokerWriteConfirmation carries a paired user's account/mode affirmation.
+// Matching it is necessary request validation, not broker-write authority;
+// the daemon's current policy, freeze, preview, and execution gates remain
+// binding.
 type BrokerWriteConfirmation struct {
 	ConfirmAccount string `json:"confirm_account,omitempty"`
 	ConfirmMode    string `json:"confirm_mode,omitempty"`

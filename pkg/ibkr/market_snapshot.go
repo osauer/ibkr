@@ -10,12 +10,10 @@ import (
 	"time"
 )
 
-// MarketSnapshot is a one-shot quote for a symbol returned by FetchMarketSnapshot.
-//
-// IV is reported only when IBKR delivers tick 106 (Option Implied Volatility).
-// For equity contracts IV is naturally absent and the caller should treat
-// IVStatus == "unavailable" as an honest signal — never substitute with
-// historical vol or any proxy (per AGENTS.md).
+// MarketSnapshot is the result of one [Connector.FetchMarketSnapshot] request.
+// Nil price pointers mean the broker did not provide that field. The one-shot
+// request does not request generic ticks, so IV is nil and IVStatus is
+// "unavailable". AsOf is the local completion time, not a broker tick timestamp.
 type MarketSnapshot struct {
 	Symbol         string
 	Bid            *float64
@@ -53,19 +51,12 @@ func newSnapshotSession(symbol string) *snapshotSession {
 	return s
 }
 
-// FetchMarketSnapshot issues a one-shot snapshot reqMktData and returns the
-// observed bid/ask/last/IV. The call blocks until the gateway signals
-// tickSnapshotEnd, the supplied context is cancelled, or timeout elapses.
-//
-// Behavior:
-//   - Returns ErrSymbolInactive immediately for symbols flagged in the
-//     inactive store; no protocol traffic is generated.
-//   - Returns ErrIBKRUnavailable if the connector is not connected or ready.
-//   - On timeout the request is cancelled (cancelMktData) so the local
-//     market-data slot is released; the call returns context.DeadlineExceeded.
-//   - The snapshot reqID is intentionally NOT registered in the connector's
-//     reqIDMap. This keeps the connector's main streaming-tick handlers from
-//     mistaking snapshot ticks for updates to a streaming subscription.
+// FetchMarketSnapshot requests a one-shot bid, ask, and last-price snapshot and
+// waits for the broker's end marker. ctx must be non-nil. A timeout of zero or
+// less uses five seconds. Context cancellation returns ctx.Err; timeout returns
+// [context.DeadlineExceeded]. Both paths best-effort cancel the request and
+// release its market-data slot. Inactive and unavailable connectors return
+// [ErrSymbolInactive] and [ErrIBKRUnavailable] without sending a request.
 func (c *Connector) FetchMarketSnapshot(ctx context.Context, symbol string, timeout time.Duration) (*MarketSnapshot, error) {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	if symbol == "" {

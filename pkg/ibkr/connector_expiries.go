@@ -36,12 +36,9 @@ func newOptionExpiryFetch() *optionExpiryFetch {
 	}
 }
 
-// ExpiryClassedStrikes is the strike grid for one (expiry, trading-class)
-// pair. SPX's third-Friday cycle lists BOTH an AM-settled SPX contract and a
-// PM-settled SPXW contract on the same date, with distinct ConIDs and (in
-// general) distinct strike grids — the TradingClass field is the
-// discriminator. For single-class underlyings (SPY, equities) the slice
-// returned by FetchOptionExpiryStrikesClassed always has length 1.
+// ExpiryClassedStrikes contains the sorted, deduplicated strike grid for one
+// trading class on an expiry date. TradingClass preserves the broker's class
+// discriminator when an underlying lists multiple contract classes.
 type ExpiryClassedStrikes struct {
 	TradingClass string    `json:"trading_class"`
 	Strikes      []float64 `json:"strikes"`
@@ -156,13 +153,11 @@ func (c *Connector) fetchOptionExpiriesData(symbol string, timeout time.Duration
 	return expiries, strikes, classed, nil
 }
 
-// FetchOptionExpiries returns the sorted, deduped list of available option
-// expiries for the given equity underlying, in YYYY-MM-DD form. It issues
-// reqSecDefOptParams (msg 78) and aggregates all per-exchange
-// SecurityDefinitionOptionalParameter (msg 75) responses until the end marker
-// (msg 76) arrives or the timeout fires. On timeout with at least one frame
-// already observed it returns the partial slice; on a fully empty timeout it
-// returns an error so callers can surface it as gateway_unavailable.
+// FetchOptionExpiries returns a newly allocated, sorted, deduplicated list of
+// option expiry dates for symbol in YYYY-MM-DD form. A timeout of zero or less
+// uses ten seconds. If the timeout expires after at least one response, the
+// partial list is returned without an error; an empty timeout returns an error.
+// An unavailable or inactive Connector returns the corresponding sentinel.
 func (c *Connector) FetchOptionExpiries(symbol string, timeout time.Duration) ([]string, error) {
 	expiries, _, _, err := c.fetchOptionExpiriesData(symbol, timeout)
 	if err != nil {
@@ -171,14 +166,11 @@ func (c *Connector) FetchOptionExpiries(symbol string, timeout time.Duration) ([
 	return expiries, nil
 }
 
-// FetchOptionExpiryStrikes returns strikes per expiry as observed across
-// exchanges AND trading classes. Used by --with-iv to pick the ATM strike
-// per expiry without re-issuing the request. The map key is YYYY-MM-DD.
-//
-// For multi-class underlyings (SPX has both `SPX` AM-settled monthlies and
-// `SPXW` PM-settled weeklies, distinct on third-Fridays), this merges the
-// classes into one strike grid per date. Callers that need to keep the
-// classes separated use FetchOptionExpiryStrikesClassed.
+// FetchOptionExpiryStrikes returns newly allocated, sorted, deduplicated strike
+// slices keyed by YYYY-MM-DD expiry. It merges strikes across exchanges and
+// trading classes; callers that require class identity should use
+// [Connector.FetchOptionExpiryStrikesClassed]. Timeout, partial-result, and
+// availability semantics match [Connector.FetchOptionExpiries].
 func (c *Connector) FetchOptionExpiryStrikes(symbol string, timeout time.Duration) (map[string][]float64, error) {
 	_, strikes, _, err := c.fetchOptionExpiriesData(symbol, timeout)
 	if err != nil {
@@ -187,17 +179,11 @@ func (c *Connector) FetchOptionExpiryStrikes(symbol string, timeout time.Duratio
 	return strikes, nil
 }
 
-// FetchOptionExpiryStrikesClassed returns the strike grid for each
-// (expiry, tradingClass) pair the gateway lists. SPY-style underlyings
-// with a single trading class return one ExpiryClassedStrikes per expiry
-// date; SPX returns multiple per-date entries on third-Fridays — one for
-// the AM-settled `SPX` monthly and one for the PM-settled `SPXW` weekly
-// that happens to share the third-Friday slot.
-//
-// The class qualifier matters for the gamma compute: same date, same
-// strike, two contracts, two ConIDs, two settlement times. Without the
-// class the entries collide in the option-contract cache and the gamma
-// compute mis-prices half a day of time-to-expiry.
+// FetchOptionExpiryStrikesClassed returns newly allocated strike grids grouped
+// first by YYYY-MM-DD expiry and then by broker trading class. Both class entries
+// and strikes are sorted. This preserves distinct contracts that share a date
+// and strike but have different trading classes. Timeout, partial-result, and
+// availability semantics match [Connector.FetchOptionExpiries].
 func (c *Connector) FetchOptionExpiryStrikesClassed(symbol string, timeout time.Duration) (map[string][]ExpiryClassedStrikes, error) {
 	_, _, classed, err := c.fetchOptionExpiriesData(symbol, timeout)
 	if err != nil {

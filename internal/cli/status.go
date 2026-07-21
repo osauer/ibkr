@@ -12,11 +12,9 @@ import (
 )
 
 // handshakeWaitBudget bounds how long `ibkr status` waits for the daemon's
-// IB Gateway handshake to land. Sub-second on a healthy gateway. The
-// daemon's watchdog (issue #2) populates LastError after ~12s when the
-// gateway TCPs but never completes the API handshake, so this budget
-// only matters on the slow happy path (TLS fallback or a sluggish
-// gateway). 25s comfortably covers both.
+// IB Gateway handshake to land. The daemon publishes a bounded connection
+// error when TCP succeeds but the API handshake does not; this larger budget
+// also covers TLS fallback and slow healthy gateways.
 const handshakeWaitBudget = 25 * time.Second
 
 // handshakePollInterval is the cadence at which `status` re-asks the
