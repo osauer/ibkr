@@ -211,6 +211,8 @@ func TestUnaryDeadlineCoversAllUnaryMethods(t *testing.T) {
 		{rpc.MethodBriefAck, cliLong},
 		{rpc.MethodNudgesSnapshot, cliDefault},
 		{rpc.MethodNudgesCutoverReview, cliDefault},
+		{rpc.MethodReconStatus, cliDefault},
+		{rpc.MethodReconCheck, cliDefault},
 		{rpc.MethodStatusHealth, cliDefault},
 		{rpc.MethodTradingStatus, cliDefault},
 		{rpc.MethodSettingsGet, cliDefault},

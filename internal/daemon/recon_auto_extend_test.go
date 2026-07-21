@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +138,73 @@ func TestRiskPolicyV3ExistingHumanReconcileReportBlocksAutoDuplicate(t *testing.
 	}
 	if s.evaluateRiskPolicyV3Reconciliation() {
 		t.Fatal("report already referenced by a human reconcile auto-extended")
+	}
+}
+
+func TestLateSameDayEquityTriggersAutomaticReconcileOnlyOnce(t *testing.T) {
+	s := newReconV3TestServer(t)
+	now := time.Date(2026, 7, 21, 7, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	s.riskCapital.now = s.now
+	day := now.Format("20060102")
+	writeFlexFixture(t, "flex-before-equity.xml", day+";063000", day, day, equityRow(day, 250000))
+
+	s.riskCapital.mu.Lock()
+	s.riskCapital.loadLocked()
+	s.riskCapital.state.GenesisAt = now.Add(-24 * time.Hour)
+	s.riskCapital.state.Seeded = true
+	s.riskCapital.state.AdjustedPeakBase = 250000
+	s.riskCapital.state.PeakAsOf = now.Add(-time.Hour)
+	s.riskCapital.state.DailyEquity = nil
+	if err := s.riskCapital.persistLocked(true); err != nil {
+		s.riskCapital.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.riskCapital.mu.Unlock()
+
+	if s.evaluateRiskPolicyV3Reconciliation() {
+		t.Fatal("report auto-reconciled before a same-day runtime account value existed")
+	}
+	policy := s.riskPolicies.snapshot().policy
+	if first := s.riskCapital.Observe(250000, now, policy, testLiveObserveScope); !first {
+		t.Fatal("first same-day runtime account value was not identified")
+	}
+	if !s.evaluateRiskPolicyV3Reconciliation() {
+		t.Fatal("late same-day runtime account value did not complete automatic reconciliation")
+	}
+
+	if first := s.riskCapital.Observe(250000, now.Add(time.Minute), policy, testLiveObserveScope); first {
+		t.Fatal("second account read on the same day was treated as the first")
+	}
+	if s.evaluateRiskPolicyV3Reconciliation() {
+		t.Fatal("same report was automatically reconciled more than once")
+	}
+
+	report := s.buildReconReport()
+	if report.ReportID == "" || report.LastAutoExtendReportID != report.ReportID {
+		t.Fatalf("automatic evidence does not pin the current report: report=%q auto=%q", report.ReportID, report.LastAutoExtendReportID)
+	}
+}
+
+func TestAccountSummaryWiresFirstDailyObservationToV3Reconciliation(t *testing.T) {
+	data, err := os.ReadFile("handlers.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	start := strings.Index(source, "func (s *Server) buildAccountSummary")
+	if start < 0 {
+		t.Fatal("buildAccountSummary production hook is missing")
+	}
+	end := strings.Index(source[start+1:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("could not isolate buildAccountSummary production hook")
+	}
+	block := source[start : start+1+end]
+	observeAt := strings.Index(block, "firstDailyObservation := s.riskCapital.Observe")
+	evaluateAt := strings.Index(block, "s.evaluateRiskPolicyV3Reconciliation()")
+	if observeAt < 0 || evaluateAt < 0 || evaluateAt < observeAt {
+		t.Fatal("first daily account observation must invoke v3 reconciliation in the production account-summary path")
 	}
 }
 

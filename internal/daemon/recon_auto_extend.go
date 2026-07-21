@@ -87,3 +87,61 @@ func statementsHealthOK(health []rpc.SourceHealth) bool {
 	}
 	return false
 }
+
+func (s *Server) reconAutomationStatus(report *rpc.ReconResult, now time.Time) rpc.ReconAutomationStatus {
+	status := rpc.ReconAutomationStatus{
+		Evaluation: rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateWaiting, Reason: rpc.ReconEvaluationReasonReportPending},
+	}
+	if report == nil {
+		status.Report = s.flexFetchStatusAt(now)
+		if status.Report.State == rpc.ReconReportStateChecking {
+			status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateChecking, Reason: rpc.ReconEvaluationReasonReportPending}
+		}
+		return status
+	}
+	status.Report = report.Fetch
+	if status.Report.State == rpc.ReconReportStateChecking {
+		status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateChecking, Reason: rpc.ReconEvaluationReasonReportPending}
+		return status
+	}
+	if status.Report.State != rpc.ReconReportStateCurrent {
+		return status
+	}
+	switch report.Status {
+	case rpc.ReconStatusUnapproved:
+		status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateFailed, Reason: rpc.ReconEvaluationReasonPolicyUnapproved}
+		return status
+	case rpc.ReconStatusActive:
+	case rpc.ReconStatusDegraded:
+		status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateFailed, Reason: rpc.ReconEvaluationReasonEvaluationFailed}
+		return status
+	default:
+		status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateFailed, Reason: rpc.ReconEvaluationReasonEvaluationFailed}
+		return status
+	}
+	if report.Unresolved > 0 {
+		status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateAttentionRequired, Reason: rpc.ReconEvaluationReasonExceptionsNeedReview}
+		return status
+	}
+	if report.ReportID != "" && report.LastAutoExtendReportID == report.ReportID {
+		status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateComplete}
+		return status
+	}
+	if report.Equity == nil || !report.Equity.SameDay || report.Equity.DivergencePct == nil {
+		status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateWaiting, Reason: rpc.ReconEvaluationReasonAccountValuePending}
+		return status
+	}
+	policy := s.riskPolicies.snapshot().policy
+	if policy == nil || policy.Recon.MaxEquityDivergencePct == nil {
+		status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateFailed, Reason: rpc.ReconEvaluationReasonPolicyUnapproved}
+		return status
+	}
+	if math.Abs(*report.Equity.DivergencePct) > *policy.Recon.MaxEquityDivergencePct {
+		status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateAttentionRequired, Reason: rpc.ReconEvaluationReasonAccountValueMismatch}
+		return status
+	}
+	// A clean, current, same-day report inside tolerance should have been
+	// extended by the evaluator before the pipeline reports completion.
+	status.Evaluation = rpc.ReconEvaluationStatus{State: rpc.ReconEvaluationStateFailed, Reason: rpc.ReconEvaluationReasonEvaluationFailed}
+	return status
+}

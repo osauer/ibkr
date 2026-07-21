@@ -10,6 +10,7 @@ const state = {
   governanceRefreshAfterFlight: false,
   governanceLastRefreshAt: 0,
   governanceRefreshSucceeded: null,
+  reconciliationCheck: { busy: false, state: "", error: false },
   governanceCutoverReceipt: null,
   safeNotificationTest: { busy: false, state: "", error: false },
   governanceCutoverReview: { busy: false, state: "", error: false },

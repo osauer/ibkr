@@ -35,7 +35,7 @@ func TestGovernancePayloadIsExactCanonicalAllowlist(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(raw)
-	want := `{"title":"Policy pins need review","body":"Review the policy pin status.","severity":"act","kind":"policy_drift","destination":"alerts","display_id":"gov-0123456789abcdef"}`
+	want := `{"title":"Risk settings changed","body":"Review the changed settings before relying on reminders.","severity":"act","kind":"policy_drift","destination":"alerts","display_id":"gov-0123456789abcdef"}`
 	if got != want {
 		t.Fatalf("payload=%s\nwant=%s", got, want)
 	}

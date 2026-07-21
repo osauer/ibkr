@@ -1,6 +1,6 @@
 # Post-Trade Truth (Phase 3a): Flex Ingestion and Reconciliation
 
-Updated: 2026-07-18 17:31 CEST
+Updated: 2026-07-21 08:30 CEST
 Status: implemented (phase 3a, 2026-07-13) — live since risk-policy v2 with
 the Flex pull configured. R3/R4 flipped 2026-07-18 with risk-policy v3
 (statement-authoritative flows, clean-report auto-extend of the reconcile
@@ -81,12 +81,20 @@ action message; renewal is a human act at IBKR.
 
 **Fetch mechanics.** Flex is a two-step API (SendRequest returns a
 reference code; GetStatement polls until the report is generated) with
-aggressive server-side throttling. One scheduled fetch per day
-(single-flight, failure memory with retry-after — borrow-fee/earnings
-refresher precedent), fetching a rolling window (last N days, N covering
-the restatement horizon) so late broker corrections are picked up by
-re-ingest. Raw XML is retained immutably under
-`~/.local/state/ibkr/statements/` (0700/0600), one file per fetch, so every
+aggressive server-side throttling. The daemon makes its first automatic
+attempt at 06:30 Europe/Berlin, before the morning report, and retries a
+temporary failure every 30 minutes. It starts a daily check on every local
+calendar day, including weekends and holidays, but never invents a broker
+coverage date: the report's own `toDate` remains the truth and may be the
+last business day. Every successful response is parsed and compared again,
+even when IBKR returns the same `whenGenerated` value, because the configured
+Flex query may have changed. Changed contents at the same generation are
+retained as the latest query result; strictly older broker generations remain
+rejected so stale cached data cannot roll the report back. The scheduler is
+single-flight and its v2 cursor stores the daily target separately from broker
+coverage, so a restart, interrupted download, or failed local projection
+resumes without silently marking the report current. Raw XML is retained
+immutably under `~/.local/state/ibkr/statements/` (0700/0600), one file per fetch, so every
 recon report is reproducible from kept evidence.
 
 **Parsing.** `internal/flexstmt` is a pure, fixture-tested parser: XML in,
@@ -145,8 +153,12 @@ keeps outages visible instead of adding a quiet soft mode.
 
 `internal/flexstmt` (pure parser) → daemon statement store + recon engine +
 scheduler → `internal/rpc` recon types → CLI `ibkr recon [--json]` and the
-extended reconcile verb. MCP/SPA: none in 3a. New `[flex]` config section
-regenerates the config reference (`make docs-regen`).
+extended reconcile verb. Canary receives only a redacted daily-report state,
+actual broker coverage date, safe reason, and retry timing. It separates
+report retrieval from report comparison and offers an authenticated
+`Check again` action when that action is safe. Credentials, raw broker text,
+paths, identifiers, and balances never cross that boundary. New `[flex]`
+config regenerates the config reference (`make docs-regen`).
 
 ## Rückbau
 
@@ -188,6 +200,9 @@ recon engine table tests per category incl. ambiguity-never-auto-resolves
 and dismiss-requires-human; equity-series divergence cases; reconcile-verb
 refusal cases (no report, stale report, unresolved exceptions); token
 never in any marshaled output (grep-style test over RPC results and logs);
+daily-window tests across winter, summer, and DST; restart tests before and
+after raw retention; broker-generation regression and same-date correction
+tests; automatic-retry, action-required, and unavailable Canary fixtures;
 `make check` + `make test` binding; live artifact: redacted `ibkr recon
 --json` (report id, category counts, coverage window — no amounts) plus a
 journaled report-backed reconcile performed by the operator.

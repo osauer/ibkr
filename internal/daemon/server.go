@@ -423,6 +423,10 @@ type Server struct {
 	// reconciliation (docs/design/post-trade-truth.md). Read-only toward
 	// the broker; sanitized status only, never the token.
 	flexFetch flexFetchState
+	// Test-only seams for the broker fetch and retained-statement projection.
+	// Production leaves both nil and uses the concrete implementations.
+	flexFetchOnceFn  func(context.Context, time.Time) (flexFetchOutcome, error)
+	flexProjectionFn func(context.Context) error
 	// earnings backs the trading rulebook's catalyst rules (6-8); LKG cache,
 	// async refresh only — never fetched on a snapshot or preview path.
 	earnings *earningsCache
@@ -2524,6 +2528,10 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleRiskPolicyArtefact(ctx, req) })
 	case rpc.MethodReconSnapshot:
 		s.unary(req, enc, func() (any, error) { return s.handleReconSnapshot(ctx, req) })
+	case rpc.MethodReconStatus:
+		s.unary(req, enc, func() (any, error) { return s.handleReconStatus(ctx, req) })
+	case rpc.MethodReconCheck:
+		s.unary(req, enc, func() (any, error) { return s.handleReconCheck(ctx, req) })
 	case rpc.MethodReconBacktest:
 		s.unary(req, enc, func() (any, error) { return s.handleReconBacktest(ctx, req) })
 	case rpc.MethodReconDismiss:
@@ -2669,7 +2677,7 @@ func unaryDeadline(method string) time.Duration {
 		// Brief composition fans out across the same gateway-heavy account,
 		// positions, regime, market-event, and rulebook reads as canary.
 		return 75 * time.Second
-	case rpc.MethodNudgesSnapshot, rpc.MethodNudgesCutoverReview:
+	case rpc.MethodNudgesSnapshot, rpc.MethodNudgesCutoverReview, rpc.MethodReconStatus, rpc.MethodReconCheck:
 		// Local policy, retained statements, and daemon state only.
 		return 5 * time.Second
 	case rpc.MethodMarketEventsSnapshot:
@@ -2851,6 +2859,9 @@ func (s *Server) backgroundTasks() []rpc.BackgroundTaskStatus {
 	}
 	if s.regimeSnapshots != nil && s.regimeSnapshots.refreshing() {
 		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "regime-refresh", Status: "computing"})
+	}
+	if s.flexFetch.isBusy() {
+		tasks = append(tasks, rpc.BackgroundTaskStatus{Name: "flex-report", Status: "checking"})
 	}
 	if scoped, total := s.openBrokerOrderCounts(); total > 0 {
 		// A daemon that idle-exits while protective stops are working goes

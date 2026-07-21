@@ -121,6 +121,8 @@ func Register(deps Dependencies) {
 	srv.POST("/api/opportunities/ignore", h.requireAuth(h.handleOpportunitiesIgnore))
 	srv.POST("/api/brief/seen", h.requireAuth(h.handleBriefSeen))
 	srv.POST("/api/recon/signoff", h.requireAuth(h.handleReconcileSignoff))
+	srv.GET("/api/recon/status", h.requireAuth(h.handleReconcileStatus))
+	srv.POST("/api/recon/check", h.requireAuth(h.handleReconcileCheck))
 	srv.POST("/api/push/subscribe", h.requireAuth(h.handlePushSubscribe))
 	srv.DELETE("/api/push/{id}", h.requireAuth(h.handlePushDelete))
 	srv.GET("/api/governance", h.requireAuth(h.handleGovernance))
@@ -402,6 +404,7 @@ type GovernanceDTO struct {
 	Candidates            []rpc.NudgeCandidate             `json:"candidates"`
 	SourceHealth          GovernanceSourceHealth           `json:"source_health"`
 	PollSource            GovernancePollSource             `json:"poll_source"`
+	Reconciliation        *ReconciliationDTO               `json:"reconciliation,omitempty"`
 	ConfirmedFlowCoverage *rpc.NudgeConfirmedFlowCoverage  `json:"confirmed_flow_coverage,omitempty"`
 	Context               *rpc.NudgeSnapshotContext        `json:"context,omitempty"`
 	Occurrences           []state.GovernanceOccurrenceView `json:"occurrences"`
@@ -436,6 +439,11 @@ func (h *handler) governanceDTO() GovernanceDTO {
 		dto.Candidates = append(dto.Candidates, snapshot.Nudges.Candidates...)
 		normalized := rpc.NormalizeNudgeSourceHealth(snapshot.Nudges.SourceHealth, len(snapshot.Nudges.Candidates))
 		dto.SourceHealth = governanceSourceHealth(normalized)
+		if snapshot.Nudges.Reconciliation != nil {
+			if reconciliation, err := reconciliationDTO(*snapshot.Nudges.Reconciliation); err == nil {
+				dto.Reconciliation = &reconciliation
+			}
+		}
 		if snapshot.Nudges.ConfirmedFlowCoverage != nil {
 			coverage := *snapshot.Nudges.ConfirmedFlowCoverage
 			dto.ConfirmedFlowCoverage = &coverage
@@ -457,6 +465,121 @@ func governanceSourceHealth(health rpc.NudgeSourceHealth) GovernanceSourceHealth
 
 func (h *handler) handleGovernance(w nethttp.ResponseWriter, _ *nethttp.Request) {
 	writeJSON(w, h.governanceDTO())
+}
+
+type ReconciliationReportDTO struct {
+	State              string `json:"state"`
+	Reason             string `json:"reason,omitempty"`
+	ExpectedCoverageTo string `json:"expected_coverage_to,omitempty"`
+	CoverageTo         string `json:"coverage_to,omitempty"`
+	LastAttemptAt      string `json:"last_attempt_at,omitempty"`
+	LastCompletedAt    string `json:"last_completed_at,omitempty"`
+	NextAttemptAt      string `json:"next_attempt_at,omitempty"`
+	RetryAutomatic     bool   `json:"retry_automatic"`
+	CanCheckNow        bool   `json:"can_check_now"`
+}
+
+type ReconciliationEvaluationDTO struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type ReconciliationDTO struct {
+	Report     ReconciliationReportDTO     `json:"report"`
+	Evaluation ReconciliationEvaluationDTO `json:"evaluation"`
+}
+
+type reconciliationResponseDTO struct {
+	Outcome        string            `json:"outcome,omitempty"`
+	Reconciliation ReconciliationDTO `json:"reconciliation"`
+}
+
+func reconciliationDTO(status rpc.ReconAutomationStatus) (ReconciliationDTO, error) {
+	if err := rpc.ValidateReconAutomationStatus(status); err != nil {
+		return ReconciliationDTO{}, err
+	}
+	return ReconciliationDTO{
+		Report: ReconciliationReportDTO{
+			State: status.Report.State, Reason: status.Report.Reason,
+			ExpectedCoverageTo: reconciliationDate(status.Report.ExpectedCoverageTo),
+			CoverageTo:         reconciliationDate(status.Report.CoverageTo),
+			LastAttemptAt:      reconciliationTime(status.Report.LastAttempt),
+			LastCompletedAt:    reconciliationTime(status.Report.LastSuccess),
+			NextAttemptAt:      reconciliationTime(status.Report.NextAttempt),
+			RetryAutomatic:     status.Report.RetryAutomatic,
+			CanCheckNow:        status.Report.CanCheckNow,
+		},
+		Evaluation: ReconciliationEvaluationDTO{State: status.Evaluation.State, Reason: status.Evaluation.Reason},
+	}, nil
+}
+
+func reconciliationDate(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format("2006-01-02")
+}
+
+func reconciliationTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func reconciliationTerminal(status rpc.ReconAutomationStatus) bool {
+	if status.Report.State == rpc.ReconReportStateDue || status.Report.State == rpc.ReconReportStateChecking {
+		return false
+	}
+	return status.Evaluation.State != rpc.ReconEvaluationStateChecking
+}
+
+func (h *handler) handleReconcileStatus(w nethttp.ResponseWriter, r *nethttp.Request) {
+	client, ok := h.deps.Daemon.(daemonclient.ReconciliationClient)
+	if !ok {
+		writeError(w, nethttp.StatusServiceUnavailable, "daily report status unavailable")
+		return
+	}
+	result, err := client.ReconcileStatus(r.Context())
+	if err != nil || result == nil {
+		writeError(w, nethttp.StatusServiceUnavailable, "daily report status unavailable")
+		return
+	}
+	reconciliation, err := reconciliationDTO(result.Status)
+	if err != nil {
+		writeError(w, nethttp.StatusBadGateway, "invalid daily report status")
+		return
+	}
+	if reconciliationTerminal(result.Status) && h.deps.Live != nil {
+		h.deps.Live.PollNudgesOnce(r.Context())
+	}
+	writeJSON(w, reconciliationResponseDTO{Reconciliation: reconciliation})
+}
+
+func (h *handler) handleReconcileCheck(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if err := decodeRequiredEmptyJSONObject(r); err != nil {
+		writeError(w, nethttp.StatusBadRequest, "daily report check body must be an empty JSON object")
+		return
+	}
+	client, ok := h.deps.Daemon.(daemonclient.ReconciliationClient)
+	if !ok {
+		writeError(w, nethttp.StatusServiceUnavailable, "daily report check unavailable")
+		return
+	}
+	result, err := client.ReconcileCheck(r.Context())
+	if err != nil || result == nil {
+		writeError(w, nethttp.StatusServiceUnavailable, "daily report check unavailable")
+		return
+	}
+	reconciliation, err := reconciliationDTO(result.Status)
+	if err != nil || rpc.ValidateReconCheckResult(*result) != nil {
+		writeError(w, nethttp.StatusBadGateway, "invalid daily report check result")
+		return
+	}
+	if reconciliationTerminal(result.Status) && h.deps.Live != nil {
+		h.deps.Live.PollNudgesOnce(r.Context())
+	}
+	writeJSON(w, reconciliationResponseDTO{Outcome: result.Outcome, Reconciliation: reconciliation})
 }
 
 func (h *handler) handleAttention(w nethttp.ResponseWriter, _ *nethttp.Request) {
@@ -526,6 +649,26 @@ func decodeEmptyJSONObject(r *nethttp.Request) error {
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
+		return err
+	}
+	if fixed == nil || len(fixed) != 0 {
+		return errors.New("body must be an empty JSON object")
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("body must contain exactly one empty JSON object")
+	}
+	return nil
+}
+
+func decodeRequiredEmptyJSONObject(r *nethttp.Request) error {
+	if r.Body == nil || r.Body == nethttp.NoBody {
+		return errors.New("body is required")
+	}
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	var fixed map[string]json.RawMessage
+	if err := decoder.Decode(&fixed); err != nil {
 		return err
 	}
 	if fixed == nil || len(fixed) != 0 {

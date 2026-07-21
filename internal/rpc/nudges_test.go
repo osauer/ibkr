@@ -894,7 +894,7 @@ func TestNudgesSnapshotContextPrivacyAndCandidateCanonicalization(t *testing.T) 
 	if strings.Contains(string(raw), sentinel) {
 		t.Fatalf("private/caller-authored sentinel leaked onto snapshot wire: %s", raw)
 	}
-	if !strings.Contains(string(raw), `"title":"Shadow control triggered"`) || !strings.Contains(string(raw), `"title":"Drawdown latch open"`) {
+	if !strings.Contains(string(raw), `"title":"A planned trade would have been blocked"`) || !strings.Contains(string(raw), `"title":"The drawdown warning remains active"`) {
 		t.Fatalf("candidate display fields were not canonicalized: %s", raw)
 	}
 }

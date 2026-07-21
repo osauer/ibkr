@@ -178,8 +178,8 @@ async function runRound4SyntheticSmoke() {
       pushState: document.getElementById("pushState")?.textContent || "",
     }));
     if (!monitor.active || monitor.badge !== "2" || monitor.label !== "Alerts, 2 unread") throw new Error(`synthetic unread monitor state failed: ${JSON.stringify(monitor)}`);
-    if (alertsView.detailsOpen !== false || !alertsView.cutoverVisible || !alertsView.coverage.includes("need foreground review") || !alertsView.canaryHistory.includes("Synthetic watch") || !alertsView.governanceHistory.includes("Synthetic process review")) throw new Error(`synthetic Alerts state failed: ${JSON.stringify(alertsView)}`);
-    if (JSON.stringify(settings.modes) !== JSON.stringify(["Off", "Action required", "Watch + action"]) || !settings.copy.includes("global for this app host and all paired devices") || !settings.copy.includes("Off suppresses Web Push while in-app history remains") || !settings.copy.includes("Action required limits Canary delivery to typed required actions while governance remains included") || !settings.copy.includes("Watch + action broadens Canary delivery and includes governance") || !settings.copy.includes("not configured here") || !settings.copy.includes("shared across paired devices") || settings.pushState !== "unsupported") throw new Error(`synthetic Settings state failed: ${JSON.stringify(settings)}`);
+    if (alertsView.detailsOpen !== false || !alertsView.cutoverVisible || !alertsView.coverage.includes("Older payments need a one-time review") || !alertsView.canaryHistory.includes("Synthetic watch") || !alertsView.governanceHistory.includes("Synthetic process review")) throw new Error(`synthetic Alerts state failed: ${JSON.stringify(alertsView)}`);
+    if (JSON.stringify(settings.modes) !== JSON.stringify(["Off", "Action required", "Watch + action"]) || !settings.copy.includes("global for this app host and all paired devices") || !settings.copy.includes("Off stops phone notifications while your in-app history remains") || !settings.copy.includes("Action required sends urgent items only") || !settings.copy.includes("Watch + action also sends review reminders") || !settings.copy.includes("not configured here") || !settings.copy.includes("shared across paired devices") || settings.pushState !== "unsupported") throw new Error(`synthetic Settings state failed: ${JSON.stringify(settings)}`);
     if (mutationRequests.length !== 1 || mutationRequests[0].method !== "POST" || mutationRequests[0].path !== "/api/attention/read" || JSON.parse(mutationRequests[0].body).through_seq !== 4) throw new Error(`unexpected synthetic mutations: ${JSON.stringify(mutationRequests)}`);
     if (errors.length > 0) throw new Error(`synthetic browser errors: ${errors.join("\n")}`);
     console.log(JSON.stringify({ ok: true, browser: browserName, mobile: true, isolated: true, monitor, alerts: alertsView, settings, intercepted_mutations: mutationRequests.map(({ method, path }) => ({ method, path })) }, null, 2));
@@ -1451,7 +1451,7 @@ async function exerciseAlertHistory(page) {
 }
 
 async function exerciseGovernanceFixtures(page) {
-  const mutationPaths = ["/api/push/test", "/api/governance/cutover-review", "/api/brief/seen"];
+  const mutationPaths = ["/api/push/test", "/api/governance/cutover-review", "/api/recon/check", "/api/brief/seen"];
   const fetchesBefore = await page.evaluate((paths) => globalThis.__ibkrSmoke.fetches.filter((item) => paths.some((path) => item.url.endsWith(path))).length, mutationPaths);
   await page.locator("#tabAlerts").click();
   await page.waitForFunction(() => document.getElementById("alertsTab")?.hidden === false, { timeout: 5000 });
@@ -1493,6 +1493,10 @@ async function exerciseGovernanceFixtures(page) {
     health_aggregate: { partial_episodes: 1, state_write_failures: 0, recoveries: 0, overflows: 0 },
     delivery_health: { state: "healthy", updated_at: asOf, last_push_service_acceptance_at: earlier },
     diagnostic: { state: "push_service_accepted", at: earlier },
+    reconciliation: {
+      report: { state: "current", reason: "none", coverage_to: asOf.slice(0, 10), last_completed_at: asOf, retry_automatic: true, can_check_now: true },
+      evaluation: { state: "complete", reason: "none" },
+    },
   };
 
   await renderFixture({ patch: {
@@ -1541,11 +1545,70 @@ async function exerciseGovernanceFixtures(page) {
     monthly: [...document.querySelectorAll("#briefSections .brief-row")].find((row) => row.querySelector(".brief-row__head b")?.textContent === "Monthly pulse")?.textContent || "",
     visible: document.querySelector(".governance-section")?.textContent || "",
   }));
-  if (due.ids.length > 0 || !due.current.includes("Monthly risk pulse") || !due.source.includes("confirmed_flow: unapproved") || !due.context.includes("Shadow count 2") || !due.context.includes("0.0% consumed") || !due.coverage.includes("need foreground review") || !due.coverageDetail.includes("pre-cutover flows unreviewed") || due.detailsOpen !== false || !due.cutoverVisible || !["active", "resolved", "expired"].every((status) => due.history.includes(status)) || !due.monthly.includes("due")) {
+  if (due.ids.length > 0 || !due.current.includes("Monthly risk pulse") || !due.source.includes("Payment records: not enabled · one-time review needed") || !due.context.includes("Warning-only observations 2") || !due.context.includes("0.0% used") || !due.coverage.includes("Older payments need a one-time review") || !due.coverageDetail.includes("older payments need review") || due.detailsOpen !== false || !due.cutoverVisible || !["active", "resolved", "expired"].every((status) => due.history.includes(status)) || !due.monthly.includes("due")) {
     throw new Error(`governance due fixture is incomplete: ${JSON.stringify(due)}`);
   }
   for (const privateText of ["private-fingerprint-sentinel", "private-target-sentinel", "private-note-sentinel", "private-error-sentinel", "evil.example"]) {
     if (due.visible.includes(privateText)) throw new Error(`governance fixture leaked private text ${JSON.stringify(privateText)}`);
+  }
+
+  await renderFixture({ patch: {
+    sources: { nudges: { state: "current", updated_at: asOf, last_success_at: asOf } },
+    nudges: { as_of: asOf, candidates: [], source_health: readyHealth, context: null, confirmed_flow_coverage: { coverage_from: earlier, pre_cutover_flows_unreviewed: false } },
+    governance: {
+      ...baseGovernance,
+      reconciliation: {
+        report: { state: "retry_scheduled", reason: "report_not_ready", coverage_to: earlier.slice(0, 10), next_attempt_at: later, retry_automatic: true, can_check_now: true },
+        evaluation: { state: "waiting", reason: "report_pending" },
+      },
+    },
+  } });
+  const reportRetry = await page.evaluate(() => ({
+    state: document.getElementById("reconciliationState")?.textContent || "",
+    heading: document.getElementById("reconciliationHeading")?.textContent || "",
+    summary: document.getElementById("reconciliationSummary")?.textContent || "",
+    meta: document.getElementById("reconciliationMeta")?.textContent || "",
+  }));
+  if (reportRetry.state !== "Retrying" || !reportRetry.heading.includes("recheck will retry") || !reportRetry.summary.includes("still has the report through") || !reportRetry.summary.includes("did not finish the re-read") || !reportRetry.meta.includes("Next automatic try")) {
+    throw new Error(`governance report-retry fixture is incomplete: ${JSON.stringify(reportRetry)}`);
+  }
+
+  await renderFixture({ patch: {
+    governance: {
+      ...baseGovernance,
+      reconciliation: {
+        report: { state: "action_required", reason: "token_expired", coverage_to: earlier.slice(0, 10), retry_automatic: false, can_check_now: true },
+        evaluation: { state: "waiting", reason: "report_pending" },
+      },
+    },
+  } });
+  const reportAction = await page.evaluate(() => ({
+    state: document.getElementById("reconciliationState")?.textContent || "",
+    heading: document.getElementById("reconciliationHeading")?.textContent || "",
+    summary: document.getElementById("reconciliationSummary")?.textContent || "",
+    button: document.getElementById("reconciliationCheckButton")?.textContent || "",
+    buttonDisabled: document.getElementById("reconciliationCheckButton")?.disabled,
+  }));
+  if (reportAction.state !== "Needs you" || !reportAction.heading.includes("Fix the report connection") || !reportAction.summary.includes("Flex Web Service token") || !reportAction.summary.includes("~/.config/ibkr/flex-token") || reportAction.button !== "Check again" || reportAction.buttonDisabled !== false) {
+    throw new Error(`governance report-action fixture is incomplete: ${JSON.stringify(reportAction)}`);
+  }
+
+  await renderFixture({ patch: {
+    governance: {
+      ...baseGovernance,
+      reconciliation: {
+        report: { state: "unavailable", reason: "authority_unavailable", coverage_to: earlier.slice(0, 10), retry_automatic: false, can_check_now: false },
+        evaluation: { state: "waiting", reason: "report_pending" },
+      },
+    },
+  } });
+  const reportUnavailable = await page.evaluate(() => ({
+    state: document.getElementById("reconciliationState")?.textContent || "",
+    summary: document.getElementById("reconciliationSummary")?.textContent || "",
+    buttonDisabled: document.getElementById("reconciliationCheckButton")?.disabled,
+  }));
+  if (reportUnavailable.state !== "Unavailable" || !reportUnavailable.summary.includes("Restart Canary") || !reportUnavailable.summary.includes("local Canary data store") || reportUnavailable.buttonDisabled !== true) {
+    throw new Error(`governance report-unavailable fixture is incomplete: ${JSON.stringify(reportUnavailable)}`);
   }
 
   await renderFixture({ patch: {
@@ -1555,7 +1618,7 @@ async function exerciseGovernanceFixtures(page) {
     governance: baseGovernance,
   } });
   const blocked = await page.evaluate(() => ({ source: document.getElementById("governanceSourceHealth")?.textContent || "", context: document.getElementById("governanceContext")?.textContent || "", monthly: [...document.querySelectorAll("#briefSections .brief-row")].find((row) => row.querySelector(".brief-row__head b")?.textContent === "Monthly pulse")?.textContent || "" }));
-  if (!blocked.source.includes("pins: stale · evidence_stale") || !blocked.context.includes("measurement unavailable") || !blocked.monthly.includes("blocked by policy evidence")) throw new Error(`governance blocked fixture is incomplete: ${JSON.stringify(blocked)}`);
+  if (!blocked.source.includes("Saved approvals: out of date · information is out of date") || !blocked.context.includes("measurement unavailable") || !blocked.monthly.includes("blocked by policy evidence")) throw new Error(`governance blocked fixture is incomplete: ${JSON.stringify(blocked)}`);
 
   await renderFixture({ patch: {
     sources: { nudges: { state: "current", updated_at: asOf, last_success_at: asOf } },
@@ -1563,7 +1626,7 @@ async function exerciseGovernanceFixtures(page) {
     brief: { stamp_target: "", brief_fingerprint: "", ready: { monthly_pulse: { status: "completed", month: "2099-01", completed_at: asOf } } },
   } });
   const completed = await page.evaluate(() => ({ current: document.getElementById("governanceCurrentList")?.textContent || "", monthly: [...document.querySelectorAll("#briefSections .brief-row")].find((row) => row.querySelector(".brief-row__head b")?.textContent === "Monthly pulse")?.textContent || "" }));
-  if (!completed.current.includes("No current risk & process nudges") || !completed.monthly.includes("completed this month")) throw new Error(`governance completed fixture is incomplete: ${JSON.stringify(completed)}`);
+  if (!completed.current.includes("No current risk and process reminders") || !completed.monthly.includes("completed this month")) throw new Error(`governance completed fixture is incomplete: ${JSON.stringify(completed)}`);
 
   await renderFixture({ patch: {
     governance: {
@@ -1619,7 +1682,7 @@ async function exerciseGovernanceFixtures(page) {
     source: document.getElementById("governanceSourceHealth")?.textContent || "",
     delivery: document.getElementById("governanceDeliveryHealth")?.textContent || "",
   }));
-  if (stale.state !== "stale" || stale.current.includes("Stale retained candidate") || !stale.current.includes("unavailable") || !stale.source.includes("stale · poll_stale") || !stale.source.includes("updated") || !stale.source.includes("last successful") || !stale.delivery.includes("healthy · updated")) {
+  if (stale.state !== "Unavailable" || stale.current.includes("Stale retained candidate") || !stale.current.includes("unavailable") || !stale.source.includes("out of date · latest update is late") || !stale.source.includes("updated") || !stale.source.includes("last successful") || !stale.delivery.includes("healthy · updated")) {
     throw new Error(`governance stale fixture is incomplete: ${JSON.stringify(stale)}`);
   }
 
@@ -1634,7 +1697,7 @@ async function exerciseGovernanceFixtures(page) {
   }));
   // The redesigned chip renders "waiting" for a not-yet-observed poll; the
   // raw enum only appears inside the source-health evidence line.
-  if (notObserved.state !== "waiting" || notObserved.current.includes("Unobserved retained candidate") || !notObserved.source.includes("not_observed · not_observed")) {
+  if (notObserved.state !== "Waiting" || notObserved.current.includes("Unobserved retained candidate") || !notObserved.source.includes("waiting for first check · not checked yet")) {
     throw new Error(`governance not-observed fixture is incomplete: ${JSON.stringify(notObserved)}`);
   }
 
@@ -1651,7 +1714,7 @@ async function exerciseGovernanceFixtures(page) {
     history: document.getElementById("governanceHistoryList")?.textContent || "",
     delivery: document.getElementById("governanceDeliveryHealth")?.textContent || "",
   }));
-  if (unavailable.state !== "unavailable" || !unavailable.current.includes("unavailable") || unavailable.current.includes("Retained candidate") || !unavailable.source.includes("transport_unavailable") || !unavailable.source.includes("updated") || !unavailable.source.includes("last successful") || !unavailable.history.includes("Monthly risk pulse") || !unavailable.delivery.includes("retained · refresh unavailable · last known healthy · updated")) {
+  if (unavailable.state !== "Unavailable" || !unavailable.current.includes("unavailable") || unavailable.current.includes("Retained candidate") || !unavailable.source.includes("the Mac could not reach the service") || !unavailable.source.includes("updated") || !unavailable.source.includes("last successful") || !unavailable.history.includes("Monthly risk pulse") || !unavailable.delivery.includes("retained · refresh unavailable · last known healthy · updated")) {
     throw new Error(`governance unavailable-with-history fixture is incomplete: ${JSON.stringify(unavailable)}`);
   }
 
@@ -1666,7 +1729,7 @@ async function exerciseGovernanceFixtures(page) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   await page.locator("#tabMonitor").click();
-  return { not_due: notDue, due, blocked, completed, failed_push: failedPush, partial_multi_target: partialPush, stale, not_observed: notObserved, unavailable_with_history: unavailable, mutation_fetches: 0 };
+  return { not_due: notDue, due, report_retry: reportRetry, report_action: reportAction, report_unavailable: reportUnavailable, blocked, completed, failed_push: failedPush, partial_multi_target: partialPush, stale, not_observed: notObserved, unavailable_with_history: unavailable, mutation_fetches: 0 };
 }
 
 // Orders lives on its own bottom-nav tab (Monitor, Brief, Alerts, Orders,
@@ -1771,7 +1834,7 @@ async function exerciseSettingsTab(page) {
     modes: [...document.querySelectorAll("#alertSegments button")].map((button) => button.textContent.trim()),
     copy: document.querySelector(".settings-notification-card")?.textContent || "",
   }));
-  if (JSON.stringify(notification.modes) !== JSON.stringify(["Off", "Action required", "Watch + action"]) || !notification.copy.includes("global for this app host and all paired devices") || !notification.copy.includes("Off suppresses Web Push while in-app history remains") || !notification.copy.includes("Action required limits Canary delivery to typed required actions while governance remains included") || !notification.copy.includes("Watch + action broadens Canary delivery and includes governance") || !notification.copy.includes("not configured here") || !notification.copy.includes("shared across paired devices")) {
+  if (JSON.stringify(notification.modes) !== JSON.stringify(["Off", "Action required", "Watch + action"]) || !notification.copy.includes("global for this app host and all paired devices") || !notification.copy.includes("Off stops phone notifications while your in-app history remains") || !notification.copy.includes("Action required sends urgent items only") || !notification.copy.includes("Watch + action also sends review reminders") || !notification.copy.includes("not configured here") || !notification.copy.includes("shared across paired devices")) {
     throw new Error(`Settings notification card is incomplete: ${JSON.stringify(notification)}`);
   }
   const settingWritesAfter = await page.evaluate(() => globalThis.__ibkrSmoke.fetches.filter((item) => item.url.endsWith("/api/alerts/settings")).length);

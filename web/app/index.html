@@ -456,20 +456,35 @@
                   <span>Risk &amp; process</span>
                   <b id="governanceHeading">Process checks</b>
                 </div>
-                <span class="governance-state" id="governanceCurrentState">unavailable</span>
+                <span class="governance-state" id="governanceCurrentState">Unavailable</span>
               </div>
               <p class="governance-summary" id="governanceSummary">Process check status not observed yet.</p>
-              <section class="governance-block" aria-label="Current risk and process nudges" id="governanceCurrentBlock" hidden>
+              <section class="reconciliation-card" id="reconciliationCard" data-state="unavailable" aria-labelledby="reconciliationHeading">
+                <div class="reconciliation-card__head">
+                  <div>
+                    <span>Daily broker report</span>
+                    <b id="reconciliationHeading">Latest report check</b>
+                  </div>
+                  <span class="reconciliation-card__state" id="reconciliationState">Unavailable</span>
+                </div>
+                <p class="reconciliation-card__summary" id="reconciliationSummary">Canary has not checked the latest IBKR report yet.</p>
+                <p class="reconciliation-card__meta" id="reconciliationMeta"></p>
+                <div class="reconciliation-card__actions">
+                  <button class="text-button" id="reconciliationCheckButton" type="button" disabled>Check again</button>
+                  <p class="governance-action-status" id="reconciliationCheckStatus" role="status"></p>
+                </div>
+              </section>
+              <section class="governance-block" aria-label="Current risk and process reminders" id="governanceCurrentBlock" hidden>
                 <div class="alert-section__head">
                   <span>Current</span>
                   <b id="governanceCurrentCount">--</b>
                 </div>
                 <div class="governance-list" id="governanceCurrentList"></div>
               </section>
-              <section class="governance-coverage" aria-label="Confirmed-flow review" id="governanceCoverageBlock" hidden>
-                <span>Confirmed-flow coverage</span>
-                <p id="governanceCoverage">Confirmed-flow coverage unavailable.</p>
-                <button class="text-button" id="governanceCutoverReviewButton" type="button" hidden>Record foreground review</button>
+              <section class="governance-coverage" aria-label="Older payment review" id="governanceCoverageBlock" hidden>
+                <span>Older payment history</span>
+                <p id="governanceCoverage">Payment history unavailable.</p>
+                <button class="text-button" id="governanceCutoverReviewButton" type="button" hidden>Mark older payments reviewed</button>
                 <p class="governance-action-status" id="governanceCutoverReviewStatus" role="status"></p>
               </section>
               <details class="governance-details" id="governanceEvidenceDetails">
@@ -487,18 +502,18 @@
                     <b id="governanceDeliveryHealth">unavailable</b>
                   </div>
                 </section>
-                <div class="governance-evidence" aria-label="Governance authority evidence">
+                <div class="governance-evidence" aria-label="Process check details">
                   <div>
-                    <span>Source health</span>
-                    <p id="governanceSourceHealth">unavailable · not_observed</p>
+                    <span>Information used</span>
+                    <p id="governanceSourceHealth">Unavailable · not checked yet</p>
                   </div>
                   <div>
-                    <span>Typed context</span>
-                    <p id="governanceContext">Context unavailable.</p>
+                    <span>Extra warning details</span>
+                    <p id="governanceContext">Extra warning details unavailable.</p>
                   </div>
                   <div>
-                    <span>Resolved coverage detail</span>
-                    <p id="governanceCoverageDetail">Confirmed-flow coverage unavailable.</p>
+                    <span>Payment history checked</span>
+                    <p id="governanceCoverageDetail">Payment history unavailable.</p>
                   </div>
                 </div>
                 <section class="governance-delivery" aria-label="Notification delivery evidence">
@@ -566,7 +581,7 @@
                 <button type="button" data-mode="watch_and_act">Watch + action</button>
               </div>
               <p class="settings-notification-copy">The delivery level is global for this app host and all paired devices. Browser permission and subscription belong only to this browser or installed PWA.</p>
-              <p class="settings-notification-copy">Off suppresses Web Push while in-app history remains. Action required limits Canary delivery to typed required actions while governance remains included. Watch + action broadens Canary delivery and includes governance.</p>
+              <p class="settings-notification-copy">Off stops phone notifications while your in-app history remains. Action required sends urgent items only. Watch + action also sends review reminders.</p>
               <p class="settings-notification-copy">Risk and process eligibility is not configured here. The unread badge and read state are shared across paired devices.</p>
               <p class="governance-action-status" id="alertSettingsStatus" role="status"></p>
               <div class="settings-notification-actions">

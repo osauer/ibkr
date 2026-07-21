@@ -100,7 +100,7 @@ func TestGovernanceAuthorityGatesCandidatesShadowAndMonthly(t *testing.T) {
 		wantActive bool
 	}{
 		{name: "active approved v4", policyTOML: validRiskPolicyV4TOML(), wantStatus: rpc.NudgeInputStatusOK, wantActive: true},
-		{name: "v3", policyTOML: validRiskPolicyV3TOML(), wantStatus: rpc.NudgeInputStatusUnapproved, wantReason: rpc.NudgeHealthReasonPolicyUnapproved},
+		{name: "v3", policyTOML: validRiskPolicyV3TOML(), wantStatus: rpc.NudgeInputStatusInactive, wantReason: rpc.NudgeHealthReasonProcessRemindersNotEnabled},
 		{name: "inactive", policyTOML: validRiskPolicyV4TOML(), mutate: func(s *Server) { s.riskPolicies.status = rpc.RiskPolicyStatusAbsent }, wantStatus: rpc.NudgeInputStatusUnavailable, wantReason: rpc.NudgeHealthReasonSourceUnavailable},
 		{name: "unapproved", policyTOML: validRiskPolicyV4TOML(), mutate: func(s *Server) { s.riskPolicies.active.Cadence.Monthly.DayOfMonth = nil }, wantStatus: rpc.NudgeInputStatusUnapproved, wantReason: rpc.NudgeHealthReasonPolicyUnapproved},
 		{name: "error", policyTOML: validRiskPolicyV4TOML(), mutate: func(s *Server) { s.riskPolicies.status = rpc.RiskPolicyStatusError }, wantStatus: rpc.NudgeInputStatusError, wantReason: rpc.NudgeHealthReasonEvaluationError},
@@ -140,6 +140,14 @@ func TestGovernanceAuthorityGatesCandidatesShadowAndMonthly(t *testing.T) {
 					t.Fatalf("active context=%+v", result.Context)
 				}
 				return
+			}
+			if tt.name == "v3" {
+				if result.Reconciliation == nil {
+					t.Fatal("active v3 omitted daily broker-report status")
+				}
+				if result.SourceHealth.Cadence.Status != rpc.NudgeInputStatusInactive || result.SourceHealth.ConfirmedFlow.Status != rpc.NudgeInputStatusInactive {
+					t.Fatalf("v3 reminder sources=%+v, want explicitly inactive", result.SourceHealth)
+				}
 			}
 			if len(result.Candidates) != 0 || result.Context != nil || result.IsCleanEmpty() {
 				t.Fatalf("blocked result candidates=%+v context=%+v clean=%v", result.Candidates, result.Context, result.IsCleanEmpty())

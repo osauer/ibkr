@@ -376,34 +376,34 @@ func candidateTemplate(kind, state string) (title, body, severity string) {
 	switch kind {
 	case NudgeKindReconcileDue:
 		if state == NudgeStateDueSoon {
-			return "Reconciliation due soon", "Review the reconciliation clock.", NudgeSeverityWatch
+			return "Daily broker check due soon", "Open Process checks before the due date.", NudgeSeverityWatch
 		}
 		if state == NudgeStateOverdue {
-			return "Reconciliation overdue", "Reconciliation evidence needs attention.", NudgeSeverityAct
+			return "Daily broker check overdue", "Open Process checks and resolve what is waiting.", NudgeSeverityAct
 		}
 	case NudgeKindReconcileException:
 		if state == NudgeStateOpen {
-			return "Reconciliation exception", "Review unresolved reconciliation evidence.", NudgeSeverityAct
+			return "Broker report needs your review", "One or more broker entries could not be cleared automatically.", NudgeSeverityAct
 		}
 	case NudgeKindShadowWouldBlock:
 		if state == NudgeStateObserved {
-			return "Shadow control triggered", "A risk-increasing preview met the shadow block condition.", NudgeSeverityAct
+			return "A planned trade would have been blocked", "Review the risk warning before placing a similar trade.", NudgeSeverityAct
 		}
 	case NudgeKindDrawdownLatched:
 		if state == NudgeStateOpen {
-			return "Drawdown latch open", "The drawdown latch remains open.", NudgeSeverityAct
+			return "The drawdown warning remains active", "This is a warning only; Canary has not blocked trading. Review the risk screen before increasing risk.", NudgeSeverityAct
 		}
 	case NudgeKindPolicyDrift:
 		if state == NudgeStateOpen {
-			return "Policy pins need review", "Review the policy pin status.", NudgeSeverityAct
+			return "Risk settings changed", "Review the changed settings before relying on reminders.", NudgeSeverityAct
 		}
 	case NudgeKindConfirmedFlow:
 		if state == NudgeStateObserved {
-			return "Confirmed account flow", "A new confirmed statement flow is available for review.", NudgeSeverityWatch
+			return "New cash movement found", "A broker statement contains a new deposit or withdrawal.", NudgeSeverityWatch
 		}
 	case NudgeKindMonthlyPulse:
 		if state == NudgeStateDue {
-			return "Monthly risk pulse due", "Review the monthly risk brief and policy pins.", NudgeSeverityWatch
+			return "Monthly risk review due", "Open the monthly brief and review the current risk settings.", NudgeSeverityWatch
 		}
 	}
 	return "", "", ""

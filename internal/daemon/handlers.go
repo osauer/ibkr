@@ -160,7 +160,13 @@ func (s *Server) buildAccountSummary(ctx context.Context, observe bool) (*rpc.Ac
 		}
 		if pol == nil || pol.Capital.BaseCurrency == "" || res.BaseCurrency == "" ||
 			strings.EqualFold(pol.Capital.BaseCurrency, res.BaseCurrency) {
-			s.riskCapital.Observe(res.NetLiquidation, res.AsOf, pol, s.currentBrokerStateScope())
+			if firstDailyObservation := s.riskCapital.Observe(res.NetLiquidation, res.AsOf, pol, s.currentBrokerStateScope()); firstDailyObservation {
+				// The broker report can arrive before today's runtime account
+				// value. Re-evaluate once when that missing daily counterpart
+				// first appears; the report-id gate keeps automatic extension
+				// idempotent.
+				s.evaluateRiskPolicyV3Reconciliation()
+			}
 		}
 	}
 	return res, nil

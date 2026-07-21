@@ -516,9 +516,9 @@ func (st *riskCapitalStore) effectiveFlowsLocked(c *risk.Constitution) (effectiv
 // the caller's connected broker identity: an observation from an unresolved
 // scope, a non-live mode, or a different account is refused and journaled,
 // never folded into the peak.
-func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.Constitution, scope brokerStateScope) {
+func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.Constitution, scope brokerStateScope) bool {
 	if st == nil || equityBase <= 0 || asOf.IsZero() {
-		return
+		return false
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -527,7 +527,7 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 	now := st.now()
 	if reason := st.observationScopeRejectionLocked(scope); reason != "" {
 		st.journalScopeRejectionLocked(scope, equityBase, asOf, reason, c, now)
-		return
+		return false
 	}
 	force := false
 	if st.state.GenesisAt.IsZero() {
@@ -551,7 +551,9 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 	if st.state.DailyEquity == nil {
 		st.state.DailyEquity = make(map[string]float64)
 	}
-	st.state.DailyEquity[asOf.UTC().Format("2006-01-02")] = equityBase
+	dayKey := asOf.UTC().Format("2006-01-02")
+	_, alreadyObservedToday := st.state.DailyEquity[dayKey]
+	st.state.DailyEquity[dayKey] = equityBase
 	cutoff := now.UTC().Add(-riskCapitalDailySampleKeep)
 	cutoff = time.Date(cutoff.Year(), cutoff.Month(), cutoff.Day(), 0, 0, 0, 0, time.UTC)
 	for day := range st.state.DailyEquity {
@@ -603,6 +605,7 @@ func (st *riskCapitalStore) Observe(equityBase float64, asOf time.Time, c *risk.
 		force = true
 	}
 	st.persistLocked(force)
+	return !alreadyObservedToday
 }
 
 // observationScopeRejectionLocked names why an equity observation may not

@@ -1,4 +1,4 @@
-import { clearAlerts, dismissCurrentSignals, enablePush, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, sendGovernanceCutoverReview, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility } from "./alerts.js";
+import { clearAlerts, dismissCurrentSignals, enablePush, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, sendGovernanceCutoverReview, sendReconciliationCheck, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility } from "./alerts.js";
 import { renderAlertInboxV2 } from "./alert-inbox-v2.js";
 import { completePairing } from "./auth.js";
 import { renderBriefCard, setupBriefVisibility } from "./brief.js";
@@ -185,6 +185,7 @@ $("dismissCurrentButton").addEventListener("click", dismissCurrentSignals);
 
 $("enablePushButton").addEventListener("click", enablePush);
 $("safeNotificationTestButton").addEventListener("click", sendSafeNotificationTest);
+$("reconciliationCheckButton").addEventListener("click", sendReconciliationCheck);
 $("governanceCutoverReviewButton").addEventListener("click", sendGovernanceCutoverReview);
 $("retryAuthButton").addEventListener("click", bootstrap);
 $("accountPrivacyToggle").addEventListener("click", () => {

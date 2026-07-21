@@ -1,6 +1,10 @@
 package rpc
 
-import "time"
+import (
+	"encoding/json"
+	"errors"
+	"time"
+)
 
 // Post-trade reconciliation contract (docs/design/post-trade-truth.md).
 // recon.snapshot is read-only and works from retained statement files;
@@ -12,6 +16,13 @@ const (
 	// report from retained Flex statements and the declared capital-event
 	// ledger. Params may request a background statement fetch.
 	MethodReconSnapshot = "recon.snapshot"
+	// MethodReconCheck requests one broker-report check and returns an
+	// immediate, typed receipt. It is broker-read-only and never signs off,
+	// dismisses an exception, or changes trading controls.
+	MethodReconCheck = "recon.check"
+	// MethodReconStatus returns only the redacted daily automation state. It
+	// deliberately omits report rows, amounts, account data, and identifiers.
+	MethodReconStatus = "recon.status"
 	// MethodReconBacktest builds the full-window backtest report: every
 	// statement flow labeled for the operator's flow-list review, plus the
 	// capital-ladder replay over the statement equity series
@@ -21,6 +32,92 @@ const (
 	// MethodReconDismiss records a human resolution for one exception
 	// line: reviewed, explained, deliberately not a ledger event.
 	MethodReconDismiss = "recon.dismiss"
+)
+
+const (
+	ReconCheckOutcomeStarted         = "started"
+	ReconCheckOutcomeAlreadyChecking = "already_checking"
+	ReconCheckOutcomeCooldown        = "cooldown"
+	ReconCheckOutcomeActionRequired  = "action_required"
+)
+
+// ReconCheckParams is deliberately an exact empty object. The paired app
+// cannot smuggle report, account, policy, or trading instructions into this
+// read-only action.
+type ReconCheckParams struct{}
+
+func (ReconCheckParams) MarshalJSON() ([]byte, error) { return []byte("{}"), nil }
+
+func (params *ReconCheckParams) UnmarshalJSON(data []byte) error {
+	type wire ReconCheckParams
+	var decoded wire
+	if err := decodeExactNudgeJSONObject(data, nil, &decoded); err != nil {
+		return err
+	}
+	*params = ReconCheckParams(decoded)
+	return nil
+}
+
+type ReconStatusParams struct{}
+
+func (ReconStatusParams) MarshalJSON() ([]byte, error) { return []byte("{}"), nil }
+
+func (params *ReconStatusParams) UnmarshalJSON(data []byte) error {
+	type wire ReconStatusParams
+	var decoded wire
+	if err := decodeExactNudgeJSONObject(data, nil, &decoded); err != nil {
+		return err
+	}
+	*params = ReconStatusParams(decoded)
+	return nil
+}
+
+// Daily broker-report automation states. These values are deliberately
+// narrow and prose-free so paired surfaces can render their own plain copy
+// without exposing broker responses, local paths, or statement contents.
+const (
+	ReconReportStateWaiting        = "waiting"
+	ReconReportStateDue            = "due"
+	ReconReportStateChecking       = "checking"
+	ReconReportStateCurrent        = "current"
+	ReconReportStateRetryScheduled = "retry_scheduled"
+	ReconReportStateActionRequired = "action_required"
+	ReconReportStateUnavailable    = "unavailable"
+
+	ReconReportReasonNone                 = ""
+	ReconReportReasonBeforeDailyWindow    = "before_daily_window"
+	ReconReportReasonCoveragePending      = "coverage_pending"
+	ReconReportReasonReportNotReady       = "report_not_ready"
+	ReconReportReasonServiceBusy          = "service_busy"
+	ReconReportReasonRateLimited          = "rate_limited"
+	ReconReportReasonNetworkUnavailable   = "network_unavailable"
+	ReconReportReasonFlexDisabled         = "flex_disabled"
+	ReconReportReasonQueryMissing         = "query_missing"
+	ReconReportReasonTokenMissing         = "token_missing"
+	ReconReportReasonTokenInvalid         = "token_invalid"
+	ReconReportReasonTokenExpired         = "token_expired"
+	ReconReportReasonQueryInvalid         = "query_invalid"
+	ReconReportReasonIPRestricted         = "ip_restricted"
+	ReconReportReasonServiceInactive      = "service_inactive"
+	ReconReportReasonResponseInvalid      = "response_invalid"
+	ReconReportReasonReportInvalid        = "report_invalid"
+	ReconReportReasonStorageFailed        = "storage_failed"
+	ReconReportReasonProjectionFailed     = "projection_failed"
+	ReconReportReasonAuthorityUnavailable = "authority_unavailable"
+
+	ReconEvaluationStateWaiting           = "waiting"
+	ReconEvaluationStateChecking          = "checking"
+	ReconEvaluationStateComplete          = "complete"
+	ReconEvaluationStateAttentionRequired = "attention_required"
+	ReconEvaluationStateFailed            = "failed"
+
+	ReconEvaluationReasonNone                 = ""
+	ReconEvaluationReasonReportPending        = "report_pending"
+	ReconEvaluationReasonAccountValuePending  = "account_value_pending"
+	ReconEvaluationReasonExceptionsNeedReview = "exceptions_need_review"
+	ReconEvaluationReasonAccountValueMismatch = "account_value_mismatch"
+	ReconEvaluationReasonEvaluationFailed     = "evaluation_failed"
+	ReconEvaluationReasonPolicyUnapproved     = "policy_unapproved"
 )
 
 // Recon report statuses.
@@ -159,10 +256,216 @@ type ReconBacktestResult struct {
 // ReconFetchStatus reports statement-source health. It never carries the
 // token or any request detail.
 type ReconFetchStatus struct {
-	Configured  bool      `json:"configured"`
-	LastSuccess time.Time `json:"last_success,omitzero"`
-	LastAttempt time.Time `json:"last_attempt,omitzero"`
-	LastError   string    `json:"last_error,omitempty"`
+	Configured         bool      `json:"configured"`
+	State              string    `json:"state"`
+	Reason             string    `json:"reason,omitempty"`
+	ExpectedCoverageTo time.Time `json:"expected_coverage_to,omitzero"`
+	CoverageTo         time.Time `json:"coverage_to,omitzero"`
+	LastSuccess        time.Time `json:"last_success,omitzero"`
+	LastAttempt        time.Time `json:"last_attempt,omitzero"`
+	NextAttempt        time.Time `json:"next_attempt,omitzero"`
+	RetryAutomatic     bool      `json:"retry_automatic"`
+	CanCheckNow        bool      `json:"can_check_now"`
+	Busy               bool      `json:"busy"`
+	// LastError is retained for CLI compatibility, but is now derived only
+	// from Reason. It never contains broker prose, paths, URLs, or parser
+	// details and is not forwarded by the paired-app DTO.
+	LastError string `json:"last_error,omitempty"`
+}
+
+// ReconEvaluationStatus reports what happened after the broker report was
+// acquired. It intentionally does not expose report ids, amounts, or policy
+// thresholds.
+type ReconEvaluationStatus struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// ReconAutomationStatus keeps acquisition and evaluation separate so a
+// report outage is never presented as a policy/evaluation failure (or vice
+// versa).
+type ReconAutomationStatus struct {
+	Report     ReconFetchStatus      `json:"report"`
+	Evaluation ReconEvaluationStatus `json:"evaluation"`
+}
+
+// ReconCheckResult is the immediate receipt returned by recon.check. Status
+// is a fresh redacted snapshot; completion is observed by polling status,
+// never inferred from the receipt alone.
+type ReconCheckResult struct {
+	Outcome string                `json:"outcome"`
+	Status  ReconAutomationStatus `json:"status"`
+}
+
+type ReconStatusResult struct {
+	Status ReconAutomationStatus `json:"status"`
+}
+
+func (result ReconStatusResult) MarshalJSON() ([]byte, error) {
+	if err := ValidateReconAutomationStatus(result.Status); err != nil {
+		return nil, err
+	}
+	type wire ReconStatusResult
+	return json.Marshal(wire(result))
+}
+
+func (result *ReconStatusResult) UnmarshalJSON(data []byte) error {
+	type wire ReconStatusResult
+	var decoded wire
+	if err := decodeExactNudgeJSONObject(data, []string{"status"}, &decoded); err != nil {
+		return err
+	}
+	value := ReconStatusResult(decoded)
+	if err := ValidateReconAutomationStatus(value.Status); err != nil {
+		return err
+	}
+	*result = value
+	return nil
+}
+
+func (result ReconCheckResult) MarshalJSON() ([]byte, error) {
+	if err := ValidateReconCheckResult(result); err != nil {
+		return nil, err
+	}
+	type wire ReconCheckResult
+	return json.Marshal(wire(result))
+}
+
+func (result *ReconCheckResult) UnmarshalJSON(data []byte) error {
+	type wire ReconCheckResult
+	var decoded wire
+	if err := decodeExactNudgeJSONObject(data, []string{"outcome", "status"}, &decoded); err != nil {
+		return err
+	}
+	value := ReconCheckResult(decoded)
+	if err := ValidateReconCheckResult(value); err != nil {
+		return err
+	}
+	*result = value
+	return nil
+}
+
+func ValidateReconCheckResult(result ReconCheckResult) error {
+	switch result.Outcome {
+	case ReconCheckOutcomeStarted, ReconCheckOutcomeAlreadyChecking,
+		ReconCheckOutcomeCooldown, ReconCheckOutcomeActionRequired:
+	default:
+		return errors.New("invalid reconciliation check outcome")
+	}
+	return ValidateReconAutomationStatus(result.Status)
+}
+
+// ValidateReconAutomationStatus rejects unknown or incoherent values before
+// an adapter can publish them. The contract is intentionally exact: callers
+// must map new internal failures to an existing safe reason or revise every
+// consumer deliberately.
+func ValidateReconAutomationStatus(status ReconAutomationStatus) error {
+	reportReasons := map[string]bool{
+		ReconReportReasonNone: true, ReconReportReasonBeforeDailyWindow: true,
+		ReconReportReasonCoveragePending: true, ReconReportReasonReportNotReady: true,
+		ReconReportReasonServiceBusy: true, ReconReportReasonRateLimited: true,
+		ReconReportReasonNetworkUnavailable: true, ReconReportReasonFlexDisabled: true,
+		ReconReportReasonQueryMissing: true, ReconReportReasonTokenMissing: true,
+		ReconReportReasonTokenInvalid: true, ReconReportReasonTokenExpired: true,
+		ReconReportReasonQueryInvalid: true, ReconReportReasonIPRestricted: true,
+		ReconReportReasonServiceInactive: true, ReconReportReasonResponseInvalid: true,
+		ReconReportReasonReportInvalid: true, ReconReportReasonStorageFailed: true,
+		ReconReportReasonProjectionFailed: true, ReconReportReasonAuthorityUnavailable: true,
+	}
+	reportStates := map[string]bool{
+		ReconReportStateWaiting: true, ReconReportStateDue: true,
+		ReconReportStateChecking: true, ReconReportStateCurrent: true,
+		ReconReportStateRetryScheduled: true, ReconReportStateActionRequired: true,
+		ReconReportStateUnavailable: true,
+	}
+	evaluationStates := map[string]bool{
+		ReconEvaluationStateWaiting: true, ReconEvaluationStateChecking: true,
+		ReconEvaluationStateComplete: true, ReconEvaluationStateAttentionRequired: true,
+		ReconEvaluationStateFailed: true,
+	}
+	evaluationReasons := map[string]bool{
+		ReconEvaluationReasonNone: true, ReconEvaluationReasonReportPending: true,
+		ReconEvaluationReasonAccountValuePending:  true,
+		ReconEvaluationReasonExceptionsNeedReview: true,
+		ReconEvaluationReasonAccountValueMismatch: true,
+		ReconEvaluationReasonEvaluationFailed:     true,
+		ReconEvaluationReasonPolicyUnapproved:     true,
+	}
+	if !reportStates[status.Report.State] || !reportReasons[status.Report.Reason] {
+		return errors.New("invalid reconciliation report automation state")
+	}
+	if !evaluationStates[status.Evaluation.State] || !evaluationReasons[status.Evaluation.Reason] {
+		return errors.New("invalid reconciliation evaluation automation state")
+	}
+	if status.Report.Busy != (status.Report.State == ReconReportStateChecking) {
+		return errors.New("reconciliation report busy flag and state disagree")
+	}
+	if status.Report.State == ReconReportStateCurrent && status.Report.Reason != ReconReportReasonNone {
+		return errors.New("current reconciliation report carries a failure reason")
+	}
+	switch status.Report.State {
+	case ReconReportStateWaiting:
+		if status.Report.Reason != ReconReportReasonBeforeDailyWindow {
+			return errors.New("waiting reconciliation report has an invalid reason")
+		}
+	case ReconReportStateDue:
+		if status.Report.Reason != ReconReportReasonCoveragePending {
+			return errors.New("due reconciliation report has an invalid reason")
+		}
+	case ReconReportStateChecking:
+		if status.Report.Reason != ReconReportReasonNone && status.Report.Reason != ReconReportReasonCoveragePending {
+			return errors.New("checking reconciliation report has an invalid reason")
+		}
+	case ReconReportStateRetryScheduled:
+		switch status.Report.Reason {
+		case ReconReportReasonCoveragePending, ReconReportReasonReportNotReady,
+			ReconReportReasonServiceBusy, ReconReportReasonRateLimited,
+			ReconReportReasonNetworkUnavailable, ReconReportReasonResponseInvalid,
+			ReconReportReasonReportInvalid, ReconReportReasonStorageFailed,
+			ReconReportReasonProjectionFailed:
+		default:
+			return errors.New("retrying reconciliation report has an invalid reason")
+		}
+	case ReconReportStateActionRequired:
+		switch status.Report.Reason {
+		case ReconReportReasonFlexDisabled, ReconReportReasonQueryMissing,
+			ReconReportReasonTokenMissing, ReconReportReasonTokenInvalid,
+			ReconReportReasonTokenExpired, ReconReportReasonQueryInvalid,
+			ReconReportReasonIPRestricted, ReconReportReasonServiceInactive:
+		default:
+			return errors.New("action-required reconciliation report has an invalid reason")
+		}
+	case ReconReportStateUnavailable:
+		if status.Report.Reason != ReconReportReasonAuthorityUnavailable && status.Report.Reason != ReconReportReasonNetworkUnavailable {
+			return errors.New("unavailable reconciliation report has an invalid reason")
+		}
+	}
+	switch status.Evaluation.State {
+	case ReconEvaluationStateWaiting:
+		if status.Evaluation.Reason != ReconEvaluationReasonReportPending && status.Evaluation.Reason != ReconEvaluationReasonAccountValuePending {
+			return errors.New("waiting reconciliation evaluation has an invalid reason")
+		}
+	case ReconEvaluationStateChecking:
+		if status.Evaluation.Reason != ReconEvaluationReasonReportPending {
+			return errors.New("checking reconciliation evaluation has an invalid reason")
+		}
+	case ReconEvaluationStateComplete:
+		if status.Evaluation.Reason != ReconEvaluationReasonNone {
+			return errors.New("complete reconciliation evaluation carries a reason")
+		}
+	case ReconEvaluationStateAttentionRequired:
+		if status.Evaluation.Reason != ReconEvaluationReasonExceptionsNeedReview && status.Evaluation.Reason != ReconEvaluationReasonAccountValueMismatch {
+			return errors.New("attention-required reconciliation evaluation has an invalid reason")
+		}
+	case ReconEvaluationStateFailed:
+		if status.Evaluation.Reason != ReconEvaluationReasonEvaluationFailed && status.Evaluation.Reason != ReconEvaluationReasonPolicyUnapproved {
+			return errors.New("failed reconciliation evaluation has an invalid reason")
+		}
+	}
+	if status.Report.State != ReconReportStateCurrent && status.Evaluation.State == ReconEvaluationStateComplete {
+		return errors.New("reconciliation evaluation is complete without a current report")
+	}
+	return nil
 }
 
 // ReconResult is the recon.snapshot payload.
@@ -174,22 +477,23 @@ type ReconResult struct {
 	ReportID string `json:"report_id,omitempty"`
 	// StatementAsOf is when the newest ingested statement was generated
 	// by IBKR — the freshness the max_report_age_days policy key bounds.
-	StatementAsOf          time.Time         `json:"statement_as_of,omitzero"`
-	CoverageFrom           time.Time         `json:"coverage_from,omitzero"`
-	CoverageTo             time.Time         `json:"coverage_to,omitzero"`
-	GenesisAt              time.Time         `json:"genesis_at,omitzero"`
-	Counts                 map[string]int    `json:"counts,omitempty"`
-	Exceptions             []ReconException  `json:"exceptions,omitempty"`
-	Baseline               []ReconException  `json:"baseline,omitempty"`
-	Confirmed              []ReconException  `json:"confirmed,omitempty"`
-	Unresolved             int               `json:"unresolved"`
-	StatementCumFlowsBase  *float64          `json:"statement_cum_flows_base,omitempty"`
-	LastAutoExtendReportID string            `json:"last_auto_extend_report_id,omitempty"`
-	LastAutoExtendedAt     time.Time         `json:"last_auto_extended_at,omitzero"`
-	Equity                 *ReconEquityCheck `json:"equity,omitempty"`
-	Fetch                  ReconFetchStatus  `json:"fetch"`
-	Message                string            `json:"message,omitempty"`
-	InputHealth            []SourceHealth    `json:"input_health,omitempty"`
+	StatementAsOf          time.Time             `json:"statement_as_of,omitzero"`
+	CoverageFrom           time.Time             `json:"coverage_from,omitzero"`
+	CoverageTo             time.Time             `json:"coverage_to,omitzero"`
+	GenesisAt              time.Time             `json:"genesis_at,omitzero"`
+	Counts                 map[string]int        `json:"counts,omitempty"`
+	Exceptions             []ReconException      `json:"exceptions,omitempty"`
+	Baseline               []ReconException      `json:"baseline,omitempty"`
+	Confirmed              []ReconException      `json:"confirmed,omitempty"`
+	Unresolved             int                   `json:"unresolved"`
+	StatementCumFlowsBase  *float64              `json:"statement_cum_flows_base,omitempty"`
+	LastAutoExtendReportID string                `json:"last_auto_extend_report_id,omitempty"`
+	LastAutoExtendedAt     time.Time             `json:"last_auto_extended_at,omitzero"`
+	Equity                 *ReconEquityCheck     `json:"equity,omitempty"`
+	Fetch                  ReconFetchStatus      `json:"fetch"`
+	Automation             ReconAutomationStatus `json:"automation"`
+	Message                string                `json:"message,omitempty"`
+	InputHealth            []SourceHealth        `json:"input_health,omitempty"`
 }
 
 // ReconDismissParams records one human resolution.

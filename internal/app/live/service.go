@@ -68,6 +68,52 @@ type Snapshot struct {
 	Sources         map[string]SourceMeta       `json:"sources,omitempty"`
 }
 
+// publicNudgesSnapshot is the browser/SSE projection. Reconciliation uses a
+// separate allowlisted HTTP DTO; keeping the full daemon RPC value here would
+// let future private fields bypass that boundary through bootstrap or events.
+type publicNudgesSnapshot struct {
+	AsOf                  time.Time                       `json:"as_of"`
+	Candidates            []rpc.NudgeCandidate            `json:"candidates"`
+	SourceHealth          publicNudgeSourceHealth         `json:"source_health"`
+	ConfirmedFlowCoverage *rpc.NudgeConfirmedFlowCoverage `json:"confirmed_flow_coverage,omitempty"`
+	Context               *rpc.NudgeSnapshotContext       `json:"context,omitempty"`
+}
+
+type publicNudgeSourceHealth struct {
+	Aggregate      string               `json:"aggregate"`
+	Policy         rpc.NudgeInputHealth `json:"policy"`
+	Reconciliation rpc.NudgeInputHealth `json:"reconciliation"`
+	Capital        rpc.NudgeInputHealth `json:"capital"`
+	Pins           rpc.NudgeInputHealth `json:"pins"`
+	Cadence        rpc.NudgeInputHealth `json:"cadence"`
+	ConfirmedFlow  rpc.NudgeInputHealth `json:"confirmed_flow"`
+}
+
+func projectPublicNudges(value *rpc.NudgesSnapshotResult) *publicNudgesSnapshot {
+	if value == nil {
+		return nil
+	}
+	health := rpc.NormalizeNudgeSourceHealth(value.SourceHealth, len(value.Candidates))
+	return &publicNudgesSnapshot{
+		AsOf: value.AsOf, Candidates: value.Candidates,
+		SourceHealth: publicNudgeSourceHealth{
+			Aggregate: health.Aggregate, Policy: health.Policy, Reconciliation: health.Reconciliation,
+			Capital: health.Capital, Pins: health.Pins, Cadence: health.Cadence, ConfirmedFlow: health.ConfirmedFlow,
+		},
+		ConfirmedFlowCoverage: value.ConfirmedFlowCoverage, Context: value.Context,
+	}
+}
+
+// MarshalJSON is the one public snapshot boundary shared by bootstrap,
+// snapshot reads, and full-snapshot SSE messages.
+func (snapshot Snapshot) MarshalJSON() ([]byte, error) {
+	type snapshotAlias Snapshot
+	return json.Marshal(struct {
+		snapshotAlias
+		Nudges *publicNudgesSnapshot `json:"nudges,omitempty"`
+	}{snapshotAlias: snapshotAlias(snapshot), Nudges: projectPublicNudges(snapshot.Nudges)})
+}
+
 type MarketQuotes struct {
 	AsOf   time.Time            `json:"as_of,omitzero"`
 	Quotes map[string]rpc.Quote `json:"quotes,omitempty"`
@@ -428,7 +474,7 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 			snap.Nudges = nudges
 			snap.Sources["nudges"] = sourceCurrent(now)
 			if s.changed("nudges", nudges) {
-				events = append(events, Event{Type: "nudges", Data: nudges})
+				events = append(events, Event{Type: "nudges", Data: projectPublicNudges(nudges)})
 			}
 			if s.OnNudges != nil {
 				s.OnNudges(ctx, *nudges)
@@ -735,7 +781,7 @@ func (s *Service) PollNudgesOnce(ctx context.Context) Snapshot {
 		snap.Nudges = nudges
 		snap.Sources["nudges"] = sourceCurrent(now)
 		if s.changed("nudges", nudges) {
-			events = append(events, Event{Type: "nudges", Data: nudges})
+			events = append(events, Event{Type: "nudges", Data: projectPublicNudges(nudges)})
 		}
 		if s.OnNudges != nil {
 			s.OnNudges(ctx, *nudges)
@@ -1414,6 +1460,10 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	if in.Nudges != nil {
 		nudges := *in.Nudges
 		nudges.Candidates = append([]rpc.NudgeCandidate(nil), in.Nudges.Candidates...)
+		if in.Nudges.Reconciliation != nil {
+			reconciliation := *in.Nudges.Reconciliation
+			nudges.Reconciliation = &reconciliation
+		}
 		if in.Nudges.ConfirmedFlowCoverage != nil {
 			coverage := *in.Nudges.ConfirmedFlowCoverage
 			nudges.ConfirmedFlowCoverage = &coverage

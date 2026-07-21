@@ -905,7 +905,7 @@ func (s *Server) currentNudgeAuthority(now time.Time) nudgeAuthorityState {
 		setHealth(rpc.NudgeInputStatusStale, rpc.NudgeHealthReasonEvidenceStale)
 		return state
 	}
-	if mgr.policy.PolicyVersion != 4 || len(state.report.Unapproved) != 0 {
+	if len(state.report.Unapproved) != 0 {
 		setHealth(rpc.NudgeInputStatusUnapproved, rpc.NudgeHealthReasonPolicyUnapproved)
 		return state
 	}
@@ -913,8 +913,16 @@ func (s *Server) currentNudgeAuthority(now time.Time) nudgeAuthorityState {
 		setHealth(rpc.NudgeInputStatusError, rpc.NudgeHealthReasonEvaluationError)
 		return state
 	}
-	setHealth(rpc.NudgeInputStatusOK, rpc.NudgeHealthReasonNone)
 	state.pinsReadable = policyPinsReadable(state.report.Inventory, false)
+	if mgr.policy.PolicyVersion == 3 {
+		setHealth(rpc.NudgeInputStatusInactive, rpc.NudgeHealthReasonProcessRemindersNotEnabled)
+		return state
+	}
+	if mgr.policy.PolicyVersion != 4 {
+		setHealth(rpc.NudgeInputStatusUnapproved, rpc.NudgeHealthReasonPolicyUnapproved)
+		return state
+	}
+	setHealth(rpc.NudgeInputStatusOK, rpc.NudgeHealthReasonNone)
 	state.eligible = true
 	return state
 }
@@ -1171,6 +1179,47 @@ func (s *Server) composeNudgesSnapshotContextWithAuthority(ctx context.Context, 
 		}
 	}
 	result.SourceHealth.Policy = authority.policyHealth
+	if authority.policyHealth.Status == rpc.NudgeInputStatusInactive {
+		inactive := setHealth(rpc.NudgeInputStatusInactive, rpc.NudgeHealthReasonProcessRemindersNotEnabled)
+		result.SourceHealth.Cadence = inactive
+		result.SourceHealth.ConfirmedFlow = inactive
+		if authority.pinsReadable {
+			result.SourceHealth.Pins = setHealth(rpc.NudgeInputStatusOK, rpc.NudgeHealthReasonNone)
+		}
+		capital := authority.report.Capital
+		if s.riskCapital != nil {
+			switch {
+			case capital.Tier == risk.CapitalTierUnapproved:
+				result.SourceHealth.Capital = setHealth(rpc.NudgeInputStatusUnapproved, rpc.NudgeHealthReasonPolicyUnapproved)
+			case capital.EquityAsOf.IsZero():
+				result.SourceHealth.Capital = unavailable
+			case capital.EquityStale:
+				result.SourceHealth.Capital = setHealth(rpc.NudgeInputStatusStale, rpc.NudgeHealthReasonEvidenceStale)
+			default:
+				result.SourceHealth.Capital = setHealth(rpc.NudgeInputStatusOK, rpc.NudgeHealthReasonNone)
+			}
+			report, err := s.buildReconReportContext(ctx)
+			if err != nil {
+				return rpc.NudgesSnapshotResult{}, err
+			}
+			result.Reconciliation = &report.Automation
+			switch report.Status {
+			case rpc.ReconStatusActive:
+				if reconReportStale(authority.policy, report, now) {
+					result.SourceHealth.Reconciliation = setHealth(rpc.NudgeInputStatusStale, rpc.NudgeHealthReasonEvidenceStale)
+				} else {
+					result.SourceHealth.Reconciliation = setHealth(rpc.NudgeInputStatusOK, rpc.NudgeHealthReasonNone)
+				}
+			case rpc.ReconStatusUnapproved:
+				result.SourceHealth.Reconciliation = setHealth(rpc.NudgeInputStatusUnapproved, rpc.NudgeHealthReasonPolicyUnapproved)
+			case rpc.ReconStatusUnavailable:
+				result.SourceHealth.Reconciliation = unavailable
+			default:
+				result.SourceHealth.Reconciliation = setHealth(rpc.NudgeInputStatusError, rpc.NudgeHealthReasonEvaluationError)
+			}
+		}
+		return result, nil
+	}
 	if authority.policyHealth.Status != rpc.NudgeInputStatusOK {
 		return result, nil
 	}
@@ -1258,6 +1307,7 @@ func (s *Server) composeNudgesSnapshotContextWithAuthority(ctx context.Context, 
 	}
 	currentConfirmed := []string(nil)
 	if report != nil {
+		result.Reconciliation = &report.Automation
 		for _, row := range report.Confirmed {
 			currentConfirmed = append(currentConfirmed, confirmedFlowContentIdentity(row))
 		}

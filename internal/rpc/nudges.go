@@ -52,6 +52,7 @@ const (
 
 const (
 	NudgeInputStatusOK          = "ok"
+	NudgeInputStatusInactive    = "inactive"
 	NudgeInputStatusUnapproved  = "unapproved"
 	NudgeInputStatusStale       = "stale"
 	NudgeInputStatusUnavailable = "unavailable"
@@ -65,15 +66,16 @@ const (
 // Nudge source-health reasons are allowlisted tokens. Raw errors, paths,
 // upstream fingerprints, and broker text do not belong on this contract.
 const (
-	NudgeHealthReasonNone                  = ""
-	NudgeHealthReasonPolicyUnapproved      = "policy_unapproved"
-	NudgeHealthReasonCadenceUnapproved     = "cadence_unapproved"
-	NudgeHealthReasonEvidenceStale         = "evidence_stale"
-	NudgeHealthReasonSourceUnavailable     = "source_unavailable"
-	NudgeHealthReasonEvaluationError       = "evaluation_error"
-	NudgeHealthReasonCoverageUnavailable   = "coverage_unavailable"
-	NudgeHealthReasonCutoverReviewRequired = "cutover_review_required"
-	NudgeHealthReasonInvalid               = "invalid_health"
+	NudgeHealthReasonNone                       = ""
+	NudgeHealthReasonPolicyUnapproved           = "policy_unapproved"
+	NudgeHealthReasonCadenceUnapproved          = "cadence_unapproved"
+	NudgeHealthReasonEvidenceStale              = "evidence_stale"
+	NudgeHealthReasonSourceUnavailable          = "source_unavailable"
+	NudgeHealthReasonEvaluationError            = "evaluation_error"
+	NudgeHealthReasonCoverageUnavailable        = "coverage_unavailable"
+	NudgeHealthReasonCutoverReviewRequired      = "cutover_review_required"
+	NudgeHealthReasonProcessRemindersNotEnabled = "process_reminders_not_enabled"
+	NudgeHealthReasonInvalid                    = "invalid_health"
 )
 
 // NudgesSnapshotParams is empty because nudges.snapshot is a
@@ -317,6 +319,9 @@ func normalizeNudgeInputHealth(health NudgeInputHealth, source nudgeHealthSource
 		switch health.Status {
 		case NudgeInputStatusOK:
 			validPair = health.Reason == NudgeHealthReasonNone
+		case NudgeInputStatusInactive:
+			validPair = (source == nudgeHealthSourcePolicy || source == nudgeHealthSourceCadence || source == nudgeHealthSourceConfirmedFlow) &&
+				health.Reason == NudgeHealthReasonProcessRemindersNotEnabled
 		case NudgeInputStatusUnapproved:
 			validPair = health.Reason == NudgeHealthReasonPolicyUnapproved ||
 				health.Reason == NudgeHealthReasonCadenceUnapproved ||
@@ -376,6 +381,7 @@ type NudgesSnapshotResult struct {
 	AsOf                  time.Time                   `json:"as_of"`
 	Candidates            []NudgeCandidate            `json:"candidates"`
 	SourceHealth          NudgeSourceHealth           `json:"source_health"`
+	Reconciliation        *ReconAutomationStatus      `json:"reconciliation,omitempty"`
 	ConfirmedFlowCoverage *NudgeConfirmedFlowCoverage `json:"confirmed_flow_coverage,omitempty"`
 	Context               *NudgeSnapshotContext       `json:"context,omitempty"`
 }
@@ -412,12 +418,14 @@ func (result NudgesSnapshotResult) MarshalJSON() ([]byte, error) {
 		AsOf                  time.Time                   `json:"as_of"`
 		Candidates            []NudgeCandidate            `json:"candidates"`
 		SourceHealth          nudgeSourceHealthWire       `json:"source_health"`
+		Reconciliation        *ReconAutomationStatus      `json:"reconciliation,omitempty"`
 		ConfirmedFlowCoverage *NudgeConfirmedFlowCoverage `json:"confirmed_flow_coverage,omitempty"`
 		Context               *NudgeSnapshotContext       `json:"context,omitempty"`
 	}{
 		AsOf:                  result.AsOf,
 		Candidates:            candidates,
 		SourceHealth:          nudgeSourceHealthWire(normalizedHealth),
+		Reconciliation:        result.Reconciliation,
 		ConfirmedFlowCoverage: result.ConfirmedFlowCoverage,
 		Context:               result.Context,
 	}
@@ -434,6 +442,11 @@ func (result NudgesSnapshotResult) IsCleanEmpty() bool {
 
 func validateNudgeSnapshot(result NudgesSnapshotResult) (NudgeSourceHealth, []NudgeCandidate, error) {
 	normalizedHealth := NormalizeNudgeSourceHealth(result.SourceHealth, len(result.Candidates))
+	if result.Reconciliation != nil {
+		if err := ValidateReconAutomationStatus(*result.Reconciliation); err != nil {
+			return NudgeSourceHealth{}, nil, err
+		}
+	}
 	if err := validateNudgeSnapshotConfirmedFlowCoherence(result.AsOf, result.ConfirmedFlowCoverage, normalizedHealth.ConfirmedFlow); err != nil {
 		return NudgeSourceHealth{}, nil, err
 	}

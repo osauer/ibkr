@@ -60,6 +60,14 @@ type Client interface {
 	PurgeRestoreExecute(context.Context, rpc.PurgeRestoreParams) (*rpc.PurgeRestoreResult, error)
 }
 
+// ReconciliationClient is an optional paired-app capability. Keeping it
+// separate from Client lets older adapters remain read-compatible while the
+// HTTP layer fails closed when the daemon does not support the new surface.
+type ReconciliationClient interface {
+	ReconcileStatus(context.Context) (*rpc.ReconStatusResult, error)
+	ReconcileCheck(context.Context) (*rpc.ReconCheckResult, error)
+}
+
 type Real struct {
 	SocketPath string
 	AutoSpawn  bool
@@ -213,6 +221,28 @@ func (c Real) NudgesSnapshot(ctx context.Context) (*rpc.NudgesSnapshotResult, er
 	var out rpc.NudgesSnapshotResult
 	if err := c.call(ctx, rpc.MethodNudgesSnapshot, rpc.NudgesSnapshotParams{}, &out); err != nil {
 		return nil, err
+	}
+	return &out, nil
+}
+
+func (c Real) ReconcileStatus(ctx context.Context) (*rpc.ReconStatusResult, error) {
+	var out rpc.ReconStatusResult
+	if err := c.call(ctx, rpc.MethodReconStatus, rpc.ReconStatusParams{}, &out); err != nil {
+		return nil, err
+	}
+	if err := rpc.ValidateReconAutomationStatus(out.Status); err != nil {
+		return nil, fmt.Errorf("invalid reconciliation status result: %w", err)
+	}
+	return &out, nil
+}
+
+func (c Real) ReconcileCheck(ctx context.Context) (*rpc.ReconCheckResult, error) {
+	var out rpc.ReconCheckResult
+	if err := c.call(ctx, rpc.MethodReconCheck, rpc.ReconCheckParams{}, &out); err != nil {
+		return nil, err
+	}
+	if err := rpc.ValidateReconCheckResult(out); err != nil {
+		return nil, fmt.Errorf("invalid reconciliation check result: %w", err)
 	}
 	return &out, nil
 }

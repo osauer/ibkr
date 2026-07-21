@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -596,12 +598,19 @@ func TestBusinessDaysApart(t *testing.T) {
 	}
 }
 
-// The sanitized transport error can never leak a query string (the token
-// travels in POST bodies, but belt and suspenders for proxy-style errors).
-func TestSanitizeFlexTransportError(t *testing.T) {
-	err := fmt.Errorf(`Post "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.SendRequest?t=SECRET&q=1": dial tcp: timeout`)
-	got := sanitizeFlexTransportError(err, flexSendRequestURL)
-	if strings.Contains(got, "SECRET") {
-		t.Fatalf("sanitized error leaks credentials: %q", got)
+// Flex request construction failures are typed locally and never include
+// the token-bearing form body or the rejected endpoint.
+func TestFlexRequestFailureIsTypedAndRedacted(t *testing.T) {
+	const secret = "SECRET-FLEX-TOKEN"
+	_, err := flexRawCall(t.Context(), http.DefaultClient, "://invalid/"+secret, url.Values{"t": {secret}, "q": {"1"}})
+	if err == nil {
+		t.Fatal("invalid endpoint unexpectedly succeeded")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("typed Flex failure leaks credentials: %q", err)
+	}
+	reason, retryable := flexFailureStatus(err)
+	if reason != rpc.ReconReportReasonResponseInvalid || !retryable {
+		t.Fatalf("failure = %s retryable=%v, want response_invalid retry", reason, retryable)
 	}
 }

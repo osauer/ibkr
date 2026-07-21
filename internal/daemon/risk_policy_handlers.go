@@ -218,6 +218,80 @@ func (s *Server) handleReconSnapshot(ctx context.Context, req *rpc.Request) (*rp
 	return s.buildReconReport(), nil
 }
 
+func (s *Server) currentReconAutomationStatus(ctx context.Context) (rpc.ReconAutomationStatus, error) {
+	now := time.Now()
+	if s != nil && s.now != nil {
+		now = s.now()
+	}
+	status := s.reconAutomationStatus(nil, now)
+	if status.Report.State != rpc.ReconReportStateCurrent {
+		return status, nil
+	}
+	report, err := s.buildReconReportContext(ctx)
+	if err != nil {
+		return rpc.ReconAutomationStatus{}, err
+	}
+	return report.Automation, nil
+}
+
+func (s *Server) handleReconStatus(ctx context.Context, req *rpc.Request) (*rpc.ReconStatusResult, error) {
+	if len(req.Params) == 0 {
+		return nil, errBadRequest("recon status params must be an empty JSON object")
+	}
+	var params rpc.ReconStatusParams
+	if err := decodeParams(req.Params, &params); err != nil {
+		return nil, err
+	}
+	status, err := s.currentReconAutomationStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &rpc.ReconStatusResult{Status: status}, nil
+}
+
+func (s *Server) handleReconCheck(ctx context.Context, req *rpc.Request) (*rpc.ReconCheckResult, error) {
+	if len(req.Params) == 0 {
+		return nil, errBadRequest("recon check params must be an empty JSON object")
+	}
+	var params rpc.ReconCheckParams
+	if err := decodeParams(req.Params, &params); err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	if s != nil && s.now != nil {
+		now = s.now()
+	}
+	before := s.flexFetchStatusAt(now)
+	outcome := ""
+	switch {
+	case before.State == rpc.ReconReportStateChecking:
+		outcome = rpc.ReconCheckOutcomeAlreadyChecking
+	case before.State == rpc.ReconReportStateUnavailable:
+		outcome = rpc.ReconCheckOutcomeActionRequired
+	case before.State == rpc.ReconReportStateActionRequired && !before.CanCheckNow:
+		outcome = rpc.ReconCheckOutcomeActionRequired
+	case !before.CanCheckNow:
+		outcome = rpc.ReconCheckOutcomeCooldown
+	case s.startFlexFetch(ctx, true):
+		outcome = rpc.ReconCheckOutcomeStarted
+	default:
+		after := s.flexFetchStatusAt(now)
+		switch {
+		case after.State == rpc.ReconReportStateChecking:
+			outcome = rpc.ReconCheckOutcomeAlreadyChecking
+		case !after.CanCheckNow:
+			outcome = rpc.ReconCheckOutcomeCooldown
+		default:
+			outcome = rpc.ReconCheckOutcomeActionRequired
+		}
+	}
+	status, err := s.currentReconAutomationStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &rpc.ReconCheckResult{Outcome: outcome, Status: status}, nil
+}
+
 func (s *Server) handleReconBacktest(ctx context.Context, req *rpc.Request) (*rpc.ReconBacktestResult, error) {
 	var p rpc.ReconSnapshotParams
 	if len(req.Params) > 0 {

@@ -69,11 +69,13 @@ func (s *Server) buildReconReportWithSnapshotContext(ctx context.Context) (*rpc.
 		now = s.now()
 	}
 	res := &rpc.ReconResult{AsOf: now, Counts: map[string]int{}}
+	res.Fetch = s.flexFetchStatusAt(now)
+	defer func() {
+		res.Automation = s.reconAutomationStatus(res, now)
+	}()
 	if s.riskCapital != nil {
 		res.LastAutoExtendReportID, res.LastAutoExtendedAt = s.riskCapital.LastAutoExtend()
 	}
-	configured, lastSuccess, lastAttempt, lastErr := s.flexFetchStatus()
-	res.Fetch = rpc.ReconFetchStatus{Configured: configured, LastSuccess: lastSuccess, LastAttempt: lastAttempt, LastError: lastErr}
 
 	var health []rpc.SourceHealth
 	pol := s.riskPolicies.snapshot().policy
@@ -227,9 +229,15 @@ func splitV3ReconEvents(events []capitalEventV1, ctx capitalReplayContext, cover
 
 // mergeRetainedStatements folds all retained Flex statements into the
 // restatement-aware flow, exception, and equity inputs shared by the live
-// recon report and the full-window backtest. Files arrive newest-first, so
-// the first occurrence of a line id and equity day wins.
+// recon report and the full-window backtest. A newer broker generation wins;
+// for the same generation, the most recently retained query result wins. A
+// later download of an older broker generation must never roll a correction
+// back.
 func mergeRetainedStatements(statements []flexstmt.Statement) retainedStatementMerge {
+	statements = append([]flexstmt.Statement(nil), statements...)
+	sort.SliceStable(statements, func(i, j int) bool {
+		return statements[i].WhenGenerated.After(statements[j].WhenGenerated)
+	})
 	merged := retainedStatementMerge{
 		equityByDay:      make(map[string]flexstmt.EquityRow),
 		classifiedCounts: make(map[string]int),

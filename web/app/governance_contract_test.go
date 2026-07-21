@@ -19,6 +19,8 @@ func TestGovernanceSurfaceStaticContract(t *testing.T) {
 		"governanceCutoverReviewButton", "governanceCutoverReviewStatus",
 		"governanceHistoryCount", "governanceHistoryList", "governanceDeliveryHealth",
 		"governanceDeliveryDetail", "governanceAttemptList", "safeNotificationTestButton", "safeNotificationTestStatus",
+		"reconciliationCard", "reconciliationHeading", "reconciliationState", "reconciliationSummary",
+		"reconciliationMeta", "reconciliationCheckButton", "reconciliationCheckStatus",
 	} {
 		if !strings.Contains(html, `id="`+id+`"`) {
 			t.Errorf("index.html missing governance id %q", id)
@@ -52,8 +54,8 @@ func TestGovernanceRendererConsumesTypedAuthorities(t *testing.T) {
 		`const pollState = safeGovernancePollState(pollSource.state)`,
 		`const current = pollState === "current"`,
 		`"current", "stale", "not_observed", "unavailable"`,
-		`No current risk & process nudges.`,
-		`Current risk & process nudges are unavailable.`,
+		`No current risk and process reminders.`,
+		`Current risk and process reminders are unavailable.`,
 		`last push-service acceptance`,
 		`refresh unavailable · last known`,
 		`updated not observed`,
@@ -64,11 +66,16 @@ func TestGovernanceRendererConsumesTypedAuthorities(t *testing.T) {
 		`body: JSON.stringify({})`,
 		`fetch("/api/push/test"`,
 		`fetch("/api/governance/cutover-review"`,
+		`fetch("/api/recon/check"`,
+		`fetch("/api/recon/status"`,
+		`const reconciliation = validateReconciliation(governance?.reconciliation)`,
+		`Open IBKR Client Portal → Reporting → Flex Queries on this Mac, renew the Flex Web Service token`,
+		`process_reminders_not_enabled: "reminders are not enabled"`,
 		`renderGovernanceAttempts(governance?.attempts)`,
 		`safeGovernanceTransportClass(attempt.class) || "unknown"`,
 		`pre_cutover_flows_unreviewed: false`,
-		`foreground render recorded`,
-		`already recorded`,
+		`Older payments marked reviewed.`,
+		`Older payments were already marked reviewed.`,
 	} {
 		if !strings.Contains(alerts, want) {
 			t.Errorf("alerts.js missing governance contract %q", want)
@@ -76,7 +83,7 @@ func TestGovernanceRendererConsumesTypedAuthorities(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		`candidate.fingerprint`, `attempt.raw_error`,
-		`all clear`,
+		`all clear`, `normal outside market hours`, `return "paused"`,
 	} {
 		if strings.Contains(alerts, forbidden) {
 			t.Errorf("alerts.js contains forbidden governance rendering contract %q", forbidden)
@@ -139,7 +146,7 @@ func TestGovernanceBootstrapSSEAndSmokeHookContract(t *testing.T) {
 		t.Fatal("governance refresh evidence must start not observed")
 	}
 	for _, want := range []string{
-		`state.governance = data.governance ?? null`,
+		`state.governance = validateGovernanceResponse(data.governance)`,
 		`"brief", "nudges"`,
 		`nudges: { state: "current"`,
 		`refreshGovernance()`,

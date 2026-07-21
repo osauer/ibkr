@@ -1,4 +1,4 @@
-import { applyAttention, applyGovernanceCutoverOverlay, handleAttentionContextChange, refreshAlerts, refreshGovernance, refreshPushState, scheduleGovernanceRefresh } from "./alerts.js";
+import { applyAttention, applyGovernanceCutoverOverlay, handleAttentionContextChange, refreshAlerts, refreshGovernance, refreshPushState, scheduleGovernanceRefresh, validateGovernanceResponse } from "./alerts.js";
 import { ingestAlertInboxV2, ingestAlertInboxV2Event, renderAlertInboxV2 } from "./alert-inbox-v2.js";
 import { renderAll } from "./app.js";
 import { tryDeviceLogin } from "./auth.js";
@@ -66,7 +66,7 @@ async function fetchBootstrap() {
 
 function applyBootstrap(data) {
   state.snapshot = applyGovernanceCutoverOverlay(data.snapshot);
-  state.governance = data.governance ?? null;
+  state.governance = validateGovernanceResponse(data.governance);
   state.governanceRefreshSucceeded = null;
   state.authenticated = Boolean(data.auth?.authenticated);
   state.settings = data.settings || data.snapshot?.settings || state.settings;

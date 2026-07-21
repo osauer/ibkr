@@ -58,4 +58,5 @@ func (s *Server) stopServerContextAndWait() {
 	if cache != nil {
 		cache.wait()
 	}
+	s.flexFetch.stopAndWait()
 }

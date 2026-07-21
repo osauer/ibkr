@@ -95,6 +95,9 @@ func (s *Server) bindAuthoritativeDaemonState(ctx context.Context, core *coresto
 	if err := s.briefState.bindCore(ctx, core); err != nil {
 		return err
 	}
+	if err := s.flexFetch.bindCore(ctx, core); err != nil {
+		return err
+	}
 	if err := s.bindRulesRegimeStage(ctx, core); err != nil {
 		return err
 	}

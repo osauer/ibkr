@@ -40,6 +40,7 @@ function loadAlerts() {
     governanceRefreshAfterFlight: false,
     governanceLastRefreshAt: 0,
     governanceRefreshSucceeded: null,
+    reconciliationCheck: { busy: false, state: "", error: false },
     governanceCutoverReceipt: null,
     safeNotificationTest: { busy: false, state: "", error: false },
     governanceCutoverReview: { busy: false, state: "", error: false },
@@ -139,6 +140,28 @@ function governanceDTO(overrides = {}) {
   };
 }
 
+function reconciliationDTO(report = {}, evaluation = {}) {
+  return {
+    report: {
+      state: "current",
+      reason: "none",
+      expected_coverage_to: "2026-07-20",
+      coverage_to: "2026-07-20",
+      last_attempt_at: "2026-07-21T04:30:00Z",
+      last_completed_at: "2026-07-21T04:31:00Z",
+      next_attempt_at: "",
+      retry_automatic: false,
+      can_check_now: true,
+      ...report,
+    },
+    evaluation: {
+      state: "complete",
+      reason: "none",
+      ...evaluation,
+    },
+  };
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -198,11 +221,21 @@ test("poll-source rendering preserves allowlisted state and fails candidates clo
     // enum stays visible in the source-health evidence below.
     assert.equal(
       harness.elements.get("governanceCurrentState").textContent,
-      source.state === "not_observed" ? "waiting" : source.state,
+      source.state === "not_observed" ? "Waiting" : "Unavailable",
     );
     const sourceCopy = harness.elements.get("governanceSourceHealth").textContent;
-    assert.match(sourceCopy, new RegExp(source.state));
-    assert.match(sourceCopy, new RegExp(source.reason));
+    const stateCopy = {
+      stale: "out of date",
+      not_observed: "waiting for first check",
+      unavailable: "unavailable",
+    }[source.state];
+    const reasonCopy = {
+      poll_stale: "latest update is late",
+      not_observed: "not checked yet",
+      transport_unavailable: "the Mac could not reach the service",
+    }[source.reason];
+    assert.match(sourceCopy, new RegExp(stateCopy));
+    assert.match(sourceCopy, new RegExp(reasonCopy));
     if (source.updated_at) assert.match(sourceCopy, /updated/);
     if (source.last_success_at) assert.match(sourceCopy, /last successful/);
     assert.equal(visibleText(harness.elements.get("governanceCurrentList")).includes("Retained candidate"), false);
@@ -211,13 +244,189 @@ test("poll-source rendering preserves allowlisted state and fails candidates clo
   const unknown = loadAlerts();
   unknown.state.snapshot.sources.nudges = { state: "hostile-state", reason: "hostile-reason" };
   unknown.exports.renderGovernance();
-  assert.equal(unknown.elements.get("governanceCurrentState").textContent, "unavailable");
-  assert.match(unknown.elements.get("governanceSourceHealth").textContent, /unavailable.*invalid_health/);
+  assert.equal(unknown.elements.get("governanceCurrentState").textContent, "Unavailable");
+  assert.match(unknown.elements.get("governanceSourceHealth").textContent, /unavailable.*details unavailable/);
+  assert.equal(unknown.elements.get("governanceSourceHealth").textContent.includes("hostile"), false);
 
   const unknownReason = loadAlerts();
   unknownReason.state.snapshot.sources.nudges = { state: "current", reason: "hostile-reason" };
   unknownReason.exports.renderGovernance();
-  assert.match(unknownReason.elements.get("governanceSourceHealth").textContent, /poll current.*invalid_health/);
+  assert.match(unknownReason.elements.get("governanceSourceHealth").textContent, /latest update current.*details unavailable/);
+  assert.equal(unknownReason.elements.get("governanceSourceHealth").textContent.includes("hostile"), false);
+});
+
+test("daily report contract is allowlisted and every visible state uses plain single-user copy", () => {
+  const validation = loadAlerts();
+  const privateFixture = reconciliationDTO({
+    private_path: "/private/report.xml",
+    raw_error: "private backend error",
+  }, { private_note: "private note" });
+  const validated = validation.exports.validateReconciliation(privateFixture);
+  assert.equal(validated.report.state, "current");
+  assert.equal(JSON.stringify(validated).includes("private"), false);
+  assert.equal(validation.exports.validateReconciliation(reconciliationDTO({ state: "hostile-state" })), null);
+  assert.equal(validation.exports.validateReconciliation(reconciliationDTO({ reason: "hostile-reason" })), null);
+  assert.equal(validation.exports.validateReconciliation(reconciliationDTO({}, { reason: "hostile-reason" })), null);
+  assert.equal(validation.exports.validateReconciliation(reconciliationDTO({ coverage_to: "2026-02-31" })).report.coverage_to, "");
+
+  for (const fixture of [
+    {
+      reconciliation: reconciliationDTO({ state: "waiting", reason: "before_daily_window", coverage_to: "", last_completed_at: "", can_check_now: false }, { state: "waiting", reason: "report_pending" }),
+      label: "Waiting",
+      copy: /daily IBKR report window opens.*before your morning report/,
+    },
+    {
+      reconciliation: reconciliationDTO({ state: "checking", reason: "coverage_pending" }, { state: "checking", reason: "report_pending" }),
+      label: "Checking",
+      copy: /asking IBKR/,
+    },
+    {
+      reconciliation: reconciliationDTO(),
+      label: "Up to date",
+      copy: /finished the automatic comparison/,
+    },
+    {
+      reconciliation: reconciliationDTO({ state: "retry_scheduled", reason: "report_not_ready", next_attempt_at: "2026-07-21T05:00:00Z", retry_automatic: true }, { state: "waiting", reason: "report_pending" }),
+      label: "Retrying",
+      copy: /still has the report through.*did not finish the re-read.*try again/,
+    },
+    {
+      reconciliation: reconciliationDTO({ state: "action_required", reason: "token_expired" }, { state: "waiting", reason: "report_pending" }),
+      label: "Needs you",
+      copy: /Reporting → Flex Queries.*local token file.*tap Check again/,
+    },
+    {
+      reconciliation: reconciliationDTO({ state: "unavailable", reason: "network_unavailable" }, { state: "waiting", reason: "report_pending" }),
+      label: "Unavailable",
+      copy: /internet connection.*Check again/,
+    },
+    {
+      reconciliation: reconciliationDTO({}, { state: "attention_required", reason: "exceptions_need_review" }),
+      label: "Needs you",
+      copy: /review that movement, record or resolve it there, then tap Check again/,
+	},
+	{
+	  reconciliation: reconciliationDTO({ state: "unavailable", reason: "authority_unavailable", can_check_now: false }, { state: "waiting", reason: "report_pending" }),
+	  label: "Unavailable",
+	  copy: /cannot read its local report record.*Restart Canary.*repair the local Canary data store/,
+	},
+	{
+	  reconciliation: reconciliationDTO({ state: "retry_scheduled", reason: "projection_failed", next_attempt_at: "2026-07-21T05:00:00Z", retry_automatic: true }, { state: "waiting", reason: "report_pending" }),
+	  label: "Retrying",
+	  copy: /could not save or compare.*will retry.*free disk space/,
+	},
+	{
+	  reconciliation: reconciliationDTO({ state: "retry_scheduled", reason: "report_invalid", next_attempt_at: "2026-07-21T05:00:00Z", retry_automatic: true }, { state: "waiting", reason: "report_pending" }),
+	  label: "Retrying",
+	  copy: /could not safely use.*will retry.*recreate the Activity Flex Query/,
+    },
+  ]) {
+    const harness = loadAlerts();
+    harness.state.governance = governanceDTO({ reconciliation: fixture.reconciliation });
+    harness.exports.renderGovernance();
+    assert.equal(harness.elements.get("governanceCurrentState").textContent, fixture.label);
+    assert.equal(harness.elements.get("reconciliationState").textContent, fixture.label);
+    assert.match(harness.elements.get("reconciliationSummary").textContent, fixture.copy);
+    const visible = [
+      harness.elements.get("governanceSummary").textContent,
+      harness.elements.get("reconciliationHeading").textContent,
+      harness.elements.get("reconciliationSummary").textContent,
+      harness.elements.get("reconciliationMeta").textContent,
+    ].join(" ");
+    for (const forbidden of ["normal outside market hours", "token_expired", "exceptions_need_review", "desk", "admin", "operator", "private"]) {
+      assert.equal(visible.toLowerCase().includes(forbidden), false, `visible report copy leaked ${forbidden}`);
+    }
+    assert.equal(harness.elements.get("reconciliationCheckButton").disabled, fixture.reconciliation.report.can_check_now !== true);
+  }
+});
+
+test("reminders-not-enabled health is distinct from missing report data", () => {
+  const harness = loadAlerts();
+  harness.state.snapshot.nudges.source_health = {
+    aggregate: "suppressed",
+    policy: { status: "inactive", reason: "process_reminders_not_enabled", as_of: "2026-07-21T04:30:00Z" },
+    reconciliation: { status: "ok", as_of: "2026-07-21T04:31:00Z" },
+  };
+  harness.state.governance = governanceDTO({ reconciliation: reconciliationDTO() });
+  harness.exports.renderGovernance();
+  assert.equal(harness.elements.get("governanceCurrentState").textContent, "Report current");
+  assert.match(harness.elements.get("governanceSummary").textContent, /Reminders are not enabled yet.*daily report status is below/);
+  assert.match(harness.elements.get("governanceSourceHealth").textContent, /Reminders: not enabled.*reminders are not enabled/);
+  const visible = `${harness.elements.get("governanceSummary").textContent} ${harness.elements.get("governanceSourceHealth").textContent}`;
+  assert.equal(visible.includes("process_reminders_not_enabled"), false);
+  assert.equal(visible.includes("policy"), false);
+  assert.equal(visible.includes("missing data"), false);
+});
+
+test("active reminders and degraded checks take precedence over a current report", () => {
+  for (const fixture of [
+    { candidates: [{ title: "Review required", body: "A current reminder needs review.", severity: "act", destination: "alerts" }], aggregate: "ready", label: "Needs you" },
+    { candidates: [], aggregate: "degraded", label: "Needs you" },
+    { candidates: [], aggregate: "suppressed", label: "Waiting" },
+  ]) {
+    const harness = loadAlerts();
+    harness.state.snapshot.nudges.candidates = fixture.candidates;
+    harness.state.snapshot.nudges.source_health.aggregate = fixture.aggregate;
+    harness.state.governance = governanceDTO({ reconciliation: reconciliationDTO() });
+    harness.exports.renderGovernance();
+    assert.equal(harness.elements.get("governanceCurrentState").textContent, fixture.label);
+  }
+});
+
+test("Check again posts an exact empty request, polls typed status, then refreshes governance", async () => {
+  const harness = loadAlerts();
+  harness.state.governance = governanceDTO({
+    reconciliation: reconciliationDTO({ state: "due", reason: "coverage_pending" }, { state: "waiting", reason: "report_pending" }),
+  });
+  const calls = [];
+  let statusPolls = 0;
+  harness.context.fetch = async (url, init = {}) => {
+    calls.push({ url, init });
+    if (url === "/api/recon/check") {
+      return response({ reconciliation: reconciliationDTO({ state: "checking", reason: "coverage_pending" }, { state: "checking", reason: "report_pending" }) });
+    }
+    if (url === "/api/recon/status") {
+      statusPolls++;
+      return statusPolls === 1
+        ? response({ reconciliation: reconciliationDTO({ state: "checking", reason: "coverage_pending" }, { state: "checking", reason: "report_pending" }) })
+        : response({ reconciliation: reconciliationDTO() });
+    }
+    if (url === "/api/governance") return response(governanceDTO({ reconciliation: reconciliationDTO() }));
+    throw new Error(`unintercepted request ${url}`);
+  };
+
+  assert.equal(await harness.exports.sendReconciliationCheck({ pollDelayMs: 0, maxPolls: 3 }), true);
+  assertExactPost(calls[0], "/api/recon/check", {});
+  assert.equal(calls.filter((call) => call.url === "/api/recon/status").length, 2);
+  for (const call of calls.filter((item) => item.url === "/api/recon/status" || item.url === "/api/governance")) {
+    assert.equal(call.init.credentials, "include");
+    assert.equal(call.init.method, undefined);
+    assert.equal(call.init.body, undefined);
+  }
+  assert.equal(calls.at(-1).url, "/api/governance");
+  assert.equal(harness.state.reconciliationCheck.state, "Latest report check completed.");
+  assert.equal(harness.state.reconciliationCheck.error, false);
+  assert.equal(harness.elements.get("reconciliationState").textContent, "Up to date");
+});
+
+test("Check again fails closed on malformed status and never renders backend text", async () => {
+  const harness = loadAlerts();
+  harness.state.governance = governanceDTO({
+    reconciliation: reconciliationDTO({ state: "due", reason: "coverage_pending" }, { state: "waiting", reason: "report_pending" }),
+  });
+  const calls = [];
+  harness.context.fetch = async (url, init = {}) => {
+    calls.push({ url, init });
+    if (url === "/api/recon/check") return response({ reconciliation: { report: { state: "hostile", raw_error: "private backend text" } } });
+    if (url === "/api/governance") return response(governanceDTO({ reconciliation: reconciliationDTO({ state: "unavailable", reason: "authority_unavailable" }, { state: "failed", reason: "evaluation_failed" }) }));
+    throw new Error(`unintercepted request ${url}`);
+  };
+  assert.equal(await harness.exports.sendReconciliationCheck({ pollDelayMs: 0, maxPolls: 1 }), false);
+  assertExactPost(calls[0], "/api/recon/check", {});
+  assert.equal(calls.at(-1).url, "/api/governance");
+  assert.equal(harness.state.reconciliationCheck.state, "The report could not be checked right now. Try again.");
+  assert.equal(harness.state.reconciliationCheck.error, true);
+  assert.equal(visibleText(harness.elements.get("reconciliationCard")).includes("private backend text"), false);
 });
 
 test("delivery health is aged and a failed refresh labels retained evidence", async () => {
@@ -307,7 +516,7 @@ test("cutover receipt overlays stale snapshots until authority catches up while 
   success.state.governanceRefreshTimer = null;
   assert.equal(successCalls.length, 1);
   assertExactPost(successCalls[0], "/api/governance/cutover-review", {});
-  assert.equal(success.state.governanceCutoverReview.state, "foreground render recorded");
+  assert.equal(success.state.governanceCutoverReview.state, "Older payments marked reviewed.");
   assert.deepEqual(JSON.parse(JSON.stringify(success.state.snapshot.nudges.confirmed_flow_coverage)), {
     coverage_from: receipt.coverage_from,
     pre_cutover_flows_unreviewed: false,
@@ -354,7 +563,7 @@ test("cutover receipt overlays stale snapshots until authority catches up while 
   already.state.governanceRefreshTimer = null;
   assert.equal(alreadyCalls.length, 1);
   assertExactPost(alreadyCalls[0], "/api/governance/cutover-review", {});
-  assert.equal(already.state.governanceCutoverReview.state, "already recorded");
+  assert.equal(already.state.governanceCutoverReview.state, "Older payments were already marked reviewed.");
   assert.equal(already.state.snapshot.nudges.confirmed_flow_coverage.pre_cutover_flows_unreviewed, false);
 
   const failed = loadAlerts();
