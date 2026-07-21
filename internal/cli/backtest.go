@@ -2349,6 +2349,7 @@ func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
 	if r == nil {
 		return
 	}
+	backfillBacktestRegimeSourceContract(r)
 	backfillBacktestRegimeEligibility(r)
 	r.Composite = rpc.RegimeComposite{}
 	indicatorBands := []string{
@@ -2384,6 +2385,36 @@ func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
 	r.Composite.Verdict = rpc.RegimeHeadline(r.Composite, r.Lifecycle.Stage)
 }
 
+// backfillBacktestRegimeSourceContract upgrades legacy point-in-time corpus
+// rows that predate the typed freshness/source-health fields. A row declared
+// status=ok is a complete observation at the corpus clock; every other or
+// missing status is overdue and therefore fails closed. This compatibility
+// projection is confined to offline replay — live snapshots are authored by
+// the daemon and never pass through it.
+func backfillBacktestRegimeSourceContract(r *rpc.RegimeSnapshotResult) {
+	set := func(meta *rpc.RegimeIndicatorMeta, indicator, status string) {
+		if meta.Freshness != nil {
+			return
+		}
+		class := rpc.RegimeFreshnessOverdue
+		if strings.EqualFold(strings.TrimSpace(status), rpc.RegimeStatusOK) {
+			class = rpc.RegimeFreshnessFresh
+		}
+		meta.Freshness = &rpc.RegimeFreshness{
+			Class:         class,
+			MaxAgeSeconds: rpc.RegimeSourceMaxAgeSeconds(rpc.RegimeIndicatorCluster(indicator)),
+		}
+	}
+	set(&r.VIXTermStructure.RegimeIndicatorMeta, rpc.RegimeIndicatorVIXTerm, r.VIXTermStructure.Status)
+	set(&r.VolOfVol.RegimeIndicatorMeta, rpc.RegimeIndicatorVolOfVol, r.VolOfVol.Status)
+	set(&r.HYGSPYDivergence.RegimeIndicatorMeta, rpc.RegimeIndicatorHYGSPY, r.HYGSPYDivergence.Status)
+	set(&r.CreditSpreads.RegimeIndicatorMeta, rpc.RegimeIndicatorCredit, r.CreditSpreads.Status)
+	set(&r.FundingStress.RegimeIndicatorMeta, rpc.RegimeIndicatorFunding, r.FundingStress.Status)
+	set(&r.USDJPY.RegimeIndicatorMeta, rpc.RegimeIndicatorUSDJPY, r.USDJPY.Status)
+	set(&r.GammaZero.RegimeIndicatorMeta, rpc.RegimeIndicatorGammaZero, r.GammaZero.Status)
+	set(&r.Breadth.RegimeIndicatorMeta, rpc.RegimeIndicatorBreadth, r.Breadth.Status)
+}
+
 // backfillBacktestRegimeEligibility applies the confirmation gates to PIT
 // rows. Point-in-time panels are independent daily observations, so the
 // replay evaluates day-1 gates: depth and freshness bind, persistence is
@@ -2392,37 +2423,39 @@ func backfillBacktestRegimeComposite(r *rpc.RegimeSnapshotResult) {
 // chronological panels is follow-up work on the decisions journal
 // (docs/specs/regime-backtest-plan.md).
 func backfillBacktestRegimeEligibility(r *rpc.RegimeSnapshotResult) {
-	set := func(meta *rpc.RegimeIndicatorMeta, indicator string, depth *float64) {
+	set := func(meta *rpc.RegimeIndicatorMeta, indicator, status string, depth *float64) {
 		if meta.Band != "red" {
 			meta.Eligibility = nil
 			return
 		}
+		fresh := strings.EqualFold(strings.TrimSpace(status), rpc.RegimeStatusOK) &&
+			meta.Freshness != nil && meta.Freshness.Class == rpc.RegimeFreshnessFresh
 		meta.Eligibility = rpc.EvaluateRegimeEligibility(rpc.RegimeEligibilityInput{
 			Indicator:      indicator,
 			Band:           "red",
 			Depth:          depth,
 			StreakSessions: 1,
-			Fresh:          true,
+			Fresh:          fresh,
 		})
 	}
-	set(&r.VIXTermStructure.RegimeIndicatorMeta, rpc.RegimeIndicatorVIXTerm, r.VIXTermStructure.Ratio)
-	set(&r.VolOfVol.RegimeIndicatorMeta, rpc.RegimeIndicatorVolOfVol, r.VolOfVol.Last)
+	set(&r.VIXTermStructure.RegimeIndicatorMeta, rpc.RegimeIndicatorVIXTerm, r.VIXTermStructure.Status, r.VIXTermStructure.Ratio)
+	set(&r.VolOfVol.RegimeIndicatorMeta, rpc.RegimeIndicatorVolOfVol, r.VolOfVol.Status, r.VolOfVol.Last)
 	var hygDepth *float64
 	if h := r.HYGSPYDivergence; h.HYGPrice != nil && h.HYG50DMA != nil && *h.HYG50DMA > 0 {
 		d := (*h.HYG50DMA - *h.HYGPrice) / *h.HYG50DMA * 100
 		hygDepth = &d
 	}
-	set(&r.HYGSPYDivergence.RegimeIndicatorMeta, rpc.RegimeIndicatorHYGSPY, hygDepth)
-	set(&r.CreditSpreads.RegimeIndicatorMeta, rpc.RegimeIndicatorCredit, nil)
-	set(&r.FundingStress.RegimeIndicatorMeta, rpc.RegimeIndicatorFunding, nil)
-	set(&r.USDJPY.RegimeIndicatorMeta, rpc.RegimeIndicatorUSDJPY, nil)
-	set(&r.GammaZero.RegimeIndicatorMeta, rpc.RegimeIndicatorGammaZero, rpc.RegimeGammaDepth(r.GammaZero.Envelope.Result))
+	set(&r.HYGSPYDivergence.RegimeIndicatorMeta, rpc.RegimeIndicatorHYGSPY, r.HYGSPYDivergence.Status, hygDepth)
+	set(&r.CreditSpreads.RegimeIndicatorMeta, rpc.RegimeIndicatorCredit, r.CreditSpreads.Status, nil)
+	set(&r.FundingStress.RegimeIndicatorMeta, rpc.RegimeIndicatorFunding, r.FundingStress.Status, nil)
+	set(&r.USDJPY.RegimeIndicatorMeta, rpc.RegimeIndicatorUSDJPY, r.USDJPY.Status, nil)
+	set(&r.GammaZero.RegimeIndicatorMeta, rpc.RegimeIndicatorGammaZero, r.GammaZero.Status, rpc.RegimeGammaDepth(r.GammaZero.Envelope.Result))
 	var breadthDepth *float64
 	if r.Breadth.Envelope.State == rpc.BreadthStateReady {
 		d := 40 - r.Breadth.Envelope.PctAbove50DMA
 		breadthDepth = &d
 	}
-	set(&r.Breadth.RegimeIndicatorMeta, rpc.RegimeIndicatorBreadth, breadthDepth)
+	set(&r.Breadth.RegimeIndicatorMeta, rpc.RegimeIndicatorBreadth, r.Breadth.Status, breadthDepth)
 }
 
 // Cluster combination, isolated-red rescue, and headline wording live in

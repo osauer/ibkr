@@ -1244,6 +1244,12 @@ type GammaZeroComputed struct {
 	Params GammaZeroParams `json:"params"`
 	// Source identifies the data provenance for the headline numbers.
 	Source string `json:"source"`
+	// AuthorityProvenance is empty for a current-code compute. A non-empty
+	// value identifies an explicit persistence recovery path and is consumed
+	// by the gamma quality gate; recovered evidence remains displayable but
+	// cannot become a rankable trading signal merely because its timestamp is
+	// inside the current session.
+	AuthorityProvenance string `json:"authority_provenance,omitempty"`
 	// Method is a short stable token for the computation path. v3:
 	// "bs-gamma-profile-v3-stickymoneyness-0dte-split". The v3 bump
 	// signals two semantic changes from v2:
@@ -1528,8 +1534,9 @@ type RegimeIndicatorMeta struct {
 	// served staleness policy so renderers never hardcode a twin.
 	Freshness *RegimeFreshness `json:"freshness,omitempty"`
 	// Eligibility says whether a red band may CONFIRM stress (depth +
-	// persistence + freshness gates) or is provisional (visible, warns via
-	// early_warning, never confirms). Nil on non-red rows.
+	// persistence + freshness gates) or is provisional. A provisional red is
+	// visible and can warn only while the required input set is usable; broken
+	// or overdue inputs produce lifecycle=data_quality. Nil on non-red rows.
 	Eligibility *RegimeEligibility `json:"eligibility,omitempty"`
 }
 

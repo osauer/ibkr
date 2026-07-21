@@ -83,7 +83,7 @@ func TestRegimeLifecycleClosedDateTapeGating(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			snap := tapeSnapshot(tc.spy, tc.vix, tc.session)
-			got := BuildRegimeLifecycle(&snap)
+			got := buildRegimeLifecycleFixture(&snap)
 			if got.Stage != tc.wantStage {
 				t.Fatalf("stage = %q, want %q", got.Stage, tc.wantStage)
 			}
@@ -107,13 +107,13 @@ func TestRegimeLifecycleClosedDateClusterPathsUnaffected(t *testing.T) {
 		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
 		Breadth:          RegimeBreadth{RegimeIndicatorMeta: eligible()},
 	}
-	if got := BuildRegimeLifecycle(&confirmed); got.Stage != LifecycleConfirmedStress {
+	if got := buildRegimeLifecycleFixture(&confirmed); got.Stage != LifecycleConfirmedStress {
 		t.Fatalf("two eligible reds on a closed date = %q, want confirmed_stress (cluster path untouched)", got.Stage)
 	}
 
 	provisional := tapeSnapshot(0.1, 0, TapeSessionClosedDate)
 	provisional.FundingStress = RegimeFundingStress{RegimeIndicatorMeta: RegimeIndicatorMeta{Band: "red"}}
-	if got := BuildRegimeLifecycle(&provisional); got.Stage != LifecycleEarlyWarning {
+	if got := buildRegimeLifecycleFixture(&provisional); got.Stage != LifecycleEarlyWarning {
 		t.Fatalf("provisional red on a closed date = %q, want early_warning (cluster path untouched)", got.Stage)
 	}
 }
@@ -124,11 +124,11 @@ func TestRegimeLifecycleClosedDateStabilizationGated(t *testing.T) {
 	t.Parallel()
 	snap := tapeSnapshot(1.2, 0, TapeSessionTradingDate)
 	snap.FundingStress = RegimeFundingStress{RegimeIndicatorMeta: RegimeIndicatorMeta{Band: "yellow"}}
-	if got := BuildRegimeLifecycle(&snap); got.Stage != LifecycleStabilization {
+	if got := buildRegimeLifecycleFixture(&snap); got.Stage != LifecycleStabilization {
 		t.Fatalf("live bounce with one yellow = %q, want stabilization", got.Stage)
 	}
 	snap.TapeSessionState = TapeSessionClosedDate
-	if got := BuildRegimeLifecycle(&snap); got.Stage != LifecycleQuiet {
+	if got := buildRegimeLifecycleFixture(&snap); got.Stage != LifecycleQuiet {
 		t.Fatalf("frozen bounce with one yellow = %q, want quiet", got.Stage)
 	}
 }
@@ -139,7 +139,7 @@ func TestRegimeLifecycleClosedDateStabilizationGated(t *testing.T) {
 func TestRegimeLifecycleClosedDateEvidenceDemoted(t *testing.T) {
 	t.Parallel()
 	snap := tapeSnapshot(-7.2, 14, TapeSessionClosedDate)
-	got := BuildRegimeLifecycle(&snap)
+	got := buildRegimeLifecycleFixture(&snap)
 	seen := map[string]bool{}
 	for _, ev := range got.Evidence {
 		if ev.Signal != "tape" {
@@ -158,7 +158,7 @@ func TestRegimeLifecycleClosedDateEvidenceDemoted(t *testing.T) {
 	}
 
 	live := tapeSnapshot(-7.2, 14, TapeSessionTradingDate)
-	got = BuildRegimeLifecycle(&live)
+	got = buildRegimeLifecycleFixture(&live)
 	for _, ev := range got.Evidence {
 		if ev.Signal == "tape" && ev.Source == "spy" {
 			if ev.Severity != "act" || !ev.Confirmed || ev.Timing != LifecycleTimingContemporary {
@@ -170,8 +170,8 @@ func TestRegimeLifecycleClosedDateEvidenceDemoted(t *testing.T) {
 
 // TestRegimeSeverityGovernorClosedDateArms pins the governor interaction:
 // frozen SPY/VIX change prints can neither co-sign heuristic confirmation
-// (arms 1-2) nor claim the pure-tape-panic exemption, while arm 3 (the
-// status-gated VIX-term inversion) keeps its existing behavior.
+// nor claim the pure-tape-panic exemption. Every tape witness, including the
+// VIX-term arm, must be current on a confirmable date.
 func TestRegimeSeverityGovernorClosedDateArms(t *testing.T) {
 	t.Parallel()
 	pending := func() RegimeIndicatorMeta {
@@ -190,7 +190,7 @@ func TestRegimeSeverityGovernorClosedDateArms(t *testing.T) {
 		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
 		Breadth:          RegimeBreadth{RegimeIndicatorMeta: pending()},
 	}
-	got := BuildRegimeLifecycle(&cosigned)
+	got := buildRegimeLifecycleFixture(&cosigned)
 	if got.Stage != LifecycleConfirmedStress || got.Severity != "watch" {
 		t.Fatalf("frozen co-sign = %q/%q, want confirmed_stress/watch (arms 1-2 cannot co-sign on a closed date)", got.Stage, got.Severity)
 	}
@@ -198,13 +198,13 @@ func TestRegimeSeverityGovernorClosedDateArms(t *testing.T) {
 		t.Fatalf("governors = %+v, want disclosed pending_backtest cap", got.Governors)
 	}
 
-	// Arm 3 — a fresh status-ok VIX-term inversion — still co-signs; its own
-	// status gate is unchanged by this pass.
+	// A status-ok VIX-term inversion is still closed-date tape context and
+	// cannot lift the pending-backtest governor.
 	ratio := 1.02
 	armThree := cosigned
 	armThree.VIXTermStructure = RegimeVIXTerm{RegimeIndicatorMeta: greenMeta(), Ratio: &ratio, Status: RegimeStatusOK}
-	if got := BuildRegimeLifecycle(&armThree); got.Severity != "act" {
-		t.Fatalf("arm-3 co-sign on a closed date = %q, want act (status-gated arm unchanged)", got.Severity)
+	if got := buildRegimeLifecycleFixture(&armThree); got.Severity != "watch" {
+		t.Fatalf("VIX-term co-sign on a closed date = %q, want watch", got.Severity)
 	}
 
 	// The pure-tape-panic governor exemption needs a confirmable tape too: a
@@ -217,13 +217,13 @@ func TestRegimeSeverityGovernorClosedDateArms(t *testing.T) {
 		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: pending()},
 		Breadth:          RegimeBreadth{RegimeIndicatorMeta: pending()},
 	}
-	got = BuildRegimeLifecycle(&threeReds)
+	got = buildRegimeLifecycleFixture(&threeReds)
 	if got.Stage != LifecyclePanic || got.Severity != "act" {
 		t.Fatalf("closed-date cluster panic = %q/%q, want panic/act (exemption withheld)", got.Stage, got.Severity)
 	}
 	live := threeReds
 	live.TapeSessionState = TapeSessionTradingDate
-	got = BuildRegimeLifecycle(&live)
+	got = buildRegimeLifecycleFixture(&live)
 	if got.Stage != LifecyclePanic || got.Severity != "urgent" {
 		t.Fatalf("live tape panic = %q/%q, want panic/urgent (exemption intact)", got.Stage, got.Severity)
 	}

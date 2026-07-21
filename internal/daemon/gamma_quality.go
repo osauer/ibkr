@@ -87,8 +87,22 @@ func buildGammaSignalQuality(c *rpc.GammaZeroComputed, now time.Time) rpc.GammaS
 		gammaQualitySingleGates(&q, c)
 	}
 	gammaQualityWarningGates(&q, c)
+	gammaQualityAuthorityProvenanceGate(&q, c)
 	gammaFinalizeRankability(&q)
 	return q
+}
+
+func gammaQualityAuthorityProvenanceGate(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComputed) {
+	switch strings.TrimSpace(c.AuthorityProvenance) {
+	case "":
+		return
+	case gammaAuthorityProvenanceRecoveredObservation:
+		gammaQualityAddGate(q, "authority_provenance", rpc.GammaQualityGateContext,
+			"recovered last-known-good observation is context only until replaced by a current compute")
+	default:
+		gammaQualityAddGate(q, "authority_provenance", rpc.GammaQualityGateBlock,
+			"unrecognized gamma authority provenance")
+	}
 }
 
 func gammaQualityFreshnessGate(q *rpc.GammaSignalQuality, c *rpc.GammaZeroComputed, now time.Time) {

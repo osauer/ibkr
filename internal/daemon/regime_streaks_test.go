@@ -152,12 +152,17 @@ func TestStreakStoreUsesSQLiteWithoutLegacyFallback(t *testing.T) {
 func TestVIXTermCadenceDistinguishesNotDueFromOverdue(t *testing.T) {
 	ny := newYorkLocation()
 	ratio := 1.06
+	quality := func(at time.Time, class string) *rpc.Quality {
+		return &rpc.Quality{AsOf: at, FreshnessClass: class, Confidence: rpc.ConfidenceFirm}
+	}
 	result := &rpc.RegimeSnapshotResult{
 		AsOf: time.Date(2026, 7, 20, 1, 5, 0, 0, ny),
 		VIXTermStructure: rpc.RegimeVIXTerm{
 			Status: rpc.RegimeStatusStale, Ratio: &ratio,
 		},
 	}
+	result.VIXTermStructure.VIXQuality = quality(result.AsOf, rpc.FreshnessFrozen)
+	result.VIXTermStructure.VIX3MQuality = quality(result.AsOf, rpc.FreshnessFrozen)
 	if got := vixTermCadenceClass(result, result.AsOf); got != rpc.RegimeFreshnessNotDue {
 		t.Fatalf("Monday 01:05 ET cadence=%q, want not_due", got)
 	}
@@ -167,18 +172,80 @@ func TestVIXTermCadenceDistinguishesNotDueFromOverdue(t *testing.T) {
 		t.Fatalf("Monday 01:05 ET VIX policy=%+v", policy)
 	}
 
-	afterWindow := result.AsOf.Add(1*time.Hour + 55*time.Minute)
-	if got := vixTermCadenceClass(result, afterWindow); got != rpc.RegimeFreshnessOverdue {
-		t.Fatalf("Monday 03:00 ET cadence=%q, want overdue", got)
+	gth := time.Date(2026, 7, 20, 4, 0, 0, 0, ny)
+	result.VIXTermStructure.VIXQuality = quality(gth, rpc.FreshnessFrozen)
+	result.VIXTermStructure.VIX3MQuality = quality(gth, rpc.FreshnessFrozen)
+	if got := vixTermCadenceClass(result, gth); got != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("Monday 04:00 ET frozen VIX cadence=%q, want overdue", got)
 	}
+	result.VIXTermStructure.VIXQuality = quality(gth, rpc.FreshnessLive)
+	if got := vixTermCadenceClass(result, gth); got != rpc.RegimeFreshnessNotDue {
+		t.Fatalf("Monday 04:00 ET live VIX/frozen VIX3M cadence=%q, want not_due", got)
+	}
+	result.VIXTermStructure.VIX3MQuality = quality(gth, rpc.FreshnessLive)
+	if got := vixTermCadenceClass(result, gth); got != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("Monday 04:00 ET impossible live VIX3M cadence=%q, want overdue", got)
+	}
+	result.VIXTermStructure.VIX3MQuality = quality(gth, rpc.FreshnessFrozen)
+	savedVIX3M := result.VIXTermStructure.VIX3MQuality
+	result.VIXTermStructure.VIX3MQuality = nil
+	if got := vixTermCadenceClass(result, gth); got != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("Monday 04:00 ET missing VIX3M cadence=%q, want overdue", got)
+	}
+	result.VIXTermStructure.VIX3MQuality = savedVIX3M
+
+	beforePause := time.Date(2026, 7, 20, 9, 24, 59, 0, ny)
+	result.VIXTermStructure.VIXQuality = quality(beforePause, rpc.FreshnessFrozen)
+	result.VIXTermStructure.VIX3MQuality = quality(beforePause, rpc.FreshnessFrozen)
+	if got := vixTermCadenceClass(result, beforePause); got != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("Monday 09:24 ET frozen VIX cadence=%q, want overdue", got)
+	}
+	pauseStart := time.Date(2026, 7, 20, 9, 25, 0, 0, ny)
+	result.VIXTermStructure.VIXQuality = quality(pauseStart, rpc.FreshnessFrozen)
+	result.VIXTermStructure.VIX3MQuality = quality(pauseStart, rpc.FreshnessFrozen)
+	if got := vixTermCadenceClass(result, pauseStart); got != rpc.RegimeFreshnessNotDue {
+		t.Fatalf("Monday 09:25 ET VIX pause cadence=%q, want not_due", got)
+	}
+	beforeWindow := time.Date(2026, 7, 20, 9, 30, 59, 0, ny)
+	result.VIXTermStructure.VIXQuality = quality(beforeWindow, rpc.FreshnessLive)
+	result.VIXTermStructure.VIX3MQuality = quality(beforeWindow, rpc.FreshnessFrozen)
+	if got := vixTermCadenceClass(result, beforeWindow); got != rpc.RegimeFreshnessNotDue {
+		t.Fatalf("Monday 09:30 ET cadence=%q, want not_due", got)
+	}
+	afterWindow := time.Date(2026, 7, 20, 9, 31, 0, 0, ny)
+	if got := vixTermCadenceClass(result, afterWindow); got != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("Monday 09:31 ET cadence=%q, want overdue", got)
+	}
+	rth := time.Date(2026, 7, 20, 10, 0, 0, 0, ny)
 	result.VIXTermStructure.Status = rpc.RegimeStatusOK
-	if got := vixTermCadenceClass(result, result.AsOf); got != rpc.RegimeFreshnessFresh {
+	result.VIXTermStructure.VIXQuality = quality(rth, rpc.FreshnessLive)
+	result.VIXTermStructure.VIX3MQuality = quality(rth, rpc.FreshnessLive)
+	if got := vixTermCadenceClass(result, rth); got != rpc.RegimeFreshnessFresh {
 		t.Fatalf("live VIX cadence=%q, want fresh", got)
 	}
 	result.VIXTermStructure.Status = rpc.RegimeStatusStale
 	weekend := time.Date(2026, 7, 19, 1, 5, 0, 0, ny)
-	if got := vixTermCadenceClass(result, weekend); got != rpc.RegimeFreshnessOverdue {
-		t.Fatalf("Sunday cadence=%q, want overdue", got)
+	result.VIXTermStructure.VIXQuality = quality(weekend, rpc.FreshnessFrozen)
+	result.VIXTermStructure.VIX3MQuality = quality(weekend, rpc.FreshnessFrozen)
+	if got := vixTermCadenceClass(result, weekend); got != rpc.RegimeFreshnessNotDue {
+		t.Fatalf("Sunday cadence=%q, want not_due", got)
+	}
+
+	earlyCloseBeforeEnd := time.Date(2026, 11, 27, 13, 14, 59, 0, ny)
+	result.VIXTermStructure.VIXQuality = quality(earlyCloseBeforeEnd, rpc.FreshnessFrozen)
+	result.VIXTermStructure.VIX3MQuality = quality(earlyCloseBeforeEnd, rpc.FreshnessFrozen)
+	if got := vixTermCadenceClass(result, earlyCloseBeforeEnd); got != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("early close before VIX3M end cadence=%q, want overdue", got)
+	}
+	earlyCloseEnded := time.Date(2026, 11, 27, 13, 15, 0, 0, ny)
+	if got := vixTermCadenceClass(result, earlyCloseEnded); got != rpc.RegimeFreshnessNotDue {
+		t.Fatalf("early close after VIX3M end cadence=%q, want not_due", got)
+	}
+	unknown := time.Date(2035, 7, 20, 7, 5, 0, 0, ny)
+	result.VIXTermStructure.VIXQuality = quality(unknown, rpc.FreshnessLive)
+	result.VIXTermStructure.VIX3MQuality = quality(unknown, rpc.FreshnessFrozen)
+	if got := vixTermCadenceClass(result, unknown); got != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("unknown-calendar cadence=%q, want overdue", got)
 	}
 }
 

@@ -538,12 +538,12 @@ func TestRegimeComposite_VerdictTable(t *testing.T) {
 		{"five eligible reds full ranked = full risk-off", 0, 0, 5, 5, 0, 5, 0, rpc.LifecyclePanic, "Full risk-off conditions"},
 		// Coverage edge: 3 eligible red but two unranked → broad, not full.
 		{"three eligible reds with two unranked", 0, 0, 3, 3, 0, 3, 2, rpc.LifecyclePanic, "Broad stress regime"},
-		{"all unranked", 0, 0, 0, 0, 0, 0, 5, rpc.LifecycleDataQuality, "No usable signal yet"},
+		{"all unranked", 0, 0, 0, 0, 0, 0, 5, rpc.LifecycleDataQuality, "Market state undefined — data incomplete"},
 		// Honesty floor: below verdictFloor ranked clusters no positive
 		// claim is made, even with reds visible.
-		{"one green ranked = insufficient", 1, 0, 0, 0, 0, 1, 4, rpc.LifecycleDataQuality, "Insufficient signal — too few inputs ready"},
-		{"two green ranked = insufficient", 2, 0, 0, 0, 0, 2, 3, rpc.LifecycleDataQuality, "Insufficient signal — too few inputs ready"},
-		{"one red + one yellow = insufficient", 0, 1, 1, 1, 0, 2, 3, rpc.LifecycleDataQuality, "Insufficient signal — too few inputs ready"},
+		{"one green ranked = insufficient", 1, 0, 0, 0, 0, 1, 4, rpc.LifecycleDataQuality, "Market state undefined — data incomplete"},
+		{"two green ranked = insufficient", 2, 0, 0, 0, 0, 2, 3, rpc.LifecycleDataQuality, "Market state undefined — data incomplete"},
+		{"one red + one yellow = insufficient", 0, 1, 1, 1, 0, 2, 3, rpc.LifecycleDataQuality, "Market state undefined — data incomplete"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

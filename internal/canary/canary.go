@@ -723,26 +723,13 @@ func canaryMarketContextClusters(r rpc.RegimeSnapshotResult, now time.Time) map[
 func canaryGammaContextOnly(g rpc.RegimeGammaZero) bool {
 	return g.Envelope.Result != nil &&
 		g.Envelope.Result.Quality != nil &&
-		g.Envelope.Result.Quality.Rankability == rpc.GammaRankabilityContextOnly
+		g.Envelope.Result.Quality.Rankability == rpc.GammaRankabilityContextOnly &&
+		g.Freshness != nil && g.Freshness.Class == rpc.RegimeFreshnessNotDue
 }
 
-func canaryVolClosedSessionContext(r rpc.RegimeSnapshotResult, now time.Time) bool {
-	if rpc.ClassifySession(now) == rpc.SessionRTH {
-		return false
-	}
-	for _, q := range r.DataQuality {
-		if q.Status == rpc.RegimeStatusStale && slices.Contains(q.StaleClusters, "vol") {
-			return true
-		}
-	}
-	switch r.VIXTermStructure.Status {
-	case rpc.RegimeStatusStale:
-		return true
-	case rpc.RegimeStatusError, rpc.RegimeStatusUnavailable:
-		return r.VolOfVol.Band != "" || r.VolOfVol.Status == rpc.RegimeStatusOK || r.VolOfVol.Status == rpc.RegimeStatusStale
-	default:
-		return false
-	}
+func canaryVolClosedSessionContext(r rpc.RegimeSnapshotResult, _ time.Time) bool {
+	return r.VIXTermStructure.Freshness != nil &&
+		r.VIXTermStructure.Freshness.Class == rpc.RegimeFreshnessNotDue
 }
 
 func canaryMarketIndicators(r rpc.RegimeSnapshotResult, now time.Time) []CanaryMarketIndicator {
@@ -858,7 +845,7 @@ func canaryGammaDegraded(g rpc.RegimeGammaZero) bool {
 	case rpc.GammaRankabilityRankable:
 		return false
 	case rpc.GammaRankabilityContextOnly:
-		return false
+		return !canaryGammaContextOnly(g)
 	default:
 		return true
 	}
@@ -2068,7 +2055,7 @@ func canaryMarketEventSourceIssues(pos rpc.PositionsResult, events rpc.MarketEve
 			switch {
 			case health.AsOf.IsZero():
 				status = rpc.SourceStatusUnknown
-			case canarySourceStale(health.AsOf, now):
+			case canaryMarketEventHealthStale(health, now):
 				status = rpc.SourceStatusStale
 			}
 		}
@@ -2193,6 +2180,29 @@ func canaryMarketEventHealthRank(status string) int {
 
 func canarySourceStale(asOf, now time.Time) bool {
 	return !asOf.IsZero() && canarySourceAgeSeconds(now, asOf) > canarySourceMaxAgeSeconds(now)
+}
+
+// canaryMarketEventHealthStale honors the producer-authored per-source age
+// contract. Daily official files must not be re-staled by Canary's generic
+// 10/90-minute polling budget, while a due source at or beyond its own limit
+// fails closed. AgeSeconds is authoritative because some fallbacks age the
+// fetch attempt rather than the observation date. A typed not_due cadence
+// takes precedence over wall-clock age, but never over an explicit non-OK
+// status or a future timestamp.
+func canaryMarketEventHealthStale(health rpc.SourceHealth, now time.Time) bool {
+	if health.AsOf.IsZero() || now.IsZero() {
+		return false
+	}
+	if health.AsOf.After(now.Add(time.Minute)) || health.AgeSeconds < 0 {
+		return true
+	}
+	if health.RefreshState == rpc.SourceRefreshNotDue {
+		return false
+	}
+	if health.MaxAgeSeconds <= 0 {
+		return canarySourceStale(health.AsOf, now)
+	}
+	return health.AgeSeconds >= health.MaxAgeSeconds
 }
 
 func canaryApplySourceBlocks(signals []risk.Signal, issues []canarySourceIssue) []risk.Signal {
@@ -2369,7 +2379,7 @@ func canaryPrimaryDrivers(signals []risk.Signal) []risk.SignalID {
 
 func canaryWarnings(m CanaryMarketSummary, r rpc.RegimeSnapshotResult, now time.Time) []string {
 	var warnings []string
-	detailWarnings, detailedClusters := canaryRegimeWarningDetails(r.WarningDetails, now)
+	detailWarnings, detailedClusters := canaryRegimeWarningDetails(r.WarningDetails, canaryMarketContextClusters(r, now))
 	ambiguousClusters := canaryClustersWithoutDetailedWarning(m.AmbiguousClusters, detailedClusters)
 	partialClusters := canaryClustersWithoutDetailedWarning(m.PartialClusters, detailedClusters)
 	degradedClusters := canaryClustersWithoutDetailedWarning(m.DegradedClusters, detailedClusters)
@@ -2402,11 +2412,11 @@ func canaryMarketEventWarnings(issues []canarySourceIssue) []string {
 	return warnings
 }
 
-func canaryRegimeWarningDetails(details []rpc.RegimeWarning, now time.Time) ([]string, map[string]bool) {
+func canaryRegimeWarningDetails(details []rpc.RegimeWarning, contextClusters map[string]bool) ([]string, map[string]bool) {
 	lines := []string{}
 	clusters := map[string]bool{}
 	for _, w := range details {
-		if canaryRegimeWarningIsContext(w, now) {
+		if canaryRegimeWarningIsContext(w, contextClusters) {
 			continue
 		}
 		line := canaryWarningLine(w)
@@ -2421,13 +2431,13 @@ func canaryRegimeWarningDetails(details []rpc.RegimeWarning, now time.Time) ([]s
 	return lines, clusters
 }
 
-func canaryRegimeWarningIsContext(w rpc.RegimeWarning, now time.Time) bool {
+func canaryRegimeWarningIsContext(w rpc.RegimeWarning, contextClusters map[string]bool) bool {
 	lower := strings.ToLower(strings.Join([]string{w.Code, w.Scope, w.Severity, w.Message, w.Impact, w.Action}, " "))
-	if strings.Contains(lower, "gamma") && (strings.Contains(lower, "context_only") || strings.Contains(lower, "context only") || strings.Contains(lower, "displayed as context")) {
+	if contextClusters["gamma"] && strings.Contains(lower, "gamma") &&
+		(strings.Contains(lower, "context_only") || strings.Contains(lower, "context only") || strings.Contains(lower, "displayed as context")) {
 		return true
 	}
-	if rpc.ClassifySession(now) != rpc.SessionRTH &&
-		strings.Contains(lower, "vix_term_structure") &&
+	if contextClusters["vol"] && strings.Contains(lower, "vix_term_structure") &&
 		(strings.Contains(lower, "stale") || strings.Contains(lower, "no spot tick") || strings.Contains(lower, "calculation hours")) {
 		return true
 	}

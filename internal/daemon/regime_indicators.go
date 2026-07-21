@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -228,19 +230,99 @@ func (vixTermStreaks) depth(res *rpc.RegimeSnapshotResult) *float64 {
 }
 
 // VIX freshness: live rows are fresh at any hour. Frozen rows remain
-// confirmation-ineligible; before the documented ~03:00 ET native window on
-// an official trading date they are classified separately as not due by
-// vixTermCadenceClass rather than falsely called overdue.
+// confirmation-ineligible. VIX3M is disseminated only during Cboe regular
+// trading hours (approximately 09:31-16:15 ET), so a prior close is not due
+// before 09:31 ET or on an official closed date; it becomes overdue once a
+// newer VIX3M observation should exist.
 func (vixTermStreaks) fresh(res *rpc.RegimeSnapshotResult, _ time.Time) bool {
 	return res.VIXTermStructure.Status == rpc.RegimeStatusOK
 }
 
 func vixTermCadenceClass(res *rpc.RegimeSnapshotResult, nowNY time.Time) string {
-	if res != nil && res.VIXTermStructure.Status == rpc.RegimeStatusOK {
-		return rpc.RegimeFreshnessFresh
+	if res == nil || nowNY.IsZero() {
+		return rpc.RegimeFreshnessOverdue
 	}
-	if res != nil && res.VIXTermStructure.Status == rpc.RegimeStatusStale && nowNY.Hour() < 3 {
-		if state, _, _ := rpc.TapeSessionFor(nowNY); state == rpc.TapeSessionTradingDate {
+	row := res.VIXTermStructure
+	vixClass, vixOK := regimeTickQualityClass(row.VIXQuality, nowNY)
+	vix3mClass, vix3mOK := regimeTickQualityClass(row.VIX3MQuality, nowNY)
+	// Only usable row states with both typed legs can participate. Schedule
+	// classification happens before the live/live fast path so an impossible
+	// pre-open VIX3M "live" label cannot become confirmable evidence.
+	if (row.Status != rpc.RegimeStatusOK && row.Status != rpc.RegimeStatusStale) || !vixOK || !vix3mOK {
+		return rpc.RegimeFreshnessOverdue
+	}
+	cal := marketcal.NewWithClock(func() time.Time { return nowNY })
+	session, err := cal.SessionAt(marketcal.MarketUSOptions, nowNY)
+	if err != nil || session.State == marketcal.StateUnknown {
+		return rpc.RegimeFreshnessOverdue
+	}
+	switch session.State {
+	case marketcal.StateClosed, marketcal.StateHoliday:
+		if vix3mClass == rpc.FreshnessFrozen && (vixClass == rpc.FreshnessFrozen || vixClass == rpc.FreshnessLive) {
+			return rpc.RegimeFreshnessNotDue
+		}
+		return rpc.RegimeFreshnessOverdue
+	case marketcal.StateRegular, marketcal.StateEarlyClose:
+		local := nowNY.In(session.Open.Location())
+		vixGTHStart := time.Date(local.Year(), local.Month(), local.Day(), 3, 15, 0, 0, local.Location())
+		vixGTHEnd := time.Date(local.Year(), local.Month(), local.Day(), 9, 25, 0, 0, local.Location())
+		vix3mStart := time.Date(local.Year(), local.Month(), local.Day(), 9, 31, 0, 0, local.Location())
+		vix3mEnd := session.Close.Add(15 * time.Minute)
+		switch {
+		case local.Before(vixGTHStart):
+			if vix3mClass == rpc.FreshnessFrozen && (vixClass == rpc.FreshnessFrozen || vixClass == rpc.FreshnessLive) {
+				return rpc.RegimeFreshnessNotDue
+			}
+		case local.Before(vixGTHEnd):
+			if vix3mClass == rpc.FreshnessFrozen && vixClass == rpc.FreshnessLive {
+				return rpc.RegimeFreshnessNotDue
+			}
+		case local.Before(vix3mStart):
+			// Cboe pauses VIX dissemination from 09:25 until the 09:31
+			// regular-hours calculation. The 09:25 print is still the
+			// newest possible VIX observation in this six-minute gap.
+			if vix3mClass == rpc.FreshnessFrozen && (vixClass == rpc.FreshnessFrozen || vixClass == rpc.FreshnessLive) {
+				return rpc.RegimeFreshnessNotDue
+			}
+		case local.Before(vix3mEnd):
+			if row.Status == rpc.RegimeStatusOK && vixClass == rpc.FreshnessLive && vix3mClass == rpc.FreshnessLive {
+				return rpc.RegimeFreshnessFresh
+			}
+		case !local.Before(vix3mEnd):
+			// The current session's final VIX3M value is frozen after its
+			// dissemination window closes; the next value is not due yet.
+			if vix3mClass == rpc.FreshnessFrozen && (vixClass == rpc.FreshnessFrozen || vixClass == rpc.FreshnessLive) {
+				return rpc.RegimeFreshnessNotDue
+			}
+		}
+	}
+	return rpc.RegimeFreshnessOverdue
+}
+
+func regimeTickQualityClass(quality *rpc.Quality, now time.Time) (string, bool) {
+	if quality == nil || quality.AsOf.IsZero() || quality.AsOf.After(now.Add(time.Minute)) {
+		return "", false
+	}
+	class := strings.ToLower(strings.TrimSpace(quality.FreshnessClass))
+	switch class {
+	case rpc.FreshnessLive, rpc.FreshnessFrozen:
+		return class, true
+	default:
+		return "", false
+	}
+}
+
+func gammaCadenceClass(res *rpc.RegimeSnapshotResult, now time.Time) string {
+	if res == nil || res.GammaZero.Envelope.Result == nil {
+		return rpc.RegimeFreshnessOverdue
+	}
+	switch gammaOperationalCadence(&res.GammaZero.Envelope, now) {
+	case rpc.DataCadenceCurrent:
+		if res.GammaZero.Status == rpc.RegimeStatusOK {
+			return rpc.RegimeFreshnessFresh
+		}
+	case rpc.DataCadenceNotDue:
+		if res.GammaZero.Status == rpc.RegimeStatusOK || res.GammaZero.Status == rpc.RegimeStatusStale {
 			return rpc.RegimeFreshnessNotDue
 		}
 	}

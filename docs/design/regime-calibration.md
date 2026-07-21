@@ -2,7 +2,7 @@
 
 **Status:** Implemented; persistence contract updated for `daemon.db`
 **Created:** 2026-06-12 13:09 CEST
-**Last update:** 2026-07-20
+**Last update:** 2026-07-21
 **Owner:** osauer
 **Related:** `docs/specs/risk-regime-dashboard.md`, `docs/specs/regime-backtest-plan.md`,
 `internal/rpc/lifecycle.go`, `internal/daemon/regime*.go`, `internal/cli/canary.go`,
@@ -84,8 +84,11 @@ evidence escalate to the strongest non-panic posture against a green tape.
 
 ## Design principles
 
-- **Confirmation must be deep, persistent, fresh, and independent.** Marginal,
-  stale, or mutually-dependent evidence may warn; it may not confirm.
+- **Confirmation must be deep, persistent, fresh, and independent.** Marginal
+  but current evidence may warn; mutually-dependent evidence may not confirm.
+  Missing, broken, contradictory, or cadence-overdue evidence does not describe
+  the market at all: it puts the snapshot in `data_quality` with the headline
+  **“Market state undefined — data incomplete.”**
 - **Display and policy separate — with one precise caveat.** Row bands keep
   their current semantics (a red row stays visible the moment a threshold
   crosses). What changes is which reds may *escalate*: the cluster-level
@@ -93,8 +96,12 @@ evidence escalate to the strongest non-panic posture against a green tape.
   row renders red (the incident's credit cluster, post-fix) — that is
   intended and must be explained in row `band_reason` / cluster notes, not
   smoothed over.
-- **Data quality caps escalation, not just confidence.** A snapshot that
-  self-reports degraded inputs on its confirming evidence cannot demand "act".
+- **Data quality is a separate state, not a weak market signal.** A required
+  source defect yields `data_quality / watch / blocked / low`; it is never
+  relabelled `early_warning`. Independently current confirmed stress or panic
+  may survive an unrelated source defect, but readiness becomes degraded and
+  every confirming witness must prove current on both its row and source-health
+  contracts.
 - **One copy of policy.** Band classification, rescue/confirmation, and
   headline wording each exist in one shared place; daemon, CLI, canary, and
   backtest consume served values or the shared functions. (The third-reader
@@ -112,8 +119,10 @@ evidence escalate to the strongest non-panic posture against a green tape.
 ## Part 1 — Confirmation eligibility (the core mechanism)
 
 Introduce one concept that all four task questions hang off: a red cluster
-band is either **eligible** (may confirm stress) or **provisional** (may only
-warn).
+band is either **eligible** (may confirm stress) or **provisional** (may not
+confirm). A provisional red caused only by depth or persistence may warn when
+the required input set is otherwise usable. `data_overdue`, missing health,
+or an unavailable producer is instead a data-quality defect.
 
 A red is *eligible* when all three hold:
 
@@ -137,8 +146,12 @@ band. (Freshness is not latched — if the feed goes stale mid-streak,
 eligibility drops with it; see the severity governor.)
 
 Provisional reds remain fully visible: the row renders red, the evidence list
-carries them with `confirmed: false`, they appear in `unconfirmed`, and they
-still trigger `early_warning`. They no longer:
+carries them with `confirmed: false`, and they appear in `unconfirmed`.
+Depth- or persistence-provisional reds may trigger `early_warning` only while
+all required inputs are usable. A broken or overdue input keeps the provisional
+measurement visible for diagnosis but changes the top-level state to
+`data_quality`; a typed `not_due` schedule remains context, not a source
+failure. Provisional reds no longer:
 
 - count toward the red tally used by `confirmed_stress` / `panic`,
 - rescue another cluster from its isolated-red downgrade
@@ -159,13 +172,13 @@ includes hysteresis.
 
 | Indicator | Red band (unchanged) | Min depth for eligible red | Fast path (eligible day 1) | Min streak | Cadence-freshness for eligibility | Exit hysteresis (band re-arm) |
 |---|---|---|---|---|---|---|
-| VIX term (VIX/VIX3M) | ratio ≥ 1.00 | ratio ≥ 1.00 (inversion is already discrete) | ratio ≥ 1.05 | 2 | same-session tick (live/frozen-today; VIX publishes from ~03:00 ET, so pre-open live ticks qualify) | leave red only when ratio < 0.98; re-enter at ≥ 1.00 |
+| VIX term (VIX/VIX3M) | ratio ≥ 1.00 | ratio ≥ 1.00 (inversion is already discrete) | ratio ≥ 1.05 | 2 | both legs live during their shared 09:31–16:15 ET window for confirmation; VIX3M prior-close carry is typed `not_due` outside that window only when VIX satisfies its own 03:15–09:25 and 09:31–16:15 ET schedule | leave red only when ratio < 0.98; re-enter at ≥ 1.00 |
 | VVIX | ≥ 110 | ≥ 110 | ≥ 120 (existing isolated rule, kept) | 2 | latest official daily close (newest possible observation) | leave red < 105 |
 | HYG/SPY credit proxy | HYG < 50DMA and SPY ≥ 97% of 52w high | HYG ≥ 0.25% below 50DMA | HYG ≥ 1.0% below 50DMA | 2 | RTH tick, or latest official close outside RTH (never a thin pre/post-market tick) | leave red only after HYG closes back above 50DMA |
 | Credit spreads (HY OAS) | ≥ 5.5 or 20-obs widening ≥ 1.00 pp | levels are already deep — no extra depth | n/a (official daily series) | 1 | series ≤ 7d old (as today) | leave red < 5.25 and widening < 0.85 pp |
 | Funding (CP−T-bill) | ≥ 75 bp | ≥ 75 bp | n/a | 1 | series ≤ 7d old (as today) | leave red < 65 bp |
 | USD/JPY | yen +≥2%/week | ≥ 2% (speed *is* the depth; Aug-2024-calibrated) | ≥ 2% in 3 days (existing spec prose, now enforced) | 1 | same-day tick or same-day close | leave red < 1.5% |
-| Dealer gamma | spot below γ-zero / wholly short profile | see gamma paths below | see gamma paths below | 1 | compute `AsOf` within the current NY trading date | leave red when gap > +0.5% |
+| Dealer gamma | spot below γ-zero / wholly short profile | see gamma paths below | see gamma paths below | 1 | current-options-session compute for confirmation; latest completed-session result is typed `not_due` context before the next options session | leave red when gap > +0.5% |
 | SPX breadth | < 40% above 50DMA with SPX near highs | ≤ 38% | ≤ 30% | 2 | last completed session's compute (the newest possible observation) | leave red > 45% |
 
 **Gamma eligibility, all three red paths** (red has three producers —
@@ -230,9 +243,20 @@ without any red:
 - `panic` — `eligibleRed ≥ 3 || (SPY ≤ −4% && eligibleRed ≥ 1) || SPY ≤ −7%`.
 - `confirmed_stress` — `eligibleRed ≥ 2 || (eligibleRed ≥ 1 && SPY ≤ −2.5%)
   || (SPY ≤ −4% && yellow ≥ 2) || (eligibleRed ≥ 1 && VIX +20%)`.
-- `early_warning` — unchanged, and explicitly the home of provisional reds:
-  `rawRed ≥ 1 || yellow ≥ 3 || provisional present || SPY ≤ −1.5% || VIX +10%`.
+- `early_warning` — the home of current but not-yet-confirmed stress:
+  `rawRed ≥ 1 || yellow ≥ 3 || provisional present || SPY ≤ −1.5% || VIX +10%`,
+  but only when the required input set is usable.
 - `opportunity` / `stabilization` / `quiet` — unchanged.
+
+After stage selection, the required-input gate runs fail-closed. A blank or
+non-OK status, explicit `freshness: overdue`, missing source-health row,
+unknown refresh state, or source age beyond its served maximum changes the
+result to `data_quality / watch / blocked / low`. The only schedule exceptions
+are exact typed `not_due` contracts for VIX3M (with current VVIX and a VIX leg
+that satisfies its own schedule) and gamma. There is no generic “unranked stale
+is fine” exemption. Confirmed stress or panic survives an unrelated defect only
+when every witness that independently establishes that stage is current; stale
+SPY or VIX tape cannot preserve it.
 
 **Closed-date tape gating (added 2026-07-19).** Every tape term above reads
 the direct SPY/VIX day-change prints, which freeze at last-session values on
@@ -254,10 +278,14 @@ regime-stage latch skips closed-date snapshots so the last trading-date stage
 ages into the carried worse-of(carried, calm) path instead of a weekend stage
 re-latching fresh.
 
-On 2026-06-12 this yields: HYG red provisional (depth 0.07% < 0.25%, streak
-1 < 2), gamma red provisional (prior-trading-date compute) → `eligibleRed =
-0` → `early_warning / watch`, both clusters in `unconfirmed`. Correct
-posture: "something worth watching, not confirmed, data partly stale."
+For the 2026-06-12 regression fixture as recorded — HYG red provisional,
+gamma cadence-overdue, and volatility explicitly stale without a valid
+`not_due` contract — this now yields `data_quality / watch / blocked / low`
+and **“Market state undefined — data incomplete.”** The red measurements stay
+visible in `unconfirmed`, but they do not define a market warning. If the same
+marginal HYG break is later evaluated with a complete, current required-input
+set, `early_warning` is appropriate: that warning then describes market
+evidence rather than an ingestion defect.
 
 ### Severity governor (ordered, applied after stage selection)
 
@@ -288,15 +316,14 @@ posture: "something worth watching, not confirmed, data partly stale."
    +20%, SPY ≤ −4%) satisfy the co-sign by construction — the gate bites only
    on the pure `eligibleRed ≥ 2` path, which is exactly the incident shape.
 
-2. **Evidence-keyed readiness cap.** If any cluster in `confirmed_by` has
-   stale / partial / degraded data quality, severity is capped at **watch**
-   (urgent exempt only via the pure-tape SPY ≤ −4%/−7% paths, which are
-   self-evidencing). Keyed to the *confirming* clusters, not global
-   readiness: one unavailable funding feed must not mute a fresh, deep,
-   multi-cluster confirmation elsewhere. (Same evidence-keyed-guard pattern
-   as the protection panel's `positions_pending`.) Global
-   `readiness: degraded` keeps its current meaning and keeps capping
-   confidence only.
+2. **Required-input gate, then evidence-keyed survival.** Any required source
+   defect normally changes the state to `data_quality`. It may not overwrite
+   an independently established `confirmed_stress` or `panic` whose complete
+   witness set is current: for example, one unavailable funding feed does not
+   erase fresh, deep, multi-cluster confirmation elsewhere. In that exception
+   readiness is `degraded`; an impaired confirming cluster never qualifies as
+   an independent witness. Pure tape also has to pass its typed SPY/VIX
+   freshness and source-health checks.
 3. **Disclosure.** Any cap or downgrade emits a governor record (new
    `lifecycle.governors[]`, Part 5): `{action: "severity_capped", from:
    "act", to: "watch", reason: "pending_backtest_no_tape_cosign", clusters:
@@ -326,15 +353,17 @@ persistent eligible reds with no tape co-sign still produce stage
 follow the governed severity: `severity: watch` renders tone `watch` (amber),
 with a governor record explaining why act/red was withheld. This preserves
 headroom for act-grade stress and full risk-off conditions while keeping the
-evidence label honest. The incident case remains weaker still (provisional reds
-→ `early_warning`, tone `watch`).
+evidence label honest. The recorded incident case is weaker still because its
+required inputs were overdue: stage `data_quality`, tone `data_quality`, with
+the provisional measurements retained only as diagnostic context.
 
 ### Timing honesty
 
 Evidence rows derive `timing` from cadence-freshness: only cadence-fresh data
-may be `contemporaneous`; overdue evidence is `forward_warning` with
-`confirmed: false`. A 22:19-yesterday gamma read can never again be presented
-as contemporaneous confirmation.
+may be `contemporaneous`. An overdue measurement remains visible with
+`confirmed: false`, but the top-level state is `data_quality`, not a forward
+market warning. A 22:19-yesterday gamma read can never again be presented as
+contemporaneous confirmation.
 
 ### Headline unification
 
@@ -346,8 +375,7 @@ match wins:
 
 | Condition | Label | Tone |
 |---|---|---|
-| ranked == 0 | No usable signal yet | data_quality |
-| ranked < 3 | Insufficient signal — too few inputs ready | data_quality |
+| stage == data_quality (including too few or broken required inputs) | Market state undefined — data incomplete | data_quality |
 | all ranked clusters eligible-red, none unranked | Full risk-off conditions | risk_off |
 | eligible red ≥ 3 | Broad stress regime | stress |
 | stage == confirmed_stress and severity == watch | Confirmed stress regime | watch |
@@ -392,23 +420,31 @@ Per-indicator cadence policy:
 
 | Indicator | Native cadence | Fresh means | Overdue example |
 |---|---|---|---|
-| VIX term | intraday ticks (from ~03:00 ET) | same-session tick, incl. pre-open live ticks | frozen prior-day close after ticks should flow |
+| VIX term | VIX approximately 03:15–09:25 and 09:31–16:15 ET; VIX3M approximately 09:31–16:15 ET on the official options calendar | both legs live during the shared RTH window for a fresh, confirmable term read; frozen VIX3M is exact `not_due` outside it only when VIX is live during its own window or frozen during the 09:25–09:31 pause/closed period | missing VIX3M, frozen VIX during its due window, impossible pre-open live VIX3M, or frozen VIX3M during its RTH window |
 | VVIX | one official close per day | latest published daily close | close > 1 publication day behind |
 | HYG/SPY | intraday RTH ticks; settled closes outside RTH | RTH tick during RTH; latest official close otherwise (thin pre/post-market ticks are *never* the banding input — this also removes the incident's thin-tick wobble) | missing yesterday's close |
 | Credit OAS / funding | official daily series with publication lag | ≤ 7 days (unchanged) | > 7 days |
 | USD/JPY | 24/5 FX ticks | same-day tick or same-day close | only a prior-day close |
-| Dealer gamma | intraday-capable compute during option RTH | compute `AsOf` within the current NY trading date | any prior-date compute — pre-open, gamma simply cannot confirm yet (yesterday evening's profile includes 0DTE exposure that has since expired) |
+| Dealer gamma | intraday-capable compute during official option RTH | current-session compute during RTH; latest completed-session result before the next open is exact `not_due` context and cannot confirm | no last-good, result older than the latest completed option session, or prior-session result after the current options session opens |
 | Breadth | once per session, post-close | last completed session's compute — inherently the newest possible | compute older than the last completed session |
+
+The volatility windows come from Cboe's current
+[VIX methodology](https://cdn.cboe.com/resources/indices/Volatility_Index_Methodology_Cboe_Volatility_Index.pdf)
+and [selected SPX term-index methodology](https://cdn.cboe.com/api/global/us_indices/governance/Volatility_Index_Methodology_Selected_SPX_Target_Expected_Volatility_Term_Indices.pdf),
+with shortened sessions taken from the official options calendar rather than a
+hardcoded weekday clock.
 
 The gamma/breadth asymmetry is principled, not ad-hoc: breadth's inputs
 (daily closes) cannot exist intraday, so its post-close compute *is* current;
 gamma's inputs (live option chains) refresh intraday and roll at the open, so
-a prior-date compute is overdue by definition.
+the latest completed-session compute is valid only as pre-open/closed-session
+`not_due` context and becomes overdue when the next options session opens.
 
-Gamma additionally gets the missing `stale` status path: envelope ready but
-`AsOf` from a prior trading date → row `status: stale`, band visible, never
-eligible (`bandForGamma` keeps requiring `ok`; cadence-freshness fails too —
-two independent guards).
+Gamma additionally has an explicit context path. Before the next options
+session, the latest completed-session result is served as `status: stale`,
+`freshness: not_due`: its band stays visible but cannot confirm. Once the
+options session opens it becomes overdue unless replaced. `no_last_good` and
+`missed_session` are defects, not quiet periods and not market warnings.
 
 ### Served policy, no hardcoded twins, no churn
 
@@ -585,8 +621,9 @@ red rows. Then `make docs-regen`; `make check` enforces no drift.
   wording and tone table automatically.
 - `renderRegimePanel` stale badge derives from served max ages (drop
   hardcoded `staleMinutes: 60`), reusing the `goDurationMinutes` pattern.
-- Status line gains the provisional/governor detail ("2 stress signals
-  pending confirmation; data partly stale") instead of unqualified red.
+- Status line distinguishes current provisional evidence (for example,
+  "2 stress signals pending confirmation") from broken evidence, which uses
+  the canonical undefined-data headline instead of a warning euphemism.
 - Goes through `docs/templates/spa-authority-matrix.md`.
 
 ### Spec prose, notes, and doc gates
@@ -606,13 +643,20 @@ red rows. Then `make docs-regen`; `make check` enforces no drift.
 - **Incident regression fixture (regime):** synthetic snapshot reproducing
   2026-06-12 inputs (HYG 79.95/50DMA 80.008, SPY +0.3% near highs,
   prior-evening gamma red, VIX 18.84/VIX3M 21.42, vol cluster stale)
-  asserting `early_warning / watch`, headline "Stress signal present", both
-  clusters in `unconfirmed`, governor records present.
+  asserting `data_quality / watch / blocked / low`, headline “Market state
+  undefined — data incomplete,” and both red measurements retained in
+  `unconfirmed` for diagnosis.
 - **Incident regression fixture (canary):** same inputs through
   `summarizeCanaryMarket` asserting no "Confirmed market stress" row and no
   act-severity canary alert.
 - Eligibility unit tables per indicator (depth/streak/fast-path/freshness/
   latch), incl. gamma's three red paths and nil-streak fresh-install.
+- Required-input fail-closed tables: missing source health, blank status,
+  explicit overdue freshness, stale unranked rows, exact typed `not_due`, and
+  stale SPY/VIX tape attempting to preserve an otherwise confirmed stage.
+- VIX/VIX3M cadence table: before 03:15 ET, VIX GTH, the 09:25–09:31 pause,
+  the 09:31 boundary, regular/early close plus 15 minutes, weekends/holidays, missing
+  legs, future ticks, and unknown calendar coverage.
 - Hysteresis transition tables (enter/exit, no flap; hysteresis-held sessions
   count toward streak).
 - Crash-sensitivity fixtures: Aug-2024-style carry unwind (fast paths + tape
@@ -661,10 +705,12 @@ also fork the decision corpus's comparability, undermining Part 4. So:
 ## Risks and trade-offs
 
 - **Missed-detection risk** is the cost of every gate. Mitigations are
-  structural: tape triggers (panic, co-sign) are never gated; fast-path
-  depths make day-one eligibility possible for every gated indicator; and
-  provisional reds still escalate to `early_warning` immediately. **Stated
-  loudly:** a slow, deep, multi-cluster credit bleed (2007-style) that moves
+  structural: current tape triggers remain available; fast-path depths make
+  day-one eligibility possible for every gated indicator; and current
+  depth/persistence-provisional reds still escalate to `early_warning`
+  immediately. Broken inputs do not: they produce `data_quality`, while an
+  independently current stress stage may survive an unrelated outage.
+  **Stated loudly:** a slow, deep, multi-cluster credit bleed (2007-style) that moves
   no tape will sit at stage `confirmed_stress` / severity `watch` until a
   tape co-sign day or threshold promotion — "act" arrives later than today.
   That is the deliberate price of the provenance gate, and the event corpus will

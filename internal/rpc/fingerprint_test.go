@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -138,6 +139,80 @@ func eligibleRedMeta() RegimeIndicatorMeta {
 
 func greenMeta() RegimeIndicatorMeta { return RegimeIndicatorMeta{Band: "green"} }
 
+// buildRegimeLifecycleFixture supplies the complete typed source contract the
+// daemon always attaches before lifecycle evaluation. Individual tests can
+// still override a status, freshness class, source-health row, or data-quality
+// item to exercise fail-closed behavior.
+func buildRegimeLifecycleFixture(r *RegimeSnapshotResult) LifecycleState {
+	if r == nil {
+		return BuildRegimeLifecycle(nil)
+	}
+	fresh := func(meta *RegimeIndicatorMeta) {
+		if meta.Freshness == nil {
+			meta.Freshness = &RegimeFreshness{Class: RegimeFreshnessFresh}
+		}
+	}
+	fill := func(status *string, meta *RegimeIndicatorMeta) {
+		if strings.TrimSpace(*status) == "" {
+			*status = RegimeStatusOK
+		}
+		fresh(meta)
+	}
+	fill(&r.VIXTermStructure.Status, &r.VIXTermStructure.RegimeIndicatorMeta)
+	fill(&r.VolOfVol.Status, &r.VolOfVol.RegimeIndicatorMeta)
+	fill(&r.HYGSPYDivergence.Status, &r.HYGSPYDivergence.RegimeIndicatorMeta)
+	fill(&r.CreditSpreads.Status, &r.CreditSpreads.RegimeIndicatorMeta)
+	fill(&r.FundingStress.Status, &r.FundingStress.RegimeIndicatorMeta)
+	fill(&r.USDJPY.Status, &r.USDJPY.RegimeIndicatorMeta)
+	fill(&r.GammaZero.Status, &r.GammaZero.RegimeIndicatorMeta)
+	fill(&r.Breadth.Status, &r.Breadth.RegimeIndicatorMeta)
+	if r.GammaZero.Status == RegimeStatusOK && r.GammaZero.Envelope.Result == nil {
+		r.GammaZero.Envelope = GammaZeroSPXResult{Status: GammaZeroStatusReady, Result: &GammaZeroComputed{
+			Quality: &GammaSignalQuality{Rankability: GammaRankabilityRankable},
+		}}
+	}
+	seen := map[string]bool{}
+	for _, health := range r.SourceHealth {
+		seen[strings.ToLower(strings.TrimSpace(health.Source))] = true
+	}
+	for _, name := range RegimeClusterNames {
+		if !seen[name] {
+			r.SourceHealth = append(r.SourceHealth, SourceHealth{Source: name, Status: SourceStatusOK, RefreshState: SourceRefreshCurrent})
+		}
+	}
+	return BuildRegimeLifecycle(r)
+}
+
+func fullGreenLifecycleFixture() RegimeSnapshotResult {
+	r := RegimeSnapshotResult{
+		VIXTermStructure: RegimeVIXTerm{RegimeIndicatorMeta: greenMeta()},
+		VolOfVol:         RegimeVolOfVol{RegimeIndicatorMeta: greenMeta()},
+		HYGSPYDivergence: RegimeHYGSPYDivergence{RegimeIndicatorMeta: greenMeta()},
+		CreditSpreads:    RegimeCreditSpreads{RegimeIndicatorMeta: greenMeta()},
+		FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: greenMeta()},
+		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
+		GammaZero:        RegimeGammaZero{RegimeIndicatorMeta: greenMeta()},
+		Breadth:          RegimeBreadth{RegimeIndicatorMeta: greenMeta()},
+	}
+	buildRegimeLifecycleFixture(&r)
+	return r
+}
+
+func TestRegimeLifecycleSourceAgeAtLimitFailsClosed(t *testing.T) {
+	t.Parallel()
+	r := fullGreenLifecycleFixture()
+	for i := range r.SourceHealth {
+		if r.SourceHealth[i].Source == "credit" {
+			r.SourceHealth[i].MaxAgeSeconds = 60
+			r.SourceHealth[i].AgeSeconds = 60
+		}
+	}
+	got := BuildRegimeLifecycle(&r)
+	if got.Stage != LifecycleDataQuality || got.Readiness != "blocked" || got.Confidence != "low" {
+		t.Fatalf("source at max age must fail closed: %+v", got)
+	}
+}
+
 func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.T) {
 	t.Parallel()
 	spyDrop := -2.0
@@ -150,7 +225,7 @@ func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.
 		FundingStress: RegimeFundingStress{RegimeIndicatorMeta: greenMeta()},
 		USDJPY:        RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
 	}
-	early := BuildRegimeLifecycle(&base)
+	early := buildRegimeLifecycleFixture(&base)
 	if early.Stage != LifecycleEarlyWarning || early.Severity != "watch" {
 		t.Fatalf("early lifecycle = %+v, want early_warning/watch", early)
 	}
@@ -160,7 +235,7 @@ func TestRegimeLifecycleDistinguishesEarlyWarningFromConfirmedStress(t *testing.
 
 	confirmed := base
 	confirmed.FundingStress.RegimeIndicatorMeta = eligibleRedMeta()
-	got := BuildRegimeLifecycle(&confirmed)
+	got := buildRegimeLifecycleFixture(&confirmed)
 	if got.Stage != LifecycleConfirmedStress || got.Severity != "act" {
 		t.Fatalf("confirmed lifecycle = %+v, want confirmed_stress/act", got)
 	}
@@ -195,9 +270,9 @@ func TestRegimeLifecycleProvisionalRedsDoNotConfirm(t *testing.T) {
 			}},
 		},
 	}
-	got := BuildRegimeLifecycle(&r)
-	if got.Stage != LifecycleEarlyWarning || got.Severity != "watch" {
-		t.Fatalf("lifecycle = stage %q severity %q, want early_warning/watch", got.Stage, got.Severity)
+	got := buildRegimeLifecycleFixture(&r)
+	if got.Stage != LifecycleDataQuality || got.Severity != "watch" || got.Readiness != "blocked" {
+		t.Fatalf("lifecycle = stage %q severity %q readiness %q, want data_quality/watch/blocked", got.Stage, got.Severity, got.Readiness)
 	}
 	if len(got.ConfirmedBy) != 0 {
 		t.Fatalf("confirmed_by = %+v, want empty for provisional reds", got.ConfirmedBy)
@@ -220,15 +295,15 @@ func TestRegimeLifecycleDegradesReadinessForDataQuality(t *testing.T) {
 			{Surface: "regime", Status: "stale", StaleClusters: []string{"breadth"}},
 		},
 	}
-	got := BuildRegimeLifecycle(&base)
-	if got.Stage != LifecycleQuiet {
-		t.Fatalf("stage: want quiet, got %+v", got)
+	got := buildRegimeLifecycleFixture(&base)
+	if got.Stage != LifecycleDataQuality {
+		t.Fatalf("stage: want data_quality, got %+v", got)
 	}
-	if got.Readiness != "degraded" {
-		t.Fatalf("readiness: want degraded, got %+v", got)
+	if got.Readiness != "blocked" {
+		t.Fatalf("readiness: want blocked, got %+v", got)
 	}
-	if got.Confidence != "medium" {
-		t.Fatalf("confidence: want medium cap, got %+v", got)
+	if got.Confidence != "low" {
+		t.Fatalf("confidence: want low, got %+v", got)
 	}
 }
 
@@ -243,15 +318,114 @@ func TestRegimeLifecycleDegradesReadinessForWeakRows(t *testing.T) {
 		Breadth:          RegimeBreadth{RegimeIndicatorMeta: greenMeta()},
 		GammaZero:        RegimeGammaZero{Status: RegimeStatusComputing},
 	}
-	got := BuildRegimeLifecycle(&base)
-	if got.Stage != LifecycleQuiet {
-		t.Fatalf("stage: want quiet, got %+v", got)
+	got := buildRegimeLifecycleFixture(&base)
+	if got.Stage != LifecycleDataQuality {
+		t.Fatalf("stage: want data_quality, got %+v", got)
 	}
-	if got.Readiness != "degraded" {
-		t.Fatalf("readiness: want degraded for computing gamma, got %+v", got)
+	if got.Readiness != "blocked" {
+		t.Fatalf("readiness: want blocked for computing gamma, got %+v", got)
 	}
-	if got.Confidence != "medium" {
-		t.Fatalf("confidence: want medium cap, got %+v", got)
+	if got.Confidence != "low" {
+		t.Fatalf("confidence: want low, got %+v", got)
+	}
+}
+
+func TestRegimeLifecycleRequiredInputsFailClosed(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*RegimeSnapshotResult)
+	}{
+		{
+			name: "status_ok_but_freshness_overdue",
+			mutate: func(r *RegimeSnapshotResult) {
+				r.Breadth.Freshness = &RegimeFreshness{Class: RegimeFreshnessOverdue}
+			},
+		},
+		{
+			name: "stale_unranked_is_not_an_exemption",
+			mutate: func(r *RegimeSnapshotResult) {
+				r.GammaZero.Band = ""
+				r.GammaZero.Status = RegimeStatusStale
+				r.GammaZero.Freshness = &RegimeFreshness{Class: RegimeFreshnessOverdue}
+				for i := range r.SourceHealth {
+					if r.SourceHealth[i].Source == "gamma" {
+						r.SourceHealth[i].Status = SourceStatusStale
+					}
+				}
+				r.DataQuality = []DataQualityHealth{{Status: RegimeStatusStale, StaleClusters: []string{"gamma"}}}
+			},
+		},
+		{
+			name:   "blank_required_status",
+			mutate: func(r *RegimeSnapshotResult) { r.FundingStress.Status = "" },
+		},
+		{
+			name: "missing_required_source_health",
+			mutate: func(r *RegimeSnapshotResult) {
+				for i := range r.SourceHealth {
+					if r.SourceHealth[i].Source == "fx" {
+						r.SourceHealth = append(r.SourceHealth[:i], r.SourceHealth[i+1:]...)
+						break
+					}
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			r := fullGreenLifecycleFixture()
+			test.mutate(&r)
+			got := BuildRegimeLifecycle(&r)
+			if got.Stage != LifecycleDataQuality || got.Readiness != "blocked" || got.Timing != LifecycleTimingDataQuality {
+				t.Fatalf("state=%+v, want explicit blocked data_quality", got)
+			}
+			ApplyRegimeClusterTallies(&r.Composite, BuildRegimeClusterBands(&r))
+			if label := RegimeHeadline(r.Composite, got.Stage); label != "Market state undefined — data incomplete" {
+				t.Fatalf("headline=%q, want explicit undefined state", label)
+			}
+		})
+	}
+}
+
+func TestRegimeLifecycleTypedNotDueRemainsExpectedContext(t *testing.T) {
+	t.Parallel()
+	r := fullGreenLifecycleFixture()
+	r.VIXTermStructure.Status = RegimeStatusStale
+	r.VIXTermStructure.Freshness = &RegimeFreshness{Class: RegimeFreshnessNotDue}
+	r.GammaZero.Status = RegimeStatusStale
+	r.GammaZero.Freshness = &RegimeFreshness{Class: RegimeFreshnessNotDue}
+	r.GammaZero.Envelope.Result.Quality = &GammaSignalQuality{Rankability: GammaRankabilityContextOnly}
+	for i := range r.SourceHealth {
+		switch r.SourceHealth[i].Source {
+		case "vol", "gamma":
+			r.SourceHealth[i].Status = SourceStatusStale
+			r.SourceHealth[i].RefreshState = SourceRefreshNotDue
+		}
+	}
+	r.DataQuality = []DataQualityHealth{{Status: RegimeStatusStale, StaleClusters: []string{"vol", "gamma"}}}
+	got := BuildRegimeLifecycle(&r)
+	if got.Stage != LifecycleQuiet || got.Readiness != "ready" {
+		t.Fatalf("typed not_due context=%+v, want quiet/ready", got)
+	}
+}
+
+func TestRegimeLifecycleStaleTapeCannotPreserveStress(t *testing.T) {
+	t.Parallel()
+	r := fullGreenLifecycleFixture()
+	r.TapeSessionState = TapeSessionTradingDate
+	r.HYGSPYDivergence.SPYChangePct = new(-7.2)
+	r.HYGSPYDivergence.Status = RegimeStatusStale
+	r.HYGSPYDivergence.Freshness = &RegimeFreshness{Class: RegimeFreshnessOverdue}
+	for i := range r.SourceHealth {
+		if r.SourceHealth[i].Source == "credit" {
+			r.SourceHealth[i].Status = SourceStatusStale
+		}
+	}
+	r.DataQuality = []DataQualityHealth{{Status: RegimeStatusStale, StaleClusters: []string{"credit"}}}
+	got := BuildRegimeLifecycle(&r)
+	if got.Stage != LifecycleDataQuality || got.ConfirmedBy != nil {
+		t.Fatalf("stale tape state=%+v, want data_quality without confirmation", got)
 	}
 }
 
@@ -362,7 +536,7 @@ func TestRegimePostureClassifiesPolicyTone(t *testing.T) {
 					FundingStress:    RegimeFundingStress{RegimeIndicatorMeta: eligibleRedMeta()},
 				}
 			},
-			wantLabel:    "Insufficient signal — too few inputs ready",
+			wantLabel:    "Market state undefined — data incomplete",
 			wantTone:     RegimeToneDataQuality,
 			wantStage:    LifecycleDataQuality,
 			wantSeverity: "watch",
@@ -389,7 +563,7 @@ func TestRegimePostureClassifiesPolicyTone(t *testing.T) {
 			t.Parallel()
 			regime := tt.build()
 			ApplyRegimeClusterTallies(&regime.Composite, BuildRegimeClusterBands(&regime))
-			regime.Lifecycle = BuildRegimeLifecycle(&regime)
+			regime.Lifecycle = buildRegimeLifecycleFixture(&regime)
 			regime.Composite.Verdict = RegimeHeadline(regime.Composite, regime.Lifecycle.Stage)
 			got := BuildRegimePosture(&regime)
 			if got.Label != tt.wantLabel || got.Tone != tt.wantTone || got.Stage != tt.wantStage || got.Severity != tt.wantSeverity {
@@ -415,13 +589,13 @@ func TestRegimePostureMarksDegradedNormalAsDataQuality(t *testing.T) {
 		},
 	}
 	ApplyRegimeClusterTallies(&regime.Composite, BuildRegimeClusterBands(&regime))
-	regime.Lifecycle = BuildRegimeLifecycle(&regime)
+	regime.Lifecycle = buildRegimeLifecycleFixture(&regime)
 	got := BuildRegimePosture(&regime)
-	if got.Label != "Normal regime" {
-		t.Fatalf("label: want Normal regime, got %+v", got)
+	if got.Label != "Market state undefined — data incomplete" {
+		t.Fatalf("label: want undefined data state, got %+v", got)
 	}
-	if got.Tone != RegimeToneDataQuality || got.Severity != "watch" || got.Readiness != "degraded" {
-		t.Fatalf("posture should warn on degraded normal, got %+v", got)
+	if got.Tone != RegimeToneDataQuality || got.Severity != "watch" || got.Readiness != "blocked" {
+		t.Fatalf("posture should block on incomplete data, got %+v", got)
 	}
 }
 

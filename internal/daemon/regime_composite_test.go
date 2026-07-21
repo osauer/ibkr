@@ -14,6 +14,23 @@ import (
 // contract, not an intermediate. Fresh store ⇒ every red is streak day 1.
 func regimeTestFinalize(t *testing.T, r *rpc.RegimeSnapshotResult) rpc.RegimeComposite {
 	t.Helper()
+	if r.AsOf.IsZero() {
+		r.AsOf = time.Date(2026, 7, 20, 12, 0, 0, 0, newYorkLocation())
+	}
+	if r.VIXTermStructure.Status == rpc.RegimeStatusOK {
+		if r.VIXTermStructure.VIXQuality == nil {
+			r.VIXTermStructure.VIXQuality = &rpc.Quality{AsOf: r.AsOf, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm}
+		}
+		if r.VIXTermStructure.VIX3MQuality == nil {
+			r.VIXTermStructure.VIX3MQuality = &rpc.Quality{AsOf: r.AsOf, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm}
+		}
+	}
+	if r.VolOfVol.Status == rpc.RegimeStatusOK && r.VolOfVol.AsOfDate == "" {
+		r.VolOfVol.AsOfDate = nyTime(r.AsOf).Format("2006-01-02")
+	}
+	if r.GammaZero.Status == rpc.RegimeStatusOK && r.GammaZero.Envelope.Result != nil && r.GammaZero.Envelope.Result.AsOf.IsZero() {
+		r.GammaZero.Envelope.Result.AsOf = r.AsOf
+	}
 	s := &Server{streaks: NewStreakStore(t.TempDir())}
 	policies := s.populateStreaks(r)
 	annotateRegimeMetadata(r, policies)
@@ -309,8 +326,8 @@ func TestBuildRegimeComposite_USDJPYRedRequiresConfirmation(t *testing.T) {
 }
 
 // TestBuildRegimeComposite_BelowFloorIsInsufficient pins the
-// honesty-floor: a verdict can't be claimed when fewer than 3 rows
-// are ranked.
+// honesty-floor: a market verdict can't be claimed when fewer than 3 rows
+// are ranked; the operator sees an explicit undefined data state.
 func TestBuildRegimeComposite_BelowFloorIsInsufficient(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()
@@ -324,7 +341,7 @@ func TestBuildRegimeComposite_BelowFloorIsInsufficient(t *testing.T) {
 	if c.ClusterRankedCount >= verdictFloor {
 		t.Fatalf("test setup wrong: ranked clusters %d, want < %d", c.ClusterRankedCount, verdictFloor)
 	}
-	if c.Verdict != "Insufficient signal — too few inputs ready" {
+	if c.Verdict != "Market state undefined — data incomplete" {
 		t.Errorf("verdict: got %q", c.Verdict)
 	}
 }
@@ -354,8 +371,11 @@ func TestBuildRegimeSummaryAndWarnings(t *testing.T) {
 	regimeTestFinalize(t, r)
 
 	s := r.Summary
-	if s.Label != "Normal regime" {
+	if s.Label != "Market state undefined — data incomplete" {
 		t.Errorf("summary label: got %q", s.Label)
+	}
+	if r.Lifecycle.Stage != rpc.LifecycleDataQuality || r.Lifecycle.Readiness != "blocked" || r.Lifecycle.Confidence != "low" {
+		t.Errorf("broken FX and computing gamma must fail closed as data quality: %+v", r.Lifecycle)
 	}
 	if s.Evidence != "4 green clusters / 2 unranked clusters" {
 		t.Errorf("summary evidence: got %q", s.Evidence)

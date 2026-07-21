@@ -161,7 +161,7 @@ func TestRegimeSeverityGovernorProvenanceGate(t *testing.T) {
 		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
 		Breadth:          RegimeBreadth{RegimeIndicatorMeta: pending()},
 	}
-	got := BuildRegimeLifecycle(&base)
+	got := buildRegimeLifecycleFixture(&base)
 	if got.Stage != LifecycleConfirmedStress {
 		t.Fatalf("stage = %q, want confirmed_stress (the evidence is real)", got.Stage)
 	}
@@ -175,7 +175,7 @@ func TestRegimeSeverityGovernorProvenanceGate(t *testing.T) {
 	cosigned := base
 	drop := -1.8
 	cosigned.HYGSPYDivergence.SPYChangePct = &drop
-	got = BuildRegimeLifecycle(&cosigned)
+	got = buildRegimeLifecycleFixture(&cosigned)
 	if got.Stage != LifecycleConfirmedStress || got.Severity != "act" {
 		t.Fatalf("co-signed = %q/%q, want confirmed_stress/act", got.Stage, got.Severity)
 	}
@@ -186,7 +186,7 @@ func TestRegimeSeverityGovernorProvenanceGate(t *testing.T) {
 	promoted := base
 	promoted.FundingStress.Thresholds = &RegimeThresholds{Label: "test_v2", Heuristic: true}
 	promoted.Breadth.Thresholds = &RegimeThresholds{Label: "test_v2", Heuristic: true}
-	got = BuildRegimeLifecycle(&promoted)
+	got = buildRegimeLifecycleFixture(&promoted)
 	if got.Severity != "act" || len(got.Governors) != 0 {
 		t.Fatalf("promoted sets = %q %+v, want act with no governor", got.Severity, got.Governors)
 	}
@@ -212,7 +212,7 @@ func TestRegimeSeverityGovernorPanicLadder(t *testing.T) {
 		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: pending()},
 		Breadth:          RegimeBreadth{RegimeIndicatorMeta: pending()},
 	}
-	got := BuildRegimeLifecycle(&threeReds)
+	got := buildRegimeLifecycleFixture(&threeReds)
 	if got.Stage != LifecyclePanic || got.Severity != "act" {
 		t.Fatalf("heuristic 3-red panic = %q/%q, want panic/act (urgent withheld)", got.Stage, got.Severity)
 	}
@@ -227,7 +227,7 @@ func TestRegimeSeverityGovernorPanicLadder(t *testing.T) {
 		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: greenMeta()},
 		Breadth:          RegimeBreadth{RegimeIndicatorMeta: greenMeta()},
 	}
-	got = BuildRegimeLifecycle(&crash)
+	got = buildRegimeLifecycleFixture(&crash)
 	if got.Stage != LifecyclePanic || got.Severity != "urgent" {
 		t.Fatalf("gap crash = %q/%q, want panic/urgent (pure tape, never governed)", got.Stage, got.Severity)
 	}
@@ -251,25 +251,16 @@ func TestRegimeSeverityGovernorQualityCap(t *testing.T) {
 			{Source: "funding", Status: SourceStatusPartial},
 		},
 	}
-	got := BuildRegimeLifecycle(&base)
-	if got.Severity != "watch" {
-		t.Fatalf("severity = %q, want watch when a CONFIRMING cluster is impaired", got.Severity)
-	}
-	found := false
-	for _, g := range got.Governors {
-		if g.Reason == "confirming_cluster_quality" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("governors = %+v, want confirming_cluster_quality disclosure", got.Governors)
+	got := buildRegimeLifecycleFixture(&base)
+	if got.Stage != LifecycleDataQuality || got.Severity != "watch" || got.Readiness != "blocked" {
+		t.Fatalf("state = %q/%q/%q, want data_quality/watch/blocked when confirmation depends on an impaired cluster", got.Stage, got.Severity, got.Readiness)
 	}
 
 	unrelated := base
 	unrelated.SourceHealth = []SourceHealth{{Source: "fx", Status: SourceStatusStale}}
-	got = BuildRegimeLifecycle(&unrelated)
-	if got.Severity != "act" {
-		t.Fatalf("severity = %q, want act — an unrelated impaired feed must not mute confirmation", got.Severity)
+	got = buildRegimeLifecycleFixture(&unrelated)
+	if got.Stage != LifecycleConfirmedStress || got.Severity != "act" || got.Readiness != "degraded" {
+		t.Fatalf("state = %q/%q/%q, want confirmed_stress/act/degraded — unrelated impairment must not mute current independent stress", got.Stage, got.Severity, got.Readiness)
 	}
 }
 
@@ -295,7 +286,7 @@ func TestRegimeLifecycleCrashSensitivity(t *testing.T) {
 		USDJPY:           RegimeUSDJPY{RegimeIndicatorMeta: pendingEligible()},
 		Breadth:          RegimeBreadth{RegimeIndicatorMeta: greenMeta()},
 	}
-	got := BuildRegimeLifecycle(&carry)
+	got := buildRegimeLifecycleFixture(&carry)
 	if got.Stage != LifecycleConfirmedStress && got.Stage != LifecyclePanic {
 		t.Fatalf("carry unwind stage = %q, want confirmed_stress or panic on day one", got.Stage)
 	}

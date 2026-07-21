@@ -159,7 +159,14 @@ decision histories deliberately start empty. Imported historic market and
 gamma measurements are immutable observations stamped
 `decision_eligible=false` in a typed, non-null column (and provenance
 metadata); they support research but never seed current
-state or a current verdict.
+state or a current verdict, with one narrow cutover repair: when gamma has no
+current last-good document, the daemon may strictly validate the newest
+quarantined legacy gamma observation and promote a copy to the gamma state
+slot with `authority_provenance=recovered_legacy_observation`. The immutable
+observation remains byte-exact and decision-ineligible, and the promoted copy
+is context-only until a fresh current-code compute replaces it. Current state
+always wins; this is not a generic history fallback or a revival of file
+authority.
 
 Cutover preserves safety-critical settings, capital/governance continuity,
 active or uncertain order chains, consumed-token tombstones, conservative
@@ -214,6 +221,14 @@ RPC socket or a later publication is allowed. An unreceipted revision is
 withheld atomically from Regime consumers. A clock behind the retained commit
 is explicit `clock_invalid` stale context and cannot publish a refresh or
 relax the rulebook until it catches up.
+
+Regime source quality is not a weak form of market stress. Missing, broken,
+contradictory, or cadence-overdue required evidence produces the explicit
+`data_quality` lifecycle and “Market state undefined — data incomplete.” Only
+exact producer-authored `not_due` schedules remain context. Independently
+current confirmed stress may survive an unrelated source defect with degraded
+readiness, but every confirming row, source-health record, and direct tape
+witness must itself be current.
 
 The daemon's alert registry is likewise source-neutral and durable, but its
 unified delivery authority is deliberately inactive. It stores opaque

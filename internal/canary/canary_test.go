@@ -235,6 +235,7 @@ func TestComputeCanaryContextOnlyGammaDoesNotConfirmStress(t *testing.T) {
 			},
 		},
 	}
+	r.GammaZero.Freshness = &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessNotDue}
 
 	res := ComputeCanary(CanaryInput{
 		Account:   baseCanaryAccount(),
@@ -896,6 +897,7 @@ func TestComputeCanaryOffHoursVolStaleIsContext(t *testing.T) {
 	t.Parallel()
 	r := healthyCanaryRegime()
 	r.VIXTermStructure.Status = rpc.RegimeStatusStale
+	r.VIXTermStructure.Freshness = &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessNotDue}
 	r.VIXTermStructure.AsOf = &rpc.RegimeAsOfSummary{Label: "frozen", Date: "2026-06-01"}
 	r.DataQuality = []rpc.DataQualityHealth{{
 		Surface:       "regime",
@@ -929,6 +931,23 @@ func TestComputeCanaryOffHoursVolStaleIsContext(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(vix.Comment), "stale input") || !strings.Contains(vix.Comment, "closed-session cached context") {
 		t.Fatalf("VIX comment = %q, want closed-session context without stale-input action", vix.Comment)
+	}
+}
+
+func TestComputeCanaryOffHoursVolOverdueIsDataQuality(t *testing.T) {
+	t.Parallel()
+	r := healthyCanaryRegime()
+	r.VIXTermStructure.Status = rpc.RegimeStatusStale
+	r.VIXTermStructure.Freshness = &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessOverdue}
+	r.DataQuality = []rpc.DataQualityHealth{{
+		Surface: "regime", Status: rpc.RegimeStatusStale, StaleClusters: []string{"vol"},
+	}}
+	res := ComputeCanary(CanaryInput{
+		Account: baseCanaryAccount(), Positions: freshCanaryPositions(), Regime: r,
+		Now: time.Date(2026, 6, 1, 11, 5, 0, 0, time.UTC),
+	})
+	if !slices.Contains(res.Market.StaleClusters, "vol") || res.InputHealth != canaryInputDegraded || res.Action != canaryActionConfirmInputs {
+		t.Fatalf("off-hours overdue vol = stale %v input %q action %q, want explicit data-quality block", res.Market.StaleClusters, res.InputHealth, res.Action)
 	}
 }
 
@@ -1240,6 +1259,7 @@ func TestComputeCanaryMarketIndicatorsCarryDecisionContext(t *testing.T) {
 			RankabilityReason: "freshness: market is closed; cached gamma is context only",
 		},
 	}
+	r.GammaZero.Freshness = &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessNotDue}
 
 	res := ComputeCanary(CanaryInput{
 		Account: baseCanaryAccount(),
@@ -1305,6 +1325,7 @@ func TestComputeCanaryMarginPressureDoesNotActWithoutMarketConfirmation(t *testi
 			RankabilityReason: "freshness: cached gamma is context only",
 		},
 	}
+	r.GammaZero.Freshness = &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessNotDue}
 
 	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
 		Account:   acct,
@@ -1338,6 +1359,7 @@ func TestComputeCanaryDailyLossDoesNotActWithoutMarketConfirmation(t *testing.T)
 			RankabilityReason: "freshness: cached gamma is context only",
 		},
 	}
+	r.GammaZero.Freshness = &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessNotDue}
 
 	res := ComputeCanary(CanaryInput{Now: canaryTestNow,
 		Account:   acct,
@@ -1919,7 +1941,8 @@ func TestComputeCanaryMarketEventHealthRequiresCurrentTimestamps(t *testing.T) {
 		{
 			name: "required_child_timestamp_stale",
 			mutate: func(events *rpc.MarketEventsResult) {
-				events.SourceHealth[0].AsOf = canaryTestNow.Add(-11 * time.Minute)
+				events.SourceHealth[1].AsOf = canaryTestNow.Add(-2 * time.Minute)
+				events.SourceHealth[1].AgeSeconds = int64((2 * time.Minute).Seconds())
 			},
 			wantStatus: rpc.SourceStatusStale,
 		},
@@ -1946,6 +1969,97 @@ func TestComputeCanaryMarketEventHealthRequiresCurrentTimestamps(t *testing.T) {
 			health := findSourceHealth(res.SourceHealth, "market_events")
 			if health == nil || health.Status != test.wantStatus {
 				t.Fatalf("market-events health = %+v, want status %q", health, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestCanaryMarketEventSourceHealthUsesOwnCadence(t *testing.T) {
+	t.Parallel()
+	positions := rpc.PositionsResult{
+		AsOf:   canaryTestNow,
+		Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: 100}},
+	}
+	hasIssue := func(issues []canarySourceIssue, source string) bool {
+		for _, issue := range issues {
+			if issue.Source == source {
+				return true
+			}
+		}
+		return false
+	}
+	for _, test := range []struct {
+		name      string
+		shortBook bool
+		mutate    func(*rpc.MarketEventsResult)
+		source    string
+		wantIssue bool
+	}{
+		{
+			name: "reg_sho_older_than_generic_budget_but_inside_own_max",
+			mutate: func(events *rpc.MarketEventsResult) {
+				events.SourceHealth[0].AsOf = canaryTestNow.Add(-95 * time.Hour)
+				events.SourceHealth[0].AgeSeconds = int64((95 * time.Hour).Seconds())
+			},
+			source: "reg_sho_threshold",
+		},
+		{
+			name: "reg_sho_at_own_max_is_stale",
+			mutate: func(events *rpc.MarketEventsResult) {
+				events.SourceHealth[0].AsOf = canaryTestNow.Add(-96 * time.Hour)
+				events.SourceHealth[0].AgeSeconds = int64((96 * time.Hour).Seconds())
+			},
+			source: "reg_sho_threshold", wantIssue: true,
+		},
+		{
+			name: "missing_max_uses_conservative_fallback",
+			mutate: func(events *rpc.MarketEventsResult) {
+				events.SourceHealth[0].AsOf = canaryTestNow.Add(-11 * time.Minute)
+				events.SourceHealth[0].AgeSeconds = int64((11 * time.Minute).Seconds())
+				events.SourceHealth[0].MaxAgeSeconds = 0
+			},
+			source: "reg_sho_threshold", wantIssue: true,
+		},
+		{
+			name: "future_timestamp_fails_closed",
+			mutate: func(events *rpc.MarketEventsResult) {
+				events.SourceHealth[0].AsOf = canaryTestNow.Add(2 * time.Minute)
+			},
+			source: "reg_sho_threshold", wantIssue: true,
+		},
+		{
+			name:      "not_due_borrow_fee_is_not_re_staled",
+			shortBook: true,
+			mutate: func(events *rpc.MarketEventsResult) {
+				health := &events.SourceHealth[3]
+				health.AsOf = canaryTestNow.Add(-72 * time.Hour)
+				health.AgeSeconds = int64((72 * time.Hour).Seconds())
+				health.RefreshState = rpc.SourceRefreshNotDue
+			},
+			source: "borrow_fee",
+		},
+		{
+			name:      "explicit_stale_wins_over_not_due",
+			shortBook: true,
+			mutate: func(events *rpc.MarketEventsResult) {
+				health := &events.SourceHealth[3]
+				health.Status = rpc.SourceStatusStale
+				health.RefreshState = rpc.SourceRefreshNotDue
+			},
+			source: "borrow_fee", wantIssue: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			events := healthyCanaryMarketEvents(canaryTestNow, "XYZ")
+			test.mutate(&events)
+			book := positions
+			if test.shortBook {
+				book.Stocks = []rpc.PositionView{{Symbol: "XYZ", SecType: rpc.SecTypeStock, Quantity: -100}}
+			}
+			issues := canaryMarketEventSourceIssues(book, events, canaryTestNow)
+			if got := hasIssue(issues, test.source); got != test.wantIssue {
+				t.Fatalf("issues=%+v, source %q issue=%v want %v", issues, test.source, got, test.wantIssue)
 			}
 		})
 	}
@@ -2113,14 +2227,22 @@ func TestCanaryWarningsPolishUnrankedImpact(t *testing.T) {
 
 func TestCanaryWarningsPreferScopedInputChecks(t *testing.T) {
 	t.Parallel()
+	regime := rpc.RegimeSnapshotResult{
+		GammaZero: rpc.RegimeGammaZero{
+			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{Freshness: &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessNotDue}},
+			Envelope:            rpc.GammaZeroSPXResult{Result: &rpc.GammaZeroComputed{Quality: &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityContextOnly}}},
+		},
+		VIXTermStructure: rpc.RegimeVIXTerm{RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{Freshness: &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessNotDue}}},
+		WarningDetails: []rpc.RegimeWarning{
+			{Scope: "funding_stress", Message: "funding spread row is unranked; the composite has lower coverage."},
+			{Scope: "gamma_zero", Message: "dealer gamma context_only: freshness: market is closed; cached gamma is context only"},
+			{Scope: "vix_term_structure", Message: "volatility term structure stale"},
+		},
+	}
 	warnings := canaryWarnings(CanaryMarketSummary{
 		AmbiguousClusters: []string{"funding"},
 		UnrankedClusters:  1,
-	}, rpc.RegimeSnapshotResult{WarningDetails: []rpc.RegimeWarning{
-		{Scope: "funding_stress", Message: "funding spread row is unranked; the composite has lower coverage."},
-		{Scope: "gamma_zero", Message: "dealer gamma context_only: freshness: market is closed; cached gamma is context only"},
-		{Scope: "vix_term_structure", Message: "volatility term structure stale"},
-	}}, time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC))
+	}, regime, time.Date(2026, 6, 1, 11, 0, 0, 0, time.UTC))
 	got := strings.Join(warnings, "\n")
 	for _, unwanted := range []string{"ambiguous clusters:", "stale clusters:", "regime cluster(s) unranked"} {
 		if strings.Contains(got, unwanted) {
@@ -2166,10 +2288,10 @@ func healthyCanaryMarketEvents(now time.Time, symbols ...string) rpc.MarketEvent
 		AsOf:          now,
 		Symbols:       slices.Clone(symbols),
 		SourceHealth: []rpc.SourceHealth{
-			{Source: "reg_sho_threshold", Status: rpc.SourceStatusOK, AsOf: now, Confidence: "high"},
-			{Source: "trading_halts", Status: rpc.SourceStatusOK, AsOf: now, Confidence: "high"},
-			{Source: "borrow_inventory", Status: rpc.SourceStatusOK, AsOf: now, Confidence: "medium"},
-			{Source: "borrow_fee", Status: rpc.SourceStatusOK, AsOf: now, Confidence: "medium"},
+			{Source: "reg_sho_threshold", Status: rpc.SourceStatusOK, AsOf: now, MaxAgeSeconds: int64((96 * time.Hour).Seconds()), Confidence: "high"},
+			{Source: "trading_halts", Status: rpc.SourceStatusOK, AsOf: now, MaxAgeSeconds: int64(time.Minute.Seconds()), Confidence: "high"},
+			{Source: "borrow_inventory", Status: rpc.SourceStatusOK, AsOf: now, MaxAgeSeconds: int64((2 * time.Minute).Seconds()), Confidence: "medium"},
+			{Source: "borrow_fee", Status: rpc.SourceStatusOK, AsOf: now, MaxAgeSeconds: int64((90 * time.Minute).Seconds()), Confidence: "medium"},
 		},
 	}
 }

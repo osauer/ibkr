@@ -250,6 +250,8 @@ func TestRegimeBacktestBuilderEmitsExGammaRows(t *testing.T) {
 	if got, want := res.Metrics.DataQualityWatch, 2; got != want {
 		t.Fatalf("data_quality_watch = %d, want %d", got, want)
 	}
+	// The stress row remains independently confirmed by several current
+	// non-gamma clusters; missing gamma is still counted in data-quality watch.
 	if got, want := res.Metrics.StressTruePositive, 1; got != want {
 		t.Fatalf("stress_true_positive = %d, want %d", got, want)
 	}

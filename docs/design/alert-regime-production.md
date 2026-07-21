@@ -165,11 +165,19 @@ The commissioned producer boundary is explicit:
   policies are approved. Existing Canary/Regime advisory presentation is not a
   substitute for that authority.
 
-Source schedules do not masquerade as outages. Frozen VIX/VIX3M evidence before
-03:00 ET on an official trading date is `not_due` and remains confirmation-
-ineligible; after that window it is `overdue`. Gamma process health distinguishes
-`not_due`, `missed_session`, and `no_last_good` against the official options
-calendar. The external IBKR borrow-fee file is attempted during the official
+Source schedules do not masquerade as outages, and outages do not masquerade
+as warnings. VIX and VIX3M keep separate schedules on the official options
+calendar: VIX is due approximately 03:15–09:25 and 09:31–16:15 ET, while
+VIX3M is due approximately 09:31–16:15 ET. A present frozen VIX3M is
+`not_due` before its start, after the session's close-plus-15-minute
+dissemination window, and on closed dates; a frozen VIX is also expected in
+the 09:25–09:31 pause. A missing leg, frozen VIX during its due window, or
+frozen VIX3M during its due window is `overdue`.
+Gamma process health distinguishes `not_due`, `missed_session`, and
+`no_last_good`: the latest completed-session result is context before the next
+options open; absence, an older result, or failure to replace it after open is
+a defect. Required-source defects produce an explicit undefined/data-quality
+state, never `early_warning`. The external IBKR borrow-fee file is attempted during the official
 U.S. equity regular session; outside that window it is `not_due`, while an actual
 failed attempt and its bounded retry backoff are exposed separately. A last-good
 file from the latest completed equity session is expected overnight; an older

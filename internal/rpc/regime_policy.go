@@ -339,6 +339,8 @@ func ApplyRegimeClusterTallies(c *RegimeComposite, cb RegimeClusterBands) {
 // and backtest all show the served value. First match wins.
 func RegimeHeadline(c RegimeComposite, stage string) string {
 	switch {
+	case strings.EqualFold(strings.TrimSpace(stage), LifecycleDataQuality):
+		return "Market state undefined — data incomplete"
 	case c.ClusterRankedCount == 0:
 		return "No usable signal yet"
 	case c.ClusterRankedCount < RegimeVerdictFloor:

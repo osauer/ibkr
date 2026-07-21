@@ -16,9 +16,10 @@ import (
 // positive through the full post-fanout pipeline: HYG 7 bps below its 50DMA
 // (one session, thin pre-open context) plus a prior-evening gamma cache
 // mutually confirmed "Broad stress regime / confirmed_stress / act" against a
-// green tape. Under the confirmation gates both reds are provisional: the
-// engine must warn (early_warning / watch, "Stress signal present") and
-// disclose both clusters as unconfirmed — never confirm, never demand act.
+// green tape. Under the confirmation gates both reds are provisional, but
+// the gamma input is also overdue. The engine must therefore report an
+// explicit undefined data state and retain both reds only as unconfirmed
+// evidence — never confirm, never demand act.
 func TestRegimeIncident20260612Regression(t *testing.T) {
 	t.Parallel()
 	ratio := 18.84 / 21.42
@@ -64,8 +65,8 @@ func TestRegimeIncident20260612Regression(t *testing.T) {
 	}
 	c := regimeTestFinalize(t, r)
 
-	if r.Lifecycle.Stage != rpc.LifecycleEarlyWarning || r.Lifecycle.Severity != "watch" {
-		t.Fatalf("lifecycle = %s/%s, want early_warning/watch (incident produced confirmed_stress/act)", r.Lifecycle.Stage, r.Lifecycle.Severity)
+	if r.Lifecycle.Stage != rpc.LifecycleDataQuality || r.Lifecycle.Severity != "watch" {
+		t.Fatalf("lifecycle = %s/%s, want data_quality/watch (incident produced confirmed_stress/act)", r.Lifecycle.Stage, r.Lifecycle.Severity)
 	}
 	if len(r.Lifecycle.ConfirmedBy) != 0 {
 		t.Fatalf("confirmed_by = %v, want empty — marginal reds must not confirm", r.Lifecycle.ConfirmedBy)
@@ -75,8 +76,8 @@ func TestRegimeIncident20260612Regression(t *testing.T) {
 			t.Fatalf("unconfirmed = %v, want %s disclosed", r.Lifecycle.Unconfirmed, want)
 		}
 	}
-	if c.Verdict != "Stress signal present" {
-		t.Fatalf("verdict = %q, want %q (incident headlined Broad stress regime)", c.Verdict, "Stress signal present")
+	if c.Verdict != "Market state undefined — data incomplete" {
+		t.Fatalf("verdict = %q, want explicit undefined data state", c.Verdict)
 	}
 	if c.ClusterEligibleRedCount != 0 {
 		t.Fatalf("eligible reds = %d, want 0", c.ClusterEligibleRedCount)
@@ -90,8 +91,8 @@ func TestRegimeIncident20260612Regression(t *testing.T) {
 	if r.Posture.Tone != rpc.RegimeToneDataQuality || r.Posture.Severity != "watch" {
 		t.Fatalf("posture = %s/%s, want data_quality/watch", r.Posture.Tone, r.Posture.Severity)
 	}
-	if r.Lifecycle.Readiness != "degraded" {
-		t.Fatalf("readiness = %q, want degraded with a stale confirming input", r.Lifecycle.Readiness)
+	if r.Lifecycle.Readiness != "blocked" {
+		t.Fatalf("readiness = %q, want blocked with an overdue required input", r.Lifecycle.Readiness)
 	}
 	// Row-level disclosures: the gamma red stays visible on the stale row,
 	// and HYG's eligibility names the failed depth gate.
@@ -111,8 +112,8 @@ func TestRegimeIncident20260612Regression(t *testing.T) {
 // gamma — the one context_only/unranked cluster (rankableLifecycleGammaBand
 // returns "" whenever Rankability != rankable) — is status=stale from the
 // EXPECTED off-hours prior-NY-trading-date cache described in gammaNotes
-// ("...a prior-date cache serves status=stale, stays visible, and warns
-// only", internal/daemon/regime.go) and TestGammaStatusQualityTreatsContext
+// ("...a prior-date cache serves status=stale and stays visible as not-due
+// context", internal/daemon/regime.go) and TestGammaStatusQualityTreatsContext
 // OnlyAsContextNotDegraded (status_quality_test.go). With zero yellow/red in
 // the ranked evidence, this must read tone=normal / readiness=ready, not the
 // amber "verify inputs" data_quality read: the only "weak" thing is gamma's
@@ -121,11 +122,18 @@ func TestRegimeIncident20260612Regression(t *testing.T) {
 func TestRegimeOffHoursGammaStaleAloneStaysNormal(t *testing.T) {
 	t.Parallel()
 	r := mkAllGreenRegime()
-	r.AsOf = time.Now()
+	ny := newYorkLocation()
+	r.AsOf = time.Date(2026, 7, 20, 7, 5, 0, 0, ny)
+	// At 07:05 ET VIX is live but VIX3M is not disseminated yet, so the term
+	// row is the exact typed not-due carry rather than broken volatility data.
+	r.VIXTermStructure.Status = rpc.RegimeStatusStale
+	r.VIXTermStructure.VIXQuality = &rpc.Quality{AsOf: r.AsOf, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm}
+	r.VIXTermStructure.VIX3MQuality = &rpc.Quality{AsOf: r.AsOf, FreshnessClass: rpc.FreshnessFrozen, Confidence: rpc.ConfidenceFirm}
 	// Off-hours prior-trading-date compute: fetchRegimeGamma would map this
 	// to RegimeStatusStale (see gammaNotes) while Rankability degrades to
 	// context_only ("market is closed; cached gamma is context only").
 	r.GammaZero.Status = rpc.RegimeStatusStale
+	r.GammaZero.Envelope.Result.AsOf = time.Date(2026, 7, 17, 16, 7, 0, 0, ny)
 	r.GammaZero.Envelope.Result.Quality = &rpc.GammaSignalQuality{
 		Rankability:       rpc.GammaRankabilityContextOnly,
 		RankabilityReason: "freshness: market is closed; cached gamma is context only",
@@ -176,8 +184,8 @@ func TestRegimeRankedClusterStaleDegradesReadiness(t *testing.T) {
 	if c.ClusterRankedCount != 6 || c.ClusterYellowCount != 0 || c.ClusterRedCount != 0 {
 		t.Fatalf("ranked=%d yellow=%d red=%d, want 6/0/0 (funding stays green — only its source status is stale)", c.ClusterRankedCount, c.ClusterYellowCount, c.ClusterRedCount)
 	}
-	if r.Lifecycle.Readiness != "degraded" {
-		t.Fatalf("readiness = %q, want degraded — a ranked cluster's source going stale is a real data-quality problem", r.Lifecycle.Readiness)
+	if r.Lifecycle.Readiness != "blocked" || r.Lifecycle.Stage != rpc.LifecycleDataQuality {
+		t.Fatalf("state = %q/%q, want data_quality/blocked — ranked-cluster staleness is an undefined market state", r.Lifecycle.Stage, r.Lifecycle.Readiness)
 	}
 	if r.Posture.Tone != rpc.RegimeToneDataQuality {
 		t.Fatalf("posture.tone = %q, want %q — ranked-cluster staleness must still flip amber", r.Posture.Tone, rpc.RegimeToneDataQuality)
@@ -253,7 +261,11 @@ func TestPopulateStreaksExitHysteresisHoldsRed(t *testing.T) {
 	s := &Server{streaks: NewStreakStore(t.TempDir())}
 	mk := func(ratio float64) *rpc.RegimeSnapshotResult {
 		r := &rpc.RegimeSnapshotResult{AsOf: time.Now()}
-		r.VIXTermStructure = rpc.RegimeVIXTerm{Status: rpc.RegimeStatusOK, Ratio: new(ratio)}
+		r.VIXTermStructure = rpc.RegimeVIXTerm{
+			Status: rpc.RegimeStatusOK, Ratio: new(ratio),
+			VIXQuality:   &rpc.Quality{AsOf: r.AsOf, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm},
+			VIX3MQuality: &rpc.Quality{AsOf: r.AsOf, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm},
+		}
 		return r
 	}
 	// Enter red.

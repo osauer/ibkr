@@ -220,6 +220,9 @@ func (s *Server) populateStreaksWithStore(res *rpc.RegimeSnapshotResult, streaks
 		if key == rpc.RegimeIndicatorVIXTerm {
 			freshnessClass = vixTermCadenceClass(res, now)
 		}
+		if key == rpc.RegimeIndicatorGammaZero {
+			freshnessClass = gammaCadenceClass(res, now)
+		}
 		freshness := &rpc.RegimeFreshness{
 			Class:         freshnessClass,
 			MaxAgeSeconds: rpc.RegimeSourceMaxAgeSeconds(rpc.RegimeIndicatorCluster(key)),

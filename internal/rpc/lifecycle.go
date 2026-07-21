@@ -129,8 +129,11 @@ const (
 // Confirmation policy (docs/design/regime-calibration.md): only ELIGIBLE
 // reds — deep, persistent, cadence-fresh evidence per the shared gates —
 // count toward confirmed_stress/panic and confirmed_by. Provisional reds
-// stay visible, land in unconfirmed, and drive early_warning only. A
-// severity governor then applies the provenance gate (heuristic
+// stay visible and land in unconfirmed. They drive early_warning only while
+// the required input set is usable; broken or overdue evidence produces an
+// explicit data_quality state instead of masquerading as a market warning.
+// Independently current confirmed stress/panic is preserved even when an
+// unrelated source is impaired. A severity governor then applies the provenance gate (heuristic
 // pending_backtest evidence without a tape co-signature is capped one rung
 // down) and the evidence-keyed quality cap, disclosing every downgrade in
 // Governors.
@@ -197,13 +200,60 @@ func BuildRegimeLifecycle(r *RegimeSnapshotResult) LifecycleState {
 	if state.Stage == LifecycleConfirmedStress || state.Stage == LifecyclePanic {
 		state.ConfirmedBy = confirmedNames
 	}
-	if state.Readiness == "ready" && (regimeLifecycleHasDegradedInputs(*r, cb) || regimeLifecycleHasWeakSourceRows(*r, cb)) {
-		state.Readiness = "degraded"
-		state.Confidence = capLifecycleConfidence(state.Confidence)
+	brokenInputs := regimeLifecycleHasDegradedInputs(*r, cb) || regimeLifecycleHasWeakSourceRows(*r, cb)
+	if brokenInputs {
+		if !regimeLifecycleHasIndependentCurrentStress(state, *r, cb) {
+			state.Stage = LifecycleDataQuality
+			state.Severity = "watch"
+			state.Readiness = "blocked"
+			state.Timing = LifecycleTimingDataQuality
+			state.Confidence = "low"
+			state.ConfirmedBy = nil
+			state.Suppressed = append(state.Suppressed, unconfirmed...)
+		} else if state.Readiness == "ready" {
+			state.Readiness = "degraded"
+			state.Confidence = capLifecycleConfidence(state.Confidence)
+		}
 	}
 	applyRegimeSeverityGovernor(&state, r, tally)
 	state.Fingerprint = lifecycleFingerprint(state)
 	return state
+}
+
+// regimeLifecycleHasIndependentCurrentStress permits a stress/panic stage to
+// survive an unrelated broken input only when the stage has its own current
+// confirmation. A tape panic is self-confirming; cluster-driven confirmation
+// survives only when none of its confirming clusters is impaired.
+func regimeLifecycleHasIndependentCurrentStress(state LifecycleState, r RegimeSnapshotResult, cb RegimeClusterBands) bool {
+	if state.Stage != LifecycleConfirmedStress && state.Stage != LifecyclePanic {
+		return false
+	}
+	cleanRed, cleanYellow := 0, 0
+	for i, name := range RegimeClusterNames {
+		if i >= len(cb.Confirmed) || !regimeLifecycleClusterCurrent(r, name) {
+			continue
+		}
+		switch cb.Confirmed[i] {
+		case "red":
+			if i < len(cb.Eligible) && cb.Eligible[i] {
+				cleanRed++
+			}
+		case "yellow":
+			cleanYellow++
+		}
+	}
+	spyCurrent := regimeLifecycleSPYTapeCurrent(r)
+	vixCurrent := regimeLifecycleVIXTapeCurrent(r)
+	panicCurrent := cleanRed >= 3 ||
+		(spyCurrent && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0) && cleanRed >= 1) ||
+		(spyCurrent && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -7.0))
+	if state.Stage == LifecyclePanic {
+		return panicCurrent
+	}
+	return cleanRed >= 2 ||
+		(spyCurrent && cleanRed >= 1 && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -2.5)) ||
+		(spyCurrent && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0) && cleanYellow >= 2) ||
+		(vixCurrent && cleanRed >= 1 && pctAtLeast(r.VIXTermStructure.VIXChangePct, 20.0))
 }
 
 // regimeClusterTally is the lifecycle's working view of the combined cluster
@@ -252,7 +302,7 @@ func applyRegimeSeverityGovernor(state *LifecycleState, r *RegimeSnapshotResult,
 	// The exemption requires a confirmable tape: a frozen closed-date print
 	// is neither its own co-signature nor its own evidence quality, so a
 	// cluster-driven panic on a closed date stays governable.
-	tapePanic := state.Stage == LifecyclePanic && regimeTapeConfirmable(*r) && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0)
+	tapePanic := state.Stage == LifecyclePanic && regimeLifecycleSPYTapeCurrent(*r) && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -4.0)
 	pending := regimePendingBacktestClusters(r, state.ConfirmedBy)
 	if len(pending) > 0 && !tapePanic && !regimeTapeCosign(r) {
 		from := state.Severity
@@ -308,11 +358,13 @@ func severityRank(severity string) int {
 // (arms 1-2) require a confirmable tape — a frozen closed-date print cannot
 // co-sign. Arm 3 keeps its own status gate unchanged.
 func regimeTapeCosign(r *RegimeSnapshotResult) bool {
-	if regimeTapeConfirmable(*r) &&
-		(pctAtMost(r.HYGSPYDivergence.SPYChangePct, -1.5) || pctAtLeast(r.VIXTermStructure.VIXChangePct, 10.0)) {
+	if regimeLifecycleSPYTapeCurrent(*r) && pctAtMost(r.HYGSPYDivergence.SPYChangePct, -1.5) {
 		return true
 	}
-	return r.VIXTermStructure.Status == RegimeStatusOK &&
+	if regimeLifecycleVIXTapeCurrent(*r) && pctAtLeast(r.VIXTermStructure.VIXChangePct, 10.0) {
+		return true
+	}
+	return regimeLifecycleVIXTapeCurrent(*r) &&
 		r.VIXTermStructure.Ratio != nil && *r.VIXTermStructure.Ratio >= 1.0
 }
 
@@ -347,20 +399,15 @@ func regimePendingBacktestClusters(r *RegimeSnapshotResult, confirmedBy []string
 }
 
 // regimeImpairedConfirmingClusters returns confirming clusters whose source
-// health is stale/partial/degraded — the evidence-keyed readiness cap.
+// health or typed data-quality row is non-current — the evidence-keyed
+// readiness cap and the independent-confirmation gate.
 // Deliberately scoped to the CONFIRMING clusters: one dead unrelated feed
 // must not mute a fresh multi-cluster confirmation.
 func regimeImpairedConfirmingClusters(r *RegimeSnapshotResult, confirmedBy []string) []string {
 	var out []string
 	for _, name := range confirmedBy {
-		for _, src := range r.SourceHealth {
-			if !strings.EqualFold(src.Source, name) {
-				continue
-			}
-			switch strings.ToLower(strings.TrimSpace(src.Status)) {
-			case SourceStatusStale, SourceStatusDegraded, SourceStatusPartial:
-				out = append(out, name)
-			}
+		if !regimeLifecycleClusterCurrent(*r, name) {
+			out = append(out, name)
 		}
 	}
 	return out
@@ -556,6 +603,13 @@ func BuildRegimeSourceHealth(r *RegimeSnapshotResult, now time.Time) []SourceHea
 	for _, row := range rows {
 		asOf := weakestRegimeAsOf(row.asOf)
 		status := regimeSourceStatus(row.statuses, row.band, row.qualityStatus, row.partial)
+		refreshState := ""
+		if row.name == "vol" && r.VIXTermStructure.Freshness != nil && r.VIXTermStructure.Freshness.Class == RegimeFreshnessNotDue {
+			refreshState = SourceRefreshNotDue
+		}
+		if row.name == "gamma" && r.GammaZero.Freshness != nil && r.GammaZero.Freshness.Class == RegimeFreshnessNotDue {
+			refreshState = SourceRefreshNotDue
+		}
 		out = append(out, SourceHealth{
 			Source:               row.name,
 			Status:               status,
@@ -564,6 +618,7 @@ func BuildRegimeSourceHealth(r *RegimeSnapshotResult, now time.Time) []SourceHea
 			MaxAgeSeconds:        RegimeSourceMaxAgeSeconds(row.name),
 			Confidence:           regimeSourceConfidence(status),
 			FingerprintStability: FingerprintStabilitySemanticBuckets,
+			RefreshState:         refreshState,
 		})
 	}
 	return out
@@ -711,20 +766,10 @@ func regimeLifecycleConfidence(t regimeClusterTally) string {
 	}
 }
 
-// regimeLifecycleHasDegradedInputs reports whether the served data-quality
-// disclosures flag a readiness-relevant problem. Partial/degraded clusters
-// (computing, unavailable, error, missing required fields, or gamma's own
-// compute-quality degradation) always count, on any cluster — those are
-// active data problems, not routine cadence. Stale clusters are exempted
-// only when named cluster is UNRANKED (cb scopes this the same way
-// regimeLifecycleHasWeakSourceRows does): gamma's documented off-hours
-// prior-NY-trading-date stale cache (gammaNotes in internal/daemon/regime.go;
-// docs/design/regime-calibration.md Part 3) is real, disclosed evidence (it
-// still rides on r.DataQuality for the --explain/status reader) but must not
-// by itself flip lifecycle readiness once the cluster is also context-only.
-// An item naming no clusters at all is never a stale-only item (see
-// regimeStatusQuality/gammaStatusQuality) and always degrades.
-func regimeLifecycleHasDegradedInputs(r RegimeSnapshotResult, cb RegimeClusterBands) bool {
+// regimeLifecycleHasDegradedInputs treats every active source defect as a
+// blocked market-state input. The only exception is an exact, typed not_due
+// cadence for VIX3M or gamma; an unranked row is never itself an exemption.
+func regimeLifecycleHasDegradedInputs(r RegimeSnapshotResult, _ RegimeClusterBands) bool {
 	for _, item := range r.DataQuality {
 		if len(item.PartialClusters) > 0 || len(item.DegradedClusters) > 0 {
 			return true
@@ -737,7 +782,7 @@ func regimeLifecycleHasDegradedInputs(r RegimeSnapshotResult, cb RegimeClusterBa
 				return true
 			}
 			for _, name := range item.StaleClusters {
-				if regimeClusterNameIsRanked(cb, name) {
+				if !regimeLifecycleClusterExpectedNotDue(r, name) {
 					return true
 				}
 			}
@@ -746,59 +791,141 @@ func regimeLifecycleHasDegradedInputs(r RegimeSnapshotResult, cb RegimeClusterBa
 	return false
 }
 
-// regimeClusterNameIsRanked reports whether the named cluster (lowercase
-// wire name, e.g. "gamma", or the "FX" title-case used by
-// staleRegimeClusters/partialRegimeClusters) currently carries a ranked
-// (green/yellow/red) confirmed band rather than being unranked/context-only.
-func regimeClusterNameIsRanked(cb RegimeClusterBands, name string) bool {
-	for i, clusterName := range RegimeClusterNames {
-		if strings.EqualFold(clusterName, name) && i < len(cb.Confirmed) {
-			return cb.Confirmed[i] != ""
-		}
-	}
-	// Unknown name (e.g. a non-cluster-scoped surface) — treat as ranked so
-	// it still degrades readiness rather than being silently dropped.
-	return true
+type regimeLifecycleRequiredRow struct {
+	status    string
+	freshness *RegimeFreshness
 }
 
-// regimeLifecycleHasWeakSourceRows reports whether any source row carries a
-// non-ok status that should degrade readiness. computing/unavailable/error
-// always count, on any cluster — those are active data problems. stale is
-// exempted only when the row's cluster is UNRANKED (cb.Confirmed == ""):
-// gamma going status=stale off-hours from an expected prior-NY-trading-date
-// cache is the documented case (docs/design/regime-calibration.md Part 3;
-// internal/daemon/regime.go's gammaNotes: "a prior-date cache serves
-// status=stale, stays visible, and warns only") where the cluster is also
-// marked context_only/unranked (rankableLifecycleGammaBand), so it never
-// entered the ranked tally in the first place. A RANKED cluster's source
-// (vol/credit/funding/fx/breadth, or gamma once it is rankable) going stale
-// is still a real data-quality problem and keeps degrading, same as before.
-func regimeLifecycleHasWeakSourceRows(r RegimeSnapshotResult, cb RegimeClusterBands) bool {
-	rows := []struct {
-		cluster  int
-		statuses []string
-	}{
-		{RegimeClusterEquityVol, []string{r.VIXTermStructure.Status, r.VolOfVol.Status}},
-		{RegimeClusterCredit, []string{r.HYGSPYDivergence.Status, r.CreditSpreads.Status}},
-		{RegimeClusterFunding, []string{r.FundingStress.Status}},
-		{RegimeClusterFX, []string{r.USDJPY.Status}},
-		{RegimeClusterGamma, []string{r.GammaZero.Status}},
-		{RegimeClusterBreadth, []string{r.Breadth.Status}},
+func regimeLifecycleClusterRows(r RegimeSnapshotResult, name string) []regimeLifecycleRequiredRow {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "vol":
+		return []regimeLifecycleRequiredRow{
+			{r.VIXTermStructure.Status, r.VIXTermStructure.Freshness},
+			{r.VolOfVol.Status, r.VolOfVol.Freshness},
+		}
+	case "credit":
+		return []regimeLifecycleRequiredRow{
+			{r.HYGSPYDivergence.Status, r.HYGSPYDivergence.Freshness},
+			{r.CreditSpreads.Status, r.CreditSpreads.Freshness},
+		}
+	case "funding":
+		return []regimeLifecycleRequiredRow{{r.FundingStress.Status, r.FundingStress.Freshness}}
+	case "fx":
+		return []regimeLifecycleRequiredRow{{r.USDJPY.Status, r.USDJPY.Freshness}}
+	case "gamma":
+		return []regimeLifecycleRequiredRow{{r.GammaZero.Status, r.GammaZero.Freshness}}
+	case "breadth":
+		return []regimeLifecycleRequiredRow{{r.Breadth.Status, r.Breadth.Freshness}}
+	default:
+		return nil
+	}
+}
+
+func regimeLifecycleClusterExpectedNotDue(r RegimeSnapshotResult, name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	rows := regimeLifecycleClusterRows(r, name)
+	switch name {
+	case "vol":
+		return len(rows) == 2 && regimeLifecycleRowNotDue(rows[0]) && regimeLifecycleRowCurrent(rows[1])
+	case "gamma":
+		return len(rows) == 1 && regimeLifecycleRowNotDue(rows[0])
+	default:
+		return false
+	}
+}
+
+func regimeLifecycleRowNotDue(row regimeLifecycleRequiredRow) bool {
+	if row.freshness == nil || row.freshness.Class != RegimeFreshnessNotDue {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(row.status)) {
+	case RegimeStatusOK, RegimeStatusStale:
+		return true
+	default:
+		return false
+	}
+}
+
+func regimeLifecycleRowCurrent(row regimeLifecycleRequiredRow) bool {
+	return strings.EqualFold(strings.TrimSpace(row.status), RegimeStatusOK) &&
+		row.freshness != nil && row.freshness.Class == RegimeFreshnessFresh
+}
+
+func regimeLifecycleSourceHealth(r RegimeSnapshotResult, name string) (SourceHealth, bool) {
+	for _, source := range r.SourceHealth {
+		if strings.EqualFold(strings.TrimSpace(source.Source), strings.TrimSpace(name)) {
+			return source, true
+		}
+	}
+	return SourceHealth{}, false
+}
+
+func regimeLifecycleClusterInDataQuality(r RegimeSnapshotResult, name string) bool {
+	for _, item := range r.DataQuality {
+		if sourceInDataQualityClusters(item.PartialClusters, name) ||
+			sourceInDataQualityClusters(item.DegradedClusters, name) ||
+			sourceInDataQualityClusters(item.StaleClusters, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func regimeLifecycleClusterCurrent(r RegimeSnapshotResult, name string) bool {
+	rows := regimeLifecycleClusterRows(r, name)
+	if len(rows) == 0 || regimeLifecycleClusterInDataQuality(r, name) {
+		return false
 	}
 	for _, row := range rows {
-		ranked := row.cluster < len(cb.Confirmed) && cb.Confirmed[row.cluster] != ""
-		for _, status := range row.statuses {
-			switch strings.ToLower(strings.TrimSpace(status)) {
-			case "", RegimeStatusOK:
-			case RegimeStatusStale:
-				if ranked {
-					return true
-				}
-				// Unranked cluster's cache went stale (expected off-hours
-				// behavior) — context-only evidence, not a readiness input.
+		if !regimeLifecycleRowCurrent(row) {
+			return false
+		}
+	}
+	health, ok := regimeLifecycleSourceHealth(r, name)
+	if !ok || !strings.EqualFold(strings.TrimSpace(health.Status), SourceStatusOK) {
+		return false
+	}
+	if health.MaxAgeSeconds > 0 && health.AgeSeconds >= health.MaxAgeSeconds {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(health.RefreshState)) {
+	case "", SourceRefreshCurrent:
+		return true
+	default:
+		return false
+	}
+}
+
+func regimeLifecycleSPYTapeCurrent(r RegimeSnapshotResult) bool {
+	return regimeTapeConfirmable(r) && regimeLifecycleClusterCurrent(r, "credit") &&
+		r.HYGSPYDivergence.SPYChangePct != nil
+}
+
+func regimeLifecycleVIXTapeCurrent(r RegimeSnapshotResult) bool {
+	return regimeTapeConfirmable(r) && regimeLifecycleClusterCurrent(r, "vol") &&
+		r.VIXTermStructure.VIXChangePct != nil
+}
+
+// regimeLifecycleHasWeakSourceRows enforces the typed required-input set.
+// Missing/blank status, missing source-health, overdue freshness, or an
+// unknown refresh state all fail closed. Only the exact not_due schedules
+// above may remain context without making the market state undefined.
+func regimeLifecycleHasWeakSourceRows(r RegimeSnapshotResult, _ RegimeClusterBands) bool {
+	for _, name := range RegimeClusterNames {
+		health, healthOK := regimeLifecycleSourceHealth(r, name)
+		if regimeLifecycleClusterExpectedNotDue(r, name) {
+			if !healthOK || health.RefreshState != SourceRefreshNotDue {
+				return true
+			}
+			switch strings.ToLower(strings.TrimSpace(health.Status)) {
+			case SourceStatusOK, SourceStatusStale:
+				continue
 			default:
 				return true
 			}
+		}
+		if !regimeLifecycleClusterCurrent(r, name) {
+			return true
 		}
 	}
 	return false
@@ -829,8 +956,9 @@ func regimeLifecycleEvidence(cb RegimeClusterBands, r RegimeSnapshotResult) []Li
 		}
 		band := cb.Raw[i]
 		// Timing honesty: only an ELIGIBLE confirmed red is contemporaneous
-		// act-grade evidence. Provisional reds (marginal depth, short
-		// streak, or overdue data) are forward warnings, never confirmation.
+		// act-grade evidence. Provisional measurements stay visible but are
+		// never confirmation; if one is overdue, the required-input gate
+		// makes the top-level state data_quality rather than a market warning.
 		confirmedSignal := band == "red" &&
 			i < len(cb.Confirmed) && cb.Confirmed[i] == "red" &&
 			i < len(cb.Eligible) && cb.Eligible[i]

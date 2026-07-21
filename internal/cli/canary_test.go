@@ -16,6 +16,7 @@ func TestComputeCanaryTreatsContextOnlyGammaAsContextNotDegraded(t *testing.T) {
 	r := healthyCanaryRegime()
 	r.Composite = rpc.RegimeComposite{ClusterGreenCount: 5, ClusterRankedCount: 5, ClusterUnrankedCount: 1}
 	r.GammaZero.Band = "red"
+	r.GammaZero.Freshness = &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessNotDue}
 	r.GammaZero.Envelope.Result = &rpc.GammaZeroComputed{
 		Quality: &rpc.GammaSignalQuality{
 			Rankability:       rpc.GammaRankabilityContextOnly,

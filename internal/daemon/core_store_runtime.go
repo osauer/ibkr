@@ -92,6 +92,9 @@ func (s *Server) openCoreStore(ctx context.Context) error {
 	}
 	s.persistenceLock = lock
 	s.coreStore = store
+	if err := s.repairGammaLastGoodAuthority(ctx, store); err != nil {
+		return cleanup(err)
+	}
 	if err := s.attachCoreStoreAdapters(ctx, store); err != nil {
 		return cleanup(err)
 	}

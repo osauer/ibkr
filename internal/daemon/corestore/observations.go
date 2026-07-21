@@ -121,6 +121,16 @@ func (s *Store) LatestDecisionEligibleObservation(ctx context.Context, scopeKey,
 	return s.latestObservation(ctx, scopeKey, source, kind, &eligible)
 }
 
+// LatestQuarantinedObservationForRecovery returns the newest explicitly
+// decision-ineligible observation for a narrow startup-repair path. Callers
+// must validate the full payload and preserve quarantine provenance before
+// publishing any state derived from it. It is not a decision-history reader
+// and must never be used as a fallback for ordinary live evaluation.
+func (s *Store) LatestQuarantinedObservationForRecovery(ctx context.Context, scopeKey, source, kind string) (Observation, bool, error) {
+	eligible := false
+	return s.latestObservation(ctx, scopeKey, source, kind, &eligible)
+}
+
 func (s *Store) latestObservation(ctx context.Context, scopeKey, source, kind string, decisionEligible *bool) (Observation, bool, error) {
 	query := ObservationQuery{ScopeKey: scopeKey, Source: source, Kind: kind, DecisionEligible: decisionEligible, Limit: 1}
 	if err := validateObservationQuery(query); err != nil {
