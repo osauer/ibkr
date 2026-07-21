@@ -37,6 +37,7 @@ import (
 // Status="unavailable" depending on classifySymbol coverage at
 // snapshot time — see the per-indicator notes for the disposition.
 func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc.RegimeSnapshotResult, error) {
+	brokerScope := s.currentBrokerStateScope()
 	if s.regimeSnapshots != nil {
 		if err := s.repairRegimeSnapshotProjections(ctx); err != nil {
 			return nil, &regimeSnapshotCacheUnavailableError{cause: err}
@@ -48,6 +49,7 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 		if view.Snapshot == nil {
 			return nil, &regimeSnapshotCacheUnavailableError{cause: errRegimeSnapshotRefreshIncomplete}
 		}
+		s.observeRegimeAlertShadow(ctx, view.Snapshot, brokerScope)
 		return view.Snapshot, nil
 	}
 
@@ -58,6 +60,9 @@ func (s *Server) handleRegimeSnapshot(ctx context.Context, _ *rpc.Request) (*rpc
 	res, complete, afterPublish, err := s.acquireRegimeSnapshot(ctx)
 	if err == nil && complete && afterPublish != nil {
 		err = afterPublish(ctx, regimeSnapshotPublication{PublishedAt: res.AsOf, Fingerprint: res.Fingerprint})
+	}
+	if err == nil && res != nil {
+		s.observeRegimeAlertShadow(ctx, res, brokerScope)
 	}
 	return res, err
 }

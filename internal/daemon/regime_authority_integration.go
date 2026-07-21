@@ -55,6 +55,8 @@ func (s *Server) stopServerContextAndWait() {
 	if cancel != nil {
 		cancel()
 	}
+	s.alertShadowLoopWG.Wait()
+	s.stopDataHealthAlertShadowWorker()
 	if cache != nil {
 		cache.wait()
 	}

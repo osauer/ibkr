@@ -20,22 +20,29 @@ func (s *Server) currentBrokerStateScope() brokerStateScope {
 	c := s.connector
 	s.mu.Unlock()
 
-	account := ""
-	port := ep.Port
+	configuredAccount := ""
 	if s.cfg != nil {
-		account = strings.TrimSpace(s.cfg.Gateway.Account)
-		if port == 0 && s.cfg.Gateway.Port != nil {
-			port = *s.cfg.Gateway.Port
-		}
+		configuredAccount = s.cfg.Gateway.Account
 	}
+	connectedAccount := ""
+	if c != nil {
+		connectedAccount = c.AccountID()
+	}
+	port := ep.Port
+	if port == 0 && s.cfg != nil && s.cfg.Gateway.Port != nil {
+		port = *s.cfg.Gateway.Port
+	}
+	return brokerStateScopeFromSnapshot(configuredAccount, ep.Account, port, connectedAccount)
+}
+
+func brokerStateScopeFromSnapshot(configuredAccount, endpointAccount string, port int, connectedAccount string) brokerStateScope {
+	account := strings.TrimSpace(configuredAccount)
 	if account == "" {
-		account = strings.TrimSpace(ep.Account)
+		account = strings.TrimSpace(endpointAccount)
 	}
-	if c != nil && !brokerScopeAccountConcrete(account) {
-		if connected := strings.TrimSpace(c.AccountID()); connected != "" {
-			if brokerScopeAccountConcrete(connected) {
-				account = connected
-			}
+	if !brokerScopeAccountConcrete(account) {
+		if connected := strings.TrimSpace(connectedAccount); brokerScopeAccountConcrete(connected) {
+			account = connected
 		}
 	}
 	return brokerStateScope{

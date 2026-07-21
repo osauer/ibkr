@@ -2,17 +2,19 @@ package daemon
 
 import (
 	"cmp"
+	"context"
 	"math"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 const protectionCoverageQuantityEpsilon = 1e-9
 
-func (s *Server) attachProtectionCoverage(res *rpc.PositionsResult, symbolFilter, typeFilter string) {
+func (s *Server) attachProtectionCoverage(ctx context.Context, res *rpc.PositionsResult, symbolFilter, typeFilter string, portfolioHealth ibkrlib.PortfolioStreamHealth) {
 	if res == nil {
 		return
 	}
@@ -27,6 +29,7 @@ func (s *Server) attachProtectionCoverage(res *rpc.PositionsResult, symbolFilter
 	views, _, err := s.loadOrderViews()
 	if err != nil {
 		res.ProtectionCoverage = buildProtectionCoverage(res, nil, false, err.Error(), now)
+		s.observeProtectionCoverageAlertShadow(ctx, res.ProtectionCoverage, symbolFilter, typeFilter, portfolioHealth)
 		return
 	}
 	scope := s.currentBrokerStateScope()
@@ -39,6 +42,30 @@ func (s *Server) attachProtectionCoverage(res *rpc.PositionsResult, symbolFilter
 	}
 	reconcileFlatPositionProtectiveOrders(orders, res, now)
 	res.ProtectionCoverage = buildProtectionCoverage(res, orders, true, "", now)
+	s.observeProtectionCoverageAlertShadow(ctx, res.ProtectionCoverage, symbolFilter, typeFilter, portfolioHealth)
+}
+
+func (s *Server) observeProtectionCoverageAlertShadow(ctx context.Context, summary *rpc.ProtectionCoverageSummary, symbolFilter, typeFilter string, portfolioHealth ibkrlib.PortfolioStreamHealth) {
+	if s == nil || summary == nil || strings.TrimSpace(symbolFilter) != "" || strings.TrimSpace(typeFilter) != "" {
+		return
+	}
+	scope := s.currentBrokerStateScope()
+	shadowScope, err := newAlertShadowBrokerScope(scope)
+	if err != nil {
+		s.warnf("alert shadow: Protection observation skipped: %v", err)
+		return
+	}
+	evidenceAsOf := portfolioHealth.InitialCompletedAt.UTC()
+	if portfolioHealth.LastUpdateAt.After(evidenceAsOf) {
+		evidenceAsOf = portfolioHealth.LastUpdateAt.UTC()
+	}
+	status := classifyOrderIntegrityPortfolioHealth(scope, portfolioHealth, summary.AsOf.UTC())
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.observeProtectionAlertShadow(ctx, alertShadowProtectionInput{
+		AsOf: summary.AsOf.UTC(), EvidenceAsOf: evidenceAsOf, Status: status, Summary: *summary, Scope: shadowScope,
+	})
 }
 
 func protectionCoverageOrderPassesFilter(view rpc.OrderView, symbolFilter, typeFilter string) bool {

@@ -492,6 +492,22 @@ type Server struct {
 	// eligibility, page policy, badge, or service-worker authority.
 	alertEpisodes *alertEpisodeRegistry
 	alertShadow   *alertShadowComposer
+	// dataHealthObserveMu keeps the hottest read-only status path independent
+	// from shadow persistence. Only one detached observation may run at once;
+	// failures back off in memory so an unhealthy SQLite store cannot turn
+	// status polling into a write storm against itself. Adjacent identical
+	// samples coalesce, but semantic transitions remain ordered so an outage
+	// observed before its recovery cannot disappear while a write is in flight.
+	dataHealthObserveMu      sync.Mutex
+	dataHealthObserveRunning bool
+	dataHealthObserveStopped bool
+	dataHealthObservePending map[string][]alertShadowDataHealthPending
+	dataHealthObserveRetryAt map[string]time.Time
+	dataHealthObserveWake    chan struct{}
+	dataHealthObserveWG      sync.WaitGroup
+	dataHealthObserveTest    func(context.Context, alertShadowDataHealthInput) error
+	dataHealthObserveBackoff time.Duration
+	alertShadowLoopWG        sync.WaitGroup
 	// postConnectSetupDone latches true at the end of the first
 	// successful postConnectSetup. Gates the Connected field of
 	// handleStatusHealth so an `ibkr status` that lands between
@@ -1199,6 +1215,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.lock = nil
 		return fmt.Errorf("attach alert shadow authority: %w", err)
 	}
+	s.startAlertShadowObservationLoops(serverCtx)
 
 	ep, derr := discover.Resolve(serverCtx, partialFromConfig(s.cfg.Gateway))
 	s.mu.Lock()

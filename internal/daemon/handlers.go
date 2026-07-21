@@ -248,12 +248,8 @@ func (s *Server) handlePositionsListCaptured(ctx context.Context, req *rpc.Reque
 		return nil, s.gatewayUnavailableError()
 	}
 	var positions []*ibkrlib.RawPosition
-	var err error
-	if portfolioHealth == nil {
-		positions, err = c.CachedPositions()
-	} else {
-		var health ibkrlib.PortfolioStreamHealth
-		positions, health, err = c.CachedPositionsWithHealth()
+	positions, health, err := c.CachedPositionsWithHealth()
+	if portfolioHealth != nil {
 		*portfolioHealth = health
 	}
 	if err != nil {
@@ -403,7 +399,7 @@ func (s *Server) handlePositionsListCaptured(ctx context.Context, req *rpc.Reque
 	res.Portfolio = buildPortfolioAggregatesWithBase(res.Stocks, res.Options, baseCcy)
 	addPortfolioBaseContext(res.Portfolio, res.ByUnderlying, baseCcy, netLiquidationBase)
 	addFXSensitivity(res.Portfolio, ledger, baseCcy)
-	s.attachProtectionCoverage(res, wantSym, wantType)
+	s.attachProtectionCoverage(ctx, res, wantSym, wantType, health)
 	return res, nil
 }
 
@@ -3601,6 +3597,7 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 	ep := s.endpoint
 	c := s.connector
 	lastErr := s.lastConnectError
+	connectInFlight := s.connectInFlight
 	s.mu.Unlock()
 
 	res := &rpc.HealthResult{
@@ -3619,6 +3616,7 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 	}
 	accountForMode := ep.Account
 	var farmStatuses []ibkrlib.DataFarmStatus
+	setupComplete := s.postConnectSetupDone.Load()
 	if c != nil {
 		res.ConnectedAccount = strings.TrimSpace(c.AccountID())
 		if res.ConnectedAccount != "" {
@@ -3645,7 +3643,7 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		// "starting up" state from the user's point of view, even
 		// across reconnects (the prewarm Once guards mean reconnect
 		// doesn't re-fire them anyway).
-		res.Connected = c.IsReady() && s.postConnectSetupDone.Load()
+		res.Connected = c.IsReady() && setupComplete
 		res.ServerVersion = c.ServerVersion()
 		res.NegotiatedTLS = c.UsingTLS()
 		farmStatuses = c.DataFarmStatuses()
@@ -3665,6 +3663,21 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 	res.DataQuality = s.statusDataQuality()
 	res.Members = s.membersHealth()
 	res.Trading = *s.handleTradingStatus()
+	configuredAccount := ""
+	port := ep.Port
+	if s.cfg != nil {
+		configuredAccount = s.cfg.Gateway.Account
+		if port == 0 && s.cfg.Gateway.Port != nil {
+			port = *s.cfg.Gateway.Port
+		}
+	}
+	shadowScope := brokerStateScopeFromSnapshot(configuredAccount, ep.Account, port, res.ConnectedAccount)
+	gatewayPhase := alertShadowGatewayPhaseForHealth(res.Connected, setupComplete, connectInFlight, lastErr, time.Since(s.startedAt))
+	observedAt := time.Now().UTC()
+	if s.now != nil {
+		observedAt = s.now().UTC()
+	}
+	s.observeDataHealthAlertShadow(res, shadowScope, gatewayPhase, observedAt)
 	return res
 }
 

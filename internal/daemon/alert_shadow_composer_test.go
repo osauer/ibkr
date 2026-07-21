@@ -118,7 +118,7 @@ func TestAlertShadowComposerCanaryNormalStressRecoveryReopenAndMetrics(t *testin
 		t.Fatalf("Canary prevalence/latency metrics=%+v", canary.Measurements)
 	}
 	regime := alertShadowTestSourceStatus(t, status, rpc.AlertSourceRegime)
-	if regime.Status != alertShadowStatusProducerNotImplemented || regime.Reason != alertShadowReasonProducerNotImplemented || regime.Measurements.Evaluations != 0 || regime.Measurements.CoverageFailures != 0 {
+	if regime.Status != alertShadowStatusNotObserved || regime.Reason != alertShadowReasonNotObserved || regime.Measurements.Evaluations != 0 || regime.Measurements.CoverageFailures != 0 {
 		t.Fatalf("Regime unavailable status=%+v", regime)
 	}
 	orderIntegrity := alertShadowTestSourceStatus(t, status, rpc.AlertSourceOrderIntegrity)
@@ -212,6 +212,334 @@ func TestAlertShadowComposerOrderIntegrityRequiresConfirmationAndCurrentNegative
 	})
 	if err != nil || len(recovered.Candidates) != 1 || recovered.Candidates[0].State != rpc.AlertEpisodeRecovered {
 		t.Fatalf("trusted order negative did not recover: %+v err=%v", recovered, err)
+	}
+}
+
+func TestAlertShadowComposerRegimeEscalatesAndDataQualityCannotWarnOrRecover(t *testing.T) {
+	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+	defer store.Close()
+	registry, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composer := newAlertShadowComposer(registry)
+	scope := alertShadowTestBrokerScope(t)
+	base := time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
+	now := base.Add(time.Second)
+	composer.now = func() time.Time { return now }
+
+	early := alertShadowTestRegime(base, rpc.LifecycleEarlyWarning, "ready")
+	opened, err := composer.ObserveRegime(t.Context(), scope, early)
+	if err != nil || len(opened.Candidates) != 1 || opened.Candidates[0].State != rpc.AlertEpisodeOpen ||
+		opened.Candidates[0].Severity != rpc.AlertSeverityWatch || opened.Candidates[0].Source != rpc.AlertSourceRegime {
+		t.Fatalf("early warning open=%+v err=%v", opened, err)
+	}
+	openingOccurrence := opened.Candidates[0].OccurrenceKey
+	evaluations := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceRegime).Measurements.Evaluations
+	now = base.Add(5 * time.Second)
+	if _, err := composer.ObserveRegime(t.Context(), scope, early); err != nil {
+		t.Fatal(err)
+	}
+	if got := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceRegime).Measurements.Evaluations; got != evaluations {
+		t.Fatalf("Regime hot-poll throttle evaluations=%d want %d", got, evaluations)
+	}
+
+	now = base.Add(time.Minute + time.Second)
+	confirmed := alertShadowTestRegime(base.Add(time.Minute), rpc.LifecycleConfirmedStress, "ready")
+	escalated, err := composer.ObserveRegime(t.Context(), scope, confirmed)
+	if err != nil || len(escalated.Candidates) != 1 || escalated.Candidates[0].State != rpc.AlertEpisodeEscalated ||
+		escalated.Candidates[0].Severity != rpc.AlertSeverityAct || escalated.Candidates[0].OccurrenceKey == openingOccurrence {
+		t.Fatalf("confirmed escalation=%+v err=%v", escalated, err)
+	}
+	escalatedOccurrence := escalated.Candidates[0].OccurrenceKey
+
+	now = base.Add(2*time.Minute + time.Second)
+	broken := alertShadowTestRegime(base.Add(2*time.Minute), rpc.LifecycleDataQuality, "blocked")
+	broken.SourceHealth[0].Status = rpc.SourceStatusUnknown
+	broken.Fingerprint = rpc.BuildRegimeFingerprint(&broken)
+	held, err := composer.ObserveRegime(t.Context(), scope, broken)
+	if err != nil || len(held.Candidates) != 1 || held.Candidates[0].State != rpc.AlertEpisodeEscalated ||
+		held.Candidates[0].EvidenceHealth == rpc.AlertEvidenceCurrent || held.Candidates[0].OccurrenceKey != escalatedOccurrence {
+		t.Fatalf("data-quality observation rewrote Regime episode: %+v err=%v", held, err)
+	}
+	regimeStatus := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceRegime)
+	if regimeStatus.Covered || regimeStatus.Reason != alertShadowReasonLifecycleDataQuality {
+		t.Fatalf("data-quality source status=%+v", regimeStatus)
+	}
+
+	now = base.Add(3*time.Minute + time.Second)
+	quiet := alertShadowTestRegime(base.Add(3*time.Minute), rpc.LifecycleQuiet, "ready")
+	recovered, err := composer.ObserveRegime(t.Context(), scope, quiet)
+	if err != nil || len(recovered.Candidates) != 1 || recovered.Candidates[0].State != rpc.AlertEpisodeRecovered {
+		t.Fatalf("current quiet did not recover Regime: %+v err=%v", recovered, err)
+	}
+
+	now = base.Add(4*time.Minute + time.Second)
+	brokenEarly := alertShadowTestRegime(base.Add(4*time.Minute), rpc.LifecycleEarlyWarning, "degraded")
+	brokenEarly.SourceHealth[0].Status = rpc.SourceStatusPartial
+	brokenEarly.Fingerprint = rpc.BuildRegimeFingerprint(&brokenEarly)
+	undefined, err := composer.ObserveRegime(t.Context(), scope, brokenEarly)
+	if err != nil || len(undefined.Candidates) != 0 {
+		t.Fatalf("broken early warning created candidate: %+v err=%v", undefined, err)
+	}
+}
+
+func TestAlertShadowComposerRegimeHonorsGovernorsAndRejectsStaleWarningEvidence(t *testing.T) {
+	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+	defer store.Close()
+	registry, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composer := newAlertShadowComposer(registry)
+	scope := alertShadowTestBrokerScope(t)
+	base := time.Date(2026, 7, 21, 14, 30, 0, 0, time.UTC)
+	now := base.Add(time.Second)
+	composer.now = func() time.Time { return now }
+
+	staleCredit := alertShadowTestRegime(base, rpc.LifecycleEarlyWarning, "ready")
+	for i := range staleCredit.SourceHealth {
+		if staleCredit.SourceHealth[i].Source == "credit" {
+			staleCredit.SourceHealth[i].Status = rpc.SourceStatusStale
+			staleCredit.SourceHealth[i].RefreshState = rpc.SourceRefreshNotDue
+			staleCredit.SourceHealth[i].AsOf = base.Add(-8 * 24 * time.Hour)
+		}
+	}
+	staleCredit.Fingerprint = rpc.BuildRegimeFingerprint(&staleCredit)
+	invalid, err := composer.ObserveRegime(t.Context(), scope, staleCredit)
+	if err != nil || len(invalid.Candidates) != 0 {
+		t.Fatalf("stale Credit not_due fabricated warning: %+v err=%v", invalid, err)
+	}
+	status := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceRegime)
+	if status.Covered || status.Status != alertShadowStatusError {
+		t.Fatalf("stale Credit validation=%+v", status)
+	}
+
+	now = base.Add(time.Minute + time.Second)
+	governed := alertShadowTestRegime(base.Add(time.Minute), rpc.LifecycleConfirmedStress, "ready")
+	governed.FundingStress.Thresholds = &rpc.RegimeThresholds{PendingBacktest: true}
+	governed.Breadth.Thresholds = &rpc.RegimeThresholds{PendingBacktest: true}
+	governed.Lifecycle = rpc.BuildRegimeLifecycle(&governed)
+	governed.Fingerprint = rpc.BuildRegimeFingerprint(&governed)
+	if governed.Lifecycle.Stage != rpc.LifecycleConfirmedStress || governed.Lifecycle.Severity != "watch" {
+		t.Fatalf("test fixture did not exercise governed severity: %+v", governed.Lifecycle)
+	}
+	opened, err := composer.ObserveRegime(t.Context(), scope, governed)
+	if err != nil || len(opened.Candidates) != 1 || opened.Candidates[0].Severity != rpc.AlertSeverityWatch {
+		t.Fatalf("governed Regime severity rejected or overridden: %+v err=%v", opened, err)
+	}
+
+	now = base.Add(2*time.Minute + time.Second)
+	overdue := alertShadowTestRegime(base.Add(2*time.Minute), rpc.LifecycleEarlyWarning, "ready")
+	for i := range overdue.SourceHealth {
+		if overdue.SourceHealth[i].Source == "funding" {
+			overdue.SourceHealth[i].AsOf = now.Add(-time.Duration(overdue.SourceHealth[i].MaxAgeSeconds+1) * time.Second)
+		}
+	}
+	overdue.Fingerprint = rpc.BuildRegimeFingerprint(&overdue)
+	held, err := composer.ObserveRegime(t.Context(), scope, overdue)
+	if err != nil || len(held.Candidates) != 1 || held.Candidates[0].EvidenceHealth == rpc.AlertEvidenceCurrent {
+		t.Fatalf("overdue OK source replaced governed episode: %+v err=%v", held, err)
+	}
+}
+
+func TestAlertShadowComposerProtectionAlertsOnlyOnReconciliationFacts(t *testing.T) {
+	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+	defer store.Close()
+	registry, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composer := newAlertShadowComposer(registry)
+	scope := alertShadowTestBrokerScope(t)
+	base := time.Date(2026, 7, 21, 15, 0, 0, 0, time.UTC)
+	now := base.Add(time.Second)
+	composer.now = func() time.Time { return now }
+
+	unprotected := alertShadowProtectionInput{AsOf: base, EvidenceAsOf: base, Status: orderIntegrityHealthCurrent, Scope: scope,
+		Summary: rpc.ProtectionCoverageSummary{AsOf: base, Status: "review", Counts: rpc.ProtectionCoverageCounts{Unprotected: 1},
+			ByUnderlying: []rpc.ProtectionCoverageRow{{Underlying: "AAA", State: rpc.ProtectionCoverageStateUnprotected}}}}
+	clear, err := composer.ObserveProtection(t.Context(), unprotected)
+	if err != nil || len(clear.Candidates) != 0 || !alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceProtection).Covered {
+		t.Fatalf("unprotected context became alert or uncovered: %+v err=%v", clear, err)
+	}
+	evaluations := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceProtection).Measurements.Evaluations
+	now = base.Add(5 * time.Second)
+	unprotected.AsOf, unprotected.EvidenceAsOf, unprotected.Summary.AsOf = now, now, now
+	if _, err := composer.ObserveProtection(t.Context(), unprotected); err != nil {
+		t.Fatal(err)
+	}
+	if got := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceProtection).Measurements.Evaluations; got != evaluations {
+		t.Fatalf("portfolio receipt churn bypassed Protection throttle: evaluations=%d want %d", got, evaluations)
+	}
+
+	now = base.Add(time.Minute + time.Second)
+	issueAt := base.Add(time.Minute)
+	issueOrder := rpc.ProtectionCoverageOrder{OrderRef: "opaque-order", Symbol: "AAA", Action: "SELL", OrderType: "STP", Remaining: 10,
+		ReconciliationState: "position_mismatch", UpdatedAt: issueAt}
+	issue := alertShadowProtectionInput{AsOf: issueAt, EvidenceAsOf: issueAt, Status: orderIntegrityHealthCurrent, Scope: scope,
+		Summary: rpc.ProtectionCoverageSummary{AsOf: issueAt, Status: rpc.ProtectionCoverageStateReconcileRequired,
+			Counts: rpc.ProtectionCoverageCounts{ReconcileRequired: 1}, ReconcileRequiredOrders: []rpc.ProtectionCoverageOrder{issueOrder},
+			ByUnderlying: []rpc.ProtectionCoverageRow{{Underlying: "AAA", State: rpc.ProtectionCoverageStateReconcileRequired, Orders: []rpc.ProtectionCoverageOrder{issueOrder}}}}}
+	opened, err := composer.ObserveProtection(t.Context(), issue)
+	if err != nil || len(opened.Candidates) != 1 || opened.Candidates[0].Kind != rpc.AlertKindProtectionGap ||
+		opened.Candidates[0].Severity != rpc.AlertSeverityWatch || opened.Candidates[0].DeliveryPreference != rpc.AlertDeliveryUnapproved {
+		t.Fatalf("protection issue=%+v err=%v", opened, err)
+	}
+
+	now = base.Add(90*time.Second + time.Second)
+	malformedAt := base.Add(90 * time.Second)
+	malformed := alertShadowProtectionInput{AsOf: malformedAt, EvidenceAsOf: malformedAt, Status: orderIntegrityHealthCurrent, Scope: scope,
+		Summary: rpc.ProtectionCoverageSummary{AsOf: malformedAt, Status: "ok", ReconcileRequiredOrders: []rpc.ProtectionCoverageOrder{issueOrder}}}
+	heldMalformed, err := composer.ObserveProtection(t.Context(), malformed)
+	if err != nil || len(heldMalformed.Candidates) != 1 || heldMalformed.Candidates[0].EvidenceHealth == rpc.AlertEvidenceCurrent {
+		t.Fatalf("malformed Protection summary cleared issue: %+v err=%v", heldMalformed, err)
+	}
+	if status := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceProtection); status.Covered || status.Status != alertShadowStatusError {
+		t.Fatalf("malformed Protection summary was trusted: %+v", status)
+	}
+
+	now = base.Add(2*time.Minute + time.Second)
+	stale := alertShadowProtectionInput{AsOf: base.Add(2 * time.Minute), EvidenceAsOf: issueAt, Status: orderIntegrityHealthStale, Scope: scope,
+		Summary: rpc.ProtectionCoverageSummary{AsOf: base.Add(2 * time.Minute), Status: "ok"}}
+	held, err := composer.ObserveProtection(t.Context(), stale)
+	if err != nil || len(held.Candidates) != 1 || held.Candidates[0].State != rpc.AlertEpisodeOpen || held.Candidates[0].EvidenceHealth == rpc.AlertEvidenceCurrent {
+		t.Fatalf("stale protection evidence cleared issue: %+v err=%v", held, err)
+	}
+
+	now = base.Add(3*time.Minute + time.Second)
+	clearAt := base.Add(3 * time.Minute)
+	current := alertShadowProtectionInput{AsOf: clearAt, EvidenceAsOf: clearAt, Status: orderIntegrityHealthCurrent, Scope: scope,
+		Summary: rpc.ProtectionCoverageSummary{AsOf: clearAt, Status: "ok", Counts: rpc.ProtectionCoverageCounts{Covered: 1},
+			ByUnderlying: []rpc.ProtectionCoverageRow{{Underlying: "AAA", State: rpc.ProtectionCoverageStateCovered}}}}
+	recovered, err := composer.ObserveProtection(t.Context(), current)
+	if err != nil || len(recovered.Candidates) != 1 || recovered.Candidates[0].State != rpc.AlertEpisodeRecovered {
+		t.Fatalf("current protection evidence did not recover: %+v err=%v", recovered, err)
+	}
+}
+
+func TestAlertShadowComposerDataHealthRequiresEstablishedRoots(t *testing.T) {
+	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+	defer store.Close()
+	registry, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composer := newAlertShadowComposer(registry)
+	scope := alertShadowTestBrokerScope(t)
+	base := time.Date(2026, 7, 21, 16, 30, 0, 0, time.UTC)
+	now := base.Add(time.Second)
+	composer.now = func() time.Time { return now }
+	health := rpc.HealthResult{Connected: false, Subsystems: []rpc.SubsystemHealth{{Name: "storage", Status: "ready"}}}
+
+	starting, err := composer.ObserveDataHealth(t.Context(), alertShadowDataHealthInput{AsOf: base, Health: health, Scope: scope, GatewayPhase: alertShadowGatewayConnecting})
+	if err != nil || len(starting.Candidates) != 0 {
+		t.Fatalf("normal startup created Gateway incident: %+v err=%v", starting, err)
+	}
+	if status := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceDataHealth); status.Covered || status.Reason != alertShadowReasonConfirmationPending {
+		t.Fatalf("startup Data Health claimed coverage: %+v", status)
+	}
+
+	now = base.Add(time.Minute + time.Second)
+	failureAt := base.Add(time.Minute)
+	gateway, err := composer.ObserveDataHealth(t.Context(), alertShadowDataHealthInput{AsOf: failureAt, Health: health, Scope: scope, GatewayPhase: alertShadowGatewayFailed})
+	if err != nil || len(gateway.Candidates) != 1 || gateway.Candidates[0].Source != rpc.AlertSourceDataHealth {
+		t.Fatalf("established Gateway outage not recorded: %+v err=%v", gateway, err)
+	}
+
+	now = base.Add(2*time.Minute + time.Second)
+	readyAt := base.Add(2 * time.Minute)
+	health = rpc.HealthResult{Connected: true, Subsystems: alertShadowTestHealthySubsystems()}
+	health.Subsystems = health.Subsystems[:4]
+	missingEngine, err := composer.ObserveDataHealth(t.Context(), alertShadowDataHealthInput{
+		AsOf: readyAt, Health: health, Scope: scope, GatewayPhase: alertShadowGatewayReady, ProposalsExpected: true,
+	})
+	if err != nil || len(missingEngine.Candidates) != 2 {
+		t.Fatalf("missing enabled engine was treated as clear: %+v err=%v", missingEngine, err)
+	}
+
+	now = base.Add(3*time.Minute + time.Second)
+	missingFarmAt := base.Add(3 * time.Minute)
+	health.Subsystems = []rpc.SubsystemHealth{{Name: "storage", Status: "ready"}, {Name: "history", Status: "ready"}, {Name: "chain", Status: "ready"}}
+	untrusted, err := composer.ObserveDataHealth(t.Context(), alertShadowDataHealthInput{AsOf: missingFarmAt, Health: health, Scope: scope, GatewayPhase: alertShadowGatewayReady})
+	if err != nil || len(untrusted.Candidates) != 1 || untrusted.Candidates[0].State != rpc.AlertEpisodeOpen {
+		t.Fatalf("missing farm readiness lost retained incidents: %+v err=%v", untrusted, err)
+	}
+	if status := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceDataHealth); status.Covered || status.Status != alertShadowStatusError {
+		t.Fatalf("missing farm readiness claimed clear: %+v", status)
+	}
+}
+
+func TestAlertShadowComposerDataHealthUsesRootIncidentsAndNotDueIsClear(t *testing.T) {
+	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+	defer store.Close()
+	registry, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composer := newAlertShadowComposer(registry)
+	scope := alertShadowTestBrokerScope(t)
+	base := time.Date(2026, 7, 21, 16, 0, 0, 0, time.UTC)
+	now := base.Add(time.Second)
+	composer.now = func() time.Time { return now }
+	health := rpc.HealthResult{Connected: true, Subsystems: []rpc.SubsystemHealth{
+		{Name: "storage", Status: "ready"}, {Name: "quote", Status: "ready"}, {Name: "history", Status: "ready"}, {Name: "chain", Status: "ready"},
+	},
+		DataQuality: []rpc.DataQualityHealth{{Surface: "gamma", Status: "partial", CadenceState: rpc.DataCadenceNotDue, AsOf: base.Add(-24 * time.Hour)}}}
+
+	clear, err := composer.ObserveDataHealth(t.Context(), alertShadowDataHealthInput{AsOf: base, Health: health, Scope: scope, GatewayPhase: alertShadowGatewayReady})
+	if err != nil || len(clear.Candidates) != 0 || !alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceDataHealth).Covered {
+		t.Fatalf("not-due data became incident: %+v err=%v", clear, err)
+	}
+
+	now = base.Add(time.Minute + time.Second)
+	failureAt := base.Add(time.Minute)
+	health.DataQuality = []rpc.DataQualityHealth{{Surface: "gamma", Status: "partial", CadenceState: rpc.DataCadenceMissedSession, AsOf: failureAt}}
+	health.Subsystems[1].Status = "degraded"
+	health.DataFarms = []rpc.DataFarmHealth{{Name: "untrusted-farm-name", Type: "market", Status: "broken", Code: 2110, AsOf: failureAt}}
+	opened, err := composer.ObserveDataHealth(t.Context(), alertShadowDataHealthInput{AsOf: failureAt, Health: health, Scope: scope, GatewayPhase: alertShadowGatewayReady})
+	if err != nil || len(opened.Candidates) != 2 {
+		t.Fatalf("root incidents=%+v err=%v", opened, err)
+	}
+	for _, candidate := range opened.Candidates {
+		if candidate.Source != rpc.AlertSourceDataHealth || candidate.Kind != rpc.AlertKindDataHealth ||
+			candidate.Severity != rpc.AlertSeverityWatch || candidate.DeliveryPreference != rpc.AlertDeliveryUnapproved {
+			t.Fatalf("invalid data-health candidate=%+v", candidate)
+		}
+	}
+	evaluations := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceDataHealth).Measurements.Evaluations
+
+	now = failureAt.Add(5 * time.Second)
+	if _, err := composer.ObserveDataHealth(t.Context(), alertShadowDataHealthInput{AsOf: now, Health: health, Scope: scope, GatewayPhase: alertShadowGatewayReady}); err != nil {
+		t.Fatal(err)
+	}
+	if got := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceDataHealth).Measurements.Evaluations; got != evaluations {
+		t.Fatalf("hot-poll throttle evaluations=%d want %d", got, evaluations)
+	}
+	beforeRename := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceDataHealth).Measurements
+	now = failureAt.Add(35 * time.Second)
+	health.DataFarms[0].Name = "adversarial:new-name"
+	renamed, err := composer.ObserveDataHealth(t.Context(), alertShadowDataHealthInput{AsOf: now, Health: health, Scope: scope, GatewayPhase: alertShadowGatewayReady})
+	if err != nil || len(renamed.Candidates) != 2 {
+		t.Fatalf("canonical farm identity changed candidate set: %+v err=%v", renamed, err)
+	}
+	afterRename := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceDataHealth).Measurements
+	if afterRename.EpisodesOpened != beforeRename.EpisodesOpened || afterRename.ActiveEvidenceChurn != beforeRename.ActiveEvidenceChurn {
+		t.Fatalf("broker farm free text changed durable identity: before=%+v after=%+v", beforeRename, afterRename)
+	}
+
+	now = base.Add(2*time.Minute + time.Second)
+	recoveryAt := base.Add(2 * time.Minute)
+	health.DataQuality, health.DataFarms = nil, nil
+	health.Subsystems[1].Status = "ready"
+	recovered, err := composer.ObserveDataHealth(t.Context(), alertShadowDataHealthInput{AsOf: recoveryAt, Health: health, Scope: scope, GatewayPhase: alertShadowGatewayReady})
+	if err != nil || len(recovered.Candidates) != 2 {
+		t.Fatalf("data-health recovery=%+v err=%v", recovered, err)
+	}
+	for _, candidate := range recovered.Candidates {
+		if candidate.State != rpc.AlertEpisodeRecovered {
+			t.Fatalf("data-health incident did not recover: %+v", candidate)
+		}
 	}
 }
 
@@ -650,6 +978,60 @@ func alertShadowTestRulebook(at time.Time, status string) rpc.RulesResult {
 			{Source: "positions", Status: rpc.SourceStatusOK, AsOf: at},
 		},
 	}
+}
+
+func alertShadowTestRegime(at time.Time, stage, readiness string) rpc.RegimeSnapshotResult {
+	lastSuccess := at.UTC()
+	age := int64(0)
+	meta := func(band string, eligible bool) rpc.RegimeIndicatorMeta {
+		out := rpc.RegimeIndicatorMeta{Band: band, Freshness: &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessFresh, MaxAgeSeconds: rpc.RegimeSourceMaxAgeSeconds("breadth")}}
+		if band == "red" {
+			out.Eligibility = &rpc.RegimeEligibility{Eligible: eligible}
+		}
+		return out
+	}
+	result := rpc.RegimeSnapshotResult{
+		AsOf: at.UTC(), Summary: rpc.RegimeSummary{Confidence: "high"},
+		AuthorityHealth:  &rpc.RegimeAuthorityHealth{Status: rpc.RegimeAuthorityFresh, LastSuccessAt: &lastSuccess, LastSuccessAgeSeconds: &age},
+		SourceHealth:     make([]rpc.SourceHealth, 0, len(alertShadowRegimeRequiredSources)),
+		VIXTermStructure: rpc.RegimeVIXTerm{RegimeIndicatorMeta: meta("green", false), Status: rpc.RegimeStatusOK},
+		VolOfVol:         rpc.RegimeVolOfVol{RegimeIndicatorMeta: meta("green", false), Status: rpc.RegimeStatusOK},
+		HYGSPYDivergence: rpc.RegimeHYGSPYDivergence{RegimeIndicatorMeta: meta("green", false), Status: rpc.RegimeStatusOK},
+		CreditSpreads:    rpc.RegimeCreditSpreads{RegimeIndicatorMeta: meta("green", false), Status: rpc.RegimeStatusOK},
+		FundingStress:    rpc.RegimeFundingStress{RegimeIndicatorMeta: meta("green", false), Status: rpc.RegimeStatusOK},
+		USDJPY:           rpc.RegimeUSDJPY{RegimeIndicatorMeta: meta("green", false), Status: rpc.RegimeStatusOK},
+		GammaZero: rpc.RegimeGammaZero{RegimeIndicatorMeta: meta("green", false), Status: rpc.RegimeStatusOK,
+			Envelope: rpc.GammaZeroSPXResult{Result: &rpc.GammaZeroComputed{Quality: &rpc.GammaSignalQuality{Rankability: rpc.GammaRankabilityRankable}}}},
+		Breadth: rpc.RegimeBreadth{RegimeIndicatorMeta: meta("green", false), Status: rpc.RegimeStatusOK},
+	}
+	switch stage {
+	case rpc.LifecycleEarlyWarning:
+		result.FundingStress.RegimeIndicatorMeta = meta("red", false)
+	case rpc.LifecycleConfirmedStress:
+		result.FundingStress.RegimeIndicatorMeta = meta("red", true)
+		result.Breadth.RegimeIndicatorMeta = meta("red", true)
+	case rpc.LifecyclePanic:
+		result.FundingStress.RegimeIndicatorMeta = meta("red", true)
+		result.Breadth.RegimeIndicatorMeta = meta("red", true)
+		result.CreditSpreads.RegimeIndicatorMeta = meta("red", true)
+	case rpc.LifecycleDataQuality:
+		result.Breadth.Status = rpc.RegimeStatusUnavailable
+		result.Breadth.Band = ""
+		result.Breadth.Freshness = &rpc.RegimeFreshness{Class: rpc.RegimeFreshnessOverdue, MaxAgeSeconds: rpc.RegimeSourceMaxAgeSeconds("breadth")}
+	}
+	for _, source := range alertShadowRegimeRequiredSources {
+		result.SourceHealth = append(result.SourceHealth, rpc.SourceHealth{
+			Source: source, Status: rpc.SourceStatusOK, AsOf: at.UTC(), MaxAgeSeconds: rpc.RegimeSourceMaxAgeSeconds(source),
+			RefreshState: rpc.SourceRefreshCurrent,
+		})
+	}
+	result.Lifecycle = rpc.BuildRegimeLifecycle(&result)
+	if readiness != "" && readiness != result.Lifecycle.Readiness {
+		result.Lifecycle.Readiness = readiness
+		result.Lifecycle.Fingerprint = rpc.BuildLifecycleFingerprint(result.Lifecycle)
+	}
+	result.Fingerprint = rpc.BuildRegimeFingerprint(&result)
+	return result
 }
 
 func alertShadowTestMismatchedOrder(at time.Time, scope alertShadowBrokerScope) rpc.OrderView {

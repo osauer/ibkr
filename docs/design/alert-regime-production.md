@@ -7,6 +7,9 @@ shadow/advisory only
 
 **Owner:** osauer
 
+**Shadow-producer policy approval:** 2026-07-21, desk-owner approval for
+`market-stress-v1`, `orphan-reconcile-v1`, and `root-source-v1`
+
 ## Decision
 
 The Alerts and Regime program has six implementation phases, preceded by one
@@ -73,7 +76,7 @@ are the implementation and commissioning sequence.
 | 3 — Durable lifecycle and inbox | The daemon persists episode and occurrence lifecycle in `daemon.db`; the app observes complete snapshots into its separate durable inbox ledger. App corruption is quarantined rather than normalized into plausible state. | Open, qualifying escalation, recovery, reopen, omission, restart, old-snapshot rejection, storage bounds, and quarantine are deterministic. App ingestion cannot alter legacy attention state or send a notification. |
 | 4 — Data-health truthfulness | Snapshot state and source coverage distinguish current, partial, stale, unavailable, error, and not-yet-covered inputs. Outage or age can move a former clear to unknown, never preserve reassurance. | Fresh clear, degraded positive, degraded negative, poll outage, restart outage, cold outage, ageing, future time, and recovery scenarios retain the correct typed health and do not invent coverage. |
 | 5 — Composer, replay, fault, and measurement | One daemon composer maps the fixed producer universe into durable episode observations and exposes redacted shadow measurements. Policy identity, source-store health, candidate snapshot, and account/mode scope are captured from one evaluation boundary. | Replay and retry are idempotent; failed registry application can retry the same input; current coverage does not survive a restart by assumption; source and scope collisions are rejected; fault injection proves no false clear; measurement distinguishes repeats, evidence revisions, duplicates, equivocations, lifecycle changes, coverage failures, and time-to-observe. |
-| 6 — Shadow/advisory commissioning | The typed status remains `authority = "shadow"` and `delivery_active = false`. Candidate and inbox evidence may be reviewed, replayed, and labelled, but it cannot page or enforce. | Full verification and live redacted status prove shadow authority, inactive delivery, durable restart behavior, and explicit uncovered sources. Human precision and recall remain `unlabelled` until the operator supplies outcome labels. |
+| 6 — Shadow/advisory commissioning | The typed status remains `authority = "shadow"` and `delivery_active = false`. Candidate and inbox evidence may be reviewed, replayed, and labelled, but it cannot page or enforce. | Full verification and live redacted status prove shadow authority, inactive delivery, durable restart behavior, and explicit source-coverage gaps. Human precision and recall remain `unlabelled` until the operator supplies outcome labels. |
 
 Installed cutovers are mechanically consumer-first. The normal combined
 restart and `ibkr update --restart` paths restart and verify the app from the
@@ -160,10 +163,62 @@ The commissioned producer boundary is explicit:
   mismatch must repeat on two consecutive current portfolio-stream reads;
   stale, unprimed, future, or wrong-account stream evidence may retain an open
   episode but cannot clear it.
-- Regime, protection, and broad data-health remain explicitly uncovered until
-  their source-specific active/recovery, materiality, severity, and destination
-  policies are approved. Existing Canary/Regime advisory presentation is not a
-  substitute for that authority.
+- Regime consumes the served, fingerprint-validated last-good snapshot under
+  `market-stress-v1`. A current `early_warning` opens one watch episode;
+  `confirmed_stress` and `panic` continue that episode at the lifecycle's
+  governed severity (their uncapped levels are act and urgent), with only an
+  upward severity change qualifying as an escalation. The producer replays the
+  shared lifecycle classifier and source-age policy before trusting the served
+  state; it does not override provenance or evidence-quality governors.
+  Current `quiet`, `stabilization`, or `opportunity` is negative evidence.
+  `data_quality`, a stale/unavailable authority, overdue required evidence, or
+  an invalid `not_due` claim never opens an early warning and cannot recover an
+  existing episode.
+- Protection consumes only the complete, unfiltered positions coverage ledger
+  backed by a current, account-matched portfolio-stream receipt. Under
+  `orphan-reconcile-v1`, orphaned protective orders and
+  reconciliation-required rows open watch episodes in Alerts. Partial or
+  unprotected holdings remain context and are negative for this deliberately
+  narrow producer; the policy does not assert that every holding must have a
+  stop. Unknown or stale positions/order evidence retains an episode and
+  cannot clear it.
+- Data Health consumes the complete typed `status.health` projection under
+  `root-source-v1`. It opens one watch episode per failing root in the v1
+  allowlist: Gateway connectivity, SQLite storage, enabled proposal/opportunity
+  engines, typed decision-surface data quality, and one aggregate IBKR
+  data-farm root. Raw broker farm names never enter episode identity.
+  `not_due`, normal computing, and intentionally disabled states are negative
+  evidence. Startup remains uncovered until the first post-connect setup has
+  completed, so a normal restart cannot manufacture a Gateway outage.
+  Recovery requires a later complete status read in which that same root is
+  current. Gateway-dependent capability rows are not fanned out into duplicate
+  incidents. Earnings and borrow-fee availability remain source-owned
+  Rulebook/Canary coverage dependencies rather than additional standalone Data
+  Health episodes in v1.
+- Data Health observation is detached and single-flight with an in-memory,
+  bounded semantic-transition queue and failure backoff, so `status.health`
+  never waits on the shadow write it triggers and an outage followed by a
+  recovery remains ordered across an in-flight or failed write. Adjacent
+  identical polls coalesce. The worker is drained before SQLite closes. A
+  SQLite failure remains directly visible on the typed status surface; its
+  shadow episode is best-effort because the failed SQLite authority cannot
+  durably record its own outage. There is deliberately no second hidden
+  persistence authority.
+- Regime, Protection, and Data Health are not dependent on an open app or CLI.
+  Daemon-owned 30-second engineering heartbeats re-observe Regime authority,
+  rebuild Protection from the portfolio cache plus local order journal, and
+  refresh typed health. The canonical status read retains its normal throttled
+  reconnect behavior, and an empty held-position cache may renew the existing
+  account-updates subscription; these are read-side stream repairs, never
+  order or account mutations. Contract identity is retained, and ambiguous
+  same-symbol fallback evidence cannot clear Protection. This interval is
+  sized inside the shortest one-minute source silence horizon; it is not
+  pageability, market threshold, or broker-write policy. Client reads may
+  still provide earlier observations, and the same semantic throttle prevents
+  duplicate lifecycle churn.
+- All three policies use the Alerts destination only as a redacted shadow
+  classification. Their delivery preference remains `unapproved`; none of
+  these approvals authorizes transport, pageability, or legacy-owner cutover.
 
 Source schedules do not masquerade as outages, and outages do not masquerade
 as warnings. VIX and VIX3M keep separate schedules on the official options
@@ -276,8 +331,10 @@ Phase 6 does not close these decisions:
 1. Approve the measurement bands and observation windows used to judge source
    coverage, alert quality, noise, latency, and legacy parity.
 2. Supply outcome labels so precision and recall stop being `unlabelled`.
-3. Approve source-by-source pageability, severity, cadence, cooldown, dwell,
-   rearm, recovery notice, destination, and legacy-owner retirement.
+3. For any source leaving shadow, approve pageability, delivery cadence,
+   cooldown, dwell, rearm, recovery notice, transport destination, and
+   legacy-owner retirement. The approved shadow severity and product-surface
+   classification above do not authorize delivery.
 4. Prove receipt and tap-through on the actual paired physical device.
 5. Authorize a separate unified-transport, service-worker, badge, or foreground
    cutover, if desired.

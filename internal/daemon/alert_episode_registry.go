@@ -157,8 +157,11 @@ type alertEpisodeRegistrySourceState struct {
 type alertShadowDurableCursors struct {
 	Canary         alertShadowInputCursor `json:"canary"`
 	Nudges         alertShadowInputCursor `json:"nudges"`
+	Regime         alertShadowInputCursor `json:"regime,omitzero"`
 	Rulebook       alertShadowInputCursor `json:"rulebook,omitzero"`
+	Protection     alertShadowInputCursor `json:"protection,omitzero"`
 	OrderIntegrity alertShadowInputCursor `json:"order_integrity,omitzero"`
+	DataHealth     alertShadowInputCursor `json:"data_health,omitzero"`
 }
 
 type alertShadowDurableMetrics struct {
@@ -1123,7 +1126,10 @@ func validateAlertEpisodeEvaluation(evaluation alertEpisodeEvaluation) error {
 		}
 	}
 	if evaluation.CursorKind != "" {
-		if evaluation.CursorKind != alertShadowCursorCanary && evaluation.CursorKind != alertShadowCursorNudges && evaluation.CursorKind != alertShadowCursorRulebook && evaluation.CursorKind != alertShadowCursorOrderIntegrity {
+		if evaluation.CursorKind != alertShadowCursorCanary && evaluation.CursorKind != alertShadowCursorNudges &&
+			evaluation.CursorKind != alertShadowCursorRegime && evaluation.CursorKind != alertShadowCursorRulebook &&
+			evaluation.CursorKind != alertShadowCursorProtection && evaluation.CursorKind != alertShadowCursorOrderIntegrity &&
+			evaluation.CursorKind != alertShadowCursorDataHealth {
 			return errors.New("alert episode evaluation has invalid cursor kind")
 		}
 		if err := validateAlertShadowInputCursor(evaluation.Cursor); err != nil {
@@ -1269,11 +1275,20 @@ func validateAlertEpisodeRegistryDocument(document alertEpisodeRegistryDocument,
 		if err := validateAlertShadowInputCursorOptional(scopeDocument.Cursors.Nudges); err != nil {
 			return fmt.Errorf("invalid alert episode registry Nudge cursor: %w", err)
 		}
+		if err := validateAlertShadowInputCursorOptional(scopeDocument.Cursors.Regime); err != nil {
+			return fmt.Errorf("invalid alert episode registry Regime cursor: %w", err)
+		}
 		if err := validateAlertShadowInputCursorOptional(scopeDocument.Cursors.Rulebook); err != nil {
 			return fmt.Errorf("invalid alert episode registry Rulebook cursor: %w", err)
 		}
+		if err := validateAlertShadowInputCursorOptional(scopeDocument.Cursors.Protection); err != nil {
+			return fmt.Errorf("invalid alert episode registry Protection cursor: %w", err)
+		}
 		if err := validateAlertShadowInputCursorOptional(scopeDocument.Cursors.OrderIntegrity); err != nil {
 			return fmt.Errorf("invalid alert episode registry Order Integrity cursor: %w", err)
+		}
+		if err := validateAlertShadowInputCursorOptional(scopeDocument.Cursors.DataHealth); err != nil {
+			return fmt.Errorf("invalid alert episode registry Data Health cursor: %w", err)
 		}
 		if err := validateAlertShadowDurableMetrics(scopeDocument.Metrics, document.UpdatedAt); err != nil {
 			return fmt.Errorf("invalid alert episode registry commissioning metrics: %w", err)
@@ -1681,10 +1696,16 @@ func applyAlertShadowCursor(scopeDocument *alertEpisodeRegistryScopeDocument, ki
 		scopeDocument.Cursors.Canary = cursor
 	case alertShadowCursorNudges:
 		scopeDocument.Cursors.Nudges = cursor
+	case alertShadowCursorRegime:
+		scopeDocument.Cursors.Regime = cursor
 	case alertShadowCursorRulebook:
 		scopeDocument.Cursors.Rulebook = cursor
+	case alertShadowCursorProtection:
+		scopeDocument.Cursors.Protection = cursor
 	case alertShadowCursorOrderIntegrity:
 		scopeDocument.Cursors.OrderIntegrity = cursor
+	case alertShadowCursorDataHealth:
+		scopeDocument.Cursors.DataHealth = cursor
 	}
 }
 
