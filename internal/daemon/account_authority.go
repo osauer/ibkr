@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -176,15 +177,11 @@ func cloneRawAccountSummary(in *ibkrlib.RawAccountSummary) *ibkrlib.RawAccountSu
 	out.LookAheadExcess = cloneFloat64Ptr(in.LookAheadExcess)
 	if in.CurrencyLedger != nil {
 		out.CurrencyLedger = make(map[string]ibkrlib.CurrencyLedger, len(in.CurrencyLedger))
-		for key, row := range in.CurrencyLedger {
-			out.CurrencyLedger[key] = row
-		}
+		maps.Copy(out.CurrencyLedger, in.CurrencyLedger)
 	}
 	if in.Raw != nil {
 		out.Raw = make(map[string]string, len(in.Raw))
-		for key, value := range in.Raw {
-			out.Raw[key] = value
-		}
+		maps.Copy(out.Raw, in.Raw)
 	}
 	return &out
 }

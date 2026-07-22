@@ -23,11 +23,9 @@ func (s *Server) startRulebookCanonicalRefreshLoopWith(ctx context.Context, run 
 	if s == nil || ctx == nil || run == nil {
 		return
 	}
-	s.rulebookRefreshLoopWG.Add(1)
-	go func() {
-		defer s.rulebookRefreshLoopWG.Done()
+	s.rulebookRefreshLoopWG.Go(func() {
 		run(ctx)
-	}()
+	})
 }
 
 // runRulebookCanonicalRefreshLoop owns the same one-minute complete Rulebook
