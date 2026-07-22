@@ -201,6 +201,22 @@ the full 45-second acquisition budget plus a cushion. A Gamma publication can
 also wake Regime promptly. App polling and alert consumers do not own this
 schedule.
 
+Two slower inputs use their own publication clocks. After VIX3M dissemination
+closes, the frozen VIX term observation remains visible but the volatility
+source is healthy and `not_due` when VVIX is current; it is not a stale-source
+warning. S&P 500 breadth starts after the official equity close plus a 35-minute
+settlement delay. A full broker-paced pass can take about 74 minutes, so the
+immediately prior last-good is healthy `not_due` context only while an active
+refresh or retry remains inside the explicit 90-minute publication window. It
+becomes stale at the deadline if a current-session result has not published.
+
+Breadth counts only constituent windows whose last bar matches the requested
+trading session. Successful windows are checkpointed every ten names, so a
+restart resumes near its last completed work instead of repeating the whole
+fan-out. The result exposes refresh start, processed and total names,
+publication deadline, and a redacted failure reason. These fields describe
+work progress; they never make an incomplete snapshot current.
+
 Only a complete replacement becomes current. While refresh runs, consumers see
 the prior publication with `refreshing` authority health. A failed refresh
 keeps the last-good result but marks authority stale with the typed failure and
@@ -246,6 +262,14 @@ older than 10 minutes are stale; outside those phases the limit is 90 minutes.
 Regime must carry usable last-good authority, and market-event source health
 must remain explicit.
 
+The account timestamp still requires a completed, account-scoped broker
+snapshot. Per-currency ledger rows are accepted only through the broker's
+closed, typed ledger field set; aggregate ordinary rows and foreign-account
+rows fail closed. Daily P&L is required during the US equity regular session.
+If that stream is silent outside the session, it is `not_due` and does not make
+otherwise current account evidence unhealthy; the P&L-specific observation
+remains explicitly unavailable.
+
 Missing, stale, partial, or failed required inputs produce degraded/failed
 input health and normally `confirm_inputs` with blocked readiness. Reg SHO and
 halt health are required for a held book; borrow inventory and fee health
@@ -283,6 +307,12 @@ disagreement or an unresolved earnings source remains unknown. A carried or
 stale Regime stage is evaluated conservatively against both the carried and
 calm threshold sets, keeping the worse result so old market state cannot relax
 a rule.
+
+Outside the US equity regular session, an absent Daily P&L frame is `not_due`,
+not an account failure. Rules that have complete account and position inputs
+still evaluate; the green-day/P&L rule alone remains `not_evaluated`. During the
+regular session, missing or malformed Daily P&L continues to degrade account
+health and fail closed.
 
 Fetched earnings evidence is fresh for 24 hours, retained for bounded recovery
 up to 45 days, and retried after 15 minutes when a provider attempt fails.
