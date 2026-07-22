@@ -167,11 +167,11 @@ current recovery limits.
 | Class | Default Location | Owner and Representative Contents |
 |---|---|---|
 | Operator configuration | `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`; policy defaults under `~/.config/ibkr/policies/` | Gateway/account/client pins, daemon/trading settings, protection/opportunity policy, the operator-authored `risk-policy.toml`, the optional private terminal-evidence import path, and the separate `flex-token` secret. The risk policy has no embedded default: missing approval stays unapproved. |
-| Daemon durable authority | `$XDG_STATE_HOME/ibkr/daemon.db` (SQLite, WAL), falling back to `~/.local/state/ibkr/daemon.db` | Sole live daemon authority for platform settings, risk-capital and governance state, the last-good Regime publication and projection receipt, shadow alert episodes, trading readiness, purge state, orders and token tombstones, proposals and opportunities, decision/event history, retained observations, and statement projections. It is not delete-safe and never falls back to legacy files. |
+| Daemon durable authority | `$XDG_STATE_HOME/ibkr/daemon.db` (SQLite, WAL), falling back to `~/.local/state/ibkr/daemon.db` | Sole live daemon authority for platform settings, risk-capital and governance state, the last-good Regime publication and projection receipt, source-neutral alert episodes, trading readiness, purge state, orders and token tombstones, proposals and opportunities, decision/event history, retained observations, and statement projections. It is not delete-safe and never falls back to legacy files. |
 | Original broker evidence | `$XDG_STATE_HOME/ibkr/statements/flex-*.xml` | Immutable retained Flex statements. SQLite stores a complete current inventory, immutable file/equity versions, and current per-day winners derived transactionally from this set; it does not replace the XML evidence claim. |
 | Recovery artifacts | `$XDG_STATE_HOME/ibkr/backups/`, `$XDG_STATE_HOME/ibkr/legacy-sealed/<cutover-id>/`, and `$XDG_STATE_HOME/ibkr/daemon.db.head` | Verified database backups, hashed pre-cutover artifacts, and the external monotonic-head watermark. They are recovery and anti-rollback material only, never normal read fallbacks or dual-write targets. |
 | Private signer key | `$XDG_STATE_HOME/ibkr/order-preview-key-v2` | Private token-signing material bound to the current authority generation. It is deliberately outside ordinary database state. |
-| App durable state | `$XDG_STATE_HOME/ibkr/app`, falling back to `~/.local/state/ibkr/app` | Private `state.json` with device grants, push subscriptions, VAPID material, alerts, governance evidence, and relay credentials; `app.lock` enforces one app process per state directory. |
+| App durable state | `$XDG_STATE_HOME/ibkr/app`, falling back to `~/.local/state/ibkr/app` | Private `state.json` with device grants, push subscriptions, VAPID material, the source-neutral alert inbox, unread cursor, delivery attempts and receipts, delivery health, and relay credentials; `app.lock` enforces one app process per state directory. |
 | Disposable scratch | `$XDG_CACHE_HOME/ibkr`, falling back to `~/.cache/ibkr` | Updater and transport scratch only; it is never daemon business-state authority. Contract, membership, regime, breadth, gamma, and decision data are SQLite projections/observations or refreshable in-memory views, not live files here. |
 | User data | `$XDG_DATA_HOME/ibkr`, falling back to `~/.local/share/ibkr` | `watchlist.json`; explicit research exports are separate operator-created files. |
 | Runtime IPC and logs | `$XDG_RUNTIME_DIR/ibkr/ibkr.sock`, falling back to `~/.cache/ibkr/ibkr.sock`; daemon log defaults to `~/.local/state/ibkr/ibkr-daemon.log` | Unix socket, sibling lock/PID file, rotated daemon text log, and optional macOS LaunchAgent/app logs under `~/Library`. |
@@ -258,22 +258,23 @@ current confirmed stress may survive an unrelated source defect with degraded
 readiness, but every confirming row, source-health record, and direct tape
 witness must itself be current.
 
-The daemon's alert registry is likewise source-neutral and durable, but its
-unified delivery authority is deliberately inactive. It stores opaque
-account/mode-scoped episode and occurrence identities and typed source
-coverage; the app keeps a separate private inbox/delivery ledger. During
-shadow commissioning, `alerts.shadow_status` reports redacted coverage and
-lifecycle measurements with `authority=shadow` and
-`delivery_active=false`. Existing Canary, governance, and order-integrity
-delivery owners remain authoritative. The richer Regime and MarketEvents
-health carried by Canary is advisory during this phase; a versioned
-producer-authored established-alert projection freezes the pre-program Canary
-fingerprint and mode eligibility consumed by its legacy monitor. This keeps
-new health visible without letting a shadow source alter existing unread or
-push cadence. Scope changes create only bounded, generic previous-context
-audit rows in the app; they are not recovery, clear, attention, or delivery
-events. See
-[Alerts and Regime production commissioning](design/alert-regime-production.md).
+The daemon's alert registry is source-neutral and durable. It owns opaque
+account/mode-scoped episode and occurrence identity, producer lifecycle, and
+typed source coverage. The app keeps the separate private delivery authority:
+one inbox, unread cursor, per-target attempt and receipt ledger, delivery
+health projection, and serialized dispatcher for every alert source.
+
+The first complete, current snapshot in each authority scope establishes a
+cutover baseline. Conditions already active at that boundary remain visible
+but cannot create a backlog push. Later delivery requires a current candidate,
+current and covered evidence from that exact source, an allowed app notification
+mode, an active target, and no prior accepted receipt. The dispatcher durably
+reserves and rechecks each occurrence-and-target attempt before Web Push, maps
+the daemon's closed presentation code to fixed app-owned copy, and records
+acceptance, retry, rejection, or uncertain interruption. Scope changes create
+only bounded generic previous context; they are not recovery, clear, unread,
+or delivery events. See
+[Alerts and Regime production contract](design/alert-regime-production.md).
 
 ## Deployment Scopes and Multiple Instances
 
@@ -310,7 +311,7 @@ through the Worker.
 ## Observability
 
 The observability layer is thin on purpose: text logs, one health surface,
-typed database evidence, and bounded typed shadow-calibration counters. There
+typed database evidence, and bounded alert lifecycle and delivery counters. There
 is no external metrics stack and no tracing.
 
 - The daemon writes structured text logs through `log/slog`. The `log_level`

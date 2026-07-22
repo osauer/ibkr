@@ -333,7 +333,7 @@ current recovery limits.</p>
 <tr>
 <td>Daemon durable authority</td>
 <td><code>$XDG_STATE_HOME/ibkr/daemon.db</code> (SQLite, WAL), falling back to <code>~/.local/state/ibkr/daemon.db</code></td>
-<td>Sole live daemon authority for platform settings, risk-capital and governance state, the last-good Regime publication and projection receipt, shadow alert episodes, trading readiness, purge state, orders and token tombstones, proposals and opportunities, decision/event history, retained observations, and statement projections. It is not delete-safe and never falls back to legacy files.</td>
+<td>Sole live daemon authority for platform settings, risk-capital and governance state, the last-good Regime publication and projection receipt, source-neutral alert episodes, trading readiness, purge state, orders and token tombstones, proposals and opportunities, decision/event history, retained observations, and statement projections. It is not delete-safe and never falls back to legacy files.</td>
 </tr>
 <tr>
 <td>Original broker evidence</td>
@@ -353,7 +353,7 @@ current recovery limits.</p>
 <tr>
 <td>App durable state</td>
 <td><code>$XDG_STATE_HOME/ibkr/app</code>, falling back to <code>~/.local/state/ibkr/app</code></td>
-<td>Private <code>state.json</code> with device grants, push subscriptions, VAPID material, alerts, governance evidence, and relay credentials; <code>app.lock</code> enforces one app process per state directory.</td>
+<td>Private <code>state.json</code> with device grants, push subscriptions, VAPID material, the source-neutral alert inbox, unread cursor, delivery attempts and receipts, delivery health, and relay credentials; <code>app.lock</code> enforces one app process per state directory.</td>
 </tr>
 <tr>
 <td>Disposable scratch</td>
@@ -454,22 +454,22 @@ exact producer-authored <code>not_due</code> schedules remain context. Independe
 current confirmed stress may survive an unrelated source defect with degraded
 readiness, but every confirming row, source-health record, and direct tape
 witness must itself be current.</p>
-<p>The daemon's alert registry is likewise source-neutral and durable, but its
-unified delivery authority is deliberately inactive. It stores opaque
-account/mode-scoped episode and occurrence identities and typed source
-coverage; the app keeps a separate private inbox/delivery ledger. During
-shadow commissioning, <code>alerts.shadow_status</code> reports redacted coverage and
-lifecycle measurements with <code>authority=shadow</code> and
-<code>delivery_active=false</code>. Existing Canary, governance, and order-integrity
-delivery owners remain authoritative. The richer Regime and MarketEvents
-health carried by Canary is advisory during this phase; a versioned
-producer-authored established-alert projection freezes the pre-program Canary
-fingerprint and mode eligibility consumed by its legacy monitor. This keeps
-new health visible without letting a shadow source alter existing unread or
-push cadence. Scope changes create only bounded, generic previous-context
-audit rows in the app; they are not recovery, clear, attention, or delivery
-events. See
-<a href="https://github.com/osauer/ibkr/blob/main/docs/design/alert-regime-production.md">Alerts and Regime production commissioning</a>.</p>
+<p>The daemon's alert registry is source-neutral and durable. It owns opaque
+account/mode-scoped episode and occurrence identity, producer lifecycle, and
+typed source coverage. The app keeps the separate private delivery authority:
+one inbox, unread cursor, per-target attempt and receipt ledger, delivery
+health projection, and serialized dispatcher for every alert source.</p>
+<p>The first complete, current snapshot in each authority scope establishes a
+cutover baseline. Conditions already active at that boundary remain visible
+but cannot create a backlog push. Later delivery requires a current candidate,
+current and covered evidence from that exact source, an allowed app notification
+mode, an active target, and no prior accepted receipt. The dispatcher durably
+reserves and rechecks each occurrence-and-target attempt before Web Push, maps
+the daemon's closed presentation code to fixed app-owned copy, and records
+acceptance, retry, rejection, or uncertain interruption. Scope changes create
+only bounded generic previous context; they are not recovery, clear, unread,
+or delivery events. See
+<a href="https://github.com/osauer/ibkr/blob/main/docs/design/alert-regime-production.md">Alerts and Regime production contract</a>.</p>
 <h2 id="deployment-scopes-and-multiple-instances"><span class="secno" aria-hidden="true">07</span>Deployment Scopes and Multiple Instances</h2>
 <p>The default topology is one daemon shared by the CLI, all local MCP adapter
 processes, and the app, through the canonical Unix socket. A flock-backed
@@ -497,7 +497,7 @@ frames over the app's authenticated outbound WebSocket and stream back
 through the Worker.</p>
 <h2 id="observability"><span class="secno" aria-hidden="true">09</span>Observability</h2>
 <p>The observability layer is thin on purpose: text logs, one health surface,
-typed database evidence, and bounded typed shadow-calibration counters. There
+typed database evidence, and bounded alert lifecycle and delivery counters. There
 is no external metrics stack and no tracing.</p>
 <ul>
 <li>The daemon writes structured text logs through <code>log/slog</code>. The <code>log_level</code>
