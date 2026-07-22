@@ -580,10 +580,6 @@ func (s *Server) briefGammaSnapshot() *rpc.GammaZeroSPXResult {
 	return &env
 }
 
-func (s *Server) briefRegimeSnapshot() (*rpc.RegimeSnapshotResult, error) {
-	return s.briefRegimeSnapshotContext(s.regimeConsumerContext())
-}
-
 func (s *Server) briefRegimeSnapshotContext(ctx context.Context) (*rpc.RegimeSnapshotResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("regime snapshot unavailable")

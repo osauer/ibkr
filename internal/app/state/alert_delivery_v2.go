@@ -248,7 +248,7 @@ func failClosedMigratedAlertSnapshot(legacy legacyAlertCandidateSnapshotV2, data
 			continue
 		}
 		occurrence, _, ok := findAlertDeliveryOccurrence(data, episode.AuthorityScope, episode.CurrentOccurrenceKey)
-		if !ok || occurrence.EndedAt.IsZero() == false {
+		if !ok || !occurrence.EndedAt.IsZero() {
 			continue
 		}
 		candidate := alertCandidateFromOccurrence(occurrence)
