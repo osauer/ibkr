@@ -302,10 +302,13 @@ func TestRequestCtxNoDeadlineForStreamingMethod(t *testing.T) {
 
 // Server.Start must open the Unix socket and start serving before the
 // gateway handshake starts — otherwise a slow or unreachable gateway blocks
-// `ibkr status` for 30-40s during the IBKR pool's TCP timeouts. The fake
+// `ibkr status` for 30-40s during the IBKR pool's TCP timeouts. The initial
+// connection must also be marked in-flight before the accept loop is exposed;
+// otherwise an immediate status request launches reconnectFlow alongside the
+// initial handshake and IBKR rejects the duplicate client ID. The fake
 // attempter checks the Unix socket inode synchronously on entry to Start and
 // then blocks. Dial reachability is covered independently by the openSocket
-// test; keeping this assertion at the publication boundary avoids a
+// test; keeping these assertions at the publication boundary avoids a
 // load-sensitive kernel dial in the parallel race suite.
 func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 	t.Parallel()
@@ -332,6 +335,17 @@ func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 	// open order there would (correctly) veto idle shutdown via the
 	// open-orders background task.
 	srv.orderJournal = newOrderJournalStore(filepath.Join(dir, "order-journal.jsonl"))
+	acceptCheck := make(chan error, 1)
+	srv.initialAcceptLoopStartedForTest = func() {
+		srv.mu.Lock()
+		inFlight := srv.connectInFlight
+		srv.mu.Unlock()
+		if !inFlight {
+			acceptCheck <- errors.New("RPC accept loop exposed before initial connection claimed the in-flight gate")
+			return
+		}
+		acceptCheck <- nil
+	}
 	startCheck := make(chan error, 1)
 	srv.attempterFactory = func(_ discover.Endpoint) connectAttempter {
 		return &fakeAttempter{
@@ -357,6 +371,17 @@ func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 	go func() {
 		startReturned <- srv.Start(ctx)
 	}()
+
+	select {
+	case err := <-acceptCheck:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case err := <-startReturned:
+		t.Fatalf("Start returned before exposing the accept loop: %v", err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("accept loop was not exposed")
+	}
 
 	select {
 	case err := <-startCheck:

@@ -149,6 +149,11 @@ type Server struct {
 	// is set so a stream of `ibkr status` calls during a wedged-gateway
 	// recovery doesn't pile up parallel connect goroutines.
 	connectInFlight bool
+	// initialAcceptLoopStartedForTest observes the exact startup boundary after
+	// the RPC accept loop is exposed and before the initial connector goroutine
+	// is launched. It lets the startup-order regression test assert that the
+	// in-flight gate was already claimed at that boundary.
+	initialAcceptLoopStartedForTest func()
 	// reconnectFailStreak / lastReconnectAttemptAt drive the reconnect
 	// backoff (reconnectAllowed / reconnectBackoff). The streak counts
 	// consecutive failed reconnect cycles; it is bumped in reconnectFlow on
@@ -1278,7 +1283,6 @@ func (s *Server) Start(ctx context.Context) error {
 		s.lock = nil
 		return fmt.Errorf("attach alert shadow authority: %w", err)
 	}
-	s.startAlertShadowObservationLoops(serverCtx)
 
 	ep, derr := discover.Resolve(serverCtx, partialFromConfig(s.cfg.Gateway))
 	s.mu.Lock()
@@ -1322,12 +1326,24 @@ func (s *Server) Start(ctx context.Context) error {
 	// Skip the connect goroutine when discovery already failed — there's
 	// nothing to connect to. The socket is still up so `ibkr status`
 	// renders the discovery error, and the next request will trigger a
-	// rediscover.
-	go s.acceptLoop(ctx, s.listener)
+	// rediscover. Claim the initial attempt before exposing the accept loop:
+	// an immediately queued status request otherwise sees no ready connector
+	// and no attempt in flight, starts reconnectFlow, and races the initial
+	// handshake with a second socket using the same client ID.
 	if derr == nil {
 		s.mu.Lock()
 		s.connectInFlight = true
 		s.mu.Unlock()
+	}
+	// The canonical Rulebook refresh may immediately need the gateway. Start
+	// all alert-shadow loops only after the initial connect slot is claimed so
+	// that read-side demand cannot launch reconnectFlow alongside cold start.
+	s.startAlertShadowObservationLoops(serverCtx)
+	go s.acceptLoop(ctx, s.listener)
+	if s.initialAcceptLoopStartedForTest != nil {
+		s.initialAcceptLoopStartedForTest()
+	}
+	if derr == nil {
 		go s.runConnectAttempt(serverCtx, ep)
 	}
 	if s.protectionPolicies != nil {
