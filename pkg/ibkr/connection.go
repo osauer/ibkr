@@ -2738,11 +2738,10 @@ func (c *Connection) handleAccountSummaryUnderBrokerScopeLease(fields []string) 
 
 	// A registered one-shot is an account-scoped authority read. Keep it
 	// isolated from the shared streaming cache, and reject the whole row set
-	// if any row is outside the expected account. IBKR legitimately labels the
-	// modeled per-currency $LEDGER:ALL rows as Account=All, so those have one
-	// narrow typed exception. This is intentionally stricter than filtering:
-	// mixing unmodeled or foreign tags could manufacture a coherent-looking
-	// snapshot that no account emitted.
+	// if any concrete row is outside the expected account. IBKR labels every
+	// $LEDGER:ALL row as Account=All, including fields this client does not
+	// model. Admit only the typed currency fields and ignore the other aggregate
+	// rows; none of them may enter or invalidate the account-scoped snapshot.
 	c.accountMu.Lock()
 	key := tag
 	if currency != "" && currency != "BASE" {
@@ -2750,8 +2749,13 @@ func (c *Connection) handleAccountSummaryUnderBrokerScopeLease(fields []string) 
 	}
 	if reqIDErr == nil {
 		if snap := c.summarySnapshots[reqID]; snap != nil {
-			if snap.scopeConflict || !accountSummaryRowMatchesRequestScope(account, tag, currency, snap.expectedAccount) {
+			disposition := accountSummaryRequestRowDisposition(account, tag, currency, snap.expectedAccount)
+			if snap.scopeConflict || disposition == accountSummaryRowReject {
 				snap.scopeConflict = true
+				c.accountMu.Unlock()
+				return
+			}
+			if disposition == accountSummaryRowIgnore {
 				c.accountMu.Unlock()
 				return
 			}
@@ -2782,24 +2786,37 @@ func (c *Connection) handleAccountSummaryUnderBrokerScopeLease(fields []string) 
 	}
 }
 
-// accountSummaryRowMatchesRequestScope admits ordinary rows only from the
-// expected concrete account. IBKR's $LEDGER:ALL response is the sole aggregate
-// exception: Account=All is accepted only for typed ledger fields with an
-// exact three-letter, non-BASE currency. Unregistered traffic never calls this
-// helper and therefore cannot use the exception to seed the streaming cache.
-func accountSummaryRowMatchesRequestScope(account, tag, currency, expectedAccount string) bool {
+type accountSummaryRowDisposition uint8
+
+const (
+	accountSummaryRowReject accountSummaryRowDisposition = iota
+	accountSummaryRowAccept
+	accountSummaryRowIgnore
+)
+
+// accountSummaryRequestRowDisposition admits ordinary rows only from the
+// expected concrete account. For Account=All, it accepts only typed ledger
+// fields and ignores every unmodeled aggregate field. Unregistered traffic
+// never calls this helper and cannot seed the streaming cache through it.
+func accountSummaryRequestRowDisposition(account, tag, currency, expectedAccount string) accountSummaryRowDisposition {
 	expectedAccount = strings.TrimSpace(expectedAccount)
 	if !accountCodeConcrete(expectedAccount) {
-		return false
+		return accountSummaryRowReject
 	}
 	account = strings.TrimSpace(account)
 	if accountCodeConcrete(account) {
-		return strings.EqualFold(account, expectedAccount)
+		if strings.EqualFold(account, expectedAccount) {
+			return accountSummaryRowAccept
+		}
+		return accountSummaryRowReject
 	}
-	if !strings.EqualFold(account, "All") || !currencyLedgerField(tag) {
-		return false
+	if !strings.EqualFold(account, "All") {
+		return accountSummaryRowReject
 	}
-	return concreteAccountSummaryLedgerCurrency(currency)
+	if currencyLedgerField(tag) && concreteAccountSummaryLedgerCurrency(currency) {
+		return accountSummaryRowAccept
+	}
+	return accountSummaryRowIgnore
 }
 
 func concreteAccountSummaryLedgerCurrency(currency string) bool {
