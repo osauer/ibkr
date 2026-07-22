@@ -861,6 +861,64 @@ func TestGammaZeroCache_SoftTTLRefreshesBehindStale(t *testing.T) {
 	}
 }
 
+// TestGammaZeroCache_LongComputeGetsFullSoftTTLAfterSuccess pins the runtime
+// failure where a 13-minute combined compute was refreshed only two minutes
+// after it finished because the 15-minute TTL was measured from kickoff.
+func TestGammaZeroCache_LongComputeGetsFullSoftTTLAfterSuccess(t *testing.T) {
+	c := newGammaZeroCache()
+	startedAt := time.Date(2026, 5, 19, 14, 0, 0, 0, time.UTC)
+	completedAt := startedAt.Add(13 * time.Minute)
+	scope := rpc.GammaZeroScopeCombined
+
+	var computeRuns atomic.Int32
+	compute := func(ctx context.Context, p *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+		run := computeRuns.Add(1)
+		return &rpc.GammaZeroComputed{SpotUnderlying: 5000 + float64(run)}, nil
+	}
+
+	current, fresh := c.kickOrJoin(context.Background(), scope, startedAt, 300, compute)
+	<-current.done
+	if !fresh || current.err != nil {
+		t.Fatalf("initial kickoff: fresh=%v err=%v", fresh, current.err)
+	}
+	if current.completedAt.IsZero() || current.completedAt.Before(startedAt) {
+		t.Fatalf("initial success did not record its publication time: %s", current.completedAt)
+	}
+
+	// Model the observed long combined run without sleeping for 13 minutes.
+	// completedAt is the successful publication boundary recorded by spawnJob.
+	current.completedAt = completedAt
+
+	// The old startedAt-based schedule would already refresh here. The fixed
+	// schedule keeps the gateway quiet because success is only two minutes old.
+	earlyPoll := startedAt.Add(softTTLRTH + time.Second)
+	got, fresh := c.kickOrJoin(context.Background(), scope, earlyPoll, 300, compute)
+	if fresh || got != current {
+		t.Fatalf("early poll should keep serving current: fresh=%v got=%p want=%p", fresh, got, current)
+	}
+	if runs := computeRuns.Load(); runs != 1 {
+		t.Fatalf("early poll started %d computes, want 1", runs)
+	}
+
+	// Once the full soft TTL has elapsed after publication, one background
+	// refresh is due while callers continue to receive the current result.
+	duePoll := completedAt.Add(softTTLRTH + time.Second)
+	got, fresh = c.kickOrJoin(context.Background(), scope, duePoll, 300, compute)
+	if fresh || got != current {
+		t.Fatalf("due poll should refresh behind current: fresh=%v got=%p want=%p", fresh, got, current)
+	}
+	c.mu.Lock()
+	refresh := c.slots[scope].refresh
+	c.mu.Unlock()
+	if refresh == nil {
+		t.Fatal("due poll did not start a background refresh")
+	}
+	<-refresh.done
+	if runs := computeRuns.Load(); runs != 2 {
+		t.Fatalf("due poll started %d computes, want 2", runs)
+	}
+}
+
 // TestGammaZeroCache_SoftTTLDoesNotStackRefreshes proves the
 // refresh-while-stale path is itself singleflighted: a second caller
 // arriving while a refresh is in flight does NOT kick a second
@@ -1970,7 +2028,7 @@ func TestGammaZeroCache_BackoffTable(t *testing.T) {
 // the June 9 respawn storm: a stale-but-good current whose refreshes
 // keep failing must NOT respawn a refresh on every poll. The soft-TTL
 // trigger condition stays true forever in that state (a failed refresh
-// never advances current.startedAt), so without the streak gate the
+// never advances the current success time), so without the streak gate the
 // daemon's 1-minute scheduler reaps and respawns a doomed compute per
 // tick.
 func TestGammaZeroCache_SoftTTLRefreshBackoffAfterFailure(t *testing.T) {

@@ -192,15 +192,16 @@ func (s *gammaSlot) clearColdReason() {
 // caller having to pass it again. Mirrors sessionKey in being a
 // stable property of the compute that the surrounding cache reads.
 type gammaComputation struct {
-	sessionKey string        // e.g., "2026-05-16"
-	scope      string        // rpc.GammaZeroScope* — which slot owns this job
-	startedAt  time.Time     // kickoff wall-clock
-	done       chan struct{} // closed once result or err is set
-	result     *rpc.GammaZeroComputed
-	err        error
-	cancel     context.CancelFunc // bounds the bg goroutine; called on superseding compute
-	progress   atomic.Int32       // 0–100, best-effort
-	etaSeconds int                // static estimate captured at kickoff
+	sessionKey  string        // e.g., "2026-05-16"
+	scope       string        // rpc.GammaZeroScope* — which slot owns this job
+	startedAt   time.Time     // kickoff wall-clock
+	completedAt time.Time     // successful publication wall-clock; zero until success
+	done        chan struct{} // closed once result or err is set
+	result      *rpc.GammaZeroComputed
+	err         error
+	cancel      context.CancelFunc // bounds the bg goroutine; called on superseding compute
+	progress    atomic.Int32       // 0–100, best-effort
+	etaSeconds  int                // static estimate captured at kickoff
 }
 
 // gammaErrorRetryTTL is the minimum age of a cached error before
@@ -281,6 +282,20 @@ func (g *gammaComputation) isDone() bool {
 	default:
 		return false
 	}
+}
+
+// successfulAt is the refresh-age anchor for a completed successful job.
+// Fresh work gets its full soft-TTL quiet period after publication, not after
+// kickoff. Persisted and older synthetic fixtures fall back to startedAt when
+// no completion timestamp is available.
+func (g *gammaComputation) successfulAt() time.Time {
+	if g != nil && !g.completedAt.IsZero() {
+		return g.completedAt
+	}
+	if g == nil {
+		return time.Time{}
+	}
+	return g.startedAt
 }
 
 func newGammaZeroCache() *gammaZeroCache {
@@ -412,9 +427,12 @@ func (c *gammaZeroCache) loadPersisted() {
 // lastErr reads to the right slot without needing the caller to pass
 // it again.
 //
-// startedAt is the persisted AsOf so the soft-TTL refresh trigger
-// fires on the correct elapsed window — a result persisted 40 min
-// ago should be refreshed in another ~20 min under the RTH TTL,
+// Persisted results predate the in-memory completion timestamp. startedAt uses
+// the result's decision AsOf, while completedAt uses the latest per-index AsOf
+// as the closest retained publication boundary for a serial combined run. This
+// makes the soft-TTL refresh trigger fire on the correct elapsed window — a
+// result persisted 40 min ago should be refreshed in another ~20 min under
+// the RTH TTL,
 // not start a fresh countdown from boot time. Also lets the
 // boundary-refresh path detect cached snapshots whose AsOf belongs
 // to a different option-data session class than the current one (e.g.
@@ -425,14 +443,28 @@ func newPersistedComputation(r *rpc.GammaZeroComputed, scope string, now time.Ti
 		sessionKey = nySessionKey(r.AsOf)
 	}
 	job := &gammaComputation{
-		sessionKey: sessionKey,
-		scope:      scope,
-		startedAt:  r.AsOf,
-		done:       make(chan struct{}),
-		result:     r,
+		sessionKey:  sessionKey,
+		scope:       scope,
+		startedAt:   r.AsOf,
+		completedAt: gammaPersistedCompletionAt(r),
+		done:        make(chan struct{}),
+		result:      r,
 	}
 	close(job.done)
 	return job
+}
+
+func gammaPersistedCompletionAt(r *rpc.GammaZeroComputed) time.Time {
+	if r == nil {
+		return time.Time{}
+	}
+	latest := r.AsOf
+	for _, sub := range r.PerIndex {
+		if sub != nil && sub.AsOf.After(latest) {
+			latest = sub.AsOf
+		}
+	}
+	return latest
 }
 
 func validateGammaComputed(r *rpc.GammaZeroComputed) error {
@@ -649,14 +681,15 @@ func (c *gammaZeroCache) kickOrJoin(parent context.Context, scope string, now ti
 		// retryAllowed also gates this path: once current is past the
 		// soft TTL, the trigger condition stays true on every poll while
 		// refreshes keep failing (a failed refresh never advances
-		// current.startedAt) — the streak gate is what stops that from
+		// current's successful publication) — the streak gate is what stops that from
 		// respawning a doomed ~35 s compute per scheduler tick.
 		if slot.current.isDone() && slot.current.err == nil && slot.refresh == nil && slot.retryAllowed(now) {
 			currentClass := gammaClassifySession(now)
 			if currentClass != rpc.SessionClosed {
-				cachedClass := gammaClassifySession(slot.current.startedAt)
+				publishedAt := slot.current.successfulAt()
+				cachedClass := gammaClassifySession(publishedAt)
 				classChanged := cachedClass != currentClass
-				if classChanged || now.Sub(slot.current.startedAt) >= softTTL(now) {
+				if classChanged || now.Sub(publishedAt) >= softTTL(now) {
 					slot.refresh = c.spawnJob(parent, scope, key, now, etaSeconds, compute)
 				}
 			}
@@ -755,6 +788,7 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 		cancel:     cancel,
 		etaSeconds: etaSeconds,
 	}
+	wallStartedAt := time.Now()
 
 	go func() {
 		defer close(job.done)
@@ -812,6 +846,11 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 				gammaLogf{inner: c.log}.Warnf("gamma skew diag: append scope=%s: %v", scope, diagErr)
 			}
 		}
+		// Use the caller's clock origin plus elapsed wall time. Production gets
+		// the real publication time, while tests that use synthetic dates stay
+		// deterministic. This is deliberately after persistence/journaling: a
+		// successful result earns its full quiet period only once it is publishable.
+		job.completedAt = now.Add(time.Since(wallStartedAt))
 	}()
 
 	return job
