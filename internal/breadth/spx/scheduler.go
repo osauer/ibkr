@@ -20,9 +20,15 @@ const (
 )
 
 const (
-	refreshSettleDelay       = 35 * time.Minute
-	calendarLookbackSessions = 10
-	calendarLookaheadDays    = 14
+	refreshSettleDelay = 35 * time.Minute
+	// publicationWindowDuration covers one normal full-universe HMDS pass.
+	// The shared historical-data limiter permits an initial 60 requests and
+	// then refills at 0.1 request/second, so the remaining 443 names take about
+	// 74 minutes. Ninety minutes leaves a bounded margin for request latency
+	// without hiding a stuck or failed refresh for the rest of the evening.
+	publicationWindowDuration = 90 * time.Minute
+	calendarLookbackSessions  = 10
+	calendarLookaheadDays     = 14
 )
 
 // belowThresholdRetryDelay is how long the scheduler waits before
@@ -165,6 +171,39 @@ func sessionRefreshAt(sessionKey string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Date(day.Year(), day.Month(), day.Day(), refreshHourET, refreshMinuteET, 0, 0, loc), true
+}
+
+// PublicationDeadline returns the bounded deadline for publishing one
+// session's breadth snapshot. The start follows the official session close
+// (including known early closes) plus the normal settlement delay; the end is
+// sized for one normally paced full-universe HMDS pass.
+func PublicationDeadline(sessionKey string) (time.Time, bool) {
+	refreshAt, ok := sessionRefreshAt(sessionKey)
+	if !ok {
+		return time.Time{}, false
+	}
+	return refreshAt.Add(publicationWindowDuration), true
+}
+
+// PublicationPending reports whether lastGoodSessionKey is the immediately
+// prior session and an active refresh is still inside the current session's
+// bounded publication window. Callers may keep that prior last-good as typed
+// not-due context only while this returns true; once the deadline passes (or
+// the engine is no longer active), the older session is overdue.
+func PublicationPending(lastGoodSessionKey string, refreshActive bool, now time.Time) bool {
+	if lastGoodSessionKey == "" || !refreshActive {
+		return false
+	}
+	targetSession := CompletedSessionKey(now)
+	if targetSession == "" || targetSession == lastGoodSessionKey {
+		return false
+	}
+	refreshAt, ok := sessionRefreshAt(targetSession)
+	if !ok || now.Before(refreshAt) || !now.Before(refreshAt.Add(publicationWindowDuration)) {
+		return false
+	}
+	previousSession := CompletedSessionKey(refreshAt.Add(-time.Nanosecond))
+	return lastGoodSessionKey == previousSession
 }
 
 func breadthRefreshAt(session marketcal.Session) time.Time {

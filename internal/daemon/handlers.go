@@ -4098,6 +4098,16 @@ func (s *Server) buildBreadthSPX(req *rpc.Request, allowRefresh bool) (*rpc.Brea
 	active := s.breadth.IsBusy()
 	res.State = classifyBreadthState(ok, active)
 	res.Refreshing = ok && active
+	if progress, exists := s.breadth.Progress(); exists {
+		res.Refresh = &rpc.BreadthRefreshProgress{
+			SessionKey:  progress.SessionKey,
+			StartedAt:   progress.StartedAt,
+			Processed:   progress.Processed,
+			Total:       progress.Total,
+			Deadline:    progress.Deadline,
+			LastFailure: rpc.BreadthRefreshFailure(progress.LastFailure),
+		}
+	}
 
 	if ok {
 		res.PctAbove50DMA = snap.PctAbove50DMA

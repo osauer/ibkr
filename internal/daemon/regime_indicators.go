@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/breadth/spx"
 	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
@@ -325,6 +326,28 @@ func gammaCadenceClass(res *rpc.RegimeSnapshotResult, now time.Time) string {
 		if res.GammaZero.Status == rpc.RegimeStatusOK || res.GammaZero.Status == rpc.RegimeStatusStale {
 			return rpc.RegimeFreshnessNotDue
 		}
+	}
+	return rpc.RegimeFreshnessOverdue
+}
+
+// breadthCadenceClass keeps the raw row honest (the served snapshot is stale
+// once CompletedSessionKey rolls) while identifying the one expected gap: the
+// immediately prior last-good is typed not_due while an active HMDS refresh is
+// still inside its bounded, calendar-based publication window.
+func breadthCadenceClass(res *rpc.RegimeSnapshotResult, now time.Time) string {
+	if res == nil {
+		return rpc.RegimeFreshnessOverdue
+	}
+	row := res.Breadth
+	if row.Envelope.State != rpc.BreadthStateReady {
+		return rpc.RegimeFreshnessOverdue
+	}
+	if spx.PublicationPending(row.Envelope.SessionKey, row.Envelope.Refreshing, now) &&
+		(row.Status == rpc.RegimeStatusOK || row.Status == rpc.RegimeStatusStale) {
+		return rpc.RegimeFreshnessNotDue
+	}
+	if row.Status == rpc.RegimeStatusOK {
+		return rpc.RegimeFreshnessFresh
 	}
 	return rpc.RegimeFreshnessOverdue
 }

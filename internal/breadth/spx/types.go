@@ -42,6 +42,29 @@ const MethodConstituentFanout = methodConstituentFanout
 // rejecting catastrophic fan-out failures.
 const MinCoverageFraction = 0.80
 
+// RefreshFailure is a redacted machine-readable reason for the latest breadth
+// refresh problem. Raw broker and transport errors remain local logs.
+type RefreshFailure string
+
+const (
+	RefreshFailureFetch     RefreshFailure = "fetch_failed"
+	RefreshFailurePersist   RefreshFailure = "persist_failed"
+	RefreshFailureCancelled RefreshFailure = "cancelled"
+)
+
+// RefreshProgress is the current or most recently completed fan-out attempt.
+// Processed includes both successful and failed symbol fetches; Total is the
+// plan size at StartedAt. Deadline is the calendar-based publication SLA for
+// SessionKey, not an ETA.
+type RefreshProgress struct {
+	SessionKey  string
+	StartedAt   time.Time
+	Processed   int
+	Total       int
+	Deadline    time.Time
+	LastFailure RefreshFailure
+}
+
 // WindowSize is the 50-day SMA lookback (S&P DJI's S5FI is the
 // 50-day variant). The window holds the 50 most recent daily closes
 // chronologically; the most recent close is window[len-1]. SMA =

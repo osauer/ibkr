@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/breadth/spx"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
@@ -88,6 +89,123 @@ func TestBreadthEnvelopeStaleUsesSessionKey(t *testing.T) {
 	if !breadthEnvelopeStale(envelope, mondayPostClose) {
 		t.Fatal("Friday breadth should be stale after Monday's post-close refresh window")
 	}
+}
+
+func TestBreadthPublicationWindowNormalizesOnlyActivePriorLastGood(t *testing.T) {
+	loc := newYorkLocation()
+	build := func(now time.Time, active bool) *rpc.RegimeSnapshotResult {
+		r := mkAllGreenRegime()
+		r.AsOf = now
+		r.Breadth.Status = rpc.RegimeStatusStale
+		r.Breadth.Envelope = rpc.BreadthSPXResult{
+			State: rpc.BreadthStateReady, Refreshing: active,
+			SessionKey: "2026-05-29", AsOf: time.Date(2026, 5, 29, 17, 0, 0, 0, loc),
+			PctAbove50DMA: 65,
+		}
+		regimeTestFinalize(t, r)
+		return r
+	}
+
+	before := build(time.Date(2026, 6, 1, 17, 30, 0, 0, loc), true)
+	if before.Breadth.Status != rpc.RegimeStatusStale {
+		t.Fatalf("raw breadth status=%q, want stale evidence", before.Breadth.Status)
+	}
+	if before.Breadth.Freshness == nil || before.Breadth.Freshness.Class != rpc.RegimeFreshnessNotDue {
+		t.Fatalf("breadth freshness=%+v, want not_due before deadline", before.Breadth.Freshness)
+	}
+	assertRegimeClusterProjection(t, before, "breadth", rpc.SourceStatusOK, rpc.SourceRefreshNotDue, false, false)
+
+	deadline, ok := spx.PublicationDeadline("2026-06-01")
+	if !ok {
+		t.Fatal("resolve breadth publication deadline")
+	}
+	missed := build(deadline, true)
+	if missed.Breadth.Freshness == nil || missed.Breadth.Freshness.Class != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("breadth freshness=%+v, want overdue at deadline", missed.Breadth.Freshness)
+	}
+	assertRegimeClusterProjection(t, missed, "breadth", rpc.SourceStatusStale, "", true, true)
+
+	stuck := build(time.Date(2026, 6, 1, 17, 30, 0, 0, loc), false)
+	if stuck.Breadth.Freshness == nil || stuck.Breadth.Freshness.Class != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("idle breadth freshness=%+v, want overdue before deadline", stuck.Breadth.Freshness)
+	}
+	assertRegimeClusterProjection(t, stuck, "breadth", rpc.SourceStatusStale, "", true, true)
+}
+
+func TestVIXNotDueAggregateRequiresCurrentVVIX(t *testing.T) {
+	loc := newYorkLocation()
+	quality := func(at time.Time, class string) *rpc.Quality {
+		return &rpc.Quality{AsOf: at, FreshnessClass: class, Confidence: rpc.ConfidenceFirm}
+	}
+	build := func(now time.Time, vvixStatus string) *rpc.RegimeSnapshotResult {
+		r := mkAllGreenRegime()
+		r.AsOf = now
+		r.VIXTermStructure.Status = rpc.RegimeStatusStale
+		r.VIXTermStructure.VIXQuality = quality(now, rpc.FreshnessLive)
+		r.VIXTermStructure.VIX3MQuality = quality(now, rpc.FreshnessFrozen)
+		r.VolOfVol.Status = vvixStatus
+		r.VolOfVol.AsOfDate = now.Format("2006-01-02")
+		regimeTestFinalize(t, r)
+		return r
+	}
+
+	notDue := build(time.Date(2026, 7, 20, 4, 0, 0, 0, loc), rpc.RegimeStatusOK)
+	if notDue.VIXTermStructure.Freshness == nil || notDue.VIXTermStructure.Freshness.Class != rpc.RegimeFreshnessNotDue {
+		t.Fatalf("VIX freshness=%+v, want not_due", notDue.VIXTermStructure.Freshness)
+	}
+	assertRegimeClusterProjection(t, notDue, "vol", rpc.SourceStatusOK, rpc.SourceRefreshNotDue, false, false)
+
+	staleVVIX := build(time.Date(2026, 7, 20, 4, 0, 0, 0, loc), rpc.RegimeStatusStale)
+	assertRegimeClusterProjection(t, staleVVIX, "vol", rpc.SourceStatusStale, "", true, true)
+
+	due := build(time.Date(2026, 7, 20, 9, 31, 0, 0, loc), rpc.RegimeStatusOK)
+	if due.VIXTermStructure.Freshness == nil || due.VIXTermStructure.Freshness.Class != rpc.RegimeFreshnessOverdue {
+		t.Fatalf("VIX freshness=%+v, want overdue at due boundary", due.VIXTermStructure.Freshness)
+	}
+	assertRegimeClusterProjection(t, due, "vol", rpc.SourceStatusStale, "", true, true)
+}
+
+func assertRegimeClusterProjection(t *testing.T, r *rpc.RegimeSnapshotResult, cluster, wantStatus, wantRefresh string, wantQuality, wantWarning bool) {
+	t.Helper()
+	var health *rpc.SourceHealth
+	for i := range r.SourceHealth {
+		if strings.EqualFold(r.SourceHealth[i].Source, cluster) {
+			health = &r.SourceHealth[i]
+			break
+		}
+	}
+	if health == nil || health.Status != wantStatus || health.RefreshState != wantRefresh {
+		t.Fatalf("%s source health=%+v, want status=%q refresh=%q", cluster, health, wantStatus, wantRefresh)
+	}
+	hasQuality := false
+	for _, q := range r.DataQuality {
+		if regimeTestClustersContain(q.StaleClusters, cluster) ||
+			regimeTestClustersContain(q.PartialClusters, cluster) ||
+			regimeTestClustersContain(q.DegradedClusters, cluster) {
+			hasQuality = true
+		}
+	}
+	if hasQuality != wantQuality {
+		t.Fatalf("%s data-quality presence=%v, want %v: %+v", cluster, hasQuality, wantQuality, r.DataQuality)
+	}
+	hasWarning := false
+	for _, warning := range r.WarningDetails {
+		if regimeWarningCluster(warning.Scope) == cluster {
+			hasWarning = true
+		}
+	}
+	if hasWarning != wantWarning {
+		t.Fatalf("%s warning presence=%v, want %v: %+v", cluster, hasWarning, wantWarning, r.WarningDetails)
+	}
+}
+
+func regimeTestClustersContain(clusters []string, want string) bool {
+	for _, cluster := range clusters {
+		if strings.EqualFold(cluster, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestBuildRegimeComposite_ThreeRedTriggersRegimeShift pins the spec

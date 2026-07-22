@@ -16,10 +16,12 @@ import (
 // members is the authoritative S&P-500 list for this session. Only
 // names appearing in members count; windows for delisted names are
 // silently ignored. Names in members but missing from windows are
-// excluded with reason "no_window". Names with thin history are
-// counted toward whichever readings their history supports (a name
-// with 75 bars contributes to the 50-DMA reading and is excluded
-// from the 200-DMA and new-highs/lows counts).
+// excluded with reason "no_window". A cached window contributes only when its
+// LastBarAt matches sessionKey; this prevents yesterday's complete windows
+// from being relabelled and published as today's snapshot after a failed warm
+// refresh. Names with thin history are counted toward whichever readings their
+// history supports (a name with 75 bars contributes to the 50-DMA reading and
+// is excluded from the 200-DMA and new-highs/lows counts).
 //
 // sessionKey is the New-York trading-day date string the snapshot
 // represents (YYYY-MM-DD). The caller derives it; Compute does not
@@ -48,6 +50,13 @@ func Compute(members []string, windows map[string]ConstituentWindow, sessionKey 
 		w, ok := windows[sym]
 		if !ok {
 			snap.Excluded = append(snap.Excluded, ExcludedMember{Symbol: sym, Reason: "no_window"})
+			continue
+		}
+		if w.LastBarAt != sessionKey {
+			snap.Excluded = append(snap.Excluded, ExcludedMember{
+				Symbol: sym,
+				Reason: "session_mismatch",
+			})
 			continue
 		}
 		if len(w.Closes) < WindowSize {

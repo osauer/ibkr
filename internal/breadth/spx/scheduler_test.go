@@ -119,6 +119,45 @@ func TestCompletedSessionKeyClosedDaysUsePreviousSession(t *testing.T) {
 	}
 }
 
+func TestPublicationPendingUsesBoundedCalendarWindow(t *testing.T) {
+	loc := nyLocation()
+	refreshAt, ok := sessionRefreshAt("2026-06-01")
+	if !ok {
+		t.Fatal("resolve regular-session refresh time")
+	}
+	deadline, ok := PublicationDeadline("2026-06-01")
+	if !ok {
+		t.Fatal("resolve regular-session publication deadline")
+	}
+	if want := time.Date(2026, 6, 1, 18, 5, 0, 0, loc); !deadline.Equal(want) {
+		t.Fatalf("deadline=%s, want %s", deadline, want)
+	}
+
+	if !PublicationPending("2026-05-29", true, refreshAt.Add(60*time.Minute)) {
+		t.Fatal("active prior-session refresh should be not_due before the deadline")
+	}
+	if PublicationPending("2026-05-29", true, deadline) {
+		t.Fatal("prior-session refresh must be overdue at the exact deadline")
+	}
+	if PublicationPending("2026-05-29", true, deadline.Add(time.Nanosecond)) {
+		t.Fatal("prior-session refresh must remain overdue after the deadline")
+	}
+	if PublicationPending("2026-05-29", false, refreshAt.Add(60*time.Minute)) {
+		t.Fatal("idle prior-session state is stuck, not an expected publication gap")
+	}
+	if PublicationPending("2026-05-28", true, refreshAt.Add(60*time.Minute)) {
+		t.Fatal("a snapshot older than the immediately prior session must fail closed")
+	}
+
+	earlyDeadline, ok := PublicationDeadline("2026-11-27")
+	if !ok {
+		t.Fatal("resolve early-close publication deadline")
+	}
+	if want := time.Date(2026, 11, 27, 15, 5, 0, 0, loc); !earlyDeadline.Equal(want) {
+		t.Fatalf("early-close deadline=%s, want %s", earlyDeadline, want)
+	}
+}
+
 // TestShouldRefreshOnStartupNoSnapshot is the cold-install case: no
 // cache exists, so a catch-up is always wanted regardless of clock.
 func TestShouldRefreshOnStartupNoSnapshot(t *testing.T) {

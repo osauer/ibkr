@@ -124,8 +124,9 @@ func TestComputeNoWindow(t *testing.T) {
 func TestComputeThinHistory(t *testing.T) {
 	members := []string{"A", "NEW"}
 	thin := ConstituentWindow{
-		Symbol: "NEW",
-		Closes: []float64{50, 51, 52}, // only 3 closes
+		Symbol:    "NEW",
+		Closes:    []float64{50, 51, 52}, // only 3 closes
+		LastBarAt: "2026-05-16",
 	}
 	windows := map[string]ConstituentWindow{
 		"A":   risingWindow("A", 100, 1),
@@ -143,6 +144,26 @@ func TestComputeThinHistory(t *testing.T) {
 	}
 	if snap.Excluded[0].Reason != "thin_history(3)" {
 		t.Errorf("reason: want thin_history(3), got %q", snap.Excluded[0].Reason)
+	}
+}
+
+func TestComputeExcludesPriorSessionWindows(t *testing.T) {
+	members := []string{"CURRENT", "PRIOR"}
+	current := risingWindow("CURRENT", 100, 1)
+	current.LastBarAt = "2026-05-18"
+	prior := risingWindow("PRIOR", 100, 1)
+	prior.LastBarAt = "2026-05-15"
+
+	snap := Compute(members, map[string]ConstituentWindow{
+		"CURRENT": current,
+		"PRIOR":   prior,
+	}, "2026-05-18", time.Now())
+
+	if snap.Coverage != 1 {
+		t.Fatalf("coverage=%d, want only the current-session window", snap.Coverage)
+	}
+	if len(snap.Excluded) != 1 || snap.Excluded[0] != (ExcludedMember{Symbol: "PRIOR", Reason: "session_mismatch"}) {
+		t.Fatalf("excluded=%+v, want stable prior-session exclusion", snap.Excluded)
 	}
 }
 

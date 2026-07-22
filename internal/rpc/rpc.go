@@ -613,6 +613,28 @@ const (
 	BreadthStateDegraded  BreadthState = "degraded"
 )
 
+// BreadthRefreshFailure is a redacted allowlisted reason for the latest
+// breadth refresh problem. Raw per-symbol broker errors remain daemon-local.
+type BreadthRefreshFailure string
+
+const (
+	BreadthRefreshFailureFetch     BreadthRefreshFailure = "fetch_failed"
+	BreadthRefreshFailurePersist   BreadthRefreshFailure = "persist_failed"
+	BreadthRefreshFailureCancelled BreadthRefreshFailure = "cancelled"
+)
+
+// BreadthRefreshProgress makes the long IBKR-paced fan-out observable without
+// exposing symbols or broker text. Processed includes successful and failed
+// fetches; Deadline is the calendar-based publication SLA, not an ETA.
+type BreadthRefreshProgress struct {
+	SessionKey  string                `json:"session_key"`
+	StartedAt   time.Time             `json:"started_at"`
+	Processed   int                   `json:"processed"`
+	Total       int                   `json:"total"`
+	Deadline    time.Time             `json:"deadline,omitzero"`
+	LastFailure BreadthRefreshFailure `json:"last_failure,omitempty"`
+}
+
 // BreadthSPXResult is the payload for MethodBreadthSPX. The two
 // SMA percentages plus the new-highs/lows count are surfaced as
 // separate fields so consumers can read each independently;
@@ -634,6 +656,10 @@ type BreadthSPXResult struct {
 	// Refreshing is true when a newer breadth run is in flight or waiting to
 	// retry while this envelope serves the last good snapshot.
 	Refreshing bool `json:"refreshing,omitempty"`
+	// Refresh is the current or most recently completed paced-pass progress.
+	// It remains available after completion so operators can distinguish a
+	// slow advancing run, a stopped run, and the last classified failure.
+	Refresh *BreadthRefreshProgress `json:"refresh,omitempty"`
 	// PctAbove50DMA is the current fast-window reading: percentage of
 	// S&P 500 constituents trading above their own 50-day SMA. 0-100;
 	// 50 is the symmetric midpoint. Spec rule of thumb: > 55 healthy,

@@ -690,10 +690,10 @@ func BuildRegimeSourceHealth(r *RegimeSnapshotResult, now time.Time) []SourceHea
 		asOf := weakestRegimeAsOf(row.asOf)
 		status := regimeSourceStatus(row.statuses, row.band, row.qualityStatus, row.partial)
 		refreshState := ""
-		if row.name == "vol" && r.VIXTermStructure.Freshness != nil && r.VIXTermStructure.Freshness.Class == RegimeFreshnessNotDue {
-			refreshState = SourceRefreshNotDue
-		}
-		if row.name == "gamma" && r.GammaZero.Freshness != nil && r.GammaZero.Freshness.Class == RegimeFreshnessNotDue {
+		if RegimeClusterExpectedNotDue(*r, row.name) {
+			// Keep the raw row stale for evidence honesty, but normalize the
+			// aggregate source state: no newer observation is expected yet.
+			status = SourceStatusOK
 			refreshState = SourceRefreshNotDue
 		}
 		out = append(out, SourceHealth{
@@ -854,7 +854,8 @@ func regimeLifecycleConfidence(t regimeClusterTally) string {
 
 // regimeLifecycleHasDegradedInputs treats every active source defect as a
 // blocked market-state input. The only exception is an exact, typed not_due
-// cadence for VIX3M or gamma; an unranked row is never itself an exemption.
+// cadence recognized by RegimeClusterExpectedNotDue; an unranked row is never
+// itself an exemption.
 func regimeLifecycleHasDegradedInputs(r RegimeSnapshotResult, _ RegimeClusterBands) bool {
 	for _, item := range r.DataQuality {
 		if len(item.PartialClusters) > 0 || len(item.DegradedClusters) > 0 {
@@ -868,7 +869,7 @@ func regimeLifecycleHasDegradedInputs(r RegimeSnapshotResult, _ RegimeClusterBan
 				return true
 			}
 			for _, name := range item.StaleClusters {
-				if !regimeLifecycleClusterExpectedNotDue(r, name) {
+				if !RegimeClusterExpectedNotDue(r, name) {
 					return true
 				}
 			}
@@ -907,14 +908,31 @@ func regimeLifecycleClusterRows(r RegimeSnapshotResult, name string) []regimeLif
 	}
 }
 
-func regimeLifecycleClusterExpectedNotDue(r RegimeSnapshotResult, name string) bool {
+// RegimeClusterExpectedNotDue is the single exact-cluster exemption used by
+// source health, data-quality projection, warnings, and lifecycle readiness.
+// It accepts only source-native publication gaps with all companion evidence
+// current; malformed, partial, or overdue rows still fail closed.
+func RegimeClusterExpectedNotDue(r RegimeSnapshotResult, name string) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
 	rows := regimeLifecycleClusterRows(r, name)
 	switch name {
 	case "vol":
-		return len(rows) == 2 && regimeLifecycleRowNotDue(rows[0]) && regimeLifecycleRowCurrent(rows[1])
+		return len(rows) == 2 &&
+			regimeLifecycleRowNotDue(rows[0]) &&
+			regimeLifecycleRowCurrent(rows[1]) &&
+			!regimeSourceMissingRequiredFields(r.VIXTermStructure.Status, r.VIXTermStructure.Band, r.VIXTermStructure.FieldsMissing)
 	case "gamma":
-		return len(rows) == 1 && regimeLifecycleRowNotDue(rows[0])
+		return len(rows) == 1 &&
+			regimeLifecycleRowNotDue(rows[0]) &&
+			r.GammaZero.Envelope.Result != nil &&
+			!regimeSourceMissingRequiredFields(r.GammaZero.Status, r.GammaZero.Band, r.GammaZero.FieldsMissing)
+	case "breadth":
+		return len(rows) == 1 &&
+			regimeLifecycleRowNotDue(rows[0]) &&
+			r.Breadth.Envelope.State == BreadthStateReady &&
+			r.Breadth.Envelope.Refreshing &&
+			r.Breadth.Envelope.SessionKey != "" &&
+			!regimeSourceMissingRequiredFields(r.Breadth.Status, r.Breadth.Band, r.Breadth.FieldsMissing)
 	default:
 		return false
 	}
@@ -999,7 +1017,7 @@ func regimeLifecycleVIXTapeCurrent(r RegimeSnapshotResult) bool {
 func regimeLifecycleHasWeakSourceRows(r RegimeSnapshotResult, _ RegimeClusterBands) bool {
 	for _, name := range RegimeClusterNames {
 		health, healthOK := regimeLifecycleSourceHealth(r, name)
-		if regimeLifecycleClusterExpectedNotDue(r, name) {
+		if RegimeClusterExpectedNotDue(r, name) {
 			if !healthOK || health.RefreshState != SourceRefreshNotDue {
 				return true
 			}

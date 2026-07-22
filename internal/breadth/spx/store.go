@@ -144,6 +144,45 @@ func (s *Store) SaveWindows(windows map[string]ConstituentWindow, asOf time.Time
 	return s.writeAtomic("windows.json", set)
 }
 
+// checkpointWindows replaces the resumable window projection without
+// appending a full-map immutable observation. The finalise path calls
+// SaveWindows once per completed pass to retain the canonical observation;
+// interim batches are crash-recovery coordination, not separate market
+// evidence. Legacy standalone mode keeps the same atomic-file behavior.
+func (s *Store) checkpointWindows(windows map[string]ConstituentWindow, asOf time.Time) error {
+	set := WindowSet{
+		Version: CurrentWindowSetVersion,
+		AsOf:    asOf,
+		Windows: windows,
+	}
+	if s.authority == nil {
+		return s.writeAtomic("windows.json", set)
+	}
+	payload, err := json.Marshal(set)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	for range 4 {
+		doc, ok, err := s.authority.GetStateDocument(ctx, breadthAuthorityScope, breadthWindowsStateKind)
+		if err != nil {
+			return err
+		}
+		var revision int64
+		if ok {
+			revision = doc.Revision
+		}
+		_, err = s.authority.CompareAndSwapStateDocument(ctx, corestore.StateDocumentCAS{
+			ScopeKey: breadthAuthorityScope, Kind: breadthWindowsStateKind,
+			ExpectedRevision: revision, JSON: payload,
+		})
+		if !errors.Is(err, corestore.ErrRevisionConflict) {
+			return err
+		}
+	}
+	return fmt.Errorf("checkpoint breadth authority %s: %w", breadthWindowsStateKind, corestore.ErrRevisionConflict)
+}
+
 // LoadHistory returns the persisted rolling-history series or (nil,
 // nil) when no file exists yet. Like the other loaders, an unknown
 // schema version triggers a cold rebuild rather than an error so a

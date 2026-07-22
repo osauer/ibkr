@@ -113,6 +113,42 @@ func TestStoreUsesSQLiteWithoutLegacyFallback(t *testing.T) {
 	}
 }
 
+func TestWindowCheckpointReplacesStateWithoutObservation(t *testing.T) {
+	authority := openBreadthTestCoreStore(t)
+	store := NewStore(t.TempDir())
+	if err := store.UseCoreStore(authority); err != nil {
+		t.Fatalf("UseCoreStore: %v", err)
+	}
+	now := time.Date(2026, 5, 18, 21, 30, 0, 0, time.UTC)
+	windows := map[string]ConstituentWindow{
+		"AAPL": {Symbol: "AAPL", Closes: []float64{100, 101}, LastBarAt: "2026-05-18"},
+	}
+	if err := store.checkpointWindows(windows, now); err != nil {
+		t.Fatalf("checkpointWindows: %v", err)
+	}
+	loaded, err := store.LoadWindows()
+	if err != nil || loaded["AAPL"].LastBarAt != "2026-05-18" {
+		t.Fatalf("checkpoint load=%+v err=%v", loaded, err)
+	}
+	query := corestore.ObservationQuery{
+		ScopeKey: breadthAuthorityScope, Source: breadthSource, Kind: breadthWindowsObservationKind,
+	}
+	observations, err := authority.ListObservations(context.Background(), query)
+	if err != nil {
+		t.Fatalf("list checkpoint observations: %v", err)
+	}
+	if len(observations) != 0 {
+		t.Fatalf("checkpoint appended %d immutable observations, want zero", len(observations))
+	}
+	if err := store.SaveWindows(windows, now); err != nil {
+		t.Fatalf("SaveWindows: %v", err)
+	}
+	observations, err = authority.ListObservations(context.Background(), query)
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("canonical observations=%d err=%v, want one", len(observations), err)
+	}
+}
+
 func TestEngineUseCoreStoreReplacesPreloadedLegacyProjection(t *testing.T) {
 	legacyDir := t.TempDir()
 	legacy := NewStore(legacyDir)

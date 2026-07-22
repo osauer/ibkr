@@ -2,11 +2,18 @@ package spx
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"slices"
 	"sync"
 	"time"
 )
+
+// windowCheckpointBatchSize bounds how much successful fan-out work a daemon
+// restart can discard. At the production 0.1 request/second paced rate, ten
+// names are roughly 100 seconds of progress. Checkpoints replace only the
+// current state document; finalise records the canonical observation once.
+const windowCheckpointBatchSize = 10
 
 // Logger is the minimal logging surface the engine needs. The daemon
 // passes its standard logger; tests can pass nil to silence output.
@@ -77,9 +84,10 @@ type Options struct {
 //   - Get() / Status() are fast read-only views; safe to call during
 //     a Refresh in progress.
 //
-// State is held in memory and persisted transactionally after every successful
-// refresh. A crash mid-refresh means the next refresh continues from the last
-// committed daemon.db projection.
+// State is held in memory and successful window progress is persisted in
+// bounded batches during a refresh, then once more when the pass completes. A
+// crash mid-refresh therefore resumes from the last committed daemon.db
+// checkpoint without publishing an incomplete snapshot.
 type Engine struct {
 	store   *Store
 	fetcher BarFetcher
@@ -128,6 +136,10 @@ type Engine struct {
 	// the withheld snapshot; daemon idle shutdown must not kill the
 	// process in that gap.
 	retryPending bool
+	// progress is the current or most recently completed refresh attempt. It
+	// is served as redacted typed metadata so operators can distinguish a
+	// normally advancing paced pass from a stuck or failed one.
+	progress RefreshProgress
 }
 
 // New constructs an Engine. Loads any persisted state from store
@@ -249,6 +261,45 @@ func (e *Engine) IsBusy() bool {
 	return e.refreshing || e.retryPending
 }
 
+// Progress returns the current or most recently completed refresh attempt.
+// The bool is false before the engine has started its first pass.
+func (e *Engine) Progress() (RefreshProgress, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.progress, !e.progress.StartedAt.IsZero()
+}
+
+func (e *Engine) beginRefreshProgress(total int) {
+	now := e.clock()
+	progress := RefreshProgress{
+		SessionKey: CompletedSessionKey(now),
+		StartedAt:  now,
+		Total:      total,
+	}
+	progress.Deadline, _ = PublicationDeadline(progress.SessionKey)
+	e.mu.Lock()
+	e.progress = progress
+	e.mu.Unlock()
+}
+
+func (e *Engine) recordRefreshProcessed(failure RefreshFailure) {
+	e.mu.Lock()
+	e.progress.Processed++
+	if failure != "" {
+		e.progress.LastFailure = failure
+	}
+	e.mu.Unlock()
+}
+
+func (e *Engine) recordRefreshFailure(failure RefreshFailure) {
+	if failure == "" {
+		return
+	}
+	e.mu.Lock()
+	e.progress.LastFailure = failure
+	e.mu.Unlock()
+}
+
 func (e *Engine) setRetryPending(pending bool) {
 	e.mu.Lock()
 	e.retryPending = pending
@@ -317,20 +368,19 @@ func (e *Engine) Refresh(ctx context.Context) error {
 	}()
 
 	plan := e.planFetches(members, cached)
+	e.beginRefreshProgress(len(plan))
 	if len(plan) == 0 {
 		// Nothing to fetch — recompute against cached windows so the
 		// snapshot timestamp moves forward even on a no-op refresh.
 		return e.finalise(members, cached)
 	}
 
-	updated, fetchErrs := e.execute(ctx, plan)
+	fetchErrs := e.execute(ctx, plan, cached)
 	if ctx.Err() != nil {
+		e.recordRefreshFailure(RefreshFailureCancelled)
 		return ctx.Err()
 	}
 
-	for sym, bars := range updated {
-		cached[sym] = mergeBars(cached[sym], bars, sym)
-	}
 	for sym, err := range fetchErrs {
 		e.warnf("breadth: fetch %s: %v", sym, err)
 	}
@@ -371,15 +421,35 @@ func (e *Engine) planFetches(members []string, cached map[string]ConstituentWind
 	return plan
 }
 
-// execute runs the fetch plan in parallel with bounded concurrency.
-// Returns one map of (symbol → bars) for successful fetches and
-// another of (symbol → error) for failures. Per-symbol failures are
-// non-fatal: the caller continues with whatever data landed.
-func (e *Engine) execute(ctx context.Context, plan []fetchPlan) (map[string][]Bar, map[string]error) {
-	results := make(map[string][]Bar, len(plan))
+// execute runs the fetch plan in parallel with bounded concurrency. Successful
+// bars are merged into windows immediately and the full window projection is
+// checkpointed after each small batch. The snapshot and history are not
+// touched here: finalise remains the only publication gate, so a checkpoint
+// can resume after restart without exposing below-threshold breadth.
+//
+// The final partial batch is checkpointed even when ctx was cancelled. A
+// graceful daemon stop therefore keeps every completed name; an abrupt crash
+// loses at most windowCheckpointBatchSize-1 names.
+func (e *Engine) execute(ctx context.Context, plan []fetchPlan, windows map[string]ConstituentWindow) map[string]error {
 	errs := make(map[string]error)
 
 	var mu sync.Mutex
+	dirty := 0
+	checkpointLocked := func() {
+		if dirty == 0 {
+			return
+		}
+		checkpoint := maps.Clone(windows)
+		if err := e.store.checkpointWindows(checkpoint, e.clock()); err != nil {
+			e.warnf("breadth: checkpoint windows: %v", err)
+			e.recordRefreshFailure(RefreshFailurePersist)
+			return
+		}
+		e.mu.Lock()
+		e.windows = checkpoint
+		e.mu.Unlock()
+		dirty = 0
+	}
 	sem := make(chan struct{}, e.workers)
 	var wg sync.WaitGroup
 
@@ -399,13 +469,41 @@ dispatch:
 			defer mu.Unlock()
 			if err != nil {
 				errs[item.Symbol] = err
+				failure := RefreshFailureFetch
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					failure = RefreshFailureCancelled
+				}
+				e.recordRefreshProcessed(failure)
 				return
 			}
-			results[item.Symbol] = bars
+			merged := mergeBars(windows[item.Symbol], bars, item.Symbol)
+			if constituentWindowsEqual(windows[item.Symbol], merged) {
+				e.recordRefreshProcessed("")
+				return
+			}
+			windows[item.Symbol] = merged
+			dirty++
+			if dirty >= windowCheckpointBatchSize {
+				checkpointLocked()
+			}
+			e.recordRefreshProcessed("")
 		})
 	}
 	wg.Wait()
-	return results, errs
+	mu.Lock()
+	checkpointLocked()
+	mu.Unlock()
+	return errs
+}
+
+func constituentWindowsEqual(a, b ConstituentWindow) bool {
+	return a.Symbol == b.Symbol &&
+		a.LastBarAt == b.LastBarAt &&
+		a.HighRollingMax == b.HighRollingMax &&
+		a.HighRollingBarsHad == b.HighRollingBarsHad &&
+		a.LowRollingMin == b.LowRollingMin &&
+		a.LowRollingBarsHad == b.LowRollingBarsHad &&
+		slices.Equal(a.Closes, b.Closes)
 }
 
 // finalise computes a snapshot from the (possibly updated) windows
@@ -449,6 +547,7 @@ func (e *Engine) finalise(members []string, windows map[string]ConstituentWindow
 	// Persist windows unconditionally — see docstring above for why.
 	if err := e.store.SaveWindows(windows, now); err != nil {
 		e.warnf("breadth: save windows: %v", err)
+		e.recordRefreshFailure(RefreshFailurePersist)
 	}
 	e.mu.Lock()
 	e.windows = windows
@@ -475,9 +574,11 @@ func (e *Engine) finalise(members []string, windows map[string]ConstituentWindow
 
 	if err := e.store.SaveSnapshot(snap); err != nil {
 		e.warnf("breadth: save snapshot: %v", err)
+		e.recordRefreshFailure(RefreshFailurePersist)
 	}
 	if err := e.store.SaveHistory(history); err != nil {
 		e.warnf("breadth: save history: %v", err)
+		e.recordRefreshFailure(RefreshFailurePersist)
 	}
 
 	e.mu.Lock()
