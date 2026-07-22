@@ -26,6 +26,17 @@ type Dispatcher struct {
 	mu sync.Mutex
 }
 
+// Current returns the persisted redacted alert view used to prime a live
+// service after restart. It never observes producer state or sends transport.
+func (d *Dispatcher) Current(now time.Time) state.AlertDeliveryView {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.Store == nil {
+		return state.AlertDeliveryView{}
+	}
+	return d.Store.AlertDelivery(now.UTC())
+}
+
 // Observe atomically applies one daemon-authored snapshot and then dispatches
 // only work the durable ledger still authorizes. It never evaluates risk or
 // accepts producer-authored notification copy.
@@ -36,7 +47,10 @@ func (d *Dispatcher) Observe(ctx context.Context, snapshot rpc.AlertCandidateSna
 		return state.AlertDeliveryView{}, nil
 	}
 	if _, err := d.Store.ObserveAlertSnapshot(snapshot); err != nil {
-		return d.Store.AlertDelivery(d.now()), err
+		// A zero view distinguishes observation failure from a later dispatch
+		// failure. Live may retain producer evidence only when the returned view
+		// attests that this exact scope and timestamp were durably applied.
+		return state.AlertDeliveryView{}, err
 	}
 	return d.dispatchLocked(ctx)
 }

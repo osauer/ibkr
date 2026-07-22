@@ -19,6 +19,14 @@ type alertCandidateClient interface {
 	AlertCandidates(context.Context) (*rpc.AlertCandidateSnapshot, error)
 }
 
+// AlertSnapshotAuthority is the single app-side owner of durable candidate
+// observation and delivery. Live reads its redacted current view only for
+// restart priming; every producer observation goes through Observe.
+type AlertSnapshotAuthority interface {
+	Observe(context.Context, rpc.AlertCandidateSnapshot) (state.AlertDeliveryView, error)
+	Current(time.Time) state.AlertDeliveryView
+}
+
 // Service owns the app host's refreshable daemon snapshot, poll serialization,
 // source-freshness metadata, and best-effort event subscribers. Values stored
 // in the snapshot are treated as immutable after publication.
@@ -28,23 +36,16 @@ type Service struct {
 	canaryEvery time.Duration
 	now         func() time.Time
 
-	pollMu      sync.Mutex
-	alertMu     sync.Mutex
-	mu          sync.Mutex
-	snapshot    Snapshot
-	hashes      map[string]string
-	lastEventAt map[string]time.Time
-	subs        map[chan Event]struct{}
-	nextCanary  time.Time
-	nextNudges  time.Time
-	alertStore  *state.Store
-
-	OnCanary func(context.Context, rpc.CanaryResult)
-	OnNudges func(context.Context, rpc.NudgesSnapshotResult)
-	// OnOrders observes the open-order journal view on the canary cadence.
-	// It exists for the order-mismatch push watch; the SPA reads
-	// /api/orders/open directly and does not consume this hook.
-	OnOrders func(context.Context, rpc.OrdersOpenResult)
+	pollMu         sync.Mutex
+	alertMu        sync.Mutex
+	mu             sync.Mutex
+	snapshot       Snapshot
+	hashes         map[string]string
+	lastEventAt    map[string]time.Time
+	subs           map[chan Event]struct{}
+	nextCanary     time.Time
+	nextNudges     time.Time
+	alertAuthority AlertSnapshotAuthority
 }
 
 // Snapshot is the app's cached adapter view of daemon results. It preserves
@@ -169,6 +170,7 @@ var (
 	errRulesResultUnavailable     = errors.New("rules result unavailable")
 	errBriefResultUnavailable     = errors.New("brief result unavailable")
 	errAlertCandidatesUnavailable = errors.New("alert candidate snapshot unavailable")
+	errAlertDeliveryDispatch      = errors.New("alert delivery dispatch unavailable")
 )
 
 // Event carries one typed live-cache change to SSE adapters. Subscribers must
@@ -214,24 +216,29 @@ func New(client daemonclient.Client, pollEvery, canaryEvery time.Duration) *Serv
 	}
 }
 
-// SetAlertSnapshotStore wires the record-only alert ledger. A prior durable
-// view is synchronously invalidated before the app can serve it after restart;
-// startup fails if that fail-closed transition cannot be persisted.
-func (s *Service) SetAlertSnapshotStore(store *state.Store) error {
+// SetAlertSnapshotAuthority wires the sole durable alert observer. A prior
+// durable view is synchronously invalidated through that observer before the
+// app can serve it after restart; startup fails if the transition cannot be
+// persisted.
+func (s *Service) SetAlertSnapshotAuthority(authority AlertSnapshotAuthority) error {
 	s.alertMu.Lock()
 	defer s.alertMu.Unlock()
 	now := s.now().UTC()
 	s.mu.Lock()
-	s.alertStore = store
+	s.alertAuthority = authority
 	s.mu.Unlock()
-	if store == nil || !store.AlertDelivery(now).Initialized {
+	if authority == nil {
 		return nil
 	}
-	unavailable := unavailableAlertCandidateSnapshot(now, nil, nil, store)
+	view := authority.Current(now)
+	if !view.Initialized {
+		return nil
+	}
+	unavailable := unavailableAlertCandidateSnapshot(now, nil, nil, view)
 	if unavailable == nil {
 		return errAlertCandidatesUnavailable
 	}
-	if _, err := store.ObserveAlertSnapshot(*unavailable); err != nil {
+	if _, err := authority.Observe(context.Background(), *unavailable); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -363,7 +370,6 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 	}
 	pollCanary := s.nextCanary.IsZero() || !now.Before(s.nextCanary)
 	pollNudges := s.nextNudges.IsZero() || !now.Before(s.nextNudges)
-	alertStore := s.alertStore
 	s.mu.Unlock()
 
 	var events []Event
@@ -503,9 +509,6 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 			if s.changed("nudges", nudges) {
 				events = append(events, Event{Type: "nudges", Data: projectPublicNudges(nudges)})
 			}
-			if s.OnNudges != nil {
-				s.OnNudges(ctx, *nudges)
-			}
 		}
 		s.mu.Lock()
 		s.nextNudges = now.Add(nudgesPollEvery)
@@ -540,9 +543,6 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 			snap.Sources["canary"] = sourceCurrent(now)
 			if s.changed("canary", canary) {
 				events = append(events, Event{Type: "canary", Data: canary})
-				if s.OnCanary != nil {
-					go s.OnCanary(ctx, *canary)
-				}
 			}
 		}
 		// Rules ride the canary cadence: same inputs (positions/account),
@@ -562,26 +562,24 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 				events = append(events, Event{Type: "rules", Data: rules})
 			}
 		}
-		// The daemon observes Order Integrity from this same read. Keep the
-		// result buffered so the established app watch still receives exactly
-		// one pass at its existing cadence after shadow composition.
-		var openOrders *rpc.OrdersOpenResult
-		if orders, err := s.client.OrdersOpen(ctx, rpc.OrdersOpenParams{}); err == nil {
-			openOrders = orders
-		}
+		// The daemon observes Order Integrity from this same read. The app does
+		// not run a parallel order-mismatch watch; the composed candidate
+		// snapshot below is the only alert input.
+		_, _ = s.client.OrdersOpen(ctx, rpc.OrdersOpenParams{})
 		// Canary, Rulebook, and Order Integrity have now all observed this
-		// cycle. Read their composed record-only snapshot without a second
+		// cycle. Read their composed source-neutral snapshot without a second
 		// broker evaluation or a full-cycle lag.
 		if alertClient, ok := s.client.(alertCandidateClient); ok {
-			alertSnapshot, source, err := s.pollAlertCandidates(ctx, alertClient, alertStore, now)
+			alertSnapshot, source, err := s.pollAlertCandidates(ctx, alertClient, now)
 			snap.AlertCandidates = alertSnapshot
 			snap.Sources["alert_candidates"] = source
 			if err != nil {
-				errors = append(errors, sourceErr("alert_candidates", err, now))
+				errorSource := "alert_candidates"
+				if isAlertDeliveryDispatchError(err) {
+					errorSource = "alert_delivery"
+				}
+				errors = append(errors, sourceErr(errorSource, err, now))
 			}
-		}
-		if s.OnOrders != nil && openOrders != nil {
-			s.OnOrders(ctx, *openOrders)
 		}
 		// The brief composes canary and other daily-discipline inputs, so it
 		// shares this one-minute cadence instead of the five-second app poll.
@@ -622,19 +620,17 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 	return out
 }
 
-func (s *Service) pollAlertCandidates(ctx context.Context, client alertCandidateClient, store *state.Store, now time.Time) (*rpc.AlertCandidateSnapshot, SourceMeta, error) {
+func (s *Service) pollAlertCandidates(ctx context.Context, client alertCandidateClient, now time.Time) (*rpc.AlertCandidateSnapshot, SourceMeta, error) {
 	snapshot, err := client.AlertCandidates(ctx)
 	s.alertMu.Lock()
 	defer s.alertMu.Unlock()
 	s.mu.Lock()
 	prior := cloneAlertCandidateSnapshot(s.snapshot.AlertCandidates)
 	priorSource := s.snapshot.Sources["alert_candidates"]
-	if currentStore := s.alertStore; currentStore != nil {
-		store = currentStore
-	}
+	authority := s.alertAuthority
 	s.mu.Unlock()
 
-	current, source, observeErr := observeAlertCandidates(snapshot, err, store, now, s.canaryEvery, prior, priorSource)
+	current, source, observeErr := observeAlertCandidates(ctx, snapshot, err, authority, now, s.canaryEvery, prior, priorSource)
 	s.mu.Lock()
 	s.snapshot.AlertCandidates = cloneAlertCandidateSnapshot(current)
 	s.snapshot.Sources["alert_candidates"] = source
@@ -643,9 +639,10 @@ func (s *Service) pollAlertCandidates(ctx context.Context, client alertCandidate
 }
 
 func observeAlertCandidates(
+	ctx context.Context,
 	snapshot *rpc.AlertCandidateSnapshot,
 	err error,
-	store *state.Store,
+	authority AlertSnapshotAuthority,
 	now time.Time,
 	maxAge time.Duration,
 	prior *rpc.AlertCandidateSnapshot,
@@ -655,15 +652,15 @@ func observeAlertCandidates(
 		if err == nil {
 			err = errAlertCandidatesUnavailable
 		}
-		unavailable := unavailableAlertCandidateSnapshot(now, nil, prior, store)
-		if persistErr := observeUnavailableAlertSnapshot(store, unavailable); persistErr != nil {
+		unavailable := unavailableAlertCandidateSnapshot(now, nil, prior, currentAlertDeliveryView(authority, now))
+		if persistErr := observeUnavailableAlertSnapshot(ctx, authority, unavailable); persistErr != nil {
 			return unavailable, sourceUnavailableWithReason(priorSource, now, SourceReasonPersistenceUnavailable), errors.Join(err, persistErr)
 		}
 		return unavailable, sourceUnavailable(priorSource, now), err
 	}
 	if err := rpc.ValidateAlertCandidateSnapshot(*snapshot); err != nil {
-		unavailable := unavailableAlertCandidateSnapshot(now, nil, prior, store)
-		if persistErr := observeUnavailableAlertSnapshot(store, unavailable); persistErr != nil {
+		unavailable := unavailableAlertCandidateSnapshot(now, nil, prior, currentAlertDeliveryView(authority, now))
+		if persistErr := observeUnavailableAlertSnapshot(ctx, authority, unavailable); persistErr != nil {
 			return unavailable, sourceUnavailableWithReason(priorSource, now, SourceReasonPersistenceUnavailable), errors.Join(err, persistErr)
 		}
 		return unavailable, sourceUnavailableWithReason(priorSource, now, SourceReasonProducerUnavailable), err
@@ -678,16 +675,19 @@ func observeAlertCandidates(
 	if alertCandidateSnapshotExpired(current, now, maxAge) {
 		current = staleAlertCandidateSnapshot(now, current)
 	}
-	if store != nil {
-		if _, err := store.ObserveAlertSnapshot(*current); err != nil {
+	if authority != nil {
+		if applied, err := authority.Observe(ctx, *current); err != nil {
+			if alertSnapshotObservationApplied(applied, current) {
+				return current, alertCandidateSourceMeta(priorSource, now, current), errors.Join(errAlertDeliveryDispatch, err)
+			}
 			fallbackSeed := current
 			reason := SourceReasonPersistenceUnavailable
 			if errors.Is(err, state.ErrAlertDeliveryOldSnapshot) {
 				fallbackSeed = nil
 				reason = SourceReasonProducerUnavailable
 			}
-			unavailable := unavailableAlertCandidateSnapshot(now, fallbackSeed, prior, store)
-			if persistErr := observeUnavailableAlertSnapshot(store, unavailable); persistErr != nil {
+			unavailable := unavailableAlertCandidateSnapshot(now, fallbackSeed, prior, authority.Current(now))
+			if persistErr := observeUnavailableAlertSnapshot(ctx, authority, unavailable); persistErr != nil {
 				err = errors.Join(err, persistErr)
 				reason = SourceReasonPersistenceUnavailable
 			}
@@ -697,15 +697,30 @@ func observeAlertCandidates(
 	return current, alertCandidateSourceMeta(priorSource, now, current), nil
 }
 
-func observeUnavailableAlertSnapshot(store *state.Store, snapshot *rpc.AlertCandidateSnapshot) error {
-	if store == nil || snapshot == nil {
+func observeUnavailableAlertSnapshot(ctx context.Context, authority AlertSnapshotAuthority, snapshot *rpc.AlertCandidateSnapshot) error {
+	if authority == nil || snapshot == nil {
 		return nil
 	}
-	_, err := store.ObserveAlertSnapshot(*snapshot)
+	_, err := authority.Observe(ctx, *snapshot)
 	return err
 }
 
-func unavailableAlertCandidateSnapshot(now time.Time, valid, prior *rpc.AlertCandidateSnapshot, store *state.Store) *rpc.AlertCandidateSnapshot {
+func isAlertDeliveryDispatchError(err error) bool {
+	return errors.Is(err, errAlertDeliveryDispatch)
+}
+
+func alertSnapshotObservationApplied(view state.AlertDeliveryView, snapshot *rpc.AlertCandidateSnapshot) bool {
+	return snapshot != nil && view.Initialized && view.AuthorityScope == snapshot.AuthorityScope && view.AsOf.Equal(snapshot.AsOf)
+}
+
+func currentAlertDeliveryView(authority AlertSnapshotAuthority, now time.Time) state.AlertDeliveryView {
+	if authority == nil {
+		return state.AlertDeliveryView{}
+	}
+	return authority.Current(now)
+}
+
+func unavailableAlertCandidateSnapshot(now time.Time, valid, prior *rpc.AlertCandidateSnapshot, view state.AlertDeliveryView) *rpc.AlertCandidateSnapshot {
 	asOf := now
 	var expected []rpc.AlertSource
 	authorityScope := ""
@@ -716,17 +731,14 @@ func unavailableAlertCandidateSnapshot(now time.Time, valid, prior *rpc.AlertCan
 			asOf = valid.AsOf.Add(time.Nanosecond)
 		}
 	}
-	if store != nil {
-		view := store.AlertDelivery(now)
-		if authorityScope == "" {
-			authorityScope = view.AuthorityScope
-		}
-		if len(expected) == 0 && view.Initialized && len(view.Coverage.ExpectedSources) > 0 {
-			expected = append([]rpc.AlertSource{}, view.Coverage.ExpectedSources...)
-		}
-		if view.Initialized && !view.AsOf.Before(asOf) {
-			asOf = view.AsOf.Add(time.Nanosecond)
-		}
+	if authorityScope == "" {
+		authorityScope = view.AuthorityScope
+	}
+	if len(expected) == 0 && view.Initialized && len(view.Coverage.ExpectedSources) > 0 {
+		expected = append([]rpc.AlertSource{}, view.Coverage.ExpectedSources...)
+	}
+	if view.Initialized && !view.AsOf.Before(asOf) {
+		asOf = view.AsOf.Add(time.Nanosecond)
 	}
 	if len(expected) == 0 && prior != nil && len(prior.Coverage.ExpectedSources) > 0 {
 		expected = append([]rpc.AlertSource{}, prior.Coverage.ExpectedSources...)
@@ -740,6 +752,14 @@ func unavailableAlertCandidateSnapshot(now time.Time, valid, prior *rpc.AlertCan
 	if len(expected) == 0 || authorityScope == "" {
 		return nil
 	}
+	slices.Sort(expected)
+	sources := make([]rpc.AlertSourceCoverage, 0, len(expected))
+	for _, source := range expected {
+		sources = append(sources, rpc.AlertSourceCoverage{
+			Source: source, Status: "unavailable", Reason: "producer_unavailable",
+			EvidenceHealth: rpc.AlertEvidenceUnavailable,
+		})
+	}
 	return &rpc.AlertCandidateSnapshot{
 		SchemaVersion:  rpc.AlertCandidateSnapshotVersion,
 		AuthorityScope: authorityScope,
@@ -752,6 +772,7 @@ func unavailableAlertCandidateSnapshot(now time.Time, valid, prior *rpc.AlertCan
 			ExpectedSources: expected,
 			CoveredSources:  []rpc.AlertSource{},
 		},
+		Sources:    sources,
 		Candidates: []rpc.AlertCandidate{},
 	}
 }
@@ -812,9 +833,6 @@ func (s *Service) PollNudgesOnce(ctx context.Context) Snapshot {
 		snap.Sources["nudges"] = sourceCurrent(now)
 		if s.changed("nudges", nudges) {
 			events = append(events, Event{Type: "nudges", Data: projectPublicNudges(nudges)})
-		}
-		if s.OnNudges != nil {
-			s.OnNudges(ctx, *nudges)
 		}
 	}
 	s.mu.Lock()
@@ -1325,7 +1343,7 @@ func (s *Service) expireAlertSnapshot(now time.Time) {
 	s.mu.Lock()
 	prior := cloneAlertCandidateSnapshot(s.snapshot.AlertCandidates)
 	priorSource := s.snapshot.Sources["alert_candidates"]
-	store := s.alertStore
+	authority := s.alertAuthority
 	s.mu.Unlock()
 	if prior == nil || priorSource.State != SourceStateCurrent || priorSource.LastSuccessAt.IsZero() || now.Sub(priorSource.LastSuccessAt) <= s.canaryEvery {
 		return
@@ -1336,12 +1354,12 @@ func (s *Service) expireAlertSnapshot(now time.Time) {
 		UpdatedAt: now, LastSuccessAt: priorSource.LastSuccessAt,
 		State: SourceStateStale, Reason: SourceReasonPollStale,
 	}
-	if store != nil {
-		if _, err := store.ObserveAlertSnapshot(*aged); err != nil {
-			aged = unavailableAlertCandidateSnapshot(now, nil, prior, store)
+	if authority != nil {
+		if applied, err := authority.Observe(context.Background(), *aged); err != nil && !alertSnapshotObservationApplied(applied, aged) {
+			aged = unavailableAlertCandidateSnapshot(now, nil, prior, authority.Current(now))
 			source = sourceUnavailableWithReason(priorSource, now, SourceReasonPersistenceUnavailable)
 			if aged != nil {
-				_, _ = store.ObserveAlertSnapshot(*aged)
+				_, _ = authority.Observe(context.Background(), *aged)
 			}
 		}
 	}
@@ -1385,6 +1403,27 @@ func staleAlertCandidateSnapshot(now time.Time, snapshot *rpc.AlertCandidateSnap
 	out := cloneAlertCandidateSnapshot(snapshot)
 	out.AsOf = now
 	out.Coverage.Freshness = rpc.AlertCoverageStale
+	for i := range out.Sources {
+		if !out.Sources[i].Covered {
+			continue
+		}
+		out.Sources[i].Status = "stale"
+		out.Sources[i].Reason = "freshness_expired"
+		out.Sources[i].EvidenceHealth = rpc.AlertEvidenceStale
+	}
+	staleSources := make(map[rpc.AlertSource]bool, len(out.Sources))
+	for _, source := range out.Sources {
+		if source.Covered && source.EvidenceHealth == rpc.AlertEvidenceStale {
+			staleSources[source.Source] = true
+		}
+	}
+	for i := range out.Candidates {
+		candidate := &out.Candidates[i]
+		if staleSources[candidate.Source] && candidate.EvidenceHealth == rpc.AlertEvidenceCurrent &&
+			(candidate.State == rpc.AlertEpisodeOpen || candidate.State == rpc.AlertEpisodeEscalated) {
+			candidate.EvidenceHealth = rpc.AlertEvidenceStale
+		}
+	}
 	hasActive := false
 	for _, candidate := range out.Candidates {
 		if candidate.State == rpc.AlertEpisodeOpen || candidate.State == rpc.AlertEpisodeEscalated {
@@ -1538,6 +1577,9 @@ func cloneAlertCandidateSnapshot(in *rpc.AlertCandidateSnapshot) *rpc.AlertCandi
 	}
 	if in.Coverage.CoveredSources != nil {
 		out.Coverage.CoveredSources = append([]rpc.AlertSource{}, in.Coverage.CoveredSources...)
+	}
+	if in.Sources != nil {
+		out.Sources = append([]rpc.AlertSourceCoverage{}, in.Sources...)
 	}
 	if in.Candidates != nil {
 		out.Candidates = append([]rpc.AlertCandidate{}, in.Candidates...)

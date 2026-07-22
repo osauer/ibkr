@@ -20,7 +20,6 @@ import (
 	"github.com/osauer/ibkr/v2/internal/app/push"
 	"github.com/osauer/ibkr/v2/internal/app/relay"
 	"github.com/osauer/ibkr/v2/internal/app/state"
-	"github.com/osauer/ibkr/v2/internal/rpc"
 	"github.com/osauer/ibkr/v2/internal/xdgcache"
 )
 
@@ -29,14 +28,13 @@ import (
 // their background loops and HTTP server. Close releases the process lock.
 // Exported component fields expose app-local adapters, not broker authority.
 type App struct {
-	Options          Options
-	Store            *state.Store
-	Auth             *auth.Manager
-	Live             *live.Service
-	Relay            relay.Client
-	Server           *hyperserve.Server
-	governanceWorker *alerts.GovernanceWorker
-	lock             *xdgcache.Lock
+	Options Options
+	Store   *state.Store
+	Auth    *auth.Manager
+	Live    *live.Service
+	Relay   relay.Client
+	Server  *hyperserve.Server
+	lock    *xdgcache.Lock
 }
 
 // New constructs an App and acquires the exclusive lock for opts.StateDir. If
@@ -71,9 +69,6 @@ func New(opts Options) (*App, error) {
 		opts.PollEvery,
 		opts.CanaryEvery,
 	)
-	if err := liveSvc.SetAlertSnapshotStore(store); err != nil {
-		return nil, fmt.Errorf("prime alert shadow state: %w", err)
-	}
 	relayClient, err := newRelayClient(opts, store)
 	if err != nil {
 		return nil, err
@@ -84,37 +79,15 @@ func New(opts Options) (*App, error) {
 		}
 	}
 	pushSender := push.WebPushSender{Subscriber: push.Subscriber}
-	monitor := alerts.Monitor{
-		Store:  store,
-		Sender: pushSender,
-		URL:    opts.PublicURL,
-	}
-	monitor.TradingStatus = func() *rpc.TradingStatus {
-		return liveSvc.Snapshot().Trading
-	}
-	liveSvc.OnCanary = func(ctx context.Context, canary rpc.CanaryResult) {
-		monitor.Observe(ctx, canary)
-	}
-	mismatchWatch := &alerts.OrderMismatchWatch{
-		Store:         store,
-		Sender:        pushSender,
-		URL:           opts.PublicURL,
-		TradingStatus: monitor.TradingStatus,
-	}
-	liveSvc.OnOrders = func(ctx context.Context, orders rpc.OrdersOpenResult) {
-		mismatchWatch.Observe(ctx, orders)
-	}
-	dispatcher := alerts.GovernanceDispatcher{Store: store, Sender: pushSender}
-	governanceWorker := alerts.NewGovernanceWorker(&dispatcher)
-	liveSvc.OnNudges = func(ctx context.Context, snapshot rpc.NudgesSnapshotResult) {
-		governanceWorker.Submit(snapshot)
+	dispatcher := &alerts.Dispatcher{Store: store, Sender: pushSender, URL: opts.PublicURL}
+	if err := liveSvc.SetAlertSnapshotAuthority(dispatcher); err != nil {
+		return nil, fmt.Errorf("prime alert delivery state: %w", err)
 	}
 	app, err := newWithParts(opts, store, authMgr, daemonClient, liveSvc, relayClient, pushSender)
 	if err != nil {
 		return nil, err
 	}
 	app.lock = lock
-	app.governanceWorker = governanceWorker
 	lock = nil
 	return app, nil
 }
@@ -209,7 +182,7 @@ func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, daemo
 	return a, nil
 }
 
-// Run starts live-cache polling, alert workers, relay transport, credential
+// Run starts live-cache polling, relay transport, credential
 // reaping, and the HTTP server, then blocks until the server exits. Cancelling
 // ctx stops the server and background contexts; normal cancellation and
 // [http.ErrServerClosed] return nil. Run always calls [App.Close] before
@@ -219,9 +192,6 @@ func (a *App) Run(ctx context.Context) error {
 	liveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go a.Live.Start(liveCtx)
-	if a.governanceWorker != nil {
-		go a.governanceWorker.Run(liveCtx)
-	}
 	go a.Relay.Run(liveCtx)
 	go a.Auth.StartReaper(liveCtx, time.Minute)
 	go func() {

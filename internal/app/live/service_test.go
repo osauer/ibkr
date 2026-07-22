@@ -46,10 +46,6 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 	svc := New(client, time.Minute, time.Minute)
 	ch, release := svc.Subscribe()
 	defer release()
-	canarySeen := make(chan rpc.CanaryResult, 1)
-	svc.OnCanary = func(_ context.Context, canary rpc.CanaryResult) {
-		canarySeen <- canary
-	}
 
 	snap := svc.PollOnce(context.Background())
 	if snap.Version != 2 {
@@ -99,14 +95,6 @@ func TestPollOnceCachesSnapshotAndPublishesEvents(t *testing.T) {
 		if !seen[want] {
 			t.Fatalf("missing event %q; seen=%v", want, seen)
 		}
-	}
-	select {
-	case got := <-canarySeen:
-		if got.Action != "watch" {
-			t.Fatalf("OnCanary action=%q, want watch", got.Action)
-		}
-	case <-time.After(time.Second):
-		t.Fatalf("OnCanary was not called")
 	}
 	diag := svc.Diagnostics()
 	if diag.Subscribers != 1 {
@@ -232,15 +220,8 @@ func TestCanaryRegimePollIsAtomicOnFailure(t *testing.T) {
 	}
 	svc := New(client, 5*time.Second, time.Minute)
 	svc.now = func() time.Time { return now }
-	canarySeen := make(chan rpc.CanaryResult, 2)
-	svc.OnCanary = func(_ context.Context, canary rpc.CanaryResult) { canarySeen <- canary }
 
 	first := svc.PollOnce(t.Context())
-	select {
-	case <-canarySeen:
-	case <-time.After(time.Second):
-		t.Fatal("initial successful Canary result did not reach OnCanary")
-	}
 	for _, name := range []string{"canary", "regime"} {
 		source := first.Sources[name]
 		if source.State != SourceStateCurrent || source.Reason != SourceReasonNone || !source.LastSuccessAt.Equal(now) || source.Error != "" {
@@ -274,11 +255,6 @@ func TestCanaryRegimePollIsAtomicOnFailure(t *testing.T) {
 	if !seenErrors["canary"] || !seenErrors["regime"] {
 		t.Fatalf("legacy Canary/Regime SourceError attribution was not retained: %#v", got.Errors)
 	}
-	select {
-	case unexpected := <-canarySeen:
-		t.Fatalf("failed atomic poll fired OnCanary: %#v", unexpected)
-	case <-time.After(25 * time.Millisecond):
-	}
 }
 
 func TestCanaryRegimeNilSuccessIsUnavailableAndNeverPublishes(t *testing.T) {
@@ -299,8 +275,6 @@ func TestCanaryRegimeNilSuccessIsUnavailableAndNeverPublishes(t *testing.T) {
 			client := &fakeClient{canary: tt.canary, regime: tt.regime, brief: &rpc.BriefResult{BriefFingerprint: "brief-ready"}}
 			svc := New(client, 5*time.Second, time.Minute)
 			svc.now = func() time.Time { return now }
-			canarySeen := make(chan rpc.CanaryResult, 1)
-			svc.OnCanary = func(_ context.Context, canary rpc.CanaryResult) { canarySeen <- canary }
 
 			got := svc.PollOnce(t.Context())
 			if got.Canary != nil || got.Regime != nil {
@@ -320,11 +294,6 @@ func TestCanaryRegimeNilSuccessIsUnavailableAndNeverPublishes(t *testing.T) {
 				if !seen[name] {
 					t.Fatalf("missing nil-result SourceError attribution for %q: %#v", name, got.Errors)
 				}
-			}
-			select {
-			case unexpected := <-canarySeen:
-				t.Fatalf("partial nil poll fired OnCanary: %#v", unexpected)
-			case <-time.After(25 * time.Millisecond):
 			}
 		})
 	}
@@ -956,7 +925,7 @@ func TestNudgesExplicitOutageRemainsUnavailableAfterFreshnessBudget(t *testing.T
 	}
 }
 
-func TestAlertCandidatesPollOnCanaryCadenceIntoRecordOnlyStore(t *testing.T) {
+func TestAlertCandidatesPollOnCanaryCadenceThroughAuthority(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	store, err := state.Open(t.TempDir())
@@ -970,9 +939,7 @@ func TestAlertCandidatesPollOnCanaryCadenceIntoRecordOnlyStore(t *testing.T) {
 	}
 	service := New(client, 5*time.Second, time.Minute)
 	service.now = func() time.Time { return now }
-	if err := service.SetAlertSnapshotStore(store); err != nil {
-		t.Fatal(err)
-	}
+	authority := setTestAlertAuthority(t, service, store)
 
 	first := service.PollOnce(t.Context())
 	if first.AlertCandidates == nil || first.AlertCandidates.CurrentState != rpc.AlertSnapshotActive {
@@ -995,10 +962,13 @@ func TestAlertCandidatesPollOnCanaryCadenceIntoRecordOnlyStore(t *testing.T) {
 	}
 	view := store.AlertDelivery(now)
 	if !view.Initialized || view.CurrentState != rpc.AlertSnapshotActive || len(view.Occurrences) != 1 {
-		t.Fatalf("record-only alert delivery view=%+v", view)
+		t.Fatalf("authoritative alert delivery view=%+v", view)
 	}
-	if view.DeliveryHealth.State != state.AlertDeliveryHealthShadow || view.Occurrences[0].TransportEligible || len(store.AlertDeliveriesDue(now)) != 0 {
-		t.Fatalf("shadow transport escaped: health=%+v occurrence=%+v due=%d", view.DeliveryHealth, view.Occurrences[0], len(store.AlertDeliveriesDue(now)))
+	if view.Occurrences[0].Disposition != state.AlertDispositionCutoverExisting || len(store.AlertDeliveriesDue(now)) != 0 {
+		t.Fatalf("first active cutover occurrence became transport due: occurrence=%+v due=%d", view.Occurrences[0], len(store.AlertDeliveriesDue(now)))
+	}
+	if authority.observeCount() != 1 {
+		t.Fatalf("normal candidate poll bypassed the sole observer: %d observations", authority.observeCount())
 	}
 
 	// Returned snapshots cannot mutate the service-owned typed contract.
@@ -1034,9 +1004,7 @@ func TestAlertCandidatesPollAfterCurrentCanaryProducerInSameCadence(t *testing.T
 	client.producerHook = func() { client.Set(liveAlertSnapshot(now, current), nil) }
 	service := New(client, 5*time.Second, time.Minute)
 	service.now = func() time.Time { return now }
-	if err := service.SetAlertSnapshotStore(store); err != nil {
-		t.Fatal(err)
-	}
+	setTestAlertAuthority(t, service, store)
 
 	got := service.PollOnce(t.Context())
 	if got.AlertCandidates == nil || got.AlertCandidates.CurrentState != rpc.AlertSnapshotActive || len(got.AlertCandidates.Candidates) != 1 {
@@ -1062,10 +1030,9 @@ func TestAlertCandidatePollFollowsAllSameCycleProducers(t *testing.T) {
 	}
 	service := New(client, 5*time.Second, time.Minute)
 	service.now = func() time.Time { return now }
-	service.OnOrders = func(context.Context, rpc.OrdersOpenResult) { client.recordCall("on_orders") }
 
 	service.PollOnce(t.Context())
-	if got, want := strings.Join(client.CallOrder(), ","), "canary,rules,orders_open,alert_candidates,on_orders"; got != want {
+	if got, want := strings.Join(client.CallOrder(), ","), "canary,rules,orders_open,alert_candidates"; got != want {
 		t.Fatalf("same-cycle producer order=%q, want %q", got, want)
 	}
 }
@@ -1081,9 +1048,7 @@ func TestRepeatedOldAlertSnapshotCannotResetAuthoritativeFreshness(t *testing.T)
 	client := &alertCandidateFakeClient{fakeClient: &fakeClient{}, snapshot: liveAlertSnapshot(base)}
 	service := New(client, 5*time.Second, time.Minute)
 	service.now = func() time.Time { return now }
-	if err := service.SetAlertSnapshotStore(store); err != nil {
-		t.Fatal(err)
-	}
+	setTestAlertAuthority(t, service, store)
 	first := service.PollOnce(t.Context())
 	if source := first.Sources["alert_candidates"]; source.State != SourceStateCurrent || !source.LastSuccessAt.Equal(base) {
 		t.Fatalf("initial source freshness=%+v", source)
@@ -1112,9 +1077,7 @@ func TestAlertCandidateOutageReplacesPriorClearWithPersistedUnknown(t *testing.T
 	client := &alertCandidateFakeClient{fakeClient: &fakeClient{}, snapshot: liveAlertSnapshot(now)}
 	service := New(client, 5*time.Second, time.Minute)
 	service.now = func() time.Time { return now }
-	if err := service.SetAlertSnapshotStore(store); err != nil {
-		t.Fatal(err)
-	}
+	authority := setTestAlertAuthority(t, service, store)
 	if first := service.PollOnce(t.Context()); first.AlertCandidates == nil || first.AlertCandidates.CurrentState != rpc.AlertSnapshotClear {
 		t.Fatalf("initial alert snapshot=%+v, want trusted clear", first.AlertCandidates)
 	}
@@ -1132,6 +1095,55 @@ func TestAlertCandidateOutageReplacesPriorClearWithPersistedUnknown(t *testing.T
 	if !view.Initialized || view.CurrentState != rpc.AlertSnapshotUnknown || view.Coverage.State != rpc.AlertCoverageUnavailable {
 		t.Fatalf("persisted outage view=%+v, want unknown/unavailable", view)
 	}
+	if authority.observeCount() != 2 {
+		t.Fatalf("normal and outage observations did not share one observer: %d", authority.observeCount())
+	}
+	if err := rpc.ValidateAlertCandidateSnapshot(*failed.AlertCandidates); err != nil {
+		t.Fatalf("typed outage snapshot invalid: %v", err)
+	}
+	if len(failed.AlertCandidates.Sources) != 1 || failed.AlertCandidates.Sources[0].Covered || failed.AlertCandidates.Sources[0].EvidenceHealth != rpc.AlertEvidenceUnavailable {
+		t.Fatalf("outage source row is not explicit and unavailable: %+v", failed.AlertCandidates.Sources)
+	}
+}
+
+func TestAlertCandidateDispatchFailureKeepsCommittedProducerEvidence(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 21, 12, 15, 0, 0, time.UTC)
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &alertCandidateFakeClient{fakeClient: &fakeClient{}, snapshot: liveAlertSnapshot(now)}
+	service := New(client, 5*time.Second, time.Minute)
+	service.now = func() time.Time { return now }
+	authority := setTestAlertAuthority(t, service, store)
+	authority.failAfterPersist(errors.New("push completion unavailable"))
+
+	got := service.PollOnce(t.Context())
+	if got.AlertCandidates == nil || got.AlertCandidates.CurrentState != rpc.AlertSnapshotClear || got.AlertCandidates.Coverage.Freshness != rpc.AlertCoverageCurrent {
+		t.Fatalf("delivery failure destroyed committed producer evidence: %+v", got.AlertCandidates)
+	}
+	if source := got.Sources["alert_candidates"]; source.State != SourceStateCurrent || !source.LastSuccessAt.Equal(now) {
+		t.Fatalf("delivery failure mislabeled current producer source: %+v", source)
+	}
+	if view := store.AlertDelivery(now); view.CurrentState != rpc.AlertSnapshotClear || !view.AsOf.Equal(now) {
+		t.Fatalf("committed producer evidence was overwritten: %+v", view)
+	}
+	if authority.observeCount() != 1 {
+		t.Fatalf("delivery failure triggered an unavailable overwrite: %d observations", authority.observeCount())
+	}
+	foundDeliveryError := false
+	for _, sourceErr := range got.Errors {
+		if sourceErr.Source == "alert_candidates" {
+			t.Fatalf("delivery failure was attributed to producer evidence: %+v", sourceErr)
+		}
+		if sourceErr.Source == "alert_delivery" {
+			foundDeliveryError = true
+		}
+	}
+	if !foundDeliveryError {
+		t.Fatalf("delivery failure was not surfaced separately: %+v", got.Errors)
+	}
 }
 
 func TestAlertCandidateRestartOutageUsesPersistedCoverageAndNeverClears(t *testing.T) {
@@ -1145,9 +1157,7 @@ func TestAlertCandidateRestartOutageUsesPersistedCoverageAndNeverClears(t *testi
 	firstClient := &alertCandidateFakeClient{fakeClient: &fakeClient{}, snapshot: liveAlertSnapshot(now)}
 	firstService := New(firstClient, 5*time.Second, time.Minute)
 	firstService.now = func() time.Time { return now }
-	if err := firstService.SetAlertSnapshotStore(store); err != nil {
-		t.Fatal(err)
-	}
+	setTestAlertAuthority(t, firstService, store)
 	firstService.PollOnce(t.Context())
 	if view := store.AlertDelivery(now); view.CurrentState != rpc.AlertSnapshotClear {
 		t.Fatalf("seed view=%+v, want clear", view)
@@ -1161,11 +1171,12 @@ func TestAlertCandidateRestartOutageUsesPersistedCoverageAndNeverClears(t *testi
 	failingClient := &alertCandidateFakeClient{fakeClient: &fakeClient{}, err: errors.New("method unavailable")}
 	restartedService := New(failingClient, 5*time.Second, time.Minute)
 	restartedService.now = func() time.Time { return now }
-	if err := restartedService.SetAlertSnapshotStore(restarted); err != nil {
-		t.Fatal(err)
-	}
+	restartAuthority := setTestAlertAuthority(t, restartedService, restarted)
 	if primed := restarted.AlertDelivery(now); primed.CurrentState != rpc.AlertSnapshotUnknown || primed.Coverage.State != rpc.AlertCoverageUnavailable {
 		t.Fatalf("restart served prior clear before first daemon poll: %+v", primed)
+	}
+	if restartAuthority.observeCount() != 1 {
+		t.Fatalf("restart priming bypassed the sole observer: %d", restartAuthority.observeCount())
 	}
 	got := restartedService.PollOnce(t.Context())
 	if got.AlertCandidates == nil || got.AlertCandidates.CurrentState != rpc.AlertSnapshotUnknown || len(got.AlertCandidates.Coverage.ExpectedSources) != 1 {
@@ -1186,9 +1197,7 @@ func TestAlertCandidateColdOutageRemainsUninitialized(t *testing.T) {
 	client := &alertCandidateFakeClient{fakeClient: &fakeClient{}, err: errors.New("method unavailable")}
 	service := New(client, 5*time.Second, time.Minute)
 	service.now = func() time.Time { return now }
-	if err := service.SetAlertSnapshotStore(store); err != nil {
-		t.Fatal(err)
-	}
+	setTestAlertAuthority(t, service, store)
 	got := service.PollOnce(t.Context())
 	if got.AlertCandidates != nil {
 		t.Fatalf("cold outage invented coverage: %+v", got.AlertCandidates)
@@ -1211,9 +1220,7 @@ func TestAlertCandidateSnapshotAgeProjectsClearToTypedStaleUnknown(t *testing.T)
 	client := &alertCandidateFakeClient{fakeClient: &fakeClient{}, snapshot: liveAlertSnapshot(now)}
 	service := New(client, 5*time.Second, time.Minute)
 	service.now = func() time.Time { return now }
-	if err := service.SetAlertSnapshotStore(store); err != nil {
-		t.Fatal(err)
-	}
+	authority := setTestAlertAuthority(t, service, store)
 	service.PollOnce(t.Context())
 	now = now.Add(time.Minute + time.Nanosecond)
 	aged := service.Snapshot()
@@ -1228,6 +1235,46 @@ func TestAlertCandidateSnapshotAgeProjectsClearToTypedStaleUnknown(t *testing.T)
 	}
 	if view := store.AlertDelivery(now); view.CurrentState != rpc.AlertSnapshotUnknown || view.Coverage.Freshness != rpc.AlertCoverageStale {
 		t.Fatalf("aged clear remained durable: %+v", view)
+	}
+	if authority.observeCount() != 2 {
+		t.Fatalf("poll and expiry did not share one observer: %d", authority.observeCount())
+	}
+	if len(aged.AlertCandidates.Sources) != 1 || aged.AlertCandidates.Sources[0].Status != "stale" || aged.AlertCandidates.Sources[0].Reason != "freshness_expired" || aged.AlertCandidates.Sources[0].EvidenceHealth != rpc.AlertEvidenceStale {
+		t.Fatalf("expiry did not age the source row consistently: %+v", aged.AlertCandidates.Sources)
+	}
+}
+
+func TestAlertCandidateExpiryAgesActiveEvidenceInLedger(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 21, 12, 30, 0, 0, time.UTC)
+	now := base
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &alertCandidateFakeClient{fakeClient: &fakeClient{}, snapshot: liveAlertSnapshot(now)}
+	service := New(client, 5*time.Second, time.Minute)
+	service.now = func() time.Time { return now }
+	authority := setTestAlertAuthority(t, service, store)
+	service.PollOnce(t.Context())
+
+	now = now.Add(time.Minute)
+	candidate := liveAlertCandidate(t, now)
+	client.Set(liveAlertSnapshot(now, candidate), nil)
+	service.PollOnce(t.Context())
+
+	now = now.Add(time.Minute + time.Nanosecond)
+	authority.failAfterPersist(errors.New("push completion unavailable during expiry"))
+	aged := service.Snapshot()
+	if aged.AlertCandidates == nil || len(aged.AlertCandidates.Candidates) != 1 || aged.AlertCandidates.Candidates[0].EvidenceHealth != rpc.AlertEvidenceStale {
+		t.Fatalf("active candidate evidence did not age: %+v", aged.AlertCandidates)
+	}
+	view := store.AlertDelivery(now)
+	if len(view.Sources) != 1 || view.Sources[0].EvidenceHealth != rpc.AlertEvidenceStale || len(view.Occurrences) != 1 || view.Occurrences[0].EvidenceHealth != rpc.AlertEvidenceStale {
+		t.Fatalf("ledger retained current evidence under stale coverage: sources=%+v occurrences=%+v", view.Sources, view.Occurrences)
+	}
+	if authority.observeCount() != 3 {
+		t.Fatalf("baseline, active, and expiry did not share one observer: %d", authority.observeCount())
 	}
 }
 
@@ -1263,6 +1310,10 @@ func liveAlertSnapshot(at time.Time, candidates ...rpc.AlertCandidate) *rpc.Aler
 			ExpectedSources: []rpc.AlertSource{rpc.AlertSourceCanary},
 			CoveredSources:  []rpc.AlertSource{rpc.AlertSourceCanary},
 		},
+		Sources: []rpc.AlertSourceCoverage{{
+			Source: rpc.AlertSourceCanary, Status: "current", Reason: "current", EvidenceHealth: rpc.AlertEvidenceCurrent,
+			InputAsOf: at, ObservedAt: at, EvidenceAsOf: at, FreshUntil: at.Add(time.Hour), Covered: true,
+		}},
 		Candidates: append([]rpc.AlertCandidate{}, candidates...),
 	}
 }
@@ -1280,8 +1331,8 @@ func liveAlertCandidate(t *testing.T, at time.Time) rpc.AlertCandidate {
 	return rpc.AlertCandidate{
 		EpisodeKey: episode, OccurrenceKey: occurrence,
 		EvidenceFingerprint: "sha256:" + strings.Repeat("a", 64),
-		Source:              rpc.AlertSourceCanary, Kind: rpc.AlertKindMarketState, State: rpc.AlertEpisodeOpen,
-		Severity: rpc.AlertSeverityWatch, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+		Source:              rpc.AlertSourceCanary, Kind: rpc.AlertKindMarketState, PresentationCode: rpc.AlertPresentationCanaryPortfolioStress,
+		State: rpc.AlertEpisodeOpen, Severity: rpc.AlertSeverityWatch,
 		EvidenceHealth: rpc.AlertEvidenceCurrent, Destination: rpc.AlertDestinationAlerts,
 		EvidenceAsOf: at, StateChangedAt: at, ObservedAt: at,
 	}
@@ -1292,6 +1343,50 @@ func readyNudges(at time.Time) *rpc.NudgesSnapshotResult {
 	return &rpc.NudgesSnapshotResult{AsOf: at, SourceHealth: rpc.NudgeSourceHealth{
 		Policy: ok, Reconciliation: ok, Capital: ok, Pins: ok, Cadence: ok, ConfirmedFlow: ok,
 	}, ConfirmedFlowCoverage: &rpc.NudgeConfirmedFlowCoverage{CoverageFrom: at}}
+}
+
+type testAlertAuthority struct {
+	store *state.Store
+	mu    sync.Mutex
+	seen  []rpc.AlertCandidateSnapshot
+	after error
+}
+
+func setTestAlertAuthority(t *testing.T, service *Service, store *state.Store) *testAlertAuthority {
+	t.Helper()
+	authority := &testAlertAuthority{store: store}
+	if err := service.SetAlertSnapshotAuthority(authority); err != nil {
+		t.Fatal(err)
+	}
+	return authority
+}
+
+func (a *testAlertAuthority) Observe(_ context.Context, snapshot rpc.AlertCandidateSnapshot) (state.AlertDeliveryView, error) {
+	view, err := a.store.ObserveAlertSnapshot(snapshot)
+	a.mu.Lock()
+	a.seen = append(a.seen, snapshot)
+	after := a.after
+	a.mu.Unlock()
+	if err != nil {
+		return view, err
+	}
+	return view, after
+}
+
+func (a *testAlertAuthority) Current(now time.Time) state.AlertDeliveryView {
+	return a.store.AlertDelivery(now)
+}
+
+func (a *testAlertAuthority) observeCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.seen)
+}
+
+func (a *testAlertAuthority) failAfterPersist(err error) {
+	a.mu.Lock()
+	a.after = err
+	a.mu.Unlock()
 }
 
 type fakeClient struct {
