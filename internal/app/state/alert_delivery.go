@@ -67,9 +67,10 @@ const (
 	AlertDeliveryCompletionInactive        AlertDeliveryCompletionDisposition = "occurrence_inactive"
 	AlertDeliveryCompletionRetired         AlertDeliveryCompletionDisposition = "target_retired"
 
-	// Occurrence dispositions are sampled when a producer occurrence is first
-	// persisted. An eligible occurrence may only move to terminal suppression
-	// at the final mode gate; no later mode upgrade can arm it again.
+	// AlertDispositionEligible and the related occurrence dispositions are
+	// sampled when a producer occurrence is first persisted. An eligible
+	// occurrence may only move to terminal suppression at the final mode gate;
+	// no later mode upgrade can arm it again.
 	AlertDispositionEligible        = "eligible"
 	AlertDispositionModeSuppressed  = "mode_suppressed"
 	AlertDispositionObserveOnly     = "observe_inbox_only"
