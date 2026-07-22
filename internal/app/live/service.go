@@ -621,9 +621,11 @@ func (s *Service) PollOnce(ctx context.Context) Snapshot {
 }
 
 func (s *Service) pollAlertCandidates(ctx context.Context, client alertCandidateClient, now time.Time) (*rpc.AlertCandidateSnapshot, SourceMeta, error) {
-	snapshot, err := client.AlertCandidates(ctx)
 	s.alertMu.Lock()
 	defer s.alertMu.Unlock()
+	// Reserve observation order before the RPC. Otherwise the freshness guard
+	// can persist a later synthetic AsOf while this producer read is in flight.
+	snapshot, err := client.AlertCandidates(ctx)
 	s.mu.Lock()
 	prior := cloneAlertCandidateSnapshot(s.snapshot.AlertCandidates)
 	priorSource := s.snapshot.Sources["alert_candidates"]

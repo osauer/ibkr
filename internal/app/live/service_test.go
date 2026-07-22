@@ -1067,6 +1067,88 @@ func TestRepeatedOldAlertSnapshotCannotResetAuthoritativeFreshness(t *testing.T)
 	}
 }
 
+func TestInFlightAlertCandidatePollPrecedesFreshnessExpiry(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 21, 13, 30, 0, 0, time.UTC)
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := New(&fakeClient{}, 5*time.Second, time.Minute)
+	service.now = func() time.Time { return base }
+	setTestAlertAuthority(t, service, store)
+	seed := &alertCandidateFakeClient{fakeClient: &fakeClient{}, snapshot: liveAlertSnapshot(base)}
+	if _, _, err := service.pollAlertCandidates(t.Context(), seed, base); err != nil {
+		t.Fatalf("seed alert candidates: %v", err)
+	}
+
+	replyAt := base.Add(30 * time.Second)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	client := &blockingAlertCandidateClient{
+		snapshot: liveAlertSnapshot(replyAt),
+		started:  started,
+		release:  release,
+	}
+	type pollResult struct {
+		snapshot *rpc.AlertCandidateSnapshot
+		source   SourceMeta
+		err      error
+	}
+	pollDone := make(chan pollResult, 1)
+	go func() {
+		snapshot, source, err := service.pollAlertCandidates(t.Context(), client, replyAt)
+		pollDone <- pollResult{snapshot: snapshot, source: source, err: err}
+	}()
+	<-started
+
+	// Reproduce the freshness guard at the prior snapshot's expiry boundary.
+	// If the in-flight poll did not reserve alert ordering before its RPC, the
+	// guard can persist a later synthetic snapshot and make the valid reply old.
+	if service.alertMu.TryLock() {
+		service.alertMu.Unlock()
+		close(release)
+		<-pollDone
+		t.Fatal("in-flight alert poll did not reserve freshness ordering before its RPC")
+	}
+	expiryDone := make(chan struct{})
+	go func() {
+		service.expireAlertSnapshot(base.Add(time.Minute + time.Nanosecond))
+		close(expiryDone)
+	}()
+	select {
+	case <-expiryDone:
+		t.Fatal("freshness expiry completed ahead of an in-flight producer reply")
+	default:
+	}
+	close(release)
+	result := <-pollDone
+	<-expiryDone
+	if result.err != nil {
+		t.Fatalf("valid in-flight alert snapshot was rejected after expiry: %v", result.err)
+	}
+	if result.snapshot == nil || !result.snapshot.AsOf.Equal(replyAt) || result.snapshot.Coverage.Freshness != rpc.AlertCoverageCurrent {
+		t.Fatalf("in-flight result=%+v, want current producer snapshot", result.snapshot)
+	}
+	if result.source.State != SourceStateCurrent || result.source.Reason != SourceReasonNone || !result.source.LastSuccessAt.Equal(replyAt) {
+		t.Fatalf("in-flight source=%+v, want current", result.source)
+	}
+	if view := store.AlertDelivery(replyAt); !view.AsOf.Equal(replyAt) || view.CurrentState != rpc.AlertSnapshotClear || view.Coverage.Freshness != rpc.AlertCoverageCurrent {
+		t.Fatalf("valid in-flight snapshot was not authoritative: %+v", view)
+	}
+
+	// Serialization must not suppress normal fail-closed aging after the poll.
+	expiredAt := replyAt.Add(time.Minute + time.Nanosecond)
+	service.expireAlertSnapshot(expiredAt)
+	aged := service.Snapshot()
+	if aged.AlertCandidates == nil || aged.AlertCandidates.CurrentState != rpc.AlertSnapshotUnknown || aged.AlertCandidates.Coverage.Freshness != rpc.AlertCoverageStale {
+		t.Fatalf("completed poll did not age fail closed: %+v", aged.AlertCandidates)
+	}
+	if view := store.AlertDelivery(expiredAt); !view.AsOf.Equal(expiredAt) || view.CurrentState != rpc.AlertSnapshotUnknown || view.Coverage.Freshness != rpc.AlertCoverageStale {
+		t.Fatalf("aged in-flight snapshot was not persisted fail closed: %+v", view)
+	}
+}
+
 func TestAlertCandidateOutageReplacesPriorClearWithPersistedUnknown(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
@@ -1441,6 +1523,22 @@ type alertCandidateFakeClient struct {
 	canaryCalls  int
 	callOrder    []string
 	producerHook func()
+}
+
+type blockingAlertCandidateClient struct {
+	snapshot *rpc.AlertCandidateSnapshot
+	started  chan<- struct{}
+	release  <-chan struct{}
+}
+
+func (c *blockingAlertCandidateClient) AlertCandidates(ctx context.Context) (*rpc.AlertCandidateSnapshot, error) {
+	close(c.started)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.release:
+		return cloneAlertCandidateSnapshot(c.snapshot), nil
+	}
 }
 
 func (c *alertCandidateFakeClient) CanaryWithRegime(ctx context.Context) (*rpc.CanaryResult, *rpc.RegimeMonitorResult, error) {
