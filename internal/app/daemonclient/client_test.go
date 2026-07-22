@@ -77,6 +77,17 @@ func daemonAlertCandidateSnapshot(t *testing.T, at time.Time) rpc.AlertCandidate
 			ExpectedSources: []rpc.AlertSource{rpc.AlertSourceCanary},
 			CoveredSources:  []rpc.AlertSource{rpc.AlertSourceCanary},
 		},
+		Sources: []rpc.AlertSourceCoverage{{
+			Source:         rpc.AlertSourceCanary,
+			Status:         "current",
+			Reason:         "source_current",
+			EvidenceHealth: rpc.AlertEvidenceCurrent,
+			InputAsOf:      at,
+			ObservedAt:     at,
+			EvidenceAsOf:   at,
+			FreshUntil:     at.Add(time.Hour),
+			Covered:        true,
+		}},
 		Candidates: []rpc.AlertCandidate{},
 	}
 }
