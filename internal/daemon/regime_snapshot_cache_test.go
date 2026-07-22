@@ -1216,6 +1216,72 @@ func TestRegimeSnapshotCacheRejectsMalformedPersistedState(t *testing.T) {
 	}
 }
 
+func TestRegimeSnapshotCacheHydratesV1AndRefreshesToV2(t *testing.T) {
+	store := openRegimeSnapshotTestStore(t)
+	now := regimeSnapshotTestNow()
+	legacy := regimeSnapshotCacheFixture(now, "legacy v1")
+	legacy.Fingerprint.Version = "regime-fp-v1"
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.CompareAndSwapStateDocument(t.Context(), corestore.StateDocumentCAS{
+		ScopeKey: daemonStateScope, Kind: regimeSnapshotStateKind, JSON: raw,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	daemonContext, cancelDaemon := context.WithCancel(context.Background())
+	t.Cleanup(cancelDaemon)
+	cache, err := loadRegimeSnapshotCache(t.Context(), daemonContext, store, regimeSnapshotCacheOptions{
+		FreshFor: time.Minute, RefreshTimeout: time.Second, FailureRetryAfter: time.Minute,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("hydrate v1 snapshot: %v", err)
+	}
+	view, err := cache.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Revision != saved.Revision || view.Fingerprint != legacy.Fingerprint ||
+		view.Health.Status != rpc.RegimeAuthorityStale {
+		t.Fatalf("hydrated v1 view revision=%d fingerprint=%+v health=%+v", view.Revision, view.Fingerprint, view.Health)
+	}
+	unchanged, ok, err := store.GetStateDocument(t.Context(), daemonStateScope, regimeSnapshotStateKind)
+	if err != nil || !ok {
+		t.Fatalf("read unchanged v1 document: ok=%v err=%v", ok, err)
+	}
+	if unchanged.Revision != saved.Revision || !unchanged.UpdatedAt.Equal(saved.UpdatedAt) || !bytes.Equal(unchanged.JSON, saved.JSON) {
+		t.Fatal("v1 hydration rewrote the authoritative publication")
+	}
+
+	v2 := regimeSnapshotCacheFixture(now.Add(time.Minute), "current v2")
+	if _, err := cache.serve(t.Context(), func(context.Context) (*rpc.RegimeSnapshotResult, bool, regimeSnapshotAfterPublishFunc, error) {
+		return v2, true, nil, nil
+	}); err != nil {
+		t.Fatalf("serve stale v1 snapshot: %v", err)
+	}
+	cache.wait()
+	upgraded, err := cache.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.Revision != saved.Revision+1 || upgraded.Fingerprint.Version != rpc.RegimeFingerprintVersion ||
+		upgraded.Health.Status != rpc.RegimeAuthorityFresh {
+		t.Fatalf("upgraded view revision=%d fingerprint=%+v health=%+v", upgraded.Revision, upgraded.Fingerprint, upgraded.Health)
+	}
+}
+
+func TestRegimeSnapshotEncoderRemainsV2Only(t *testing.T) {
+	legacy := regimeSnapshotCacheFixture(regimeSnapshotTestNow(), "legacy writer")
+	legacy.Fingerprint.Version = "regime-fp-v1"
+	if _, _, err := encodeRegimeSnapshotDocument(legacy); err == nil || !strings.Contains(err.Error(), "fingerprint mismatch") {
+		t.Fatalf("encode v1 error=%v, want fingerprint mismatch", err)
+	}
+}
+
 func TestDecodeRegimeSnapshotDocumentRejectsTrailingJSON(t *testing.T) {
 	now := regimeSnapshotTestNow()
 	raw, _, err := encodeRegimeSnapshotDocument(regimeSnapshotCacheFixture(now, "valid"))

@@ -232,6 +232,8 @@ func spawnDaemonFromExecutable(bin string) (int, error) {
 		return 0, err
 	}
 	pid := cmd.Process.Pid
-	go func() { _ = cmd.Process.Release() }()
+	// Long-lived callers such as the app must reap a daemon that exits during
+	// startup. Process.Release leaves that failed child as a zombie on Unix.
+	go func() { _ = cmd.Wait() }()
 	return pid, nil
 }

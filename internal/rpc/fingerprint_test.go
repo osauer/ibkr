@@ -91,6 +91,52 @@ func TestRegimeFingerprintTracksClassifiedStateAndCanonicalOrdering(t *testing.T
 	}
 }
 
+func TestRegimeFingerprintMatchesSnapshotAcceptsExactFrozenV1(t *testing.T) {
+	t.Parallel()
+	snapshot := RegimeSnapshotResult{
+		Composite: RegimeComposite{
+			Verdict: "Stress signal present", RedCount: 1, RankedCount: 1,
+			ClusterRedCount: 1, ClusterRankedCount: 1,
+		},
+		VIXTermStructure: RegimeVIXTerm{
+			RegimeIndicatorMeta: RegimeIndicatorMeta{Band: "red"},
+			Status:              RegimeStatusOK,
+		},
+		SourceHealth: []SourceHealth{{
+			Source: "vol", Status: SourceStatusOK, Confidence: "high",
+			FingerprintStability: FingerprintStabilitySemanticBuckets,
+		}},
+	}
+	legacy := buildRegimeFingerprint(&snapshot, regimeFingerprintVersionV1, sourceHealthFingerprintsV1(snapshot.SourceHealth))
+	const wantLegacyKey = "sha256:2adc454d653c9a2c2a7b6ccfae77e98be6c3267bdfaed87ac41421d12bcd561b"
+	if legacy.Key != wantLegacyKey {
+		t.Fatalf("frozen v1 key = %q, want %q", legacy.Key, wantLegacyKey)
+	}
+	snapshot.Fingerprint = legacy
+	if !RegimeFingerprintMatchesSnapshot(&snapshot) {
+		t.Fatal("exact frozen v1 fingerprint was rejected")
+	}
+
+	tampered := snapshot
+	tampered.Composite.RedCount++
+	if RegimeFingerprintMatchesSnapshot(&tampered) {
+		t.Fatal("v1 fingerprint accepted changed classified state")
+	}
+
+	withFutureField := snapshot
+	withFutureField.SourceHealth = slices.Clone(snapshot.SourceHealth)
+	withFutureField.SourceHealth[0].LastFailure = &SourceFailure{Code: SourceFailureTimeout}
+	if RegimeFingerprintMatchesSnapshot(&withFutureField) {
+		t.Fatal("v1 fingerprint accepted source failure metadata absent from the frozen schema")
+	}
+
+	unknown := snapshot
+	unknown.Fingerprint.Version = "regime-fp-v99"
+	if RegimeFingerprintMatchesSnapshot(&unknown) {
+		t.Fatal("unknown regime fingerprint version was accepted")
+	}
+}
+
 func TestMarketEventsFingerprintTracksSemanticFlagsOnly(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)

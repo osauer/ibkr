@@ -617,7 +617,8 @@ func (cache *regimeSnapshotCache) healthLocked(now time.Time) rpc.RegimeAuthorit
 }
 
 func (cache *regimeSnapshotCache) isStaleLocked(now time.Time) bool {
-	return len(cache.raw) != 0 && (cache.clockInvalidLocked(now) || !now.Before(cache.lastSuccessAt.Add(cache.freshFor)))
+	return len(cache.raw) != 0 && (cache.fingerprint.Version != rpc.RegimeFingerprintVersion ||
+		cache.clockInvalidLocked(now) || !now.Before(cache.lastSuccessAt.Add(cache.freshFor)))
 }
 
 func (cache *regimeSnapshotCache) clockInvalidLocked(now time.Time) bool {
@@ -680,7 +681,7 @@ func decodeRegimeSnapshotDocument(raw []byte) (*rpc.RegimeSnapshotResult, error)
 	if snapshot.AuthorityHealth != nil {
 		return nil, errors.New("regime snapshot state document contains response-only authority health")
 	}
-	if err := validateCompleteRegimeSnapshot(&snapshot); err != nil {
+	if err := validatePersistedRegimeSnapshot(&snapshot); err != nil {
 		return nil, err
 	}
 	return &snapshot, nil
@@ -698,6 +699,27 @@ func requireJSONEOF(decoder *json.Decoder) error {
 }
 
 func validateCompleteRegimeSnapshot(snapshot *rpc.RegimeSnapshotResult) error {
+	if err := validateRegimeSnapshotShape(snapshot); err != nil {
+		return err
+	}
+	want := rpc.BuildRegimeFingerprint(snapshot)
+	if snapshot.Fingerprint != want {
+		return fmt.Errorf("regime snapshot fingerprint mismatch: version/key do not match classified state")
+	}
+	return nil
+}
+
+func validatePersistedRegimeSnapshot(snapshot *rpc.RegimeSnapshotResult) error {
+	if err := validateRegimeSnapshotShape(snapshot); err != nil {
+		return err
+	}
+	if !rpc.RegimeFingerprintMatchesSnapshot(snapshot) {
+		return fmt.Errorf("regime snapshot fingerprint mismatch: version/key do not match classified state")
+	}
+	return nil
+}
+
+func validateRegimeSnapshotShape(snapshot *rpc.RegimeSnapshotResult) error {
 	if snapshot == nil {
 		return errors.New("regime snapshot is nil")
 	}
@@ -731,10 +753,6 @@ func validateCompleteRegimeSnapshot(snapshot *rpc.RegimeSnapshotResult) error {
 		default:
 			return fmt.Errorf("regime snapshot %s status %q is invalid", row.name, status)
 		}
-	}
-	want := rpc.BuildRegimeFingerprint(snapshot)
-	if snapshot.Fingerprint != want {
-		return fmt.Errorf("regime snapshot fingerprint mismatch: version/key do not match classified state")
 	}
 	return nil
 }

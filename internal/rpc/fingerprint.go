@@ -15,6 +15,7 @@ import (
 // Fingerprint versions identify the semantic projection used for each source.
 // They are not data-freshness or authority versions.
 const (
+	regimeFingerprintVersionV1 = "regime-fp-v1"
 	// RegimeFingerprintVersion identifies a semantic fingerprint projection.
 	RegimeFingerprintVersion = "regime-fp-v2"
 	// AccountFingerprintVersion identifies a semantic fingerprint projection.
@@ -128,7 +129,39 @@ func marketEventBorrowFeeCoverageFingerprints(rows []MarketEventBorrowFeeCoverag
 // timestamps, raw measurements, and prose.
 func BuildRegimeFingerprint(r *RegimeSnapshotResult) Fingerprint {
 	if r == nil {
-		return semanticFingerprint(RegimeFingerprintVersion, nil)
+		return buildRegimeFingerprint(nil, RegimeFingerprintVersion, nil)
+	}
+	return buildRegimeFingerprint(r, RegimeFingerprintVersion, sourceHealthFingerprints(r.SourceHealth))
+}
+
+// RegimeFingerprintMatchesSnapshot recomputes the semantic identity embedded
+// in r. It accepts the current projection and the sole persisted predecessor,
+// whose source-health projection predates typed failure code/stage fields.
+// Unknown versions and mismatched keys fail closed.
+func RegimeFingerprintMatchesSnapshot(r *RegimeSnapshotResult) bool {
+	if r == nil {
+		return false
+	}
+	var want Fingerprint
+	switch r.Fingerprint.Version {
+	case RegimeFingerprintVersion:
+		want = buildRegimeFingerprint(r, RegimeFingerprintVersion, sourceHealthFingerprints(r.SourceHealth))
+	case regimeFingerprintVersionV1:
+		for _, source := range r.SourceHealth {
+			if source.LastFailure != nil {
+				return false
+			}
+		}
+		want = buildRegimeFingerprint(r, regimeFingerprintVersionV1, sourceHealthFingerprintsV1(r.SourceHealth))
+	default:
+		return false
+	}
+	return r.Fingerprint == want
+}
+
+func buildRegimeFingerprint(r *RegimeSnapshotResult, version string, sources []sourceHealthFingerprint) Fingerprint {
+	if r == nil {
+		return semanticFingerprint(version, nil)
 	}
 	projection := regimeFingerprintProjection{
 		Composite: regimeCompositeFingerprint{
@@ -157,11 +190,11 @@ func BuildRegimeFingerprint(r *RegimeSnapshotResult) Fingerprint {
 		Gamma:       buildRegimeGammaFingerprint(r.GammaZero),
 		Breadth:     buildRegimeBreadthFingerprint(r.Breadth),
 		Lifecycle:   lifecycleFingerprintProjectionFromState(r.Lifecycle),
-		Sources:     sourceHealthFingerprints(r.SourceHealth),
+		Sources:     sources,
 		Warnings:    regimeWarningFingerprints(r.WarningDetails),
 		DataQuality: dataQualityFingerprints(r.DataQuality),
 	}
-	return semanticFingerprint(RegimeFingerprintVersion, projection)
+	return semanticFingerprint(version, projection)
 }
 
 // BuildCanaryFingerprint returns the semantic alert identity of a canary
@@ -618,6 +651,14 @@ func lifecycleEvidenceFingerprints(values []LifecycleEvidence) []LifecycleEviden
 }
 
 func sourceHealthFingerprints(values []SourceHealth) []sourceHealthFingerprint {
+	return buildSourceHealthFingerprints(values, true)
+}
+
+func sourceHealthFingerprintsV1(values []SourceHealth) []sourceHealthFingerprint {
+	return buildSourceHealthFingerprints(values, false)
+}
+
+func buildSourceHealthFingerprints(values []SourceHealth, includeFailures bool) []sourceHealthFingerprint {
 	out := make([]sourceHealthFingerprint, 0, len(values))
 	for _, v := range values {
 		fp := sourceHealthFingerprint{
@@ -626,7 +667,7 @@ func sourceHealthFingerprints(values []SourceHealth) []sourceHealthFingerprint {
 			Confidence:           cleanString(v.Confidence),
 			FingerprintStability: cleanString(v.FingerprintStability),
 		}
-		if v.LastFailure != nil {
+		if includeFailures && v.LastFailure != nil {
 			fp.FailureCode = cleanString(v.LastFailure.Code)
 			fp.FailureStage = cleanString(v.LastFailure.Stage)
 		}

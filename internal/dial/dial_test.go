@@ -10,9 +10,32 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestSpawnDaemonFromExecutableReapsShortLivedChild(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "exit-immediately")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("IBKR_LOG", filepath.Join(dir, "daemon.log"))
+
+	pid, err := spawnDaemonFromExecutable(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("short-lived daemon child %d was not reaped", pid)
+}
 
 // shortSocketPath returns a socket path under /tmp so it stays under the
 // 104-char Unix-socket path limit macOS enforces (TempDir paths under
