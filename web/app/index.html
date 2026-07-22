@@ -403,52 +403,31 @@
             <section class="alert-section" aria-label="Needs attention">
               <div class="alert-section__head">
                 <span>Needs attention</span>
-                <span class="alert-section__tools">
-                  <button class="text-button" id="dismissCurrentButton" type="button" hidden>Hide until signal changes</button>
-                  <b id="currentSignalCount">0</b>
-                </span>
+                <b id="currentSignalCount">0</b>
               </div>
               <div class="list" id="currentSignalList"></div>
             </section>
-            <details class="alerts-passed" id="alertsPassedChecks" hidden>
-              <summary id="alertsPassedSummary">Checks passed</summary>
-              <div class="list list--passed" id="alertsPassedList"></div>
-            </details>
             <details class="previous-alerts" id="alertsHistorySection" hidden>
               <summary>
-                <span>Signal history</span>
+                <span>Ended alerts</span>
                 <b id="alertHistoryCount">0</b>
               </summary>
               <div class="list" id="alertHistoryList"></div>
-              <div class="previous-context" id="previousContextAlerts" hidden>
-                <div class="alert-section__head">
-                  <span>From a previous context — no longer apply</span>
-                  <b id="previousContextCount">0</b>
-                </div>
-                <div class="list" id="previousContextList"></div>
-              </div>
-              <div class="alerts-toolbar">
-                <span id="alertsHint">No alert history yet.</span>
-                <button class="text-button" id="clearAlertsButton" type="button">Clear history</button>
-              </div>
             </details>
-            <section class="shadow-advisory shadow-advisory--neutral" id="alertInboxV2Section" data-state="uninitialized" aria-labelledby="alertInboxV2Heading">
-              <div class="shadow-advisory__head">
+            <section class="alert-authority" id="alertAuthoritySection" aria-labelledby="alertAuthorityHeading">
+              <div class="alert-authority__head">
                 <div>
-                  <span id="alertInboxV2Heading">Shadow advisory · no delivery</span>
-                  <b>Source-neutral measurement</b>
+                  <span>Alert authority</span>
+                  <b id="alertAuthorityHeading">Source coverage</b>
                 </div>
-                <span class="shadow-advisory__state" id="alertInboxV2State">Uninitialized</span>
+                <span class="alert-authority__state" id="alertAuthorityState">Unknown</span>
               </div>
-              <p class="shadow-advisory__summary" id="alertInboxV2Summary">Shadow measurement has not initialized yet. No delivery is active.</p>
-              <div class="shadow-advisory__meta">
-                <p id="alertInboxV2Coverage" hidden></p>
-                <p id="alertInboxV2CoverageSources" hidden></p>
-                <time id="alertInboxV2AsOf" hidden></time>
-                <p id="alertInboxV2OccurrenceCount" hidden></p>
+              <p class="alert-authority__summary" id="alertCoverageSummary">Alert authority has not initialized yet.</p>
+              <div class="alert-authority__sources" id="alertSourceList"></div>
+              <div class="alert-authority__delivery">
+                <b id="alertDeliveryHealth">unavailable</b>
+                <p id="alertDeliveryAcceptance">No push-service acceptance is recorded. Phone display and reading are not known.</p>
               </div>
-              <div class="shadow-advisory__list" id="alertInboxV2List"></div>
-              <p class="shadow-advisory__empty" id="alertInboxV2Empty">No shadow evidence has been measured yet.</p>
             </section>
             <section class="governance-section" aria-labelledby="governanceHeading">
               <div class="governance-heading">
@@ -488,7 +467,7 @@
                 <p class="governance-action-status" id="governanceCutoverReviewStatus" role="status"></p>
               </section>
               <details class="governance-details" id="governanceEvidenceDetails">
-                <summary>Evidence &amp; delivery details</summary>
+                <summary>Process evidence</summary>
                 <section class="governance-block" aria-label="Governance history">
                   <div class="alert-section__head">
                     <span>History</span>
@@ -498,7 +477,7 @@
                 </section>
                 <section class="governance-delivery-summary" aria-label="Notification delivery state">
                   <div class="governance-delivery__head">
-                    <span>Delivery</span>
+                    <span>Delivery diagnostics</span>
                     <b id="governanceDeliveryHealth">unavailable</b>
                   </div>
                 </section>

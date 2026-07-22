@@ -1010,16 +1010,17 @@ func TestRegimeAuthorityHealthControlsVisibleDataQualityPosture(t *testing.T) {
 	}
 }
 
-func TestAlertInboxV2ShadowAdvisoryIsBoundedReadOnlyEvidence(t *testing.T) {
+func TestActiveAlertInboxIsTheSoleRenderedAuthority(t *testing.T) {
 	t.Parallel()
 	modules := embeddedSPAModuleSources(t)
-	alertJS := modules["alert-inbox-v2.js"]
+	alertJS := modules["alert-inbox.js"]
 	lifecycle := modules["lifecycle.js"]
 	app := modules["app.js"]
 	serviceWorkerData, err := Files.ReadFile("service-worker.js")
 	if err != nil {
 		t.Fatalf("read service-worker.js: %v", err)
 	}
+	serviceWorker := string(serviceWorkerData)
 	htmlData, err := Files.ReadFile("index.html")
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
@@ -1029,100 +1030,76 @@ func TestAlertInboxV2ShadowAdvisoryIsBoundedReadOnlyEvidence(t *testing.T) {
 		t.Fatalf("read styles.css: %v", err)
 	}
 	html, css := string(htmlData), string(cssData)
-	start := strings.Index(html, `<section class="shadow-advisory`)
-	end := strings.Index(html, `<section class="governance-section`)
-	if start < 0 || end <= start {
-		t.Fatal("index.html missing operator-visible shadow advisory section")
-	}
-	section := html[start:end]
 	for _, want := range []string{
-		`Shadow advisory · no delivery`,
-		`id="alertInboxV2State"`,
-		`id="alertInboxV2Summary"`,
-		`id="alertInboxV2Coverage"`,
-		`id="alertInboxV2OccurrenceCount"`,
-		`id="alertInboxV2List"`,
+		`id="alertAuthorityState"`,
+		`id="alertCoverageSummary"`,
+		`id="alertSourceList"`,
+		`id="alertDeliveryHealth"`,
+		`id="alertDeliveryAcceptance"`,
+		`id="currentSignalList"`,
+		`id="alertHistoryList"`,
 	} {
-		if !strings.Contains(section, want) {
-			t.Fatalf("shadow advisory section missing %q", want)
+		if !strings.Contains(html, want) {
+			t.Fatalf("active alert inbox missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"<button", "<details", "<input", " href="} {
-		if strings.Contains(section, forbidden) {
-			t.Fatalf("shadow advisory section must be read-only; found %q", forbidden)
-		}
-	}
-	for _, want := range []string{
-		".shadow-advisory",
-		".shadow-advisory--warn",
-		".shadow-advisory-row",
-		".shadow-advisory-row__times",
-	} {
+	for _, want := range []string{".alert-authority", ".alert-source-row", ".alert-authority__delivery"} {
 		if !strings.Contains(css, want) {
-			t.Fatalf("styles.css missing shadow advisory style %q", want)
+			t.Fatalf("styles.css missing active alert style %q", want)
 		}
 	}
-
-	view := jsFunctionBlock(t, alertJS, "alertInboxV2View")
 	for _, want := range []string{
-		`state: "invalid"`,
-		`state: "uninitialized"`,
-		`state: "unknown"`,
-		`currentState === "clear" ? "neutral"`,
-		`cannot assert operator all-clear`,
-		`expectedShadowHealth`,
+		`const ALERT_SCHEMA = "alerts-v1"`,
+		`const ALERT_VERSION = "alert-delivery-v3"`,
+		`"title", "body"`,
+		`source.status`,
+		`source.reason`,
+		`last_push_service_acceptance_at`,
+		`does not prove the phone displayed it or that it was read`,
+		`value.coverage.state !== "complete"`,
+		`value.coverage.freshness !== "current"`,
+		`now > Date.parse(source.fresh_until)`,
+		`state.renderedAlertAttention`,
+		`fetch("/api/alerts/attention"`,
+		`fetch("/api/alerts/attention/read"`,
 	} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("alertInboxV2View missing fail-closed state contract %q", want)
+		if !strings.Contains(alertJS, want) {
+			t.Fatalf("active alert module missing %q", want)
 		}
 	}
-	occurrenceView := jsFunctionBlock(t, alertJS, "alertInboxV2OccurrenceView")
-	for _, want := range []string{"source:", "kind:", "severity:", "evidenceHealth:", "timestamps", `end_reason === "authority_scope_changed"`} {
-		if !strings.Contains(occurrenceView, want) {
-			t.Fatalf("shadow occurrence view missing allowlisted evidence %q", want)
+	for _, want := range []string{
+		`import { handleAttentionContextChange, ingestAlerts, ingestAlertsEvent, refreshAlerts, renderAlerts, renderSelectedAlert } from "./alert-inbox.js";`,
+		`ingestAlerts(data.alerts);`,
+		`type === "alerts"`,
+		`ingestAlertsEvent(event.data);`,
+	} {
+		if !strings.Contains(lifecycle, want) {
+			t.Fatalf("lifecycle missing active alert wiring %q", want)
 		}
 	}
-	for _, forbidden := range []string{"display_id:", "destination:", "delivery_preference:", "attention_seq:"} {
-		if strings.Contains(occurrenceView, forbidden) {
-			t.Fatalf("shadow occurrence view exposes non-rendered field %q", forbidden)
+	if !strings.Contains(app, `from "./alert-inbox.js"`) || !strings.Contains(app, "renderAlerts();") {
+		t.Fatal("renderAll must use the active alert inbox")
+	}
+	for _, want := range []string{`/api/alerts/attention`, `payload.display_id`, `notificationRoutes`} {
+		if !strings.Contains(serviceWorker, want) {
+			t.Fatalf("service worker missing active alert contract %q", want)
 		}
 	}
-	renderOccurrences := jsFunctionBlock(t, alertJS, "alertInboxV2RenderedOccurrences")
-	for _, want := range []string{"MAX_RENDERED_OCCURRENCES", "last_seen_at", ".slice(0, bounded)"} {
-		if !strings.Contains(renderOccurrences, want) {
-			t.Fatalf("shadow occurrence renderer missing deterministic bound %q", want)
+	for _, forbidden := range []string{
+		"alert-inbox-v2", "alert_inbox_v2", "/api/attention", "clearAlertsButton",
+		"dismissCurrentButton", "previousContextList", "shadow-advisory",
+	} {
+		for name, source := range map[string]string{
+			"html": html, "css": css, "active alert module": alertJS,
+			"lifecycle": lifecycle, "app": app, "service worker": serviceWorker,
+		} {
+			if strings.Contains(source, forbidden) {
+				t.Fatalf("%s retains removed alert contract %q", name, forbidden)
+			}
 		}
 	}
-	renderShadow := jsFunctionBlock(t, alertJS, "renderAlertInboxV2")
-	for _, forbidden := range []string{"alertUnreadBadge", "renderAttention", "Notification", "serviceWorker", "setAppBadge", "fetch("} {
-		if strings.Contains(renderShadow, forbidden) {
-			t.Fatalf("shadow renderer must not affect delivery or attention: found %q", forbidden)
-		}
-	}
-	if !strings.Contains(app, "renderAlertInboxV2();") {
-		t.Fatal("renderAll must render the shadow advisory after bootstrap/snapshot updates")
-	}
-	eventStart := strings.Index(lifecycle, `if (type === "alert_inbox_v2") {`)
-	if eventStart < 0 {
-		t.Fatal("lifecycle.js missing isolated alert_inbox_v2 SSE branch")
-	}
-	eventEnd := strings.Index(lifecycle[eventStart:], "const data =")
-	if eventEnd < 0 {
-		t.Fatal("lifecycle.js alert_inbox_v2 SSE branch has no bounded end")
-	}
-	eventBranch := lifecycle[eventStart : eventStart+eventEnd]
-	for _, want := range []string{"ingestAlertInboxV2Event(event.data);", "renderAlertInboxV2();"} {
-		if !strings.Contains(eventBranch, want) {
-			t.Fatalf("alert_inbox_v2 SSE branch missing %q", want)
-		}
-	}
-	for _, forbidden := range []string{"renderAll();", "renderAttention", "handleAttentionContextChange", "refreshPushState"} {
-		if strings.Contains(eventBranch, forbidden) {
-			t.Fatalf("alert_inbox_v2 SSE branch must stay presentation-only: found %q", forbidden)
-		}
-	}
-	if strings.Contains(string(serviceWorkerData), "alert_inbox_v2") || strings.Contains(string(serviceWorkerData), "alert-inbox-v2") {
-		t.Fatal("shadow advisory must not enter the service-worker delivery path")
+	if strings.Contains(serviceWorker, "payload.alert_id") {
+		t.Fatal("service worker must not use a legacy alert id as notification identity")
 	}
 }
 

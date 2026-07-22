@@ -50,19 +50,34 @@ async function runRound4SyntheticSmoke() {
     high_water_seq: 4,
     read_through_seq: 2,
     unread_refs: [
-      { kind: "canary", id: "synthetic-alert-4" },
-      { kind: "governance", id: "gov-synthetic-4" },
+      { display_id: "alert-0123456789abcdef", source: "canary", kind: "portfolio_risk" },
+      { display_id: "alert-abcdef0123456789", source: "governance", kind: "governance" },
     ],
   };
   const now = new Date().toISOString();
+  const freshUntil = new Date(Date.now() + 10 * 60_000).toISOString();
   const earlier = new Date(Date.now() - 60_000).toISOString();
-  const alerts = [{
-    id: "synthetic-alert-4",
-    title: "Synthetic watch",
-    body: "Review the retained Canary history.",
-    severity: "watch",
-    created_at: now,
-  }];
+  const alertSource = (source) => ({ source, status: "current", reason: "authoritative", evidence_health: "current", input_as_of: now, observed_at: now, evidence_as_of: now, fresh_until: freshUntil, covered: true });
+  const alertOccurrence = (value) => ({
+    display_id: value.display_id, source: value.source, kind: value.kind,
+    presentation_code: value.presentation_code, title: value.title, body: value.body,
+    state: value.state, severity: value.severity, evidence_health: "current", destination: "alerts",
+    evidence_as_of: now, state_changed_at: now, first_seen_at: earlier, last_seen_at: now,
+    ended_at: value.ended_at, end_reason: value.end_reason, attention_seq: value.attention_seq,
+    disposition: "push_service_accepted",
+  });
+  let alerts = {
+    schema_version: "alerts-v1", version: "alert-delivery-v3", initialized: true, generation: 1,
+    as_of: now, current_state: "active",
+    coverage: { state: "complete", freshness: "current", as_of: now, expected_sources: ["canary", "governance"], covered_sources: ["canary", "governance"] },
+    sources: [alertSource("canary"), alertSource("governance")],
+    occurrences: [
+      alertOccurrence({ display_id: "alert-0123456789abcdef", source: "canary", kind: "portfolio_risk", presentation_code: "canary_portfolio_stress", title: "Synthetic watch", body: "Review the current Canary alert.", state: "open", severity: "watch", ended_at: null, end_reason: null, attention_seq: 3 }),
+      alertOccurrence({ display_id: "alert-abcdef0123456789", source: "governance", kind: "governance", presentation_code: "governance_monthly_pulse", title: "Synthetic process review", body: "Review the retained process alert.", state: "recovered", severity: "act", ended_at: now, end_reason: "recovered", attention_seq: 4 }),
+    ],
+    attention,
+    delivery_health: { state: "healthy", class: "", updated_at: now, last_push_service_acceptance_at: now },
+  };
   const readyInput = { status: "ok", as_of: now };
   const governance = {
     candidates: [],
@@ -84,9 +99,8 @@ async function runRound4SyntheticSmoke() {
   };
   const bootstrap = {
     auth: { authenticated: true },
-    attention,
     alert_settings: { mode: "watch_and_act" },
-    alerts: alerts.slice(0, 20),
+    alerts,
     governance,
     settings: null,
     vapid_public_key: "",
@@ -126,17 +140,18 @@ async function runRound4SyntheticSmoke() {
       mutationRequests.push({ method, path: requestPath, body: request.postData() || "" });
     }
     const json = (body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
-    if (method === "GET" && requestPath === "/api/bootstrap") return json({ ...bootstrap, attention });
-    if (method === "GET" && requestPath === "/api/attention") return json(attention);
+    if (method === "GET" && requestPath === "/api/bootstrap") return json({ ...bootstrap, alerts });
+    if (method === "GET" && requestPath === "/api/alerts/attention") return json(attention);
     if (method === "GET" && requestPath === "/api/alerts") return json(alerts);
     if (method === "GET" && requestPath === "/api/governance") return json(governance);
     if (method === "GET" && requestPath === "/api/orders/open") return json({ orders: [] });
     if (method === "GET" && requestPath === "/api/purge/status") return json({ entries: [] });
-    if (method === "POST" && requestPath === "/api/attention/read") {
+    if (method === "POST" && requestPath === "/api/alerts/attention/read") {
       const body = request.postDataJSON();
       if (Object.keys(body).length !== 1 || body.through_seq !== 4) return json({ error: "unexpected synthetic watermark" }, 400);
       attention = { unread_count: 0, high_water_seq: 4, read_through_seq: 4, unread_refs: [] };
-      return json(attention);
+      alerts = { ...alerts, generation: alerts.generation + 1, attention };
+      return json(alerts);
     }
     if (!['GET', 'HEAD'].includes(method)) return json({ error: "synthetic mutation blocked" }, 503);
     if (requestPath.startsWith("/api/")) return json({});
@@ -156,7 +171,11 @@ async function runRound4SyntheticSmoke() {
   try {
     await page.goto(syntheticURL, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => document.getElementById("dashboard")?.hidden === false, { timeout: 10000 });
-    await page.waitForFunction(() => document.getElementById("alertUnreadBadge")?.textContent === "2", { timeout: 5000 });
+    try {
+      await page.waitForFunction(() => document.getElementById("alertUnreadBadge")?.textContent === "2", { timeout: 5000 });
+    } catch (error) {
+      throw new Error(`synthetic unread did not render: ${errors.join(" | ") || error.message}`);
+    }
     const monitor = await page.evaluate(() => ({
       active: document.getElementById("tabMonitor")?.classList.contains("active"),
       badge: document.getElementById("alertUnreadBadge")?.textContent || "",
@@ -168,7 +187,9 @@ async function runRound4SyntheticSmoke() {
       detailsOpen: document.getElementById("governanceEvidenceDetails")?.open,
       cutoverVisible: document.getElementById("governanceCutoverReviewButton")?.hidden === false,
       coverage: document.getElementById("governanceCoverage")?.textContent || "",
-      canaryHistory: document.getElementById("alertHistoryList")?.textContent || "",
+      activeAlerts: document.getElementById("currentSignalList")?.textContent || "",
+      endedAlerts: document.getElementById("alertHistoryList")?.textContent || "",
+      authority: document.getElementById("alertAuthorityState")?.textContent || "",
       governanceHistory: document.getElementById("governanceHistoryList")?.textContent || "",
     }));
     await page.locator("#tabSettings").click();
@@ -178,9 +199,9 @@ async function runRound4SyntheticSmoke() {
       pushState: document.getElementById("pushState")?.textContent || "",
     }));
     if (!monitor.active || monitor.badge !== "2" || monitor.label !== "Alerts, 2 unread") throw new Error(`synthetic unread monitor state failed: ${JSON.stringify(monitor)}`);
-    if (alertsView.detailsOpen !== false || !alertsView.cutoverVisible || !alertsView.coverage.includes("Older payments need a one-time review") || !alertsView.canaryHistory.includes("Synthetic watch") || !alertsView.governanceHistory.includes("Synthetic process review")) throw new Error(`synthetic Alerts state failed: ${JSON.stringify(alertsView)}`);
+    if (alertsView.detailsOpen !== false || !alertsView.cutoverVisible || !alertsView.coverage.includes("Older payments need a one-time review") || !alertsView.activeAlerts.includes("Synthetic watch") || !alertsView.endedAlerts.includes("Synthetic process review") || alertsView.authority !== "Active" || !alertsView.governanceHistory.includes("Synthetic process review")) throw new Error(`synthetic Alerts state failed: ${JSON.stringify(alertsView)}`);
     if (JSON.stringify(settings.modes) !== JSON.stringify(["Off", "Action required", "Watch + action"]) || !settings.copy.includes("global for this app host and all paired devices") || !settings.copy.includes("Off stops phone notifications while your in-app history remains") || !settings.copy.includes("Action required sends urgent items only") || !settings.copy.includes("Watch + action also sends review reminders") || !settings.copy.includes("not configured here") || !settings.copy.includes("shared across paired devices") || settings.pushState !== "unsupported") throw new Error(`synthetic Settings state failed: ${JSON.stringify(settings)}`);
-    if (mutationRequests.length !== 1 || mutationRequests[0].method !== "POST" || mutationRequests[0].path !== "/api/attention/read" || JSON.parse(mutationRequests[0].body).through_seq !== 4) throw new Error(`unexpected synthetic mutations: ${JSON.stringify(mutationRequests)}`);
+    if (mutationRequests.length !== 1 || mutationRequests[0].method !== "POST" || mutationRequests[0].path !== "/api/alerts/attention/read" || JSON.parse(mutationRequests[0].body).through_seq !== 4) throw new Error(`unexpected synthetic mutations: ${JSON.stringify(mutationRequests)}`);
     if (errors.length > 0) throw new Error(`synthetic browser errors: ${errors.join("\n")}`);
     console.log(JSON.stringify({ ok: true, browser: browserName, mobile: true, isolated: true, monitor, alerts: alertsView, settings, intercepted_mutations: mutationRequests.map(({ method, path }) => ({ method, path })) }, null, 2));
   } finally {
@@ -197,7 +218,7 @@ const context = await browser.newContext({
 });
 // The operator's real unread attention is human-only evidence: this smoke
 // drives the real shared host in a headless page that reports itself
-// "visible", so opening the Alerts tab would POST /api/attention/read with
+// "visible", so opening the Alerts tab would POST /api/alerts/attention/read with
 // the real high-water and silently mark the operator's unread as read (same
 // hazard class as the guarded /api/brief/seen render stamp). Intercept the
 // POST before any page interaction, never forward it, and answer with the
@@ -211,7 +232,7 @@ const context = await browser.newContext({
 // where routing does observe the request.
 let attentionReadIntercepted = 0;
 let attentionReadRouted = 0;
-await context.route(`${baseURL}/api/attention/read`, async (route) => {
+await context.route(`${baseURL}/api/alerts/attention/read`, async (route) => {
   if (route.request().method() !== "POST") {
     await route.fallback();
     return;
@@ -225,9 +246,9 @@ await context.route(`${baseURL}/api/attention/read`, async (route) => {
   }
   attentionReadRouted += 1;
   await route.fulfill({
-    status: 200,
+    status: 409,
     contentType: "application/json",
-    body: JSON.stringify({ high_water_seq: throughSeq, read_through_seq: throughSeq, unread_count: 0, unread_refs: [] }),
+    body: JSON.stringify({ error: "browser smoke diverted attention read", through_seq: throughSeq }),
   });
 });
 // Second net for the render stamp (see the wrapped-fetch divert init script
@@ -304,11 +325,11 @@ await context.addInitScript(() => {
     const request = fetchArgs[0];
     const url = typeof request === "string" ? request : request?.url || "";
     const method = String((typeof request === "string" ? fetchArgs[1]?.method : request?.method || fetchArgs[1]?.method) || "GET").toUpperCase();
-    if (method === "POST" && url.endsWith("/api/attention/read")) {
+    if (method === "POST" && url.endsWith("/api/alerts/attention/read")) {
       // The QA page must never mark the operator's real unread as read.
       // Divert before any network layer (service-worker control hides this
       // request from Playwright routing in WebKit) and answer with the
-      // receipt shape the SPA expects.
+      // current full DTO shape the SPA expects without advancing the cursor.
       let throughSeq = 0;
       try {
         const raw = typeof request === "string" ? fetchArgs[1]?.body : await request.clone().text();
@@ -319,16 +340,17 @@ await context.addInitScript(() => {
       }
       globalThis.__ibkrSmoke.attentionReadDiverted += 1;
       globalThis.__ibkrSmoke.fetches.push({ url, status: 200, diverted: true, at: Date.now() });
+      const current = await nativeFetch("/api/alerts", { credentials: "include" });
       return new Response(
-        JSON.stringify({ unread_count: 0, high_water_seq: throughSeq, read_through_seq: throughSeq, unread_refs: [] }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
+        await current.text(),
+        { status: current.status, headers: { "Content-Type": "application/json", "X-Smoke-Through-Seq": String(throughSeq) } },
       );
     }
     if (method === "POST" && url.endsWith("/api/brief/seen")) {
       // The render-stamp is human-only evidence: a QA page that reports itself
       // visible would stamp the operator's real brief the instant the Brief tab
       // renders. Divert before any network layer (SW control hides this fetch
-      // from Playwright routing in WebKit, exactly like /api/attention/read) and
+      // from Playwright routing in WebKit, exactly like /api/alerts/attention/read) and
       // answer with a receipt the render-stamp state machine accepts.
       let kind = "morning";
       try {
@@ -436,8 +458,8 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 100));
     attentionReadIntercepted = await attentionReadInterceptedCount(page);
   }
-  const attentionReadFetches = await page.evaluate(() => globalThis.__ibkrSmoke.fetches.filter((item) => item.url.endsWith("/api/attention/read")).length);
-  if (attentionReadIntercepted === 0) throw new Error("attention read guard never fired: alerts tab exercised without an intercepted /api/attention/read POST");
+  const attentionReadFetches = await page.evaluate(() => globalThis.__ibkrSmoke.fetches.filter((item) => item.url.endsWith("/api/alerts/attention/read")).length);
+  if (attentionReadIntercepted === 0) throw new Error("attention read guard never fired: alerts tab exercised without an intercepted /api/alerts/attention/read POST");
   if (attentionReadFetches !== attentionReadIntercepted) throw new Error(`attention read guard bypass suspected: page fetches=${attentionReadFetches} intercepted=${attentionReadIntercepted}`);
   const openOrders = await exerciseOpenOrders(page);
   const settingsTab = await exerciseSettingsTab(page);
@@ -1413,15 +1435,13 @@ async function exerciseAlertHistory(page) {
     count: Number.parseInt(document.getElementById("alertCount")?.textContent || "0", 10) || 0,
     currentRows: document.querySelectorAll("#currentSignalList .alert-row").length,
     historyRows: document.querySelectorAll("#alertHistoryList .alert-row").length,
-    previousRows: document.querySelectorAll("#previousContextList .alert-row").length,
     currentCount: Number.parseInt(document.getElementById("currentSignalCount")?.textContent || "0", 10) || 0,
     historyCount: Number.parseInt(document.getElementById("alertHistoryCount")?.textContent || "0", 10) || 0,
-    previousCount: Number.parseInt(document.getElementById("previousContextCount")?.textContent || "0", 10) || 0,
-    clearDisabled: document.getElementById("clearAlertsButton")?.disabled || false,
-    hint: document.getElementById("alertsHint")?.textContent || "",
+    authority: document.getElementById("alertAuthorityState")?.textContent || "",
+    coverage: document.getElementById("alertCoverageSummary")?.textContent || "",
   }));
   let selected = false;
-  const firstAlert = page.locator("#currentSignalList .alert-row:visible, #alertHistoryList .alert-row:visible, #previousContextList .alert-row:visible").first();
+  const firstAlert = page.locator("#currentSignalList .alert-row:visible, #alertHistoryList .alert-row:visible").first();
   if ((await firstAlert.count()) > 0) {
     await firstAlert.click();
     await page.waitForFunction(() => {
@@ -1430,9 +1450,7 @@ async function exerciseAlertHistory(page) {
     }, { timeout: 5000 });
     selected = true;
   }
-  if (info.count === 0 && !info.clearDisabled) {
-    throw new Error("clear alert history should be disabled when there are no rows");
-  }
+  if (!info.authority || !info.coverage) throw new Error(`active alert authority did not render: ${JSON.stringify(info)}`);
   if (!initiallyOpen) {
     await page.locator("#alertsPanel summary").click();
   }
@@ -1442,10 +1460,10 @@ async function exerciseAlertHistory(page) {
     count: info.count,
     current_rows: info.currentRows,
     history_rows: info.historyRows,
-    previous_rows: info.previousRows,
     current_count: info.currentCount,
     history_count: info.historyCount,
-    previous_count: info.previousCount,
+    authority: info.authority,
+    coverage: info.coverage,
     selected,
   };
 }
@@ -1531,8 +1549,7 @@ async function exerciseGovernanceFixtures(page) {
     ids: [
       "governanceCurrentState", "governanceCurrentCount", "governanceCurrentList", "governanceSourceHealth",
       "governanceContext", "governanceCoverage", "governanceCoverageDetail", "governanceEvidenceDetails", "governanceCutoverReviewButton", "governanceCutoverReviewStatus",
-      "governanceHistoryCount", "governanceHistoryList", "governanceDeliveryHealth", "governanceDeliveryDetail",
-      "governanceAttemptList", "safeNotificationTestButton", "safeNotificationTestStatus",
+      "governanceHistoryCount", "governanceHistoryList", "safeNotificationTestButton", "safeNotificationTestStatus",
     ].filter((id) => !document.getElementById(id)),
     current: document.getElementById("governanceCurrentList")?.textContent || "",
     source: document.getElementById("governanceSourceHealth")?.textContent || "",
@@ -1629,48 +1646,6 @@ async function exerciseGovernanceFixtures(page) {
   if (!completed.current.includes("No current risk and process reminders") || !completed.monthly.includes("completed this month")) throw new Error(`governance completed fixture is incomplete: ${JSON.stringify(completed)}`);
 
   await renderFixture({ patch: {
-    governance: {
-      ...baseGovernance,
-      delivery_health: { state: "degraded", class: "transport_retry", updated_at: asOf, last_push_service_acceptance_at: earlier },
-      diagnostic: { state: "all_failed", at: asOf },
-      attempts: [
-        { target_ref: "failed-private-target-a", class: "transport_retry", at: earlier, retry_at: later, transport_count: 2 },
-        { target_ref: "failed-private-target-b", class: "http_rejected", at: asOf, completed_at: asOf, transport_count: 1 },
-      ],
-    },
-  } });
-  const failedPush = await page.evaluate(() => ({
-    health: document.getElementById("governanceDeliveryHealth")?.textContent || "",
-    detail: document.getElementById("governanceDeliveryDetail")?.textContent || "",
-    attempts: document.getElementById("governanceAttemptList")?.textContent || "",
-    safeTestVisible: document.getElementById("safeNotificationTestButton")?.getClientRects().length > 0,
-  }));
-  if (!failedPush.health.includes("degraded · transport_retry") || !failedPush.detail.includes("diagnostic all_failed") || !failedPush.attempts.includes("transport_retry") || !failedPush.attempts.includes("http_rejected") || failedPush.safeTestVisible) throw new Error(`governance failed-push fixture is incomplete: ${JSON.stringify(failedPush)}`);
-
-  await renderFixture({ patch: {
-    governance: {
-      ...baseGovernance,
-      delivery_health: { state: "degraded", class: "partial_acceptance", updated_at: asOf, last_push_service_acceptance_at: asOf },
-      diagnostic: { state: "partial_acceptance", at: asOf },
-      attempts: [
-        { target_ref: "partial-private-target-a", occurrence_id: "private-occurrence", class: "push_service_accepted", at: earlier, completed_at: asOf, transport_count: 1 },
-        { target_ref: "partial-private-target-b", class: "timeout_retry", at: asOf, retry_at: later, transport_count: 2, raw_error: "private-timeout" },
-        { target_ref: "partial-private-target-c", class: "http_rejected", at: asOf, completed_at: asOf, transport_count: 1, endpoint: "https://evil.example/push" },
-      ],
-    },
-  } });
-  const partialPush = await page.evaluate(() => ({
-    health: document.getElementById("governanceDeliveryHealth")?.textContent || "",
-    attempts: document.getElementById("governanceAttemptList")?.textContent || "",
-  }));
-  if (!partialPush.health.includes("degraded · partial_acceptance") || !["push_service_accepted", "timeout_retry", "http_rejected", "target 1", "target 2", "target 3", "retry", "transport count 2"].every((copy) => partialPush.attempts.includes(copy))) {
-    throw new Error(`governance partial multi-target fixture is incomplete: ${JSON.stringify(partialPush)}`);
-  }
-  for (const privateText of ["partial-private", "private-occurrence", "private-timeout", "evil.example"]) {
-    if (partialPush.attempts.includes(privateText)) throw new Error(`governance attempt fixture leaked private text ${JSON.stringify(privateText)}`);
-  }
-
-  await renderFixture({ patch: {
     sources: { nudges: { state: "stale", reason: "poll_stale", updated_at: asOf, last_success_at: earlier } },
     nudges: { candidates: [{ title: "Stale retained candidate", body: "Retained", severity: "act", destination: "alerts" }] },
     governance: baseGovernance,
@@ -1680,9 +1655,8 @@ async function exerciseGovernanceFixtures(page) {
     state: document.getElementById("governanceCurrentState")?.textContent || "",
     current: document.getElementById("governanceCurrentList")?.textContent || "",
     source: document.getElementById("governanceSourceHealth")?.textContent || "",
-    delivery: document.getElementById("governanceDeliveryHealth")?.textContent || "",
   }));
-  if (stale.state !== "Unavailable" || stale.current.includes("Stale retained candidate") || !stale.current.includes("unavailable") || !stale.source.includes("out of date · latest update is late") || !stale.source.includes("updated") || !stale.source.includes("last successful") || !stale.delivery.includes("healthy · updated")) {
+  if (stale.state !== "Unavailable" || stale.current.includes("Stale retained candidate") || !stale.current.includes("unavailable") || !stale.source.includes("out of date · latest update is late") || !stale.source.includes("updated") || !stale.source.includes("last successful")) {
     throw new Error(`governance stale fixture is incomplete: ${JSON.stringify(stale)}`);
   }
 
@@ -1712,9 +1686,8 @@ async function exerciseGovernanceFixtures(page) {
     current: document.getElementById("governanceCurrentList")?.textContent || "",
     source: document.getElementById("governanceSourceHealth")?.textContent || "",
     history: document.getElementById("governanceHistoryList")?.textContent || "",
-    delivery: document.getElementById("governanceDeliveryHealth")?.textContent || "",
   }));
-  if (unavailable.state !== "Unavailable" || !unavailable.current.includes("unavailable") || unavailable.current.includes("Retained candidate") || !unavailable.source.includes("the Mac could not reach the service") || !unavailable.source.includes("updated") || !unavailable.source.includes("last successful") || !unavailable.history.includes("Monthly risk pulse") || !unavailable.delivery.includes("retained · refresh unavailable · last known healthy · updated")) {
+  if (unavailable.state !== "Unavailable" || !unavailable.current.includes("unavailable") || unavailable.current.includes("Retained candidate") || !unavailable.source.includes("the Mac could not reach the service") || !unavailable.source.includes("updated") || !unavailable.source.includes("last successful") || !unavailable.history.includes("Monthly risk pulse")) {
     throw new Error(`governance unavailable-with-history fixture is incomplete: ${JSON.stringify(unavailable)}`);
   }
 
@@ -1729,7 +1702,7 @@ async function exerciseGovernanceFixtures(page) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   await page.locator("#tabMonitor").click();
-  return { not_due: notDue, due, report_retry: reportRetry, report_action: reportAction, report_unavailable: reportUnavailable, blocked, completed, failed_push: failedPush, partial_multi_target: partialPush, stale, not_observed: notObserved, unavailable_with_history: unavailable, mutation_fetches: 0 };
+  return { not_due: notDue, due, report_retry: reportRetry, report_action: reportAction, report_unavailable: reportUnavailable, blocked, completed, stale, not_observed: notObserved, unavailable_with_history: unavailable, mutation_fetches: 0 };
 }
 
 // Orders lives on its own bottom-nav tab (Monitor, Brief, Alerts, Orders,

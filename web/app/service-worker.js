@@ -31,13 +31,14 @@ self.addEventListener("push", (event) => {
   const body = typeof payload.body === "string" && payload.body ? payload.body : "Open ibkr canary for details.";
   const tag = notificationTag(payload);
   event.waitUntil((async () => {
-    await self.registration.showNotification(title, {
+    const options = {
       body,
       data: { destination },
-      tag,
       badge: "/favicon-64.png",
       icon: "/icon-192.png",
-    });
+    };
+    if (tag) options.tag = tag;
+    await self.registration.showNotification(title, options);
     await refreshAppIconBadge();
   })());
 });
@@ -51,7 +52,7 @@ async function refreshAppIconBadge() {
   const nav = self.navigator;
   if (!nav || typeof nav.setAppBadge !== "function" || typeof self.fetch !== "function") return;
   try {
-    const res = await self.fetch("/api/attention", { credentials: "include" });
+    const res = await self.fetch("/api/alerts/attention", { credentials: "include" });
     if (!res.ok) return;
     const attention = await res.json();
     const unread = attention?.unread_count;
@@ -72,8 +73,7 @@ self.addEventListener("notificationclick", (event) => {
 
 function notificationTag(payload) {
   if (typeof payload.display_id === "string" && payload.display_id) return payload.display_id;
-  if (typeof payload.alert_id === "string" && payload.alert_id) return payload.alert_id;
-  return "ibkr-canary";
+  return "";
 }
 
 async function openNotificationRoute(route) {

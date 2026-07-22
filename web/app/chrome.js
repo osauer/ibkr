@@ -1,5 +1,5 @@
 import { renderAll } from "./app.js";
-import { handleAttentionContextChange } from "./alerts.js";
+import { handleAttentionContextChange } from "./alert-inbox.js";
 import { renderCanaryDetail, renderRegimePanel } from "./canary.js";
 import { renderOpportunitiesPanel } from "./opportunities.js";
 import { setPortfolioExpansion } from "./portfolio.js";

@@ -1,0 +1,268 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+globalThis.localStorage = { getItem() { return null; }, setItem() {} };
+
+class Element {
+  constructor(id = "") {
+    this.id = id;
+    this.hidden = false;
+    this.textContent = "";
+    this.className = "";
+    this.dataset = {};
+    this.children = [];
+    this.attributes = {};
+    this.classList = {
+      toggle: (name, on) => {
+        const names = new Set(this.className.split(/\s+/).filter(Boolean));
+        if (on) names.add(name); else names.delete(name);
+        this.className = [...names].join(" ");
+      },
+    };
+  }
+  addEventListener() {}
+  append(...items) { this.children.push(...items); }
+  appendChild(item) { this.children.push(item); }
+  replaceChildren(...items) { this.children = items; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+}
+
+const ids = [
+  "alertCount", "currentSignalCount", "alertAuthorityState", "alertCoverageSummary", "currentSignalList",
+  "alertHistoryList", "alertsHistorySection", "alertHistoryCount", "alertSourceList", "alertsDeliveryBanner",
+  "alertDeliveryHealth", "alertDeliveryAcceptance", "alertUnreadBadge", "tabAlerts", "attentionStatus", "alertsTab",
+  "selectedAlertPanel", "selectedAlertTitle", "selectedAlertBody", "selectedAlertTime",
+];
+const elements = new Map(ids.map((id) => [id, new Element(id)]));
+globalThis.document = {
+  visibilityState: "visible",
+  addEventListener() {},
+  createElement() { return new Element(); },
+  getElementById(id) { return elements.get(id) || null; },
+};
+Object.defineProperty(globalThis, "navigator", { value: {}, configurable: true });
+
+const {
+  acknowledgeAttention,
+  canAssertAlertClear,
+  ingestAlerts,
+  ingestAlertsEvent,
+  renderAlerts,
+  validateAlerts,
+} = await import("../alert-inbox.js");
+const { state } = await import("../state.js");
+
+const sourceNames = [
+  "canary", "regime", "rulebook", "risk_policy", "protection", "order_integrity",
+  "reconciliation", "governance", "data_health", "delivery",
+];
+const at = "2026-07-22T12:00:00Z";
+const freshUntil = "2026-07-22T12:10:00Z";
+
+function source(name, overrides = {}) {
+  return {
+    source: name,
+    status: "current",
+    reason: "authoritative",
+    evidence_health: "current",
+    input_as_of: at,
+    observed_at: at,
+    evidence_as_of: at,
+    fresh_until: freshUntil,
+    covered: true,
+    ...overrides,
+  };
+}
+
+function occurrence(overrides = {}) {
+  return {
+    display_id: "alert-0123456789abcdef",
+    source: "canary",
+    kind: "portfolio_risk",
+    presentation_code: "canary_portfolio_stress",
+    title: "Portfolio stress",
+    body: "Portfolio stress needs attention.",
+    state: "open",
+    severity: "act",
+    evidence_health: "current",
+    destination: "alerts",
+    evidence_as_of: at,
+    state_changed_at: at,
+    first_seen_at: at,
+    last_seen_at: at,
+    ended_at: null,
+    end_reason: null,
+    attention_seq: 4,
+    disposition: "push_service_accepted",
+    ...overrides,
+  };
+}
+
+function dto(overrides = {}) {
+  const active = occurrence();
+  return {
+    schema_version: "alerts-v1",
+    version: "alert-delivery-v3",
+    initialized: true,
+    generation: 9,
+    as_of: at,
+    current_state: "active",
+    coverage: {
+      state: "complete",
+      freshness: "current",
+      as_of: at,
+      expected_sources: [...sourceNames],
+      covered_sources: [...sourceNames],
+    },
+    sources: sourceNames.map((name) => source(name)),
+    occurrences: [active],
+    attention: {
+      unread_count: 1,
+      high_water_seq: 4,
+      read_through_seq: 3,
+      unread_refs: [{ display_id: active.display_id, source: active.source, kind: active.kind }],
+    },
+    delivery_health: {
+      state: "healthy",
+      class: "",
+      updated_at: at,
+      last_push_service_acceptance_at: at,
+    },
+    ...overrides,
+  };
+}
+
+function reset() {
+  state.alerts = null;
+  state.alertsFeedValid = null;
+  state.alertsFeedError = "";
+  state.renderedAlertAttention = null;
+  state.attentionEpoch = 0;
+  state.attentionReadInFlight = null;
+  state.attentionRetryTimer = null;
+  state.attentionStatus = { state: "", error: false };
+  state.selectedAlertID = null;
+  state.authenticated = true;
+  state.activeTab = "alerts";
+  for (const element of elements.values()) {
+    element.hidden = false;
+    element.textContent = "";
+    element.children = [];
+  }
+}
+
+function visibleText(element) {
+  return `${element?.textContent || ""} ${(element?.children || []).map(visibleText).join(" ")}`.trim();
+}
+
+test("the active DTO accepts current and previous display ids with a reused attention sequence", () => {
+  const value = dto();
+  value.occurrences.push(occurrence({
+    display_id: "alert-previous-abcdef0123456789",
+    ended_at: at,
+    end_reason: "authority_scope_changed",
+  }));
+  assert.equal(validateAlerts(value), value);
+});
+
+test("clear requires every exact source to be covered, current, and not expired", () => {
+  const clear = dto({
+    current_state: "clear",
+    occurrences: [],
+    attention: { unread_count: 0, high_water_seq: 4, read_through_seq: 4, unread_refs: [] },
+  });
+  assert.equal(canAssertAlertClear(clear, Date.parse("2026-07-22T12:05:00Z")), true);
+  assert.equal(canAssertAlertClear(clear, Date.parse("2026-07-22T12:10:00.001Z")), false);
+  clear.sources[0].covered = false;
+  assert.equal(canAssertAlertClear(clear, Date.parse("2026-07-22T12:05:00Z")), false);
+});
+
+test("same-generation freshness aging applies and any other equivocation is rejected", () => {
+  reset();
+  const current = dto();
+  assert.equal(ingestAlerts(current).status, "applied");
+  const aged = structuredClone(current);
+  aged.coverage.freshness = "stale";
+  aged.sources[0].status = "stale";
+  aged.sources[0].reason = "freshness_expired";
+  aged.sources[0].evidence_health = "stale";
+  aged.occurrences[0].evidence_health = "stale";
+  assert.equal(ingestAlertsEvent(JSON.stringify(aged)).status, "applied");
+  assert.equal(state.alerts.sources[0].reason, "freshness_expired");
+  const equivocation = structuredClone(aged);
+  equivocation.occurrences[0].title = "Client-invented copy";
+  assert.equal(ingestAlerts(equivocation).status, "rejected");
+  assert.match(state.alertsFeedError, /equivocation/);
+  assert.equal(state.alerts.occurrences[0].title, "Portfolio stress");
+});
+
+test("render uses only API title and body, and records the exact unread set rendered", () => {
+  reset();
+  const value = dto();
+  ingestAlerts(value);
+  const view = renderAlerts();
+  assert.equal(view.active.length, 1);
+  assert.match(visibleText(elements.get("currentSignalList").children[0]), /Portfolio stress/);
+  assert.deepEqual(state.renderedAlertAttention, {
+    high_water_seq: 4,
+    refs: [{ display_id: "alert-0123456789abcdef", source: "canary", kind: "portfolio_risk" }],
+  });
+  assert.match(elements.get("alertDeliveryAcceptance").textContent, /does not prove the phone displayed it or that it was read/i);
+  assert.match(elements.get("alertSourceList").children[0].children[1].textContent, /current · authoritative/);
+});
+
+test("an unread row outside bounded history keeps the inbox visible but cannot be acknowledged", async () => {
+  reset();
+  const value = dto();
+  value.attention = {
+    unread_count: 1,
+    high_water_seq: 5,
+    read_through_seq: 3,
+    unread_refs: [{ display_id: "alert-previous-fedcba9876543210", source: "regime", kind: "market_state" }],
+  };
+  assert.equal(validateAlerts(value), value);
+  ingestAlerts(value);
+  renderAlerts();
+  assert.equal(state.renderedAlertAttention, null);
+  let posted = false;
+  globalThis.fetch = async (url) => {
+    if (url === "/api/alerts/attention") return { ok: true, async json() { return structuredClone(value.attention); } };
+    if (url === "/api/alerts") return { ok: true, async json() { return structuredClone(value); } };
+    posted = true;
+    throw new Error("read must not be posted");
+  };
+  assert.equal(await acknowledgeAttention({ retry: false }), false);
+  assert.equal(posted, false);
+  assert.equal(elements.get("currentSignalList").children.length, 1);
+});
+
+test("read acknowledgement uses the active routes and accepts a full DTO receipt", async () => {
+  reset();
+  const value = dto();
+  ingestAlerts(value);
+  renderAlerts();
+  const read = structuredClone(value);
+  read.generation = 10;
+  read.attention = { unread_count: 0, high_water_seq: 4, read_through_seq: 4, unread_refs: [] };
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url, init });
+    if (url === "/api/alerts/attention") return { ok: true, async json() { return structuredClone(value.attention); } };
+    if (url === "/api/alerts" && !init.method) return { ok: true, async json() { return structuredClone(value); } };
+    if (url === "/api/alerts/attention/read") return { ok: true, async json() { return structuredClone(read); } };
+    throw new Error(`unexpected route ${url}`);
+  };
+  assert.equal(await acknowledgeAttention({ retry: false }), true);
+  assert.deepEqual(calls.map((call) => call.url), ["/api/alerts/attention", "/api/alerts", "/api/alerts/attention/read"]);
+  assert.deepEqual(JSON.parse(calls[2].init.body), { through_seq: 4 });
+  assert.equal(state.alerts.attention.unread_count, 0);
+});
+
+test("malformed or hidden unread state never advances the read cursor", async () => {
+  reset();
+  elements.get("alertsTab").hidden = true;
+  let called = false;
+  globalThis.fetch = async () => { called = true; throw new Error("must not fetch"); };
+  assert.equal(await acknowledgeAttention({ retry: false }), false);
+  assert.equal(called, false);
+});

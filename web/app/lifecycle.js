@@ -1,5 +1,5 @@
-import { applyAttention, applyGovernanceCutoverOverlay, handleAttentionContextChange, refreshAlerts, refreshGovernance, refreshPushState, scheduleGovernanceRefresh, validateGovernanceResponse } from "./alerts.js";
-import { ingestAlertInboxV2, ingestAlertInboxV2Event, renderAlertInboxV2 } from "./alert-inbox-v2.js";
+import { applyGovernanceCutoverOverlay, refreshGovernance, refreshPushState, scheduleGovernanceRefresh, validateGovernanceResponse } from "./alerts.js";
+import { handleAttentionContextChange, ingestAlerts, ingestAlertsEvent, refreshAlerts, renderAlerts, renderSelectedAlert } from "./alert-inbox.js";
 import { renderAll } from "./app.js";
 import { tryDeviceLogin } from "./auth.js";
 import { refreshOpenOrders } from "./orders.js";
@@ -72,10 +72,8 @@ function applyBootstrap(data) {
   state.settings = data.settings || data.snapshot?.settings || state.settings;
   if (state.snapshot && state.settings) state.snapshot.settings = state.settings;
   state.alertSettings = data.alert_settings || state.alertSettings;
-  state.alerts = data.alerts || [];
   state.attentionEpoch = (state.attentionEpoch || 0) + 1;
-  applyAttention(data.attention);
-  ingestAlertInboxV2(data.alert_inbox_v2);
+  ingestAlerts(data.alerts);
   state.vapidPublicKey = data.vapid_public_key || "";
   $("pairingPanel").hidden = true;
   $("accountPanel").hidden = false;
@@ -108,11 +106,12 @@ function connectEvents() {
   state.eventSource?.close();
   const es = new EventSource("/api/events", { withCredentials: true });
   state.eventSource = es;
-  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules", "brief", "nudges", "alert_inbox_v2"]) {
+  for (const type of ["snapshot", "status", "market_calendar", "account", "positions", "market_events", "market_quotes", "trading", "auto_trade", "proposals", "opportunities", "settings", "regime", "canary", "rules", "brief", "nudges", "alerts"]) {
     es.addEventListener(type, (event) => {
-      if (type === "alert_inbox_v2") {
-        ingestAlertInboxV2Event(event.data);
-        renderAlertInboxV2();
+      if (type === "alerts") {
+        ingestAlertsEvent(event.data);
+        renderAlerts();
+        renderSelectedAlert();
         state.lastEventAt = Date.now();
         setConnection("Connected", true);
         return;

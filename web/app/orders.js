@@ -1,7 +1,14 @@
-import { warningMessages } from "./alerts.js";
 import { main } from "./app.js";
 import { $, labelize, protectionWriteConfirmation, protectionWriteUnavailableReason, readJSONOrText, renderFreshnessTimestamp } from "./shared.js";
 import { state } from "./state.js";
+
+function warningMessages(warnings = []) {
+  return warnings.map((warning) => {
+    if (!warning) return "";
+    if (typeof warning === "string") return warning;
+    return warning.message || warning.code || JSON.stringify(warning);
+  }).filter(Boolean);
+}
 
 function renderOpenOrders() {
   const list = $("ordersOpenList");

@@ -61,7 +61,7 @@ async function dispatch(listener, event) {
   await pending;
 }
 
-test("push payload uses governance display id before legacy Canary alert id", async () => {
+test("push payload uses only the active display id as its notification tag", async () => {
   const worker = loadWorker();
   await dispatch(worker.listeners.get("push"), {
     data: { json: () => ({
@@ -83,7 +83,7 @@ test("push payload uses governance display id before legacy Canary alert id", as
   assert.equal(JSON.stringify(worker.notifications).includes("evil.example"), false);
 });
 
-test("a brief-destined governance push shows on the Brief tab", async () => {
+test("a brief-destined push shows on the Brief tab", async () => {
   const worker = loadWorker();
   await dispatch(worker.listeners.get("push"), {
     data: { json: () => ({
@@ -95,18 +95,18 @@ test("a brief-destined governance push shows on the Brief tab", async () => {
   assert.equal(worker.notifications[0].options.tag, "gov-2222222222222222");
 });
 
-test("distinct governance occurrence ids remain distinct while Canary keeps alert-id coalescing", async () => {
+test("distinct display ids remain distinct and a legacy alert id is ignored", async () => {
   const worker = loadWorker();
   for (const display_id of ["gov-aaaaaaaaaaaaaaaa", "gov-bbbbbbbbbbbbbbbb"]) {
     await dispatch(worker.listeners.get("push"), { data: { json: () => ({ display_id, kind: "monthly_pulse" }) } });
   }
   await dispatch(worker.listeners.get("push"), { data: { json: () => ({ alert_id: "canary-stable" }) } });
   assert.deepEqual(worker.notifications.map((item) => item.options.tag), [
-    "gov-aaaaaaaaaaaaaaaa", "gov-bbbbbbbbbbbbbbbb", "canary-stable",
+    "gov-aaaaaaaaaaaaaaaa", "gov-bbbbbbbbbbbbbbbb", undefined,
   ]);
 });
 
-test("malformed payload and unknown destination fail closed to monitor with a fixed fallback tag", async () => {
+test("malformed payload and unknown destination fail closed to monitor without an invented tag", async () => {
   const worker = loadWorker();
   await dispatch(worker.listeners.get("push"), { data: { json: () => { throw new Error("malformed"); } } });
   await dispatch(worker.listeners.get("push"), { data: { json: () => "https://evil.example" } });
@@ -114,7 +114,7 @@ test("malformed payload and unknown destination fail closed to monitor with a fi
   for (const notification of worker.notifications) {
     assert.equal(notification.options.data.destination, "monitor");
     assert.deepEqual(Object.keys(notification.options.data), ["destination"]);
-    assert.equal(notification.options.tag, "ibkr-canary");
+    assert.equal("tag" in notification.options, false);
     assert.equal(JSON.stringify(notification).includes("evil.example"), false);
     assert.equal(JSON.stringify(notification).includes("/admin"), false);
   }
@@ -167,7 +167,7 @@ test("push mirrors the server unread count onto the app icon badge", async () =>
   await dispatch(worker.listeners.get("push"), { data: { json: () => ({ title: "t", body: "b", destination: "alerts" }) } });
   assert.equal(worker.notifications.length, 1);
   assert.equal(fetchCalls.length, 1);
-  assert.equal(fetchCalls[0].url, "/api/attention");
+  assert.equal(fetchCalls[0].url, "/api/alerts/attention");
   assert.equal(fetchCalls[0].init.credentials, "include");
   assert.deepEqual(badge.calls, [["set", 3]]);
 });

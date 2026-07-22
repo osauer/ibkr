@@ -26,8 +26,8 @@ func TestGovernanceSurfaceStaticContract(t *testing.T) {
 			t.Errorf("index.html missing governance id %q", id)
 		}
 	}
-	if !strings.Contains(html, ">Signal history<") || strings.Contains(html, ">Alert History<") {
-		t.Fatal("Signal history must be visibly distinct from Risk & process history")
+	if !strings.Contains(html, ">Ended alerts<") || strings.Contains(html, ">Alert History<") {
+		t.Fatal("Ended alerts must be visibly distinct from Risk & process history")
 	}
 	detailsAt := strings.Index(html, `id="governanceEvidenceDetails"`)
 	if detailsAt < 0 || strings.Contains(html[detailsAt:strings.Index(html[detailsAt:], `>`)+detailsAt], " open") {
@@ -97,38 +97,44 @@ func TestGovernanceRendererConsumesTypedAuthorities(t *testing.T) {
 func TestAttentionAndAlertDeliveryStaticContract(t *testing.T) {
 	t.Parallel()
 	htmlData, _ := Files.ReadFile("index.html")
-	alertsData, _ := Files.ReadFile("alerts.js")
+	settingsData, _ := Files.ReadFile("alerts.js")
+	inboxData, _ := Files.ReadFile("alert-inbox.js")
 	lifecycleData, _ := Files.ReadFile("lifecycle.js")
-	html, alerts, lifecycle := string(htmlData), string(alertsData), string(lifecycleData)
-	for _, id := range []string{"alertUnreadBadge", "attentionStatus", "alertSegments", "alertSettingsStatus", "pushState", "enablePushButton"} {
+	html, settings, inbox, lifecycle := string(htmlData), string(settingsData), string(inboxData), string(lifecycleData)
+	for _, id := range []string{"alertUnreadBadge", "attentionStatus", "alertSegments", "alertSettingsStatus", "pushState", "enablePushButton", "alertAuthorityState", "alertSourceList"} {
 		if !strings.Contains(html, `id="`+id+`"`) {
 			t.Errorf("index.html missing attention/settings id %q", id)
 		}
 	}
 	for _, want := range []string{
-		`fetch("/api/attention"`,
-		`fetch("/api/attention/read"`,
-		`fetch("/api/alerts/settings"`,
+		`fetch("/api/alerts/attention"`,
+		`fetch("/api/alerts/attention/read"`,
 		`body: JSON.stringify({ through_seq: attention.high_water_seq })`,
-		`unread_count: value.unread_count`,
-		`unread_count !== unreadRefs.length`,
 		`document.visibilityState === "visible"`,
+		`state.renderedAlertAttention`,
+	} {
+		if !strings.Contains(inbox, want) {
+			t.Errorf("alert-inbox.js missing attention contract %q", want)
+		}
+	}
+	for _, want := range []string{
+		`fetch("/api/alerts/settings"`,
 		`registration.pushManager.getSubscription()`,
 		`permission granted but not subscribed`,
 		`browser subscribed`,
 	} {
-		if !strings.Contains(alerts, want) {
-			t.Errorf("alerts.js missing attention/settings contract %q", want)
+		if !strings.Contains(settings, want) {
+			t.Errorf("alerts.js missing notification settings contract %q", want)
 		}
 	}
-	for _, forbidden := range []string{`localStorage.setItem("ibkrAttention`, `sessionStorage`, `indexedDB`, `fetch("/api/settings"`} {
-		if strings.Contains(alerts, forbidden) {
-			t.Errorf("alerts.js contains forbidden attention/settings contract %q", forbidden)
+	for _, forbidden := range []string{`localStorage.setItem("ibkrAttention`, `sessionStorage`, `indexedDB`, `fetch("/api/settings"`, `fetch("/api/attention"`} {
+		if strings.Contains(inbox+settings, forbidden) {
+			t.Errorf("SPA contains forbidden attention/settings contract %q", forbidden)
 		}
 	}
-	for _, want := range []string{`applyAttention(data.attention)`, `handleAttentionContextChange()`, `applyGovernanceCutoverOverlay(data)`} {
+	for _, want := range []string{`ingestAlerts(data.alerts)`, `handleAttentionContextChange()`, `applyGovernanceCutoverOverlay(data.snapshot)`} {
 		if !strings.Contains(lifecycle, want) {
-			t.Errorf("lifecycle.js missing attention/cutover wiring %q", want)
+			t.Errorf("lifecycle.js missing alert/cutover wiring %q", want)
 		}
 	}
 }

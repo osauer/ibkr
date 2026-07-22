@@ -1,5 +1,5 @@
-import { clearAlerts, dismissCurrentSignals, enablePush, renderAlertMode, renderAlerts, renderAttention, renderGovernance, renderSelectedAlert, sendGovernanceCutoverReview, sendReconciliationCheck, sendSafeNotificationTest, setAlertMode, setupAttentionVisibility } from "./alerts.js";
-import { renderAlertInboxV2 } from "./alert-inbox-v2.js";
+import { enablePush, renderAlertMode, renderGovernance, sendGovernanceCutoverReview, sendReconciliationCheck, sendSafeNotificationTest, setAlertMode } from "./alerts.js";
+import { renderAlerts, renderSelectedAlert, setupAttentionVisibility } from "./alert-inbox.js";
 import { completePairing } from "./auth.js";
 import { renderBriefCard, setupBriefVisibility } from "./brief.js";
 import { canaryStageLabel, canarySummaryText, firstClause, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderMarketContext, renderRegimePanel, renderRulesCard } from "./canary.js";
@@ -168,9 +168,7 @@ function renderAll() {
   renderPortfolioRisk(positions, account);
   renderSourceBanners(snap);
   renderAlertMode();
-  renderAttention();
   renderAlerts();
-  renderAlertInboxV2();
   renderGovernance();
   renderSettings();
   renderTabs();
@@ -180,8 +178,6 @@ function renderAll() {
 document.querySelectorAll("#alertSegments button").forEach((button) => {
   button.addEventListener("click", () => setAlertMode(button.dataset.mode));
 });
-
-$("dismissCurrentButton").addEventListener("click", dismissCurrentSignals);
 
 $("enablePushButton").addEventListener("click", enablePush);
 $("safeNotificationTestButton").addEventListener("click", sendSafeNotificationTest);
@@ -249,7 +245,6 @@ $("portfolioDetailToggle").addEventListener("click", () => {
   setPortfolioExpansion(!state.portfolioDetailOpen);
 });
 $("portfolioPanel").addEventListener("click", handlePortfolioPanelTap);
-$("clearAlertsButton").addEventListener("click", clearAlerts);
 $("purgeRestoreToggle").addEventListener("change", (event) => {
   setPurgeRestoreEnabled(event.currentTarget.checked);
 });
