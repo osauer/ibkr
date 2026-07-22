@@ -773,8 +773,32 @@ func TestComputeCanaryMissingDailyPnLIsDataQuality(t *testing.T) {
 			break
 		}
 	}
-	if accountHealth == nil || accountHealth.Status != "partial" || accountHealth.Confidence != "medium-low" {
+	if accountHealth == nil || accountHealth.Status != "partial" || accountHealth.Confidence != "medium-low" || accountHealth.RefreshState != "" {
 		t.Fatalf("account source health = %+v, want partial/medium-low", accountHealth)
+	}
+}
+
+func TestComputeCanaryMissingDailyPnLPostCloseIsExpected(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 1, 20, 5, 0, 0, time.UTC) // Monday 16:05 ET.
+	acct := baseCanaryAccount()
+	acct.AsOf = now
+	acct.DailyPnL = nil
+	res := ComputeCanary(CanaryInput{
+		Now:       now,
+		Account:   acct,
+		Positions: rpc.PositionsResult{AsOf: now},
+		Regime:    healthyCanaryRegime(),
+	})
+	if res.InputHealth != canaryInputOK || res.Direction == risk.DirectionDataQuality {
+		t.Fatalf("decision = input %q direction %q, want healthy core account after close", res.InputHealth, res.Direction)
+	}
+	health := findSourceHealth(res.SourceHealth, "account")
+	if health == nil || health.Status != rpc.SourceStatusOK || health.RefreshState != rpc.SourceRefreshNotDue || health.Confidence != "high" {
+		t.Fatalf("account source health = %+v, want ok/not_due/high", health)
+	}
+	if len(health.Notes) != 1 || !strings.Contains(health.Notes[0], "not due") {
+		t.Fatalf("account source health note = %+v, want expected off-session explanation", health.Notes)
 	}
 }
 

@@ -394,7 +394,7 @@ func TestRulebookCacheInvalidatesAcrossConnectorEpoch(t *testing.T) {
 }
 
 func TestRulebookAccountSourceHealthRequiresFreshCompleteOneShot(t *testing.T) {
-	completedAt := time.Date(2026, 7, 21, 12, 0, 2, 0, time.UTC)
+	completedAt := time.Date(2026, 7, 21, 15, 0, 2, 0, time.UTC)
 	requestAt := completedAt.Add(-time.Second)
 	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
 	complete := &rpc.AccountResult{AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: 0, DailyPnL: new(0.0)}
@@ -523,7 +523,7 @@ func TestRulebookAccountSourceHealthRequiresFreshCompleteOneShot(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			state, health := rulebookAccountSourceHealth(scope, test.account, test.authority, completedAt)
+			state, health := rulebookAccountSourceHealth(scope, test.account, test.authority, true, completedAt)
 			if state.Healthy != test.wantOK || state.Reason != test.wantReason || health.Status != test.wantStatus {
 				t.Fatalf("state=%+v health=%+v", state, health)
 			}
@@ -531,6 +531,40 @@ func TestRulebookAccountSourceHealthRequiresFreshCompleteOneShot(t *testing.T) {
 				t.Fatalf("degraded account health would not degrade the Rulebook envelope: %+v", health)
 			}
 		})
+	}
+}
+
+func TestRulebookAccountSourceHealthMissingDailyPnLPostCloseIsNotDue(t *testing.T) {
+	completedAt := time.Date(2026, 7, 21, 21, 0, 2, 0, time.UTC) // Tuesday 17:00 ET.
+	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
+	account := &rpc.AccountResult{AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: 10000}
+	authority := accountSummaryAuthority{
+		Provenance: ibkrlib.AccountSummaryProvenanceRequest, AsOf: completedAt.Add(-time.Second),
+		NetLiquidationAvailable: true, TotalCashAvailable: true, BaseCurrencyAvailable: true,
+	}
+	state, health := rulebookAccountSourceHealth(scope, account, authority, false, completedAt)
+	if !state.Healthy || state.Reason != "" || health.Status != rpc.SourceStatusOK || health.RefreshState != rpc.SourceRefreshNotDue {
+		t.Fatalf("state=%+v health=%+v, want healthy account with daily P&L not due", state, health)
+	}
+
+	evaluation := risk.EvaluateRulebook(risk.RuleInputs{
+		AsOf: completedAt, Account: state, Positions: risk.SourceState{Healthy: true},
+		NLVBase: new(100000.0), CashBase: new(10000.0), DailyPnLBase: nil,
+	}, risk.DefaultRulebookPolicy())
+	var concentration, greenDay *risk.RuleRow
+	for i := range evaluation.Rows {
+		switch evaluation.Rows[i].ID {
+		case risk.RuleSingleNameExposure:
+			concentration = &evaluation.Rows[i]
+		case risk.RuleGreenDayAction:
+			greenDay = &evaluation.Rows[i]
+		}
+	}
+	if concentration == nil || concentration.Status != risk.RuleStatusPass {
+		t.Fatalf("non-P&L concentration rule = %+v, want evaluated pass", concentration)
+	}
+	if greenDay == nil || greenDay.Status != risk.RuleStatusNotEvaluated || greenDay.Reason != risk.RuleReasonPnLUnavailable {
+		t.Fatalf("P&L-only rule = %+v, want localized not_evaluated/%s", greenDay, risk.RuleReasonPnLUnavailable)
 	}
 }
 

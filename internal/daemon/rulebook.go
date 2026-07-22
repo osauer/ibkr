@@ -429,6 +429,12 @@ func (s *Server) evaluateRulesModeLocked(ctx context.Context, includeTape, allow
 
 	in := risk.RuleInputs{AsOf: now}
 	var health []rpc.SourceHealth
+	cal := marketcal.New()
+	dailyPnLDue := true
+	if session, err := cal.SessionAt(marketcal.MarketUSEquity, now); err == nil && session.State != marketcal.StateUnknown {
+		in.SessionOpen = session.IsOpen
+		dailyPnLDue = session.IsOpen
+	}
 
 	acct, accountAuthority, acctErr := s.buildAccountSummaryWithAuthority(ctx, allowMaintenance)
 	accountCompletedAt := time.Now().UTC()
@@ -436,7 +442,7 @@ func (s *Server) evaluateRulesModeLocked(ctx context.Context, includeTape, allow
 		in.Account = risk.SourceState{Healthy: false, Reason: "account_unavailable"}
 		health = append(health, rpc.SourceHealth{Source: "account", Status: "unavailable", Notes: []string{errText(acctErr)}})
 	} else {
-		accountState, accountHealth := rulebookAccountSourceHealth(brokerScope, acct, accountAuthority, accountCompletedAt)
+		accountState, accountHealth := rulebookAccountSourceHealth(brokerScope, acct, accountAuthority, dailyPnLDue, accountCompletedAt)
 		in.Account = accountState
 		if accountAuthority.NetLiquidationAvailable {
 			in.NLVBase = new(acct.NetLiquidation)
@@ -469,11 +475,6 @@ func (s *Server) evaluateRulesModeLocked(ctx context.Context, includeTape, allow
 		positionsState, positionsHealth := rulebookPortfolioSourceHealth(brokerScope, portfolioHealth, positionsCompletedAt)
 		in.Positions = positionsState
 		health = append(health, positionsHealth)
-	}
-
-	cal := marketcal.New()
-	if session, err := cal.SessionAt(marketcal.MarketUSEquity, now); err == nil {
-		in.SessionOpen = session.IsOpen && session.State != marketcal.StateClosed && session.State != marketcal.StateHoliday
 	}
 
 	// Rule 14 inputs: base-normalized non-base NLV, corroborated against the
@@ -580,7 +581,7 @@ func rulebookTapeSourceHealth(includeTape, sessionOpen, positionsHealthy bool, d
 	}
 }
 
-func rulebookAccountSourceHealth(scope brokerStateScope, account *rpc.AccountResult, authority accountSummaryAuthority, completedAt time.Time) (risk.SourceState, rpc.SourceHealth) {
+func rulebookAccountSourceHealth(scope brokerStateScope, account *rpc.AccountResult, authority accountSummaryAuthority, dailyPnLDue bool, completedAt time.Time) (risk.SourceState, rpc.SourceHealth) {
 	health := rpc.SourceHealth{Source: "account"}
 	if account == nil || !brokerScopeConcrete(scope) || !brokerScopeAccountConcrete(account.AccountID) ||
 		!strings.EqualFold(strings.TrimSpace(account.AccountID), strings.TrimSpace(scope.Account)) {
@@ -609,7 +610,9 @@ func rulebookAccountSourceHealth(scope brokerStateScope, account *rpc.AccountRes
 	if !authority.TotalCashAvailable || math.IsNaN(account.TotalCash) || math.IsInf(account.TotalCash, 0) {
 		missing = append(missing, "total cash")
 	}
-	if account.DailyPnL == nil || math.IsNaN(*account.DailyPnL) || math.IsInf(*account.DailyPnL, 0) {
+	if account.DailyPnL == nil && dailyPnLDue {
+		missing = append(missing, "daily P&L")
+	} else if account.DailyPnL != nil && (math.IsNaN(*account.DailyPnL) || math.IsInf(*account.DailyPnL, 0)) {
 		missing = append(missing, "daily P&L")
 	}
 	if len(missing) > 0 {
@@ -618,6 +621,10 @@ func rulebookAccountSourceHealth(scope brokerStateScope, account *rpc.AccountRes
 		return risk.SourceState{Reason: "account_incomplete"}, health
 	}
 	health.Status = rpc.SourceStatusOK
+	if account.DailyPnL == nil {
+		health.RefreshState = rpc.SourceRefreshNotDue
+		health.Notes = []string{"daily P&L is not due outside the US equity regular session"}
+	}
 	return risk.SourceState{Healthy: true}, health
 }
 

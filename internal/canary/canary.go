@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/regimerows"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -120,7 +121,7 @@ func computeCanary(in CanaryInput, now time.Time, sourceIssues []canarySourceIss
 	res.MarketConfirmation = canaryMarketConfirmation(res.Market)
 	res.PortfolioFit = canaryPortfolioFit(res.Portfolio, res.Signals)
 	res.PortfolioAlertRelevant = new(canaryPortfolioAlertRelevant(&res))
-	res.InputHealth = canaryInputHealth(in, res.Market, sourceIssues)
+	res.InputHealth = canaryInputHealth(in, res.Market, sourceIssues, now)
 	res.Direction, res.Severity = canaryDecisionState(res.MarketConfirmation, res.PortfolioFit, res.InputHealth, res.Market, res.Signals)
 	res.Action = canaryAction(res.Direction, res.Severity, res.MarketConfirmation, res.PortfolioFit, res.InputHealth)
 	res.PlannerModeHint = canaryPlannerModeFromAction(res.Action)
@@ -1362,11 +1363,11 @@ func canaryPortfolioAlertRelevant(r *CanaryResult) bool {
 	return false
 }
 
-func canaryInputHealth(in CanaryInput, m CanaryMarketSummary, sourceIssues []canarySourceIssue) string {
+func canaryInputHealth(in CanaryInput, m CanaryMarketSummary, sourceIssues []canarySourceIssue, now time.Time) string {
 	switch {
 	case in.Account.NetLiquidation <= 0:
 		return canaryInputFailed
-	case in.Account.DailyPnL == nil:
+	case in.Account.DailyPnL == nil && canaryDailyPnLDue(now):
 		return canaryInputWarming
 	case len(sourceIssues) > 0 || canaryHasMarketDataIssue(m):
 		return canaryInputDegraded
@@ -2586,7 +2587,7 @@ func canaryRegimeWarningCluster(w rpc.RegimeWarning) string {
 // required-source interpretations stay on the main Canary result only.
 func canaryEstablishedSourceHealth(in CanaryInput, now time.Time, accountFP, positionsFP, regimeFP, marketEventsFP rpc.Fingerprint, inputHealth string, m CanaryMarketSummary) []rpc.SourceHealth {
 	out := []rpc.SourceHealth{
-		canaryTimedSourceHealth("account", in.Account.AsOf, now, accountFP, canaryAccountSourceStatus(in.Account, now), canaryAccountSourceConfidence(in.Account)),
+		canaryAccountSourceHealth(in.Account, now, accountFP),
 		canaryTimedSourceHealth("positions", in.Positions.AsOf, now, positionsFP, canaryPositionsSourceStatus(in.Positions, now), canaryPositionsSourceConfidence(in.Positions)),
 		canaryEstablishedRegimeSourceHealth(in.Regime.AsOf, now, regimeFP, canaryInputHealthConfidence(inputHealth), m),
 	}
@@ -2650,7 +2651,7 @@ func canaryEstablishedMarketEventsSourceHealth(pos rpc.PositionsResult, events r
 
 func canarySourceHealth(in CanaryInput, now time.Time, accountFP, positionsFP, regimeFP, marketEventsFP rpc.Fingerprint, inputHealth string, m CanaryMarketSummary) []rpc.SourceHealth {
 	out := []rpc.SourceHealth{
-		canaryTimedSourceHealth("account", in.Account.AsOf, now, accountFP, canaryAccountSourceStatus(in.Account, now), canaryAccountSourceConfidence(in.Account)),
+		canaryAccountSourceHealth(in.Account, now, accountFP),
 		canaryTimedSourceHealth("positions", in.Positions.AsOf, now, positionsFP, canaryPositionsSourceStatus(in.Positions, now), canaryPositionsSourceConfidence(in.Positions)),
 		canaryRegimeSourceHealth(in.Regime, now, regimeFP, canaryInputHealthConfidence(inputHealth), m),
 	}
@@ -2755,11 +2756,20 @@ func canaryRegimeSourceHealth(regime rpc.RegimeSnapshotResult, now time.Time, fp
 	return health
 }
 
+func canaryAccountSourceHealth(acct rpc.AccountResult, now time.Time, fp rpc.Fingerprint) rpc.SourceHealth {
+	health := canaryTimedSourceHealth("account", acct.AsOf, now, fp, canaryAccountSourceStatus(acct, now), canaryAccountSourceConfidence(acct, now))
+	if acct.DailyPnL == nil && !canaryDailyPnLDue(now) && health.Status == rpc.SourceStatusOK {
+		health.RefreshState = rpc.SourceRefreshNotDue
+		health.Notes = []string{"daily P&L is not due outside the US equity regular session"}
+	}
+	return health
+}
+
 func canaryAccountSourceStatus(acct rpc.AccountResult, now time.Time) string {
 	if acct.NetLiquidation <= 0 {
 		return "partial"
 	}
-	if acct.AsOf.IsZero() || acct.DailyPnL == nil {
+	if acct.AsOf.IsZero() || (acct.DailyPnL == nil && canaryDailyPnLDue(now)) {
 		return "partial"
 	}
 	if canarySourceAgeSeconds(now, acct.AsOf) > canarySourceMaxAgeSeconds(now) {
@@ -2768,11 +2778,22 @@ func canaryAccountSourceStatus(acct rpc.AccountResult, now time.Time) string {
 	return rpc.RegimeStatusOK
 }
 
-func canaryAccountSourceConfidence(acct rpc.AccountResult) string {
-	if acct.NetLiquidation <= 0 || acct.AsOf.IsZero() || acct.DailyPnL == nil {
+func canaryAccountSourceConfidence(acct rpc.AccountResult, now time.Time) string {
+	if acct.NetLiquidation <= 0 || acct.AsOf.IsZero() || (acct.DailyPnL == nil && canaryDailyPnLDue(now)) {
 		return "medium-low"
 	}
 	return "high"
+}
+
+// canaryDailyPnLDue follows the same official US-equity session authority as
+// the daemon's subscription repair. Calendar failures and dates outside the
+// embedded coverage fail closed: a missing P&L remains required.
+func canaryDailyPnLDue(now time.Time) bool {
+	session, err := marketcal.New().SessionAt(marketcal.MarketUSEquity, now)
+	if err != nil || session.State == marketcal.StateUnknown {
+		return true
+	}
+	return session.IsOpen
 }
 
 func canaryPositionsSourceStatus(pos rpc.PositionsResult, now time.Time) string {
