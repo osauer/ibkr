@@ -339,6 +339,35 @@ func (cache *regimeSnapshotCache) allowRefreshNow() {
 	}
 }
 
+// startRefreshAhead starts one daemon-owned refresh before last-good reaches
+// its hard freshness ceiling. It never changes health or freshness itself:
+// the retained publication remains fresh until the original deadline and
+// becomes stale at that deadline if this refresh cannot finish. Cold or
+// already-stale authority is due immediately. The cache's existing
+// single-flight, failure backoff, clock, and projection gates remain binding.
+func (cache *regimeSnapshotCache) startRefreshAhead(refresh regimeSnapshotRefreshFunc, ahead time.Duration) bool {
+	if cache == nil || refresh == nil || ahead <= 0 {
+		return false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	now := cache.now()
+	cache.recoverClockLocked(now)
+	if cache.projectionPending || cache.clockInvalidLocked(now) || cache.refresh != nil ||
+		cache.daemonContext.Err() != nil || !cache.refreshDueLocked(now) {
+		return false
+	}
+	if len(cache.raw) != 0 && !cache.isStaleLocked(now) {
+		refreshAt := cache.lastSuccessAt.Add(cache.freshFor - ahead)
+		if now.Before(refreshAt) {
+			return false
+		}
+	}
+	cache.startRefreshLocked(refresh)
+	return true
+}
+
 func (cache *regimeSnapshotCache) startRefreshLocked(refresh regimeSnapshotRefreshFunc) *regimeSnapshotRefresh {
 	job := &regimeSnapshotRefresh{done: make(chan struct{})}
 	cache.refresh = job

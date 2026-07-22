@@ -13,7 +13,15 @@ const (
 	// policy already carried in each snapshot.
 	regimeSnapshotFreshFor       = canaryJournalEvery
 	regimeSnapshotRefreshTimeout = 45 * time.Second
-	regimeSnapshotFailureRetry   = canaryJournalEvery
+	// Start a normal refresh one full timeout before the hard freshness
+	// ceiling, with a small scheduler cushion. The hard five-minute limit is
+	// unchanged: if this work cannot finish, consumers still see stale state.
+	regimeSnapshotRefreshAhead = regimeSnapshotRefreshTimeout + 15*time.Second
+	regimeSnapshotRefreshPoll  = 5 * time.Second
+	// A failed early refresh should not suppress recovery for another complete
+	// five-minute window. The single-flight and 45-second timeout still bound
+	// pressure while a source is unhealthy.
+	regimeSnapshotFailureRetry = 30 * time.Second
 )
 
 // attachRegimeSnapshotAuthority strictly hydrates the one daemon.db document
@@ -55,6 +63,7 @@ func (s *Server) stopServerContextAndWait() {
 	if cancel != nil {
 		cancel()
 	}
+	s.regimeRefreshLoopWG.Wait()
 	s.alertShadowLoopWG.Wait()
 	s.stopDataHealthAlertShadowWorker()
 	if cache != nil {

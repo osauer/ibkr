@@ -542,6 +542,7 @@ type Server struct {
 	// converge here; only a complete fan-out may publish into it.
 	regimeSnapshots          *regimeSnapshotCache
 	regimeProjectionRepairMu sync.Mutex
+	regimeRefreshLoopWG      sync.WaitGroup
 	// alertShadow is the daemon-owned, record-only alert measurement path.
 	// It persists lifecycle through alertEpisodes but has no sender, delivery
 	// eligibility, page policy, badge, or service-worker authority.
@@ -1336,8 +1337,9 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Unlock()
 	}
 	// The canonical Rulebook refresh may immediately need the gateway. Start
-	// all alert-shadow loops only after the initial connect slot is claimed so
-	// that read-side demand cannot launch reconnectFlow alongside cold start.
+	// all daemon-owned read loops only after the initial connect slot is claimed
+	// so that read-side demand cannot launch reconnectFlow alongside cold start.
+	s.startRegimeRefreshLoop(serverCtx)
 	s.startAlertShadowObservationLoops(serverCtx)
 	go s.acceptLoop(ctx, s.listener)
 	if s.initialAcceptLoopStartedForTest != nil {
@@ -1965,7 +1967,6 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 			go s.runGammaRefreshLoop(s.serverCtx)
 		})
 	}
-
 	// Kick the proposal engine for an immediate refresh now that the
 	// session is handshaken and RequestAccountUpdates (above) has started
 	// the portfolio stream. Without this a reconnect after an outage
