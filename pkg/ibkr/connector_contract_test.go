@@ -41,6 +41,124 @@ func TestParseContractDetailsLiteVersion1(t *testing.T) {
 	}
 }
 
+func TestParseContractDetailsLiteDecodesTypedClassificationTail(t *testing.T) {
+	fields := syntheticStockContractDetailsFields(maxClientVersion, "TYPE_CODE")
+	lite, ok := parseContractDetailsLite(fields, 41, maxClientVersion)
+	if !ok {
+		t.Fatal("typed contract-details frame was rejected")
+	}
+	if lite.Industry != "INDUSTRY_CODE" || lite.Category != "CATEGORY_CODE" || lite.Subcategory != "SUBCATEGORY_CODE" {
+		t.Fatalf("classification tuple = (%q,%q,%q)", lite.Industry, lite.Category, lite.Subcategory)
+	}
+	if lite.StockType != "TYPE_CODE" {
+		t.Fatalf("stock type = %q, want typed tail value", lite.StockType)
+	}
+}
+
+func TestParseContractDetailsLiteStockTypeServerBoundary(t *testing.T) {
+	below := syntheticStockContractDetailsFields(minServerVerStockType-1, "")
+	below = append(below, "UNVERSIONED_TRAILER")
+	got, ok := parseContractDetailsLite(below, 41, minServerVerStockType-1)
+	if !ok {
+		t.Fatal("pre-stock-type frame was rejected")
+	}
+	if got.StockType != "" {
+		t.Fatalf("pre-boundary stock type = %q, want empty", got.StockType)
+	}
+
+	at := syntheticStockContractDetailsFields(minServerVerStockType, "TYPE_CODE")
+	got, ok = parseContractDetailsLite(at, 41, minServerVerStockType)
+	if !ok || got.StockType != "TYPE_CODE" {
+		t.Fatalf("boundary stock type = %q ok=%v", got.StockType, ok)
+	}
+}
+
+func TestParseContractDetailsLiteMalformedOrTruncatedTailCannotFabricateStockType(t *testing.T) {
+	valid := syntheticStockContractDetailsFields(maxClientVersion, "TYPE_CODE")
+	secIDCountIndex := 31
+	stockTypeIndex := 39
+	if len(valid) <= stockTypeIndex {
+		t.Fatalf("synthetic fixture too short: %d", len(valid))
+	}
+
+	malformed := append([]string(nil), valid...)
+	malformed[secIDCountIndex] = "NOT_A_COUNT"
+	got, ok := parseContractDetailsLite(malformed, 41, maxClientVersion)
+	if !ok {
+		t.Fatal("core contract identity should survive malformed optional tail")
+	}
+	if got.StockType != "" {
+		t.Fatalf("malformed tail fabricated stock type %q", got.StockType)
+	}
+	if got.Industry != "INDUSTRY_CODE" || got.Category != "CATEGORY_CODE" || got.Subcategory != "SUBCATEGORY_CODE" {
+		t.Fatal("fixed-position classifications were lost with malformed later tail")
+	}
+	shifted := append([]string(nil), valid...)
+	shifted[secIDCountIndex] = "2"
+	got, ok = parseContractDetailsLite(shifted, 41, maxClientVersion)
+	if !ok || got.StockType != "" {
+		t.Fatalf("misaligned sec-id tail stock type=%q ok=%v, want empty", got.StockType, ok)
+	}
+
+	truncated := append([]string(nil), valid[:stockTypeIndex]...)
+	got, ok = parseContractDetailsLite(truncated, 41, maxClientVersion)
+	if !ok {
+		t.Fatal("core contract identity should survive truncated optional tail")
+	}
+	if got.StockType != "" {
+		t.Fatalf("truncated tail fabricated stock type %q", got.StockType)
+	}
+}
+
+func syntheticStockContractDetailsFields(serverVersion int, stockType string) []string {
+	fields := []string{strconv.Itoa(msgContractData)}
+	if serverVersion < minServerVerSizeRules {
+		fields = append(fields, "8")
+	}
+	fields = append(fields,
+		"41", "SYNTH1", "STK", "", // reqID, symbol, secType, contract month
+	)
+	if serverVersion >= minServerVerLastTradeDate {
+		fields = append(fields, "")
+	}
+	fields = append(fields,
+		"", "", "SMART", "USD", "SYNTH1", "MARKET_CODE", "CLASS_CODE", "424242", "0.01",
+	)
+	if serverVersion >= minServerVerMdSizeMultiplier && serverVersion < minServerVerSizeRules {
+		fields = append(fields, "")
+	}
+	fields = append(fields,
+		"1", "ORDER_CODE", "EXCHANGE_CODE", "1", "0", "SYNTHETIC NAME", "PRIMARY_CODE",
+		"", "INDUSTRY_CODE", "CATEGORY_CODE", "SUBCATEGORY_CODE", "UTC", "", "",
+		"", "0", "1", "ID_TAG", "ID_VALUE",
+	)
+	if serverVersion >= minServerVerAggGroup {
+		fields = append(fields, "0")
+	}
+	if serverVersion >= minServerVerUnderlyingInfo {
+		fields = append(fields, "", "")
+	}
+	if serverVersion >= minServerVerMarketRules {
+		fields = append(fields, "")
+	}
+	if serverVersion >= minServerVerRealExpiration {
+		fields = append(fields, "")
+	}
+	if serverVersion >= minServerVerStockType {
+		fields = append(fields, stockType)
+	}
+	if serverVersion >= minServerVerFractionalSize && serverVersion < minServerVerSizeRules {
+		fields = append(fields, "0")
+	}
+	if serverVersion >= minServerVerSizeRules {
+		fields = append(fields, "0", "0", "0")
+	}
+	if serverVersion >= minServerVerIneligibility {
+		fields = append(fields, "0")
+	}
+	return fields
+}
+
 func TestNormalizeEquityRoutingUsesSmartExchange(t *testing.T) {
 	contract := Contract{
 		SecType:  "STK",

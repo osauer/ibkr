@@ -52,15 +52,16 @@ type Connector struct {
 	config *ConnectorConfig
 	conn   *Connection
 
-	fetchContractDetails func(string, time.Duration) ([]ContractDetailsLite, error)
-	contractTimingHook   func(string, time.Duration, bool)
-	resolveWSHContract   func(context.Context, string, time.Duration) (*ContractDetailsLite, error)
-	wshNow               func() time.Time
-	wshGateMu            sync.Mutex
-	wshGate              chan struct{}
-	wshMetadataConn      *Connection
-	wshMetadataReadyAt   time.Time
-	wshEarningsEventTag  string
+	fetchContractDetails    func(string, time.Duration) ([]ContractDetailsLite, error)
+	contractTimingHook      func(string, time.Duration, bool)
+	resolveWSHContract      func(context.Context, string, time.Duration) (*ContractDetailsLite, error)
+	resolveWSHExactContract func(context.Context, string, int, time.Duration) (*ContractDetailsLite, error)
+	wshNow                  func() time.Time
+	wshGateMu               sync.Mutex
+	wshGate                 chan struct{}
+	wshMetadataConn         *Connection
+	wshMetadataReadyAt      time.Time
+	wshEarningsEventTag     string
 
 	// Component state
 	running   bool
@@ -672,6 +673,7 @@ func NewConnector(config *ConnectorConfig) *Connector {
 	c.conn.publicationBarrier = &c.publicationBarrier
 	c.fetchContractDetails = c.FetchContractDetails
 	c.resolveWSHContract = c.resolveWSHStockContract
+	c.resolveWSHExactContract = c.resolveWSHExactStockContract
 	c.wshGate = make(chan struct{}, 1)
 	c.wshGate <- struct{}{}
 	return c
@@ -1616,6 +1618,10 @@ type ContractDetailsLite struct {
 	LocalSymbol  string
 	TradingClass string
 	Multiplier   int
+	Industry     string
+	Category     string
+	Subcategory  string
+	StockType    string
 	TimeZoneID   string
 	TradingHours string
 	LiquidHours  string
@@ -1876,6 +1882,18 @@ func mergeContractDetailsLite(base, incoming ContractDetailsLite) ContractDetail
 	if base.TradingClass == "" && incoming.TradingClass != "" {
 		base.TradingClass = incoming.TradingClass
 	}
+	if base.Industry == "" && incoming.Industry != "" {
+		base.Industry = incoming.Industry
+	}
+	if base.Category == "" && incoming.Category != "" {
+		base.Category = incoming.Category
+	}
+	if base.Subcategory == "" && incoming.Subcategory != "" {
+		base.Subcategory = incoming.Subcategory
+	}
+	if base.StockType == "" && incoming.StockType != "" {
+		base.StockType = incoming.StockType
+	}
 	if base.TimeZoneID == "" && incoming.TimeZoneID != "" {
 		base.TimeZoneID = incoming.TimeZoneID
 	}
@@ -2129,8 +2147,16 @@ func (c *Connector) asyncWarmContractDetails(symbol string, timeout time.Duratio
 
 const (
 	minServerVerMdSizeMultiplier = 110
+	minServerVerAggGroup         = 121
+	minServerVerUnderlyingInfo   = 122
+	minServerVerMarketRules      = 126
+	minServerVerRealExpiration   = 134
+	minServerVerStockType        = 152
+	minServerVerFractionalSize   = 163
 	minServerVerSizeRules        = 164
+	minServerVerFundDataFields   = 179
 	minServerVerLastTradeDate    = 182
+	minServerVerIneligibility    = 186
 )
 
 // SeedContractDetails adds a caller-supplied contract to the Connector's
@@ -2610,17 +2636,113 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 		idx++
 	}
 
+	industry := ""
+	category := ""
+	subcategory := ""
 	timeZoneID := ""
 	tradingHours := ""
 	liquidHours := ""
 	if version >= 6 {
-		idx += 4 // contractMonth, industry, category, subcategory
+		idx++ // contractMonth
+		industry = strings.TrimSpace(safeGet(fields, idx))
+		idx++
+		category = strings.TrimSpace(safeGet(fields, idx))
+		idx++
+		subcategory = strings.TrimSpace(safeGet(fields, idx))
+		idx++
 		timeZoneID = safeGet(fields, idx)
 		idx++
 		tradingHours = safeGet(fields, idx)
 		idx++
 		liquidHours = safeGet(fields, idx)
 		idx++
+	}
+
+	// StockType is late in the versioned contract-details tail. Advance only
+	// through fields that the official decoder places before it, and leave it
+	// empty unless the entire prefix is structurally present. In particular, a
+	// malformed sec-id count must not shift arbitrary broker text into the
+	// identity field.
+	stockType := ""
+	tailOK := true
+	take := func() string {
+		if !tailOK || idx >= len(fields) {
+			tailOK = false
+			return ""
+		}
+		value := fields[idx]
+		idx++
+		return value
+	}
+	if version >= 8 {
+		_ = take() // evRule
+		_ = take() // evMultiplier
+	}
+	if version >= 7 {
+		countRaw := strings.TrimSpace(take())
+		count := 0
+		if tailOK && countRaw != "" {
+			var err error
+			count, err = strconv.Atoi(countRaw)
+			if err != nil || count < 0 || count > (len(fields)-idx)/2 {
+				tailOK = false
+			}
+		}
+		if tailOK {
+			for range count {
+				_ = take() // sec-id tag
+				_ = take() // sec-id value
+			}
+		}
+	}
+	if serverVersion >= minServerVerAggGroup {
+		_ = take()
+	}
+	if serverVersion >= minServerVerUnderlyingInfo {
+		_ = take()
+		_ = take()
+	}
+	if serverVersion >= minServerVerMarketRules {
+		_ = take()
+	}
+	if serverVersion >= minServerVerRealExpiration {
+		_ = take()
+	}
+	if serverVersion >= minServerVerStockType {
+		stockType = strings.TrimSpace(take())
+	}
+	if serverVersion >= minServerVerFractionalSize && serverVersion < minServerVerSizeRules {
+		_ = take() // deprecated sizeMinTick
+	}
+	if serverVersion >= minServerVerSizeRules {
+		_ = take() // minSize
+		_ = take() // sizeIncrement
+		_ = take() // suggestedSizeIncrement
+	}
+	if serverVersion >= minServerVerFundDataFields && strings.EqualFold(secType, "FUND") {
+		for range 17 {
+			_ = take()
+		}
+	}
+	if serverVersion >= minServerVerIneligibility {
+		countRaw := strings.TrimSpace(take())
+		count := 0
+		if tailOK && countRaw != "" {
+			var err error
+			count, err = strconv.Atoi(countRaw)
+			if err != nil || count < 0 || count > (len(fields)-idx)/2 {
+				tailOK = false
+			}
+		}
+		if tailOK {
+			for range count {
+				_ = take() // reason id
+				_ = take() // reason description
+			}
+		}
+	}
+	if !tailOK {
+		stockType = ""
 	}
 
 	return &ContractDetailsLite{
@@ -2637,6 +2759,10 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 		LocalSymbol:  localSymbol,
 		TradingClass: tradingClass,
 		Multiplier:   multiplier,
+		Industry:     industry,
+		Category:     category,
+		Subcategory:  subcategory,
+		StockType:    stockType,
 		TimeZoneID:   timeZoneID,
 		TradingHours: tradingHours,
 		LiquidHours:  liquidHours,

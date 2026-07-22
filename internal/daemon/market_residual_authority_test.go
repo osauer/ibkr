@@ -168,10 +168,10 @@ func TestEarningsSQLiteReplacesLegacyAndSurvivesRestart(t *testing.T) {
 		t.Fatal("empty SQLite authority retained legacy earnings current state")
 	}
 	cache.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		body := `{"data":{"reportText":"AAPL is expected to report earnings after market close.","announcement":"Earnings announcement for AAPL: Jul 30, 2026"},"status":{"rCode":200}}`
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+		body := nasdaqTestPayload(t, map[string]any{"announcement": nasdaqAnnouncementPrefix("TESTQ") + " Jul 30, 2026"}, http.StatusOK)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
 	})}
-	cache.refreshOne(context.Background(), "AAPL")
+	cache.refreshOne(context.Background(), "TESTQ")
 	after, err := os.ReadFile(legacyPath)
 	if err != nil || !bytes.Equal(after, legacyBytes) {
 		t.Fatalf("legacy earnings-dates.json changed after attachment: err=%v", err)
@@ -182,9 +182,9 @@ func TestEarningsSQLiteReplacesLegacyAndSurvivesRestart(t *testing.T) {
 	if err := restarted.UseCoreStore(authority); err != nil {
 		t.Fatalf("restart UseCoreStore: %v", err)
 	}
-	entry, _, ok := restarted.get("AAPL")
-	if !ok || entry.Date != "2026-07-30" || entry.TimeOfDay != "amc" {
-		t.Fatalf("SQLite earnings restart: entry=%+v ok=%v", entry, ok)
+	entry, _, ok := restarted.get("TESTQ")
+	if !ok || entry.Date != "2026-07-30" || entry.TimeOfDay != "" || entry.Estimated {
+		t.Fatal("SQLite earnings restart did not retain only the typed date")
 	}
 	assertStateAndObservation(t, authority, earningsAuthorityScope, earningsStateKind, earningsObservationSource, earningsProviderObservationKind)
 }

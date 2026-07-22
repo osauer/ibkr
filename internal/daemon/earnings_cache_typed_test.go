@@ -21,45 +21,143 @@ type earningsRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f earningsRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
+func nasdaqTestPayload(t testing.TB, data any, rCode int) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"data":   data,
+		"status": map[string]any{"rCode": rCode},
+	})
+	if err != nil {
+		t.Fatal("marshal synthetic Nasdaq payload")
+	}
+	return body
+}
+
 func TestParseNasdaqEarningsTypedOutcomes(t *testing.T) {
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	providerSymbol := "TESTQ"
+	prefix := nasdaqAnnouncementPrefix(providerSymbol)
 	tests := []struct {
-		name   string
-		body   string
-		status string
-		code   string
-		stage  string
+		name           string
+		body           []byte
+		expectedSymbol string
+		status         string
+		code           string
+		stage          string
 	}{
-		{"announcement absent", `{"data":{},"status":{"rCode":200}}`, rpc.EarningsStatusNoDatePublished, "", ""},
-		{"announcement null", `{"data":{"announcement":null},"status":{"rCode":200}}`, rpc.EarningsStatusNoDatePublished, "", ""},
-		{"announcement empty", `{"data":{"announcement":""},"status":{"rCode":200}}`, rpc.EarningsStatusNoDatePublished, "", ""},
-		{"changed announcement", `{"data":{"announcement":"No scheduled event currently"},"status":{"rCode":200}}`, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
-		{"malformed JSON", `{`, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqDecode},
-		{"missing data", `{"status":{"rCode":200}}`, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
-		{"unsupported", `{"data":null,"status":{"rCode":404}}`, rpc.EarningsStatusUnsupportedSecurity, "", ""},
-		{"past date", `{"data":{"announcement":"Earnings announcement for OLD: Jul 20, 2026"},"status":{"rCode":200}}`, rpc.EarningsStatusNoDatePublished, "", ""},
+		{"exact prefix only", nasdaqTestPayload(t, map[string]any{"announcement": prefix}, http.StatusOK), providerSymbol, rpc.EarningsStatusNoDatePublished, "", ""},
+		{"outer whitespace around exact prefix", nasdaqTestPayload(t, map[string]any{"announcement": " \t" + prefix + " \n"}, http.StatusOK), providerSymbol, rpc.EarningsStatusNoDatePublished, "", ""},
+		{"announcement absent", nasdaqTestPayload(t, map[string]any{}, http.StatusOK), providerSymbol, rpc.EarningsStatusNoDatePublished, "", ""},
+		{"announcement null", nasdaqTestPayload(t, map[string]any{"announcement": nil}, http.StatusOK), providerSymbol, rpc.EarningsStatusNoDatePublished, "", ""},
+		{"announcement empty", nasdaqTestPayload(t, map[string]any{"announcement": ""}, http.StatusOK), providerSymbol, rpc.EarningsStatusNoDatePublished, "", ""},
+		{"wrong expected symbol", nasdaqTestPayload(t, map[string]any{"announcement": prefix + " Jul 30, 2026"}, http.StatusOK), "OTHERQ", rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
+		{"arbitrary prose ending in date", nasdaqTestPayload(t, map[string]any{"announcement": "untrusted text Jul 30, 2026"}, http.StatusOK), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
+		{"extra content", nasdaqTestPayload(t, map[string]any{"announcement": prefix + " Jul 30, 2026 extra"}, http.StatusOK), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
+		{"unstarred prefix", nasdaqTestPayload(t, map[string]any{"announcement": strings.Replace(prefix, "*", "", 1)}, http.StatusOK), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
+		{"wrong type", nasdaqTestPayload(t, map[string]any{"announcement": 17}, http.StatusOK), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
+		{"malformed date", nasdaqTestPayload(t, map[string]any{"announcement": prefix + " Jul 030, 2026"}, http.StatusOK), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
+		{"malformed JSON", []byte{'{'}, providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqDecode},
+		{"missing data", []byte(`{"status":{"rCode":200}}`), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
+		{"unsupported", nasdaqTestPayload(t, nil, http.StatusNotFound), providerSymbol, rpc.EarningsStatusUnsupportedSecurity, "", ""},
+		{"elapsed date", nasdaqTestPayload(t, map[string]any{"announcement": prefix + " Jul 20, 2026"}, http.StatusOK), providerSymbol, rpc.EarningsStatusNoDatePublished, "", ""},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := parseNasdaqEarnings([]byte(test.body), now); err == nil {
+			entry, err := parseNasdaqEarnings(test.body, test.expectedSymbol, now)
+			if err == nil {
 				t.Fatal("typed unresolved payload returned nil error")
-			} else {
-				var outcome *earningsProviderError
-				if !errors.As(err, &outcome) {
-					t.Fatalf("error type = %T, want *earningsProviderError", err)
+			}
+			if entry != (earningsEntry{}) {
+				t.Fatal("typed unresolved payload produced a usable entry")
+			}
+			var outcome *earningsProviderError
+			if !errors.As(err, &outcome) {
+				t.Fatalf("error type = %T, want *earningsProviderError", err)
+			}
+			if outcome.status != test.status {
+				t.Fatalf("status = %q, want %q", outcome.status, test.status)
+			}
+			if test.code == "" {
+				if outcome.failure != nil {
+					t.Fatalf("semantic outcome leaked failure: %+v", outcome.failure)
 				}
-				if outcome.status != test.status {
-					t.Fatalf("status = %q, want %q", outcome.status, test.status)
-				}
-				if test.code == "" {
-					if outcome.failure != nil {
-						t.Fatalf("semantic outcome leaked failure: %+v", outcome.failure)
-					}
-					return
-				}
-				if outcome.failure == nil || outcome.failure.Code != test.code || outcome.failure.Stage != test.stage {
-					t.Fatalf("failure = %+v, want %s/%s", outcome.failure, test.code, test.stage)
-				}
+				return
+			}
+			if outcome.failure == nil || outcome.failure.Code != test.code || outcome.failure.Stage != test.stage {
+				t.Fatalf("failure = %+v, want %s/%s", outcome.failure, test.code, test.stage)
+			}
+		})
+	}
+}
+
+func TestParseNasdaqEarningsExactDateIgnoresUntypedText(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	providerSymbol := "TESTQ"
+	body := nasdaqTestPayload(t, map[string]any{
+		"announcement": nasdaqAnnouncementPrefix(providerSymbol) + " Jul 30, 2026",
+		"reportText":   "untrusted auxiliary text",
+	}, http.StatusOK)
+
+	entry, err := parseNasdaqEarnings(body, providerSymbol, now)
+	if err != nil {
+		t.Fatalf("parse synthetic payload: %v", err)
+	}
+	if entry.Date != "2026-07-30" || !entry.ObservedAt.Equal(now) {
+		t.Fatalf("typed entry date/time mismatch")
+	}
+	if entry.TimeOfDay != "" || entry.Estimated {
+		t.Fatal("untyped provider text influenced the typed entry")
+	}
+}
+
+func TestParseNasdaqEarningsErrorsDoNotEchoProviderText(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	const sentinel = "synthetic-private-response-marker"
+	body := nasdaqTestPayload(t, map[string]any{"announcement": sentinel}, http.StatusOK)
+
+	_, err := parseNasdaqEarnings(body, "TESTQ", now)
+	if err == nil {
+		t.Fatal("unrecognized provider text returned nil error")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Fatal("provider error echoed untrusted response text")
+	}
+}
+
+func TestParseNasdaqEarningsRejectsNonCanonicalProviderSymbol(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		symbol string
+	}{
+		{"empty", ""},
+		{"lowercase", "testq"},
+		{"broker space not normalized", "TEST Q"},
+		{"leading punctuation", ".TESTQ"},
+		{"trailing punctuation", "TESTQ-"},
+		{"repeated punctuation", "TEST.-Q"},
+		{"colon", "TEST:Q"},
+		{"quote", `TEST"Q`},
+		{"wildcard", "TEST*Q"},
+		{"control", "TEST\tQ"},
+		{"non ascii", "TESTÄ"},
+		{"too long", strings.Repeat("A", nasdaqProviderSymbolMaxLen+1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := nasdaqTestPayload(t, map[string]any{
+				"announcement": nasdaqAnnouncementPrefix(test.symbol) + " Jul 30, 2026",
+			}, http.StatusOK)
+			entry, err := parseNasdaqEarnings(body, test.symbol, now)
+			if err == nil || entry != (earningsEntry{}) {
+				t.Fatal("non-canonical provider symbol produced a usable entry")
+			}
+			var outcome *earningsProviderError
+			if !errors.As(err, &outcome) || outcome.status != rpc.EarningsStatusFormatChange {
+				t.Fatal("non-canonical provider symbol did not fail closed")
+			}
+			if outcome.failure == nil || outcome.failure.Code != rpc.SourceFailureInvalidPayload || outcome.failure.Stage != rpc.SourceFailureStageNasdaqSchema {
+				t.Fatal("non-canonical provider symbol did not retain typed failure")
 			}
 		})
 	}
@@ -353,8 +451,8 @@ func TestEarningsConflictPersistsAcrossRestart(t *testing.T) {
 	cache := newEarningsCacheMemory(nil)
 	cache.clock = func() time.Time { return now }
 	cache.client = &http.Client{Transport: earningsRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		body := `{"data":{"announcement":"Earnings announcement for AAPL: Jul 30, 2026"},"status":{"rCode":200}}`
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+		body := nasdaqTestPayload(t, map[string]any{"announcement": nasdaqAnnouncementPrefix("TESTQ") + " Jul 30, 2026"}, http.StatusOK)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
 	})}
 	if err := cache.setSecondaryProvider(earningsWSHProvider, func(context.Context, string) (earningsProviderFetchResult, error) {
 		return earningsProviderFetchResult{Status: rpc.EarningsStatusDate, Entry: earningsEntry{Date: "2026-07-31", ObservedAt: now}}, nil
@@ -364,11 +462,11 @@ func TestEarningsConflictPersistsAcrossRestart(t *testing.T) {
 	if err := cache.UseCoreStore(store); err != nil {
 		t.Fatal(err)
 	}
-	cache.refreshOne(context.Background(), "AAPL")
-	if _, _, ok := cache.get("AAPL"); ok {
+	cache.refreshOne(context.Background(), "TESTQ")
+	if _, _, ok := cache.get("TESTQ"); ok {
 		t.Fatal("conflicting providers exposed a usable earnings date")
 	}
-	view, ok := cache.resolution("AAPL")
+	view, ok := cache.resolution("TESTQ")
 	if !ok || view.Status != rpc.EarningsStatusConflictingSources {
 		t.Fatalf("conflict = %+v ok=%v", view, ok)
 	}
@@ -390,7 +488,7 @@ func TestEarningsConflictPersistsAcrossRestart(t *testing.T) {
 	if err := restarted.UseCoreStore(store); err != nil {
 		t.Fatal(err)
 	}
-	view, ok = restarted.resolution("AAPL")
+	view, ok = restarted.resolution("TESTQ")
 	if !ok || view.Status != rpc.EarningsStatusConflictingSources {
 		t.Fatalf("restarted conflict = %+v ok=%v", view, ok)
 	}
@@ -402,8 +500,8 @@ func TestEarningsFailedAuthorityCommitDoesNotPublishMemory(t *testing.T) {
 	cache := newEarningsCacheMemory(nil)
 	cache.clock = func() time.Time { return now }
 	cache.client = &http.Client{Transport: earningsRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		body := `{"data":{"announcement":"Earnings announcement for AAPL: Jul 30, 2026"},"status":{"rCode":200}}`
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+		body := nasdaqTestPayload(t, map[string]any{"announcement": nasdaqAnnouncementPrefix("TESTQ") + " Jul 30, 2026"}, http.StatusOK)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
 	})}
 	if err := cache.UseCoreStore(store); err != nil {
 		t.Fatal(err)
@@ -411,8 +509,8 @@ func TestEarningsFailedAuthorityCommitDoesNotPublishMemory(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	cache.refreshOne(context.Background(), "AAPL")
-	if _, ok := cache.resolution("AAPL"); ok {
+	cache.refreshOne(context.Background(), "TESTQ")
+	if _, ok := cache.resolution("TESTQ"); ok {
 		t.Fatal("failed SQLite commit published provider result into memory")
 	}
 }

@@ -15,43 +15,72 @@ import (
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
-// Recorded api.nasdaq.com response shape (captured 2026-07-06; see design
-// doc "endpoint spike"). The parser must be strict: ambiguity is a miss.
-const nasdaqEarningsFixture = `{"data":{"reportText":"ServiceNow, Inc. Common Stock is expected* to report earnings on  07/22/2026 after market close.  The report will be for the fiscal Quarter ending Jun 2026.","heading":"NOW Earnings Date","announcement":"Earnings announcement* for NOW: Jul 22, 2026"},"status":{"rCode":200}}`
-
 func TestParseNasdaqEarnings(t *testing.T) {
 	now := time.Date(2026, 7, 7, 8, 0, 0, 0, time.UTC)
-	entry, err := parseNasdaqEarnings([]byte(nasdaqEarningsFixture), now)
+	providerSymbol := "TESTQ"
+	body := nasdaqTestPayload(t, map[string]any{
+		"announcement": nasdaqAnnouncementPrefix(providerSymbol) + " Jul 22, 2026",
+	}, 200)
+	entry, err := parseNasdaqEarnings(body, providerSymbol, now)
 	if err != nil {
-		t.Fatalf("parse fixture: %v", err)
+		t.Fatalf("parse synthetic fixture: %v", err)
 	}
-	if entry.Date != "2026-07-22" || entry.TimeOfDay != "amc" || !entry.Estimated {
-		t.Fatalf("entry = %+v, want 2026-07-22 amc estimated", entry)
+	if entry.Date != "2026-07-22" || entry.TimeOfDay != "" || entry.Estimated {
+		t.Fatal("synthetic fixture did not produce only the typed date")
 	}
 
-	if _, err := parseNasdaqEarnings([]byte(`{"data":{"announcement":"No date scheduled"}}`), now); err == nil {
+	if _, err := parseNasdaqEarnings(nasdaqTestPayload(t, map[string]any{"announcement": "untrusted text"}, 200), providerSymbol, now); err == nil {
 		t.Fatal("missing date must be an error, never a guessed date")
 	}
-	if _, err := parseNasdaqEarnings([]byte(`not json`), now); err == nil {
+	if _, err := parseNasdaqEarnings([]byte(`not json`), providerSymbol, now); err == nil {
 		t.Fatal("malformed payload must be an error")
 	}
-	if _, err := parseNasdaqEarnings([]byte(`{"data":{"announcement":"Earnings announcement for X: Julember 40, 2026"}}`), now); err == nil {
+	badDate := nasdaqAnnouncementPrefix(providerSymbol) + " Julember 40, 2026"
+	if _, err := parseNasdaqEarnings(nasdaqTestPayload(t, map[string]any{"announcement": badDate}, 200), providerSymbol, now); err == nil {
 		t.Fatal("unparseable date must be an error")
 	}
 }
 
 func TestNasdaqSymbolMapping(t *testing.T) {
-	cases := map[string]string{
-		"NOW":   "NOW",
-		"BRK B": "BRK.B",
-		"brk b": "BRK.B",
-		"":      "",
-		"BAD/S": "",
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "TESTQ", "TESTQ"},
+		{"trim and uppercase", " testq ", "TESTQ"},
+		{"broker class space", "TEST Q", "TEST.Q"},
+		{"interior dot", "TEST.Q", "TEST.Q"},
+		{"interior hyphen", "TEST-Q", "TEST-Q"},
+		{"digit", "TEST2", "TEST2"},
+		{"empty", "", ""},
+		{"slash", "TEST/Q", ""},
+		{"backslash", `TEST\Q`, ""},
+		{"question mark", "TEST?Q", ""},
+		{"percent", "TEST%Q", ""},
+		{"quote", `TEST"Q`, ""},
+		{"colon", "TEST:Q", ""},
+		{"wildcard", "TEST*Q", ""},
+		{"interior control", "TEST\nQ", ""},
+		{"leading control", "\tTESTQ", ""},
+		{"trailing control", "TESTQ\x7f", ""},
+		{"underscore", "TEST_Q", ""},
+		{"leading dot", ".TESTQ", ""},
+		{"leading hyphen", "-TESTQ", ""},
+		{"trailing dot", "TESTQ.", ""},
+		{"trailing hyphen", "TESTQ-", ""},
+		{"repeated punctuation", "TEST.-Q", ""},
+		{"repeated broker spaces", "TEST  Q", ""},
+		{"non ascii", "TESTÄ", ""},
+		{"non ascii padding", "\u00a0TESTQ", ""},
+		{"too long", strings.Repeat("A", nasdaqProviderSymbolMaxLen+1), ""},
 	}
-	for in, want := range cases {
-		if got := nasdaqSymbol(in); got != want {
-			t.Errorf("nasdaqSymbol(%q) = %q, want %q", in, got, want)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := nasdaqSymbol(test.in); got != test.want {
+				t.Fatal("symbol mapping mismatch")
+			}
+		})
 	}
 }
 

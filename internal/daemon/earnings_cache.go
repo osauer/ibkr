@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -231,14 +230,41 @@ func (c *earningsCache) UseCoreStore(store *corestore.Store) error {
 	return nil
 }
 
-// nasdaqSymbol maps IBKR symbols to the provider's spelling: share classes
-// use dots there ("BRK B" -> "BRK.B"). Unmappable symbols return "".
+const nasdaqProviderSymbolMaxLen = 32
+
+// nasdaqSymbol maps IBKR symbols to the provider's spelling: broker spaces
+// become dots. Only the provider's bounded ASCII symbol grammar may reach the
+// request URL or shape an accepted announcement prefix.
 func nasdaqSymbol(sym string) string {
-	sym = strings.ToUpper(strings.TrimSpace(sym))
-	if sym == "" || strings.ContainsAny(sym, "/\\?%") {
+	// Only ordinary broker padding is normalized. Keeping every other byte lets
+	// the canonical validator reject controls and non-ASCII whitespace instead
+	// of silently deleting untrusted input.
+	sym = strings.ToUpper(strings.Trim(sym, " "))
+	sym = strings.ReplaceAll(sym, " ", ".")
+	if !validNasdaqProviderSymbol(sym) {
 		return ""
 	}
-	return strings.ReplaceAll(sym, " ", ".")
+	return sym
+}
+
+func validNasdaqProviderSymbol(sym string) bool {
+	if len(sym) == 0 || len(sym) > nasdaqProviderSymbolMaxLen {
+		return false
+	}
+	previousWasAlphaNumeric := false
+	for i := 0; i < len(sym); i++ {
+		char := sym[i]
+		isAlphaNumeric := char >= 'A' && char <= 'Z' || char >= '0' && char <= '9'
+		if isAlphaNumeric {
+			previousWasAlphaNumeric = true
+			continue
+		}
+		if (char != '.' && char != '-') || !previousWasAlphaNumeric || i == len(sym)-1 {
+			return false
+		}
+		previousWasAlphaNumeric = false
+	}
+	return previousWasAlphaNumeric
 }
 
 // get returns the aggregate usable date and whether its evidence is degraded
@@ -497,7 +523,14 @@ func earningsNextAttempt(status string, failure *rpc.SourceFailure, completedAt 
 	}
 }
 
-var earningsAnnouncementRe = regexp.MustCompile(`:\s*([A-Z][a-z]{2} \d{1,2}, \d{4})\s*$`)
+const nasdaqAnnouncementLead = "Earnings announcement* for "
+
+// nasdaqAnnouncementPrefix is the only accepted Nasdaq announcement lead. It
+// deliberately binds the provider's fixed wording to the exact symbol used in
+// the request so arbitrary text ending in a date can never become evidence.
+func nasdaqAnnouncementPrefix(providerSymbol string) string {
+	return nasdaqAnnouncementLead + providerSymbol + ":"
+}
 
 type earningsProviderError struct {
 	status  string
@@ -579,24 +612,24 @@ func (c *earningsCache) fetchOne(ctx context.Context, sym string) (earningsEntry
 	if err != nil {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusTransportFailure, rpc.SourceFailureTransportFailed, rpc.SourceFailureStageNasdaqRequest, true, err)
 	}
-	return parseNasdaqEarnings(body, c.clock())
+	return parseNasdaqEarnings(body, providerSymbol, c.clock())
 }
 
-// parseNasdaqEarnings extracts the announcement date, session half, and
-// estimated flag. Missing/null/empty announcement is an explicit no-date
-// publication; non-empty unrecognized content is a format change.
-func parseNasdaqEarnings(body []byte, now time.Time) (earningsEntry, error) {
+// parseNasdaqEarnings accepts only the observed typed announcement grammar for
+// the exact provider symbol requested. Missing/null/empty announcement and the
+// exact prefix without a date are explicit no-date publications; every other
+// non-empty shape is a format change.
+func parseNasdaqEarnings(body []byte, providerSymbol string, now time.Time) (earningsEntry, error) {
 	var payload struct {
 		Data *struct {
 			Announcement json.RawMessage `json:"announcement"`
-			ReportText   string          `json:"reportText"`
 		} `json:"data"`
 		Status struct {
 			RCode int `json:"rCode"`
 		} `json:"status"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqDecode, false, err)
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqDecode, false, errors.New("nasdaq payload is not valid JSON"))
 	}
 	if payload.Data == nil {
 		if payload.Status.RCode == http.StatusBadRequest || payload.Status.RCode == http.StatusNotFound {
@@ -610,35 +643,31 @@ func parseNasdaqEarnings(body []byte, now time.Time) (earningsEntry, error) {
 	}
 	var announcement string
 	if err := json.Unmarshal(announcementRaw, &announcement); err != nil {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, err)
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement has invalid type"))
 	}
 	announcement = strings.TrimSpace(announcement)
 	if announcement == "" {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusNoDatePublished, "", "", false, errors.New("nasdaq published no earnings date"))
 	}
-	m := earningsAnnouncementRe.FindStringSubmatch(announcement)
-	if m == nil {
+	if !validNasdaqProviderSymbol(providerSymbol) {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement format changed"))
 	}
-	t, err := time.Parse("Jan 2, 2006", m[1])
-	if err != nil {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, err)
+	prefix := nasdaqAnnouncementPrefix(providerSymbol)
+	if announcement == prefix {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusNoDatePublished, "", "", false, errors.New("nasdaq published no earnings date"))
+	}
+	dateText, ok := strings.CutPrefix(announcement, prefix+" ")
+	if !ok || dateText == "" {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement format changed"))
+	}
+	t, err := time.Parse("Jan 2, 2006", dateText)
+	if err != nil || t.Format("Jan 2, 2006") != dateText {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement date is invalid"))
 	}
 	if t.Format(time.DateOnly) < earningsCalendarDate(now) {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusNoDatePublished, "", "", false, errors.New("nasdaq announcement date has elapsed"))
 	}
-	report := strings.ToLower(payload.Data.ReportText)
-	entry := earningsEntry{Date: t.Format(time.DateOnly), ObservedAt: now}
-	switch {
-	case strings.Contains(report, "after market close"):
-		entry.TimeOfDay = "amc"
-	case strings.Contains(report, "before market open"):
-		entry.TimeOfDay = "bmo"
-	}
-	if strings.Contains(report, "expected*") || strings.Contains(report, "expected *") || strings.Contains(announcement, "*") {
-		entry.Estimated = true
-	}
-	return entry, nil
+	return earningsEntry{Date: t.Format(time.DateOnly), ObservedAt: now}, nil
 }
 
 func earningsCalendarDate(now time.Time) string {

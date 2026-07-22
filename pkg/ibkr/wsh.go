@@ -84,42 +84,82 @@ func (e *WSHError) Unwrap() error {
 	return e.cause
 }
 
+// WSHEarningsResult pairs WSH event JSON with an optional exact broker stock
+// identity. StockIdentity is nil unless a fresh positive-ConID contract-details
+// row matched the requested ConID, stock security type, and symbol.
+type WSHEarningsResult struct {
+	EventJSON     string
+	StockIdentity *ContractDetailsLite
+}
+
 // FetchWSHEarnings returns the raw WSH earnings-event JSON for a stock symbol.
-// It performs no broker write: the method resolves a stock conId, establishes
-// daily WSH metadata readiness for the current broker session, then issues a
-// serialized event-calendar read filtered to wsh_ed.
-// IBKR permits only one WSH request of each kind for a client; the gate covers
-// the complete metadata -> event sequence.
+// It preserves the legacy symbol-resolution and temporary-inactive-cache
+// behavior. Call [Connector.FetchWSHEarningsWithIdentity] when the caller has a
+// positive held contract ID and needs fresh broker identity evidence.
 func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string, error) {
+	result, err := c.fetchWSHEarnings(ctx, symbol, 0, false)
+	return result.EventJSON, err
+}
+
+// FetchWSHEarningsWithIdentity reads WSH earnings events using a caller-proven
+// positive held contract ID and independently attempts an exact contract-
+// details lookup by that ID. A symbol-level temporary inactive mark does not
+// suppress this exact lookup. If exact details are unavailable or contradict
+// the request, the event read may still succeed but StockIdentity remains nil;
+// callers must not infer issuer classification from the supplied ID or cache.
+func (c *Connector) FetchWSHEarningsWithIdentity(ctx context.Context, symbol string, conID int) (WSHEarningsResult, error) {
+	if conID <= 0 {
+		return WSHEarningsResult{}, &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+	}
+	return c.fetchWSHEarnings(ctx, symbol, conID, true)
+}
+
+// ResolveWSHStockIdentity independently reads exact broker contract details
+// for a caller-proven positive held contract ID. It deliberately bypasses the
+// symbol-level temporary inactive cache and does not make a WSH metadata or
+// event request. All failures are returned as sanitized WSH errors.
+func (c *Connector) ResolveWSHStockIdentity(ctx context.Context, symbol string, conID int) (*ContractDetailsLite, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return c.resolveWSHStockIdentity(ctx, symbol, conID, boundedWSHResolveTimeout(ctx, 5*time.Second))
+}
+
+// fetchWSHEarnings performs no broker write: it establishes daily WSH metadata
+// readiness for the current broker session, then issues a serialized event-
+// calendar read filtered to the broker-resolved event tag. IBKR permits only
+// one WSH request of each kind for a client; the gate covers the complete
+// contract-details -> metadata -> event sequence.
+func (c *Connector) fetchWSHEarnings(ctx context.Context, symbol string, exactConID int, exactIdentity bool) (WSHEarningsResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if c == nil {
-		return "", &WSHError{Kind: WSHErrorTransport, Operation: "acquire"}
+		return WSHEarningsResult{}, &WSHError{Kind: WSHErrorTransport, Operation: "acquire"}
 	}
 	if err := ctx.Err(); err != nil {
-		return "", newWSHContextError("acquire", err)
+		return WSHEarningsResult{}, newWSHContextError("acquire", err)
 	}
 
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	if symbol == "" {
-		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+		return WSHEarningsResult{}, &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
 	}
 	secType, _, _, _ := classifySymbol(symbol)
 	if !strings.EqualFold(secType, "STK") {
-		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+		return WSHEarningsResult{}, &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
 	}
 	// A positive contract cache entry can outlive a later broker-confirmed
 	// inactive mark. Check the mark before consulting that cache or acquiring
 	// the serialized WSH gate so a dead contract cannot keep reaching either
 	// contract resolution or the event-calendar wire path.
-	if c.IsSymbolInactive(symbol) {
-		return "", &WSHError{Kind: WSHErrorConnectorInactive, Operation: "resolve_contract"}
+	if !exactIdentity && c.IsSymbolInactive(symbol) {
+		return WSHEarningsResult{}, &WSHError{Kind: WSHErrorConnectorInactive, Operation: "resolve_contract"}
 	}
 
 	release, err := c.acquireWSH(ctx)
 	if err != nil {
-		return "", err
+		return WSHEarningsResult{}, err
 	}
 	defer release()
 
@@ -127,33 +167,47 @@ func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string
 	conn := c.conn
 	c.mu.RUnlock()
 	if conn == nil || !conn.IsConnected() {
-		return "", &WSHError{Kind: WSHErrorTransport, Operation: "metadata"}
+		return WSHEarningsResult{}, &WSHError{Kind: WSHErrorTransport, Operation: "metadata"}
 	}
 	serverVersion := conn.ServerVersion()
 	if serverVersion < minServerVerWSHEventFilters || serverVersion > maxClientVersion {
-		return "", &WSHError{Kind: WSHErrorUnsupportedProtocol, Operation: "event_data"}
+		return WSHEarningsResult{}, &WSHError{Kind: WSHErrorUnsupportedProtocol, Operation: "event_data"}
 	}
 
-	resolver := c.resolveWSHContract
-	if resolver == nil {
-		resolver = c.resolveWSHStockContract
-	}
 	resolveTimeout := boundedWSHResolveTimeout(ctx, 5*time.Second)
-	detail, resolveErr := resolver(ctx, symbol, resolveTimeout)
-	if resolveErr != nil {
+	result := WSHEarningsResult{}
+	eventConID := exactConID
+	if exactIdentity {
+		detail, resolveErr := c.resolveWSHStockIdentity(ctx, symbol, exactConID, resolveTimeout)
 		if errors.Is(resolveErr, context.Canceled) || errors.Is(resolveErr, context.DeadlineExceeded) {
-			return "", newWSHContextError("resolve_contract", resolveErr)
+			return WSHEarningsResult{}, resolveErr
 		}
-		if errors.Is(resolveErr, ErrSymbolInactive) || c.IsSymbolInactive(symbol) {
-			return "", &WSHError{Kind: WSHErrorConnectorInactive, Operation: "resolve_contract"}
+		if resolveErr == nil {
+			copy := *detail
+			result.StockIdentity = &copy
 		}
-		return "", &WSHError{Kind: WSHErrorContractResolution, Operation: "resolve_contract"}
-	}
-	if detail == nil || detail.ConID <= 0 || (detail.SecType != "" && !strings.EqualFold(detail.SecType, "STK")) {
-		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
-	}
-	if c.IsSymbolInactive(symbol) {
-		return "", &WSHError{Kind: WSHErrorConnectorInactive, Operation: "resolve_contract"}
+	} else {
+		resolver := c.resolveWSHContract
+		if resolver == nil {
+			resolver = c.resolveWSHStockContract
+		}
+		detail, resolveErr := resolver(ctx, symbol, resolveTimeout)
+		if resolveErr != nil {
+			if errors.Is(resolveErr, context.Canceled) || errors.Is(resolveErr, context.DeadlineExceeded) {
+				return WSHEarningsResult{}, newWSHContextError("resolve_contract", resolveErr)
+			}
+			if errors.Is(resolveErr, ErrSymbolInactive) || c.IsSymbolInactive(symbol) {
+				return WSHEarningsResult{}, &WSHError{Kind: WSHErrorConnectorInactive, Operation: "resolve_contract"}
+			}
+			return WSHEarningsResult{}, &WSHError{Kind: WSHErrorContractResolution, Operation: "resolve_contract"}
+		}
+		if detail == nil || detail.ConID <= 0 || (detail.SecType != "" && !strings.EqualFold(detail.SecType, "STK")) {
+			return WSHEarningsResult{}, &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+		}
+		if c.IsSymbolInactive(symbol) {
+			return WSHEarningsResult{}, &WSHError{Kind: WSHErrorConnectorInactive, Operation: "resolve_contract"}
+		}
+		eventConID = detail.ConID
 	}
 
 	now := time.Now().UTC()
@@ -165,12 +219,12 @@ func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string
 		var err error
 		eventTag, err = c.refreshWSHMetadata(ctx, conn, now)
 		if err != nil {
-			return "", err
+			return result, err
 		}
 	}
 
 	for attempt := range 2 {
-		request := wshEventRequest{conID: detail.ConID, limit: wshRequestLimit, eventTag: eventTag}
+		request := wshEventRequest{conID: eventConID, limit: wshRequestLimit, eventTag: eventTag}
 		events, err := fetchWSHJSON(ctx, conn, wshPhase{
 			operation:  "event_data",
 			responseID: msgWSHEventData,
@@ -181,27 +235,28 @@ func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string
 		})
 		if err == nil {
 			if !json.Valid([]byte(events)) {
-				return "", &WSHError{Kind: WSHErrorMalformedResponse, Operation: "event_data"}
+				return result, &WSHError{Kind: WSHErrorMalformedResponse, Operation: "event_data"}
 			}
-			return events, nil
+			result.EventJSON = events
+			return result, nil
 		}
 		var typed *WSHError
 		if !errors.As(err, &typed) || typed.Kind != WSHErrorMetadataRequired {
-			return "", err
+			return result, err
 		}
 		// TWS can invalidate its metadata cache without dropping the socket.
 		// Clear our matching latch before retrying once so 10282 cannot trap
 		// every subsequent refresh on the stale event-only path.
 		c.resetWSHMetadataReadiness()
 		if attempt == 1 {
-			return "", err
+			return result, err
 		}
 		eventTag, err = c.refreshWSHMetadata(ctx, conn, now)
 		if err != nil {
-			return "", err
+			return result, err
 		}
 	}
-	return "", &WSHError{Kind: WSHErrorProviderFailure, Operation: "event_data"}
+	return result, &WSHError{Kind: WSHErrorProviderFailure, Operation: "event_data"}
 }
 
 func (c *Connector) refreshWSHMetadata(ctx context.Context, conn *Connection, now time.Time) (string, error) {
@@ -311,6 +366,60 @@ func (c *Connector) resolveWSHStockContract(ctx context.Context, symbol string, 
 		c.contractMu.Unlock()
 	}
 	return detail, nil
+}
+
+func (c *Connector) resolveWSHExactStockContract(ctx context.Context, symbol string, conID int, timeout time.Duration) (*ContractDetailsLite, error) {
+	if conID <= 0 {
+		return nil, &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+	}
+	lookup := Contract{ConID: conID, SecType: "STK"}
+	// A position-seeded cache row may supply a currency constraint, but it is
+	// never returned as identity evidence. The exact response must independently
+	// carry every classification field used by callers.
+	if cached := c.cachedContractDetail(symbol); cached != nil && cached.ConID == conID &&
+		(cached.SecType == "" || strings.EqualFold(cached.SecType, "STK")) {
+		lookup.Currency = strings.TrimSpace(cached.Currency)
+	}
+	return c.ContractDetailsFirst(ctx, lookup, timeout)
+}
+
+func (c *Connector) resolveWSHStockIdentity(ctx context.Context, symbol string, conID int, timeout time.Duration) (*ContractDetailsLite, error) {
+	if c == nil {
+		return nil, &WSHError{Kind: WSHErrorTransport, Operation: "resolve_contract"}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, newWSHContextError("resolve_contract", err)
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	secType, _, _, _ := classifySymbol(symbol)
+	if symbol == "" || conID <= 0 || !strings.EqualFold(secType, "STK") {
+		return nil, &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+	}
+	resolver := c.resolveWSHExactContract
+	if resolver == nil {
+		resolver = c.resolveWSHExactStockContract
+	}
+	detail, err := resolver(ctx, symbol, conID, timeout)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, newWSHContextError("resolve_contract", err)
+		}
+		return nil, &WSHError{Kind: WSHErrorContractResolution, Operation: "resolve_contract"}
+	}
+	if !validWSHExactStockIdentity(symbol, conID, detail) {
+		return nil, &WSHError{Kind: WSHErrorContractResolution, Operation: "resolve_contract"}
+	}
+	copy := *detail
+	return &copy, nil
+}
+
+func validWSHExactStockIdentity(symbol string, conID int, detail *ContractDetailsLite) bool {
+	if conID <= 0 || detail == nil || detail.ConID != conID || !strings.EqualFold(strings.TrimSpace(detail.SecType), "STK") {
+		return false
+	}
+	wantSymbol := strings.ToUpper(strings.TrimSpace(dualClassWireSymbol(symbol)))
+	gotSymbol := strings.ToUpper(strings.TrimSpace(detail.Symbol))
+	return wantSymbol != "" && gotSymbol == wantSymbol
 }
 
 func boundedWSHResolveTimeout(ctx context.Context, fallback time.Duration) time.Duration {

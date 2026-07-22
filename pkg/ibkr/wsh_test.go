@@ -13,6 +13,10 @@ import (
 
 func TestWSHWireEncodingUsesMetadataThenFilteredEarningsRequest(t *testing.T) {
 	connector, conn, out := newWSHTestConnector(t)
+	connector.resolveWSHExactContract = func(context.Context, string, int, time.Duration) (*ContractDetailsLite, error) {
+		t.Fatal("legacy API must not invoke exact-ConID resolver")
+		return nil, nil
+	}
 	connector.wshNow = func() time.Time { return time.Date(2026, time.July, 21, 12, 0, 0, 0, time.UTC) }
 
 	responderDone := make(chan struct{})
@@ -406,6 +410,197 @@ func TestFetchWSHEarningsResolutionInactiveMarkSkipsProviderWire(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("new inactive mark emitted %d WSH wire bytes, want 0", out.Len())
+	}
+}
+
+func TestResolveWSHStockIdentityBypassesInactiveAndSanitizesFailure(t *testing.T) {
+	connector := NewConnector(&ConnectorConfig{})
+	t.Cleanup(func() { connector.conn.rateLimiter.Stop() })
+	connector.inactiveMu.Lock()
+	if connector.inactiveSymbols == nil {
+		connector.inactiveSymbols = make(map[string]inactiveSymbolState)
+	}
+	connector.inactiveSymbols["SYNTH1"] = inactiveSymbolState{reason: "typed_test", markedAt: time.Now()}
+	connector.inactiveMu.Unlock()
+	called := 0
+	connector.resolveWSHExactContract = func(_ context.Context, symbol string, conID int, _ time.Duration) (*ContractDetailsLite, error) {
+		called++
+		if symbol != "SYNTH1" || conID != 424242 {
+			t.Fatalf("exact resolver args symbol=%q conID=%d", symbol, conID)
+		}
+		return nil, errors.New("SENSITIVE_SENTINEL")
+	}
+	identity, err := connector.ResolveWSHStockIdentity(context.Background(), "SYNTH1", 424242)
+	if identity != nil {
+		t.Fatalf("failed exact lookup returned identity: %+v", *identity)
+	}
+	assertWSHError(t, err, WSHErrorContractResolution, "resolve_contract", 0)
+	if strings.Contains(err.Error(), "SENSITIVE_SENTINEL") {
+		t.Fatalf("sanitized exact-resolution error leaked source text: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("exact resolver calls=%d, want 1 despite inactive symbol cache", called)
+	}
+}
+
+func TestFetchWSHEarningsWithIdentityBypassesOnlySymbolInactiveCache(t *testing.T) {
+	connector, conn, out := newWSHTestConnector(t)
+	const (
+		symbol = "SYNTH1"
+		conID  = 424242
+	)
+	connector.inactiveMu.Lock()
+	if connector.inactiveSymbols == nil {
+		connector.inactiveSymbols = make(map[string]inactiveSymbolState)
+	}
+	connector.inactiveSymbols[symbol] = inactiveSymbolState{reason: "typed_test", markedAt: time.Now()}
+	connector.inactiveMu.Unlock()
+	connector.contractMu.Lock()
+	connector.contractCache[symbol] = ContractDetailsLite{Symbol: symbol, SecType: "STK", ConID: conID, Currency: "USD"}
+	connector.contractMu.Unlock()
+
+	responderDone := make(chan struct{})
+	go func() {
+		defer close(responderDone)
+		detailReqID := waitForHandlerReqID(t, conn, msgContractData)
+		fields := syntheticStockContractDetailsFields(maxClientVersion, "TYPE_CODE")
+		fields[1] = strconv.Itoa(detailReqID)
+		for _, handler := range conn.snapshotHandlers(msgContractData) {
+			handler(fields)
+		}
+		metaReqID := waitForHandlerReqIDAfter(t, conn, msgWSHMetaData, detailReqID)
+		deliverWSHData(conn, msgWSHMetaData, metaReqID, `{"event_types":["wsh_ed"]}`)
+		eventReqID := waitForHandlerReqIDAfter(t, conn, msgWSHEventData, metaReqID)
+		deliverWSHData(conn, msgWSHEventData, eventReqID, `{"events":[]}`)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := connector.FetchWSHEarningsWithIdentity(ctx, symbol, conID)
+	<-responderDone
+	if err != nil {
+		t.Fatalf("exact WSH fetch: %v", err)
+	}
+	if result.EventJSON != `{"events":[]}` || result.StockIdentity == nil {
+		t.Fatalf("exact WSH result event=%q identity_present=%v", result.EventJSON, result.StockIdentity != nil)
+	}
+	if result.StockIdentity.ConID != conID || result.StockIdentity.SecType != "STK" || result.StockIdentity.StockType != "TYPE_CODE" {
+		t.Fatalf("exact identity did not retain typed broker fields: %+v", *result.StockIdentity)
+	}
+	if !connector.IsSymbolInactive(symbol) {
+		t.Fatal("exact identity read cleared the independent symbol inactive cache")
+	}
+
+	frames := decodeOutboundFrames(t, conn, out.Bytes())
+	detailRequest := findOutboundFrame(t, frames, reqContractData)
+	assertField(t, detailRequest, 3, strconv.Itoa(conID), "exact contract conID")
+	assertField(t, detailRequest, 4, "", "exact contract symbol")
+	assertField(t, detailRequest, 5, "STK", "exact contract security type")
+	eventRequest := findOutboundFrame(t, frames, reqWSHEventData)
+	var filter map[string]any
+	if err := json.Unmarshal([]byte(eventRequest[3]), &filter); err != nil {
+		t.Fatal(err)
+	}
+	watchlist, _ := filter["watchlist"].([]any)
+	if len(watchlist) != 1 || watchlist[0] != strconv.Itoa(conID) {
+		t.Fatalf("event request did not use supplied exact conID: %#v", filter["watchlist"])
+	}
+}
+
+func TestFetchWSHEarningsWithIdentityMismatchesFailClosed(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		detail ContractDetailsLite
+	}{
+		{name: "conid", detail: ContractDetailsLite{Symbol: "SYNTH1", SecType: "STK", ConID: 424243, StockType: "TYPE_CODE"}},
+		{name: "security_type", detail: ContractDetailsLite{Symbol: "SYNTH1", SecType: "FUND", ConID: 424242, StockType: "TYPE_CODE"}},
+		{name: "symbol", detail: ContractDetailsLite{Symbol: "SYNTH2", SecType: "STK", ConID: 424242, StockType: "TYPE_CODE"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			connector, conn, _ := newWSHTestConnector(t)
+			now := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+			connector.wshNow = func() time.Time { return now }
+			connector.markWSHMetadataReady(conn, now, "wsh_ed")
+			connector.resolveWSHExactContract = func(context.Context, string, int, time.Duration) (*ContractDetailsLite, error) {
+				copy := test.detail
+				return &copy, nil
+			}
+			go func() {
+				reqID := waitForHandlerReqID(t, conn, msgWSHEventData)
+				deliverWSHData(conn, msgWSHEventData, reqID, `{"events":[]}`)
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result, err := connector.FetchWSHEarningsWithIdentity(ctx, "SYNTH1", 424242)
+			if err != nil || result.EventJSON != `{"events":[]}` {
+				t.Fatalf("event result=%q err=%v", result.EventJSON, err)
+			}
+			if result.StockIdentity != nil {
+				t.Fatalf("mismatched detail became identity: %+v", *result.StockIdentity)
+			}
+		})
+	}
+}
+
+func TestFetchWSHEarningsWithIdentityDoesNotPromotePartialCache(t *testing.T) {
+	connector, conn, _ := newWSHTestConnector(t)
+	const (
+		symbol = "SYNTH1"
+		conID  = 424242
+	)
+	connector.contractMu.Lock()
+	connector.contractCache[symbol] = ContractDetailsLite{
+		Symbol: symbol, SecType: "STK", ConID: conID, Currency: "USD", StockType: "CACHE_ONLY_TYPE",
+	}
+	connector.contractMu.Unlock()
+	connector.resolveWSHExactContract = func(context.Context, string, int, time.Duration) (*ContractDetailsLite, error) {
+		return nil, errors.New("synthetic")
+	}
+	now := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	connector.wshNow = func() time.Time { return now }
+	connector.markWSHMetadataReady(conn, now, "wsh_ed")
+	go func() {
+		reqID := waitForHandlerReqID(t, conn, msgWSHEventData)
+		deliverWSHData(conn, msgWSHEventData, reqID, `{"events":[]}`)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := connector.FetchWSHEarningsWithIdentity(ctx, symbol, conID)
+	if err != nil || result.EventJSON != `{"events":[]}` {
+		t.Fatalf("event result=%q err=%v", result.EventJSON, err)
+	}
+	if result.StockIdentity != nil {
+		t.Fatalf("cache-only stock type was promoted: %+v", *result.StockIdentity)
+	}
+}
+
+func TestFetchWSHEarningsWithIdentityReturnsBrokerIdentityWithProviderFailure(t *testing.T) {
+	connector, conn, _ := newWSHTestConnector(t)
+	connector.resolveWSHExactContract = func(context.Context, string, int, time.Duration) (*ContractDetailsLite, error) {
+		return &ContractDetailsLite{Symbol: "SYNTH1", SecType: "STK", ConID: 424242, StockType: "TYPE_CODE"}, nil
+	}
+	go func() {
+		reqID := waitForHandlerReqID(t, conn, msgWSHMetaData)
+		fields := []string{strconv.Itoa(msgErrMsg), "2", strconv.Itoa(reqID), "10089", "SYNTHETIC"}
+		for _, handler := range conn.snapshotHandlers(msgErrMsg) {
+			handler(fields)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := connector.FetchWSHEarningsWithIdentity(ctx, "SYNTH1", 424242)
+	assertWSHError(t, err, WSHErrorEntitlementRequired, "metadata", 10089)
+	if result.StockIdentity == nil || result.StockIdentity.StockType != "TYPE_CODE" {
+		t.Fatalf("provider failure discarded exact identity: %+v", result.StockIdentity)
+	}
+}
+
+func TestFetchWSHEarningsWithIdentityRejectsMissingConIDBeforeWire(t *testing.T) {
+	connector, _, out := newWSHTestConnector(t)
+	_, err := connector.FetchWSHEarningsWithIdentity(context.Background(), "SYNTH1", 0)
+	assertWSHError(t, err, WSHErrorUnsupportedSecurity, "resolve_contract", 0)
+	if out.Len() != 0 {
+		t.Fatalf("missing exact conID emitted %d wire bytes", out.Len())
 	}
 }
 
