@@ -599,7 +599,7 @@ func rulebookAccountSourceHealth(scope brokerStateScope, account *rpc.AccountRes
 		health.Notes = []string{"account snapshot receipt time is missing or future-dated"}
 		return risk.SourceState{Reason: "account_unavailable"}, health
 	}
-	missing := make([]string, 0, 3)
+	missing := make([]string, 0, 4)
 	if !authority.NetLiquidationAvailable || account.NetLiquidation <= 0 || math.IsNaN(account.NetLiquidation) || math.IsInf(account.NetLiquidation, 0) {
 		missing = append(missing, "positive net liquidation")
 	}
@@ -608,6 +608,9 @@ func rulebookAccountSourceHealth(scope brokerStateScope, account *rpc.AccountRes
 	}
 	if !authority.TotalCashAvailable || math.IsNaN(account.TotalCash) || math.IsInf(account.TotalCash, 0) {
 		missing = append(missing, "total cash")
+	}
+	if account.DailyPnL == nil || math.IsNaN(*account.DailyPnL) || math.IsInf(*account.DailyPnL, 0) {
+		missing = append(missing, "daily P&L")
 	}
 	if len(missing) > 0 {
 		health.Status = rpc.SourceStatusDegraded

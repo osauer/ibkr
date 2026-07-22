@@ -2177,6 +2177,7 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 	for _, source := range alertShadowCanonicalRulebookHealth {
 		required[source] = false
 	}
+	accountHealthStatus := ""
 	seenHealth := make(map[string]struct{}, len(result.InputHealth))
 	for _, health := range result.InputHealth {
 		name := strings.TrimSpace(health.Source)
@@ -2194,7 +2195,11 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 			continue
 		}
 		required[name] = true
-		switch strings.ToLower(strings.TrimSpace(health.Status)) {
+		healthStatus := strings.ToLower(strings.TrimSpace(health.Status))
+		if name == "account" {
+			accountHealthStatus = healthStatus
+		}
+		switch healthStatus {
 		case rpc.SourceStatusOK:
 			if health.AsOf.IsZero() || health.AsOf.After(result.AsOf) {
 				covered, worst, reason = false, rpc.AlertEvidenceError, alertShadowReasonSourceTimeInvalid
@@ -2267,7 +2272,7 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 		case risk.RuleStatusPass, risk.RuleStatusInfo:
 			continue
 		case risk.RuleStatusNotEvaluated:
-			if !alertShadowRulebookSafeNotEvaluated(row) {
+			if !alertShadowRulebookSafeNotEvaluated(row, result.Status, accountHealthStatus) {
 				covered, worst, reason = false, rpc.AlertEvidenceError, alertShadowReasonCandidateInvalid
 			}
 			continue
@@ -2358,12 +2363,15 @@ func alertRulebookPresentationCode(id string) rpc.AlertPresentationCode {
 	}
 }
 
-func alertShadowRulebookSafeNotEvaluated(row risk.RuleRow) bool {
+func alertShadowRulebookSafeNotEvaluated(row risk.RuleRow, resultStatus, accountHealthStatus string) bool {
 	switch row.ID {
 	case risk.RuleCatalystCoverage, risk.RuleOverwriteEarnings, risk.RuleEarningsSizeFreeze:
 		return row.Reason == risk.EarningsReasonTerminalNonReporting
 	case risk.RuleRedOnGreen, risk.RuleWinnerTrim:
 		return row.Reason == risk.RuleReasonOffSession
+	case risk.RuleGreenDayAction:
+		return row.Reason == risk.RuleReasonPnLUnavailable &&
+			resultStatus == "degraded" && accountHealthStatus == rpc.SourceStatusDegraded
 	case risk.RuleHedgeIntegrity:
 		return row.Reason == risk.RuleReasonNoLongBook
 	default:

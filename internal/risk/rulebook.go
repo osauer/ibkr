@@ -26,6 +26,7 @@ const (
 	EarningsReasonTerminalNonReporting = "terminal_non_reporting"
 	RuleReasonOffSession               = "off_session"
 	RuleReasonNoLongBook               = "no_long_book"
+	RuleReasonPnLUnavailable           = "pnl_unavailable"
 )
 
 // RuleSingleNameExposure and the related constants identify rules in stable
@@ -1166,9 +1167,10 @@ func (c *ruleContext) winnerTrim() RuleRow {
 
 func (c *ruleContext) greenDayAction(rows []RuleRow) RuleRow {
 	row := RuleRow{ID: RuleGreenDayAction, Number: 11, Title: "Green day is an execution day"}
-	if !c.in.Account.Healthy || c.in.DailyPnLBase == nil {
+	if !c.in.Account.Healthy || c.in.DailyPnLBase == nil ||
+		math.IsNaN(*c.in.DailyPnLBase) || math.IsInf(*c.in.DailyPnLBase, 0) {
 		row.Status = RuleStatusNotEvaluated
-		row.Reason = "pnl_unavailable"
+		row.Reason = RuleReasonPnLUnavailable
 		row.Evidence = "Daily P&L unavailable — nudge idle."
 		return row
 	}

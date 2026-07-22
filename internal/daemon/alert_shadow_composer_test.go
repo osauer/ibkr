@@ -164,6 +164,56 @@ func TestAlertShadowComposerRulebookCurrentNegativeAndDegradedHold(t *testing.T)
 	}
 }
 
+func TestAlertShadowComposerRulebookMissingPnLHoldsUntilCurrentRestored(t *testing.T) {
+	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+	defer store.Close()
+	registry, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	composer := newAlertShadowComposer(registry)
+	scope := alertShadowTestBrokerScope(t)
+	base := time.Date(2026, 7, 21, 11, 0, 0, 0, time.UTC)
+	now := base.Add(time.Second)
+	composer.now = func() time.Time { return now }
+
+	active := alertShadowTestRulebook(base, risk.RuleStatusWatch)
+	opened, err := composer.ObserveRulebook(t.Context(), scope, active)
+	if err != nil || len(opened.Candidates) != 1 || opened.Candidates[0].State != rpc.AlertEpisodeOpen {
+		t.Fatalf("rulebook open=%+v err=%v", opened, err)
+	}
+
+	now = base.Add(time.Minute + time.Second)
+	missing := alertShadowTestRulebook(base.Add(time.Minute), risk.RuleStatusPass)
+	alertShadowTestRulebookPnLUnavailable(&missing)
+	held, err := composer.ObserveRulebook(t.Context(), scope, missing)
+	if err != nil || len(held.Candidates) != 1 || held.Candidates[0].State != rpc.AlertEpisodeOpen ||
+		held.Candidates[0].EvidenceHealth != rpc.AlertEvidencePartial {
+		t.Fatalf("missing P&L cleared or corrupted the active episode: %+v err=%v", held, err)
+	}
+
+	now = base.Add(2*time.Minute + time.Second)
+	stillIncomplete := alertShadowTestRulebook(base.Add(2*time.Minute), risk.RuleStatusPass)
+	alertShadowTestRulebookPnLUnavailable(&stillIncomplete)
+	for i := range stillIncomplete.Rules {
+		if stillIncomplete.Rules[i].ID == risk.RuleGreenDayAction {
+			stillIncomplete.Rules[i].Status = risk.RuleStatusPass
+			stillIncomplete.Rules[i].Reason = ""
+		}
+	}
+	held, err = composer.ObserveRulebook(t.Context(), scope, stillIncomplete)
+	if err != nil || len(held.Candidates) != 1 || held.Candidates[0].State != rpc.AlertEpisodeOpen {
+		t.Fatalf("an uncovered P&L result recovered the active episode: %+v err=%v", held, err)
+	}
+
+	now = base.Add(3*time.Minute + time.Second)
+	restored := alertShadowTestRulebook(base.Add(3*time.Minute), risk.RuleStatusPass)
+	recovered, err := composer.ObserveRulebook(t.Context(), scope, restored)
+	if err != nil || len(recovered.Candidates) != 1 || recovered.Candidates[0].State != rpc.AlertEpisodeRecovered {
+		t.Fatalf("current restored P&L did not recover the active episode: %+v err=%v", recovered, err)
+	}
+}
+
 func TestAlertShadowRulebookRequiresCanonicalUniverseAndReasons(t *testing.T) {
 	base := time.Date(2026, 7, 21, 11, 0, 0, 0, time.UTC)
 	assertUncovered := func(t *testing.T, result rpc.RulesResult) {
@@ -210,6 +260,47 @@ func TestAlertShadowRulebookRequiresCanonicalUniverseAndReasons(t *testing.T) {
 		result.Rules[0].Reason = "future_reason"
 		assertUncovered(t, result)
 	})
+	t.Run("P&L unavailable requires exact degraded pair", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestRulebookPnLUnavailable(&result)
+		batch := alertShadowMapRulebook(alertShadowTestBrokerScope(t), result, base.Add(time.Second))
+		if batch.Covered || batch.Status != alertShadowStatusPartial || batch.EvidenceHealth != rpc.AlertEvidencePartial ||
+			batch.Reason != alertShadowReasonSourceHealthIncomplete {
+			t.Fatalf("canonical missing-P&L result was not retained as partial evidence: %+v", batch)
+		}
+	})
+
+	for _, tc := range []struct {
+		name          string
+		envelope      string
+		accountHealth string
+	}{
+		{name: "healthy envelope and account", envelope: "ok", accountHealth: rpc.SourceStatusOK},
+		{name: "degraded envelope with healthy account", envelope: "degraded", accountHealth: rpc.SourceStatusOK},
+		{name: "healthy envelope with degraded account", envelope: "ok", accountHealth: rpc.SourceStatusDegraded},
+		{name: "degraded envelope with unavailable account", envelope: "degraded", accountHealth: "unavailable"},
+	} {
+		t.Run("reject P&L mismatch "+tc.name, func(t *testing.T) {
+			result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+			result.Status = tc.envelope
+			for i := range result.InputHealth {
+				if result.InputHealth[i].Source == "account" {
+					result.InputHealth[i].Status = tc.accountHealth
+				}
+			}
+			for i := range result.Rules {
+				if result.Rules[i].ID == risk.RuleGreenDayAction {
+					result.Rules[i].Status = risk.RuleStatusNotEvaluated
+					result.Rules[i].Reason = risk.RuleReasonPnLUnavailable
+				}
+			}
+			batch := alertShadowMapRulebook(alertShadowTestBrokerScope(t), result, base.Add(time.Second))
+			if batch.Covered || batch.Status != alertShadowStatusError || batch.EvidenceHealth != rpc.AlertEvidenceError ||
+				batch.Reason != alertShadowReasonCandidateInvalid {
+				t.Fatalf("mismatched missing-P&L result was trusted: %+v", batch)
+			}
+		})
+	}
 
 	for _, tc := range []struct {
 		id     string
@@ -1243,6 +1334,21 @@ func alertShadowTestRulebook(at time.Time, status string) rpc.RulesResult {
 		PolicyFingerprint: &fingerprint,
 		Rules:             rules,
 		InputHealth:       health,
+	}
+}
+
+func alertShadowTestRulebookPnLUnavailable(result *rpc.RulesResult) {
+	result.Status = "degraded"
+	for i := range result.InputHealth {
+		if result.InputHealth[i].Source == "account" {
+			result.InputHealth[i].Status = rpc.SourceStatusDegraded
+		}
+	}
+	for i := range result.Rules {
+		if result.Rules[i].ID == risk.RuleGreenDayAction {
+			result.Rules[i].Status = risk.RuleStatusNotEvaluated
+			result.Rules[i].Reason = risk.RuleReasonPnLUnavailable
+		}
 	}
 }
 

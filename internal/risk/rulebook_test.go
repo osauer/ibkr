@@ -1,6 +1,7 @@
 package risk
 
 import (
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -112,6 +113,28 @@ func TestEvaluateRulebookHealthyBook(t *testing.T) {
 		if got := rowByID(t, ev, id).Status; got != want {
 			t.Errorf("%s = %s, want %s (evidence: %s)", id, got, want, rowByID(t, ev, id).Evidence)
 		}
+	}
+}
+
+func TestGreenDayActionRequiresFiniteDailyPnL(t *testing.T) {
+	tests := []struct {
+		name string
+		pnl  *float64
+	}{
+		{name: "missing", pnl: nil},
+		{name: "nan", pnl: new(math.NaN())},
+		{name: "positive infinity", pnl: new(math.Inf(1))},
+		{name: "negative infinity", pnl: new(math.Inf(-1))},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			in := healthyInputs()
+			in.DailyPnLBase = test.pnl
+			row := rowByID(t, EvaluateRulebook(in, DefaultRulebookPolicy()), RuleGreenDayAction)
+			if row.Status != RuleStatusNotEvaluated || row.Reason != RuleReasonPnLUnavailable {
+				t.Fatalf("green day row = %s/%s, want not_evaluated/%s", row.Status, row.Reason, RuleReasonPnLUnavailable)
+			}
+		})
 	}
 }
 

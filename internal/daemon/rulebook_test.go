@@ -397,7 +397,7 @@ func TestRulebookAccountSourceHealthRequiresFreshCompleteOneShot(t *testing.T) {
 	completedAt := time.Date(2026, 7, 21, 12, 0, 2, 0, time.UTC)
 	requestAt := completedAt.Add(-time.Second)
 	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
-	complete := &rpc.AccountResult{AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: 0}
+	complete := &rpc.AccountResult{AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: 0, DailyPnL: new(0.0)}
 	completeAuthority := accountSummaryAuthority{
 		Provenance: ibkrlib.AccountSummaryProvenanceRequest, AsOf: requestAt,
 		NetLiquidationAvailable: true, TotalCashAvailable: true, BaseCurrencyAvailable: true,
@@ -415,7 +415,7 @@ func TestRulebookAccountSourceHealthRequiresFreshCompleteOneShot(t *testing.T) {
 		{
 			name: "fresh complete request permits negative finite cash",
 			account: &rpc.AccountResult{
-				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: -2500,
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: -2500, DailyPnL: new(-125.0),
 			},
 			authority: completeAuthority, wantOK: true, wantStatus: rpc.SourceStatusOK,
 		},
@@ -438,7 +438,7 @@ func TestRulebookAccountSourceHealthRequiresFreshCompleteOneShot(t *testing.T) {
 		},
 		{
 			name:    "fresh response missing base currency",
-			account: &rpc.AccountResult{AccountID: "DU123", NetLiquidation: 100000, TotalCash: 0},
+			account: &rpc.AccountResult{AccountID: "DU123", NetLiquidation: 100000, TotalCash: 0, DailyPnL: new(0.0)},
 			authority: func() accountSummaryAuthority {
 				partial := completeAuthority
 				partial.BaseCurrencyAvailable = false
@@ -458,35 +458,56 @@ func TestRulebookAccountSourceHealthRequiresFreshCompleteOneShot(t *testing.T) {
 		{
 			name: "non-finite net liquidation",
 			account: &rpc.AccountResult{
-				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: math.NaN(), TotalCash: 0,
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: math.NaN(), TotalCash: 0, DailyPnL: new(0.0),
 			},
 			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
 		},
 		{
 			name: "non-positive net liquidation",
 			account: &rpc.AccountResult{
-				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 0, TotalCash: 0,
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 0, TotalCash: 0, DailyPnL: new(0.0),
 			},
 			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
 		},
 		{
 			name: "non-finite cash",
 			account: &rpc.AccountResult{
-				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: math.Inf(1),
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: math.Inf(1), DailyPnL: new(0.0),
+			},
+			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name: "missing daily P&L",
+			account: &rpc.AccountResult{
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: 0,
+			},
+			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name: "non-finite daily P&L",
+			account: &rpc.AccountResult{
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: 0, DailyPnL: new(math.NaN()),
+			},
+			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name: "infinite daily P&L",
+			account: &rpc.AccountResult{
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: 0, DailyPnL: new(math.Inf(1)),
 			},
 			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
 		},
 		{
 			name: "malformed base currency",
 			account: &rpc.AccountResult{
-				AccountID: "DU123", BaseCurrency: "EU1", NetLiquidation: 100000, TotalCash: 0,
+				AccountID: "DU123", BaseCurrency: "EU1", NetLiquidation: 100000, TotalCash: 0, DailyPnL: new(0.0),
 			},
 			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
 		},
 		{
 			name: "placeholder base currency",
 			account: &rpc.AccountResult{
-				AccountID: "DU123", BaseCurrency: "BASE", NetLiquidation: 100000, TotalCash: 0,
+				AccountID: "DU123", BaseCurrency: "BASE", NetLiquidation: 100000, TotalCash: 0, DailyPnL: new(0.0),
 			},
 			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
 		},
@@ -505,6 +526,9 @@ func TestRulebookAccountSourceHealthRequiresFreshCompleteOneShot(t *testing.T) {
 			state, health := rulebookAccountSourceHealth(scope, test.account, test.authority, completedAt)
 			if state.Healthy != test.wantOK || state.Reason != test.wantReason || health.Status != test.wantStatus {
 				t.Fatalf("state=%+v health=%+v", state, health)
+			}
+			if test.wantStatus == rpc.SourceStatusDegraded && !rulebookInputHealthDegraded([]rpc.SourceHealth{health}) {
+				t.Fatalf("degraded account health would not degrade the Rulebook envelope: %+v", health)
 			}
 		})
 	}
