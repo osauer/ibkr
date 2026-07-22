@@ -172,6 +172,12 @@
 <td>ReloadInterval controls how often the daemon checks the opportunity policy file for changes; default 30s.</td>
 </tr>
 <tr>
+<td><code>[rulebook]</code></td>
+<td><code>terminal_evidence_file</code></td>
+<td><code>string</code></td>
+<td>TerminalEvidenceFile points to an optional JSON document of reviewed, exact-contract terminal/non-reporting issuer evidence for rules 6-8.</td>
+</tr>
+<tr>
 <td><code>[scans.&lt;name&gt;]</code></td>
 <td><code>exchange</code></td>
 <td><code>string</code></td>
@@ -223,13 +229,13 @@
 <td><code>[trading]</code></td>
 <td><code>max_notional</code></td>
 <td><code>float64</code></td>
-<td>MaxNotional caps risk-increasing (opening/adding/flipping) equity/ETF order notional before broker WhatIf; reduce-only orders are exempt, bounded by the position itself; default 10000 in account currency.</td>
+<td>MaxNotional caps every equity/ETF order before broker WhatIf; apparent close/reduce orders are not exempt because this client cannot prove that a manual TWS order has not already consumed the exit capacity.</td>
 </tr>
 <tr>
 <td><code>[trading]</code></td>
 <td><code>max_option_contracts</code></td>
 <td><code>int</code></td>
-<td>MaxOptionContracts caps risk-increasing single-leg option quantity; reduce-only orders are exempt, bounded by the position itself; default 5.</td>
+<td>MaxOptionContracts caps every single-leg option order; apparent close/reduce orders are not exempt because account-global working-order authority is incomplete.</td>
 </tr>
 <tr>
 <td><code>[trading]</code></td>
@@ -573,7 +579,7 @@
 </table>
 </div>
 <h2 id="runtime-platform-settings">Runtime platform settings</h2>
-<p>Daemon-owned preferences persisted in <code>$XDG_STATE_HOME/ibkr/daemon.db</code> and changed at runtime — no restart — via <code>ibkr settings set &lt;key&gt;=&lt;value&gt;</code>, the SPA Settings tab, or <code>PATCH /api/settings</code>. Setting a key to <code>null</code> clears the runtime override, and every response field carries access/source/reason metadata. Keys in the trading-limit class are writable only on experimental trading builds with <code>[trading].mode</code> set, and live routes reject agent-origin writes. Ownership and semantics: <code>docs/design/platform-settings.md</code>.</p>
+<p>Daemon-owned preferences persisted in <code>$XDG_STATE_HOME/ibkr/daemon.db</code> and changed at runtime without a restart. Feature preferences may be changed via <code>ibkr settings set &lt;key&gt;=&lt;value&gt;</code>, the SPA Settings tab, or <code>PATCH /api/settings</code>. Setting a key to <code>null</code> clears the runtime override, and every response field carries access/source/reason metadata. <code>trading.freeze</code> and trading-limit keys require <code>ibkr settings set</code> from an interactive human terminal; missing, agent, and paired-device origins are rejected in disabled, paper, and live modes. Trading-limit keys additionally require an experimental trading build with <code>[trading].mode</code> set. Ownership and semantics: <code>docs/design/platform-settings.md</code>.</p>
 <div class="tblwrap">
 <table>
 <thead>
@@ -589,7 +595,7 @@
 <td><code>features.purge_restore.enabled</code></td>
 <td><code>true/false/null</code></td>
 <td>runtime</td>
-<td>Allows the purge/restore workflow; false blocks purge/restore write actions across CLI, RPC, API, and SPA while purge status stays readable (default true).</td>
+<td>Controls the purge/restore workflow/read surface while purge status stays readable; true does not authorize preview or broker submission, which remains unavailable until exact per-leg portfolio and account-global working-order authority exists (default true).</td>
 </tr>
 <tr>
 <td><code>features.stock_protection.enabled</code></td>
@@ -619,13 +625,13 @@
 <td><code>trading.limits.max_notional</code></td>
 <td><code>number/null</code></td>
 <td>trading-limit</td>
-<td>Runtime override of [trading].max_notional, the opening-order notional cap; null falls back to the TOML value.</td>
+<td>Runtime override of [trading].max_notional, the notional cap for every equity/ETF order including apparent exits; null falls back to the TOML value.</td>
 </tr>
 <tr>
 <td><code>trading.limits.max_option_contracts</code></td>
 <td><code>integer/null</code></td>
 <td>trading-limit</td>
-<td>Runtime override of [trading].max_option_contracts, the opening option-quantity cap; null falls back to the TOML value.</td>
+<td>Runtime override of [trading].max_option_contracts, the quantity cap for every single-leg option order including apparent exits; null falls back to the TOML value.</td>
 </tr>
 <tr>
 <td><code>trading.limits.allow_stock_short</code></td>

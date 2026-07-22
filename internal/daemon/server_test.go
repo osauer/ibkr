@@ -303,9 +303,10 @@ func TestRequestCtxNoDeadlineForStreamingMethod(t *testing.T) {
 // Server.Start must open the Unix socket and start serving before the
 // gateway handshake starts — otherwise a slow or unreachable gateway blocks
 // `ibkr status` for 30-40s during the IBKR pool's TCP timeouts. The fake
-// attempter checks the Unix socket synchronously on entry to Start and then
-// blocks, so this pins the ordering invariant without a load-sensitive wall
-// clock assumption about authority initialization.
+// attempter checks the Unix socket inode synchronously on entry to Start and
+// then blocks. Dial reachability is covered independently by the openSocket
+// test; keeping this assertion at the publication boundary avoids a
+// load-sensitive kernel dial in the parallel race suite.
 func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 	t.Parallel()
 	dir := shortTempDir(t)
@@ -315,7 +316,10 @@ func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 	cfg := &config.Resolved{
 		Gateway: config.Gateway{Host: "127.0.0.1", Port: new(4002), ClientID: new(99), TLS: &tlsFalse},
 	}
-	cfg.Daemon.SetIdleTimeout(2 * time.Second)
+	// Disable idle exit for this ordering test. A short idle timer makes the
+	// fixture itself load-sensitive: under a parallel race run it can close the
+	// listener before the deliberately blocked connect goroutine is scheduled.
+	cfg.Daemon.SetIdleTimeout(0)
 
 	srv := New(Options{
 		Config:            cfg,
@@ -333,11 +337,14 @@ func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 		return &fakeAttempter{
 			blockUntilCtxDone: true,
 			startCheck: func() error {
-				conn, err := net.DialTimeout("unix", sockPath, time.Second)
-				if err == nil {
-					_ = conn.Close()
+				fi, err := os.Stat(sockPath)
+				if err != nil {
+					return err
 				}
-				return err
+				if fi.Mode()&os.ModeSocket == 0 {
+					return errors.New("daemon socket was not published before gateway handshake")
+				}
+				return nil
 			},
 			startCheckResult: startCheck,
 		}
@@ -354,7 +361,7 @@ func TestStartOpensSocketBeforeGatewayHandshake(t *testing.T) {
 	select {
 	case err := <-startCheck:
 		if err != nil {
-			t.Fatalf("gateway handshake started before daemon socket was reachable: %v", err)
+			t.Fatalf("gateway handshake started before daemon socket was published: %v", err)
 		}
 	case err := <-startReturned:
 		t.Fatalf("Start returned before gateway handshake: %v", err)

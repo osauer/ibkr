@@ -162,6 +162,12 @@ func (s *purgeLedgerStore) CommitOrderLifecycle(orderStore *orderJournalStore, e
 	if s == nil || orderStore == nil {
 		return fmt.Errorf("order lifecycle authority is unavailable")
 	}
+	return orderStore.withEvidenceMutation(func() error {
+		return s.commitOrderLifecycleLockedByJournal(orderStore, ev)
+	})
+}
+
+func (s *purgeLedgerStore) commitOrderLifecycleLockedByJournal(orderStore *orderJournalStore, ev orderJournalEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	store, err := s.coreStore()

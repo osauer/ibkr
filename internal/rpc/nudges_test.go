@@ -631,6 +631,23 @@ func TestNudgeCutoverReviewRequiredHealthRemainsNonReady(t *testing.T) {
 	}
 }
 
+func TestNudgeInactiveV3ReminderInputsAreNeutralForCleanAggregate(t *testing.T) {
+	asOf := time.Date(2031, time.February, 3, 12, 0, 0, 0, time.UTC)
+	health := allReadyNudgeSourceHealth(asOf)
+	inactive := NudgeInputHealth{
+		Status: NudgeInputStatusInactive,
+		Reason: NudgeHealthReasonProcessRemindersNotEnabled,
+		AsOf:   asOf,
+	}
+	health.Cadence = inactive
+	health.ConfirmedFlow = inactive
+
+	normalized := NormalizeNudgeSourceHealth(health, 0)
+	if normalized.Aggregate != NudgeAggregateReady {
+		t.Fatalf("aggregate=%q, want ready for valid v3 clean empty", normalized.Aggregate)
+	}
+}
+
 func TestNudgeCutoverReviewRequiredHealthRejectsArbitraryReason(t *testing.T) {
 	asOf := time.Date(2031, time.February, 3, 12, 0, 0, 0, time.UTC)
 	health := allReadyNudgeSourceHealth(asOf)

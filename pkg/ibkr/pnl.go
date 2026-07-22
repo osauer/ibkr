@@ -102,6 +102,9 @@ func (c *Connection) RequestPnL(reqID int, account, modelCode string) error {
 	if err := ensureASCII("modelCode", modelCode); err != nil {
 		return err
 	}
+	if err := c.claimRequestID(reqID); err != nil {
+		return err
+	}
 	msg := c.encodeMsg(reqPnL, reqID, account, modelCode)
 	return c.sendMessage(msg)
 }
@@ -110,6 +113,9 @@ func (c *Connection) RequestPnL(reqID int, account, modelCode string) error {
 // It returns nil when the connection is already down because socket closure
 // also terminates the stream.
 func (c *Connection) CancelPnL(reqID int) error {
+	if reqID <= 0 || reqID > maxProtoInt32 {
+		return fmt.Errorf("reqPnL request ID must be a positive signed 32-bit integer")
+	}
 	if !c.IsConnected() {
 		return nil
 	}
@@ -137,6 +143,9 @@ func (c *Connection) RequestPnLSingle(reqID int, account, modelCode string, conI
 	if err := ensureASCII("modelCode", modelCode); err != nil {
 		return err
 	}
+	if err := c.claimRequestID(reqID); err != nil {
+		return err
+	}
 	msg := c.encodeMsg(reqPnLSingle, reqID, account, modelCode, conID)
 	return c.sendMessage(msg)
 }
@@ -144,6 +153,9 @@ func (c *Connection) RequestPnLSingle(reqID int, account, modelCode string, conI
 // CancelPnLSingle requests cancellation of the reqPnLSingle stream identified
 // by reqID. It returns nil when the connection is already down.
 func (c *Connection) CancelPnLSingle(reqID int) error {
+	if reqID <= 0 || reqID > maxProtoInt32 {
+		return fmt.Errorf("reqPnLSingle request ID must be a positive signed 32-bit integer")
+	}
 	if !c.IsConnected() {
 		return nil
 	}
@@ -250,7 +262,11 @@ func (c *Connector) SubscribeAccountPnL(account string) error {
 		}
 	}
 
-	reqID := conn.GetNextRequestID()
+	reqID, err := conn.nextRequestIDForForwarding()
+	if err != nil {
+		return err
+	}
+	defer conn.discardRequestIDReservation(reqID)
 	c.pnl.mu.Lock()
 	if c.pnl.accountReqID != 0 && c.pnl.accountAcct == account {
 		c.pnl.mu.Unlock()
@@ -312,8 +328,18 @@ func (c *Connector) SubscribePositionDailyPnL(account string, conID int) error {
 	if conn == nil {
 		return ErrIBKRUnavailable
 	}
+	c.pnl.mu.Lock()
+	if _, ok := c.pnl.positionReqIDs[conID]; ok {
+		c.pnl.mu.Unlock()
+		return nil
+	}
+	c.pnl.mu.Unlock()
 
-	reqID := conn.GetNextRequestID()
+	reqID, err := conn.nextRequestIDForForwarding()
+	if err != nil {
+		return err
+	}
+	defer conn.discardRequestIDReservation(reqID)
 	c.pnl.mu.Lock()
 	if _, ok := c.pnl.positionReqIDs[conID]; ok {
 		c.pnl.mu.Unlock()
@@ -383,6 +409,8 @@ func (c *Connector) SeedAccountIDForTest(account string) {
 	if conn == nil {
 		return
 	}
+	unlockEvidence := conn.lockEvidenceChange()
+	defer unlockEvidence()
 	conn.accountMu.Lock()
 	conn.account = account
 	conn.accountMu.Unlock()

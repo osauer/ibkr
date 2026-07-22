@@ -25,9 +25,11 @@ func TestClassifyOrderIntegrityPortfolioHealth(t *testing.T) {
 	}{
 		{name: "current initial completion", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(-4 * time.Minute)}, want: orderIntegrityHealthCurrent},
 		{name: "current heartbeat overrides old completion", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(-time.Hour), LastUpdateAt: now.Add(-time.Minute)}, want: orderIntegrityHealthCurrent},
-		{name: "stale silence", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(-orderIntegrityPortfolioMaxAge - time.Nanosecond)}, want: orderIntegrityHealthStale},
+		{name: "stale silence", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(-portfolioStreamReceiptMaxAge - time.Nanosecond)}, want: orderIntegrityHealthStale},
 		{name: "unprimed", health: ibkrlib.PortfolioStreamHealth{Account: "DU123"}, want: orderIntegrityHealthUnavailable},
 		{name: "wrong account", health: ibkrlib.PortfolioStreamHealth{Account: "DU999", InitialCompletedAt: now.Add(-time.Minute)}, want: orderIntegrityHealthUnavailable},
+		{name: "latched scope conflict", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(-time.Minute), ScopeConflictAt: now}, want: orderIntegrityHealthUnavailable},
+		{name: "malformed generation", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(-time.Minute), InvalidPayloadAt: now}, want: orderIntegrityHealthUnavailable},
 		{name: "future receipt", health: ibkrlib.PortfolioStreamHealth{Account: "DU123", InitialCompletedAt: now.Add(time.Minute)}, want: orderIntegrityHealthUnavailable},
 	}
 	for _, tc := range cases {
@@ -36,6 +38,66 @@ func TestClassifyOrderIntegrityPortfolioHealth(t *testing.T) {
 				t.Fatalf("health=%+v classified %q, want %q", tc.health, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestReconcileOrderViewsUsesOneCacheOnlyReadAndCompletionClock(t *testing.T) {
+	startedAt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	port := 4002
+	clock := startedAt
+	server := &Server{
+		cfg:      &config.Resolved{Gateway: config.Gateway{Port: &port, Account: "DU123"}},
+		endpoint: discover.Endpoint{Port: port, Account: "DU123"},
+		now:      func() time.Time { return clock },
+	}
+
+	for _, test := range []struct {
+		name      string
+		receiptAt time.Time
+		want      string
+	}{
+		{name: "receipt completed during the read", receiptAt: startedAt.Add(time.Second), want: orderIntegrityHealthCurrent},
+		{name: "truly future receipt stays unavailable", receiptAt: startedAt.Add(3 * time.Second), want: orderIntegrityHealthUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clock = startedAt
+			views := []rpc.OrderView{{
+				Open: true, ModifyEligible: true, Source: proposalOrderSource,
+				Symbol: "OLD", SecType: "STK", ConID: 1001, Action: rpc.OrderActionSell,
+				OrderType: rpc.OrderTypeLMT, Quantity: 10, Remaining: 10,
+			}}
+			calls := 0
+			evaluation := server.reconcileOrderViewsFromCachedPositions(t.Context(), views, func(context.Context) ([]*ibkrlib.RawPosition, ibkrlib.PortfolioStreamHealth, error) {
+				calls++
+				clock = startedAt.Add(2 * time.Second)
+				return []*ibkrlib.RawPosition{{
+						Account: "DU123", Position: 10,
+						Contract: ibkrlib.Contract{ConID: 1001, Symbol: "RENAMED", SecType: "STK"},
+					}}, ibkrlib.PortfolioStreamHealth{
+						Account: "DU123", InitialCompletedAt: test.receiptAt,
+					}, nil
+			})
+			if calls != 1 {
+				t.Fatalf("cache read calls = %d, want exactly one", calls)
+			}
+			if evaluation.AsOf != clock || evaluation.EvidenceAsOf != test.receiptAt || evaluation.Status != test.want {
+				t.Fatalf("evaluation = %+v, completion=%s receipt=%s", evaluation, clock, test.receiptAt)
+			}
+			if views[0].ReconciliationState != "" || !views[0].ModifyEligible {
+				t.Fatalf("exact ConID position was not matched across symbol change: %+v", views[0])
+			}
+		})
+	}
+}
+
+func TestOrderIntegrityCacheProjectionRejectsForeignAccountRows(t *testing.T) {
+	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
+	positions, scoped := orderIntegrityPositionsFromCache([]*ibkrlib.RawPosition{{
+		Account: "DU999", Position: 10,
+		Contract: ibkrlib.Contract{ConID: 1001, Symbol: "ABC", SecType: "STK"},
+	}}, scope, time.Now())
+	if scoped || positions == nil || len(positions.Stocks) != 0 || len(positions.Options) != 0 {
+		t.Fatalf("foreign-account projection = %+v scoped=%t, want fail-closed empty projection", positions, scoped)
 	}
 }
 

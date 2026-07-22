@@ -113,6 +113,19 @@ func handleFakeIBConn(conn net.Conn) {
 	if _, err := io.ReadFull(conn, msgPayload); err != nil {
 		return
 	}
+	// A successful startAPI session publishes nextValidId. The connection now
+	// remains fail-closed until that broker namespace frontier arrives, so the
+	// TLS-fallback fake must complete the same startup contract as TWS/Gateway.
+	nextValidPayload := make([]byte, 4, 4+len("1\x00100\x00"))
+	binary.BigEndian.PutUint32(nextValidPayload, uint32(msgNextValidID))
+	nextValidPayload = append(nextValidPayload, []byte("1\x00100\x00")...)
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(nextValidPayload)))
+	if _, err := conn.Write(lenBuf[:]); err != nil {
+		return
+	}
+	if _, err := conn.Write(nextValidPayload); err != nil {
+		return
+	}
 	// Keep the connection open until the client disconnects.
 	_, _ = io.Copy(io.Discard, conn)
 }
@@ -255,6 +268,7 @@ func TestConnectionTLSFallback(t *testing.T) {
 	cfg.Host = host
 	cfg.Port = port
 	cfg.ClientID = 90
+	cfg.MaxClientIDRetries = 1
 	cfg.UseTLS = false
 	cfg.EnableTLSFallback = true
 	cfg.TLSInsecureSkipVerify = true
@@ -267,5 +281,8 @@ func TestConnectionTLSFallback(t *testing.T) {
 	}
 	if !conn.useTLS {
 		t.Fatalf("expected TLS fallback, useTLS=%v", conn.useTLS)
+	}
+	if !conn.BrokerIDNamespaceReady() {
+		t.Fatal("TLS fallback connected without the nextValidId namespace frontier")
 	}
 }

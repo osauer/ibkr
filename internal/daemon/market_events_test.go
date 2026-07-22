@@ -222,13 +222,13 @@ func TestFTPPassiveAddrRejectsOutOfRangeParts(t *testing.T) {
 }
 
 func TestMarketEventBorrowFeesSnapshotIndexesBySymbol(t *testing.T) {
-	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 6, 8, 16, 0, 0, 0, time.UTC)
 	cache := newMarketEventCache(func() time.Time { return now })
 	cache.regSHO = marketEventRegSHOEntry{FetchedAt: now, AsOf: now, Symbols: map[string]marketEventRegSHORecord{}}
 	cache.halts = marketEventHaltsEntry{FetchedAt: now, AsOf: now}
 	cache.borrowFees = marketEventBorrowFeeEntry{
 		FetchedAt: now,
-		AsOf:      now.Add(-15 * time.Minute),
+		AsOf:      now.Add(-5 * time.Minute),
 		SourceURL: "ftp://ftp3.interactivebrokers.com/usa.txt",
 		Symbols: map[string]marketEventBorrowFeeRecord{
 			"CRWV": {Symbol: "CRWV", Currency: "USD", Name: "COREWEAVE INC", FeeRate: 55.5, Available: 10_000},

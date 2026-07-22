@@ -154,6 +154,42 @@ VALUES (?, ?, ?, ?, ?, ?)`, request.TokenDigest[:], request.Scope.ScopeKey, befo
 				return fmt.Errorf("consume preview token: %w", err)
 			}
 		}
+		if request.ExpectedOrderEventSeq != nil {
+			var (
+				actual       int64
+				latestType   string
+				latestStatus sql.NullString
+			)
+			err := tx.QueryRowContext(ctx, `SELECT event_seq,type,status FROM order_events WHERE scope_key=? AND reserved_order_id=? ORDER BY event_seq DESC LIMIT 1`, request.Scope.ScopeKey, request.ReservedOrderID).Scan(&actual, &latestType, &latestStatus)
+			exists := true
+			if errors.Is(err, sql.ErrNoRows) {
+				actual = 0
+				exists = false
+			} else if err != nil {
+				return fmt.Errorf("read per-order event frontier: %w", err)
+			}
+			if actual != *request.ExpectedOrderEventSeq {
+				return &RevisionConflictError{Expected: *request.ExpectedOrderEventSeq, Actual: actual, Exists: exists}
+			}
+			if request.Action == ActionModify {
+				if !exists || latestType == "cancel-requested" || terminalOrderStatus(latestStatus.String) {
+					return ErrOrderNotModifiable
+				}
+				var lastTerminal sql.NullInt64
+				if err := tx.QueryRowContext(ctx, `SELECT
+MAX(CASE WHEN lower(COALESCE(status,'')) IN ('filled','cancelled','canceled','apicancelled','inactive','rejected') THEN event_seq END)
+FROM order_events WHERE scope_key=? AND reserved_order_id=?`, request.Scope.ScopeKey, request.ReservedOrderID).Scan(&lastTerminal); err != nil {
+					return fmt.Errorf("read unresolved cancel frontier: %w", err)
+				}
+				unresolvedCancel, err := hasUnresolvedCancelAttemptTx(ctx, tx, request.Scope.ScopeKey, request.ReservedOrderID, lastTerminal.Int64)
+				if err != nil {
+					return err
+				}
+				if unresolvedCancel {
+					return ErrOrderNotModifiable
+				}
+			}
+		}
 		if request.Action == ActionPlace {
 			global, err := readFloor(ctx, tx, "global", "")
 			if err != nil {
@@ -182,9 +218,124 @@ VALUES (?, ?, ?, ?, ?, ?)`, request.TokenDigest[:], request.Scope.ScopeKey, befo
 	return result, err
 }
 
+func terminalOrderStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "filled", "cancelled", "canceled", "apicancelled", "inactive", "rejected":
+		return true
+	default:
+		return false
+	}
+}
+
+type cancelAttemptAdmissionPayload struct {
+	Type            string     `json:"type"`
+	AttemptID       string     `json:"attempt_id"`
+	ActionKind      ActionKind `json:"action_kind"`
+	SendDisposition string     `json:"send_disposition"`
+}
+
+type cancelAttemptAdmissionState struct {
+	action           ActionKind
+	outcomeCount     int
+	definitelyUnsent bool
+}
+
+func hasUnresolvedCancelAttemptTx(ctx context.Context, tx *sql.Tx, scopeKey string, reservedOrderID, afterEventSeq int64) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT oe.type,el.action_kind,el.payload_json
+FROM order_events oe JOIN event_log el ON el.event_seq=oe.event_seq
+WHERE oe.scope_key=? AND oe.reserved_order_id=? AND oe.event_seq>?
+AND oe.type IN ('cancel-requested','send-completed','send-error')
+ORDER BY oe.event_seq`, scopeKey, reservedOrderID, afterEventSeq)
+	if err != nil {
+		return false, fmt.Errorf("read cancel attempt evidence: %w", err)
+	}
+	defer rows.Close()
+
+	attempts := make(map[string]*cancelAttemptAdmissionState)
+	for rows.Next() {
+		var (
+			eventType string
+			action    string
+			rawJSON   []byte
+		)
+		if err := rows.Scan(&eventType, &action, &rawJSON); err != nil {
+			return false, fmt.Errorf("scan cancel attempt evidence: %w", err)
+		}
+		var payload cancelAttemptAdmissionPayload
+		payloadOK := json.Unmarshal(rawJSON, &payload) == nil &&
+			payload.Type == eventType && payload.AttemptID != "" &&
+			strings.TrimSpace(payload.AttemptID) == payload.AttemptID &&
+			string(payload.ActionKind) == action
+
+		switch eventType {
+		case "cancel-requested":
+			cancelAction := payload.ActionKind == ActionCancel || payload.ActionKind == ActionSmokeCleanup
+			if !payloadOK || !cancelAction {
+				return true, nil
+			}
+			if _, duplicate := attempts[payload.AttemptID]; duplicate {
+				return true, nil
+			}
+			attempts[payload.AttemptID] = &cancelAttemptAdmissionState{action: payload.ActionKind}
+		case "send-completed", "send-error":
+			attempt := attempts[payload.AttemptID]
+			if attempt == nil {
+				continue
+			}
+			attempt.outcomeCount++
+			attempt.definitelyUnsent = attempt.outcomeCount == 1 && payloadOK &&
+				eventType == "send-error" && payload.ActionKind == attempt.action &&
+				payload.SendDisposition == "definitely_unsent"
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("read cancel attempt evidence: %w", err)
+	}
+	for _, attempt := range attempts {
+		if !attempt.definitelyUnsent {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// LatestOrderEventSeq returns the exact durable frontier for one broker order.
+// Zero means no event exists for the scope/order pair.
+func (s *Store) LatestOrderEventSeq(ctx context.Context, scope BrokerScope, reservedOrderID int64) (int64, error) {
+	if err := validateBrokerScope(scope); err != nil {
+		return 0, err
+	}
+	if reservedOrderID <= 0 {
+		return 0, errorsf("reserved order id must be positive")
+	}
+	var latest sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(event_seq) FROM order_events WHERE scope_key=? AND reserved_order_id=?`, scope.ScopeKey, reservedOrderID).Scan(&latest); err != nil {
+		return 0, fmt.Errorf("read per-order event frontier: %w", err)
+	}
+	if !latest.Valid {
+		return 0, nil
+	}
+	return latest.Int64, nil
+}
+
 // AppendOrderEvents appends normal lifecycle events atomically and returns
 // their stable event_seq values in input order.
 func (s *Store) AppendOrderEvents(ctx context.Context, events []OrderEventRecord) ([]int64, error) {
+	return s.appendOrderEventsAtHead(ctx, -1, events)
+}
+
+// AppendOrderEventsAtHead appends events only when the authoritative order
+// event frontier still equals expectedLastEventSeq. It is the reconciliation
+// CAS boundary: a journal write after the caller's reload makes absence
+// evidence stale instead of allowing it to close a newer row.
+func (s *Store) AppendOrderEventsAtHead(ctx context.Context, expectedLastEventSeq int64, events []OrderEventRecord) ([]int64, error) {
+	if expectedLastEventSeq < 0 {
+		return nil, errorsf("expected order event head must not be negative")
+	}
+	return s.appendOrderEventsAtHead(ctx, expectedLastEventSeq, events)
+}
+
+func (s *Store) appendOrderEventsAtHead(ctx context.Context, expectedLastEventSeq int64, events []OrderEventRecord) ([]int64, error) {
 	if len(events) == 0 {
 		return nil, errorsf("at least one order event is required")
 	}
@@ -198,6 +349,15 @@ func (s *Store) AppendOrderEvents(ctx context.Context, events []OrderEventRecord
 	}
 	var seqs []int64
 	err := s.criticalMutation(ctx, func(tx *sql.Tx) error {
+		if expectedLastEventSeq >= 0 {
+			head, err := readAuthorityHead(ctx, tx)
+			if err != nil {
+				return err
+			}
+			if head.LastEventSeq != expectedLastEventSeq {
+				return &RevisionConflictError{Expected: expectedLastEventSeq, Actual: head.LastEventSeq, Exists: true}
+			}
+		}
 		now := time.Now().UTC()
 		seen := map[string]BrokerScope{}
 		for _, event := range events {

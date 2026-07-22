@@ -366,17 +366,18 @@ func normalizeNudgeInputHealth(health NudgeInputHealth, source nudgeHealthSource
 }
 
 func aggregateNormalizedNudgeSourceHealth(health NudgeSourceHealth, candidateCount int) string {
-	statuses := [...]string{
-		health.Policy.Status,
-		health.Reconciliation.Status,
-		health.Capital.Status,
-		health.Pins.Status,
-		health.Cadence.Status,
-		health.ConfirmedFlow.Status,
+	inputs := [...]NudgeInputHealth{
+		health.Policy,
+		health.Reconciliation,
+		health.Capital,
+		health.Pins,
+		health.Cadence,
+		health.ConfirmedFlow,
 	}
 	allReady := true
-	for _, status := range statuses {
-		if status != NudgeInputStatusOK {
+	for _, input := range inputs {
+		if input.Status != NudgeInputStatusOK &&
+			!(input.Status == NudgeInputStatusInactive && input.Reason == NudgeHealthReasonProcessRemindersNotEnabled) {
 			allReady = false
 			break
 		}

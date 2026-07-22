@@ -1548,7 +1548,7 @@ func TestQuoteMarketForStockContract(t *testing.T) {
 	}
 }
 
-func TestQuoteSessionMarketForContractSkipsCashFX(t *testing.T) {
+func TestQuoteSessionMarketForContractSelectsInstrumentCalendar(t *testing.T) {
 	t.Parallel()
 	if got, ok := quoteSessionMarketForContract(rpc.ContractParams{
 		Symbol:   "USD",
@@ -1561,6 +1561,10 @@ func TestQuoteSessionMarketForContractSkipsCashFX(t *testing.T) {
 	got, ok := quoteSessionMarketForContract(rpc.ContractParams{Symbol: "SPY", SecType: "STK"})
 	if !ok || got != marketcal.MarketUSEquity {
 		t.Fatalf("quoteSessionMarketForContract(STK) = %q, %t; want %q, true", got, ok, marketcal.MarketUSEquity)
+	}
+	got, ok = quoteSessionMarketForContract(rpc.ContractParams{Symbol: "SPY", SecType: "OPT"})
+	if !ok || got != marketcal.MarketUSOptions {
+		t.Fatalf("quoteSessionMarketForContract(OPT) = %q, %t; want %q, true", got, ok, marketcal.MarketUSOptions)
 	}
 }
 

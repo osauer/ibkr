@@ -19,14 +19,16 @@ const (
 	stateKindRulesRegimeStage = "rules_regime_stage"
 	stateKindProposalOutcomes = "proposal_outcomes"
 
-	coreEventCapital         = "capital_event"
-	coreEventRiskPolicy      = "risk_policy_event"
-	coreEventRegimeDecision  = "regime_decision"
-	coreEventCanaryDecision  = "canary_decision"
-	coreEventRuleTransition  = "rule_transition"
-	coreEventProposalOutcome = "proposal_outcome"
-	coreEventActionRecord    = "record"
-	coreEventOriginDaemon    = "daemon_internal"
+	coreEventCapital          = "capital_event"
+	coreEventRiskPolicy       = "risk_policy_event"
+	coreEventRegimeDecision   = "regime_decision"
+	coreEventCanaryDecision   = "canary_decision"
+	coreEventRuleTransition   = "rule_transition"
+	coreEventProposalOutcome  = "proposal_outcome"
+	coreEventPlatformSettings = "platform_settings_update"
+	coreEventActionRecord     = "record"
+	coreEventActionUpdate     = "update"
+	coreEventOriginDaemon     = "daemon_internal"
 )
 
 func coreEventKey(prefix string, at time.Time, payload []byte, ordinal int) string {

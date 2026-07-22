@@ -76,6 +76,20 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 			}
 			fmt.Fprintf(env.Stdout, "      • %s\n", line)
 		}
+		for i, o := range r.Exempt {
+			if i >= 5 {
+				fmt.Fprintf(env.Stdout, "      … %d more exemptions\n", len(r.Exempt)-i)
+				break
+			}
+			line := o.Symbol
+			if o.Leg != "" {
+				line = o.Leg
+			}
+			if o.Note != "" {
+				line += " — " + o.Note
+			}
+			fmt.Fprintf(env.Stdout, "      exempt: %s\n", line)
+		}
 		for _, note := range r.Notes {
 			fmt.Fprintf(env.Stdout, "      (%s)\n", note)
 		}
@@ -92,8 +106,16 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 	}
 	fmt.Fprintln(env.Stdout)
 	if len(res.Earnings) > 0 {
-		var unresolved []string
+		var unresolved, terminal []string
 		for _, e := range res.Earnings {
+			if e.Status == rpc.EarningsStatusTerminalNonReporting {
+				review := ""
+				if e.Terminal != nil && !e.Terminal.RevalidateAfter.IsZero() {
+					review = "; review by " + e.Terminal.RevalidateAfter.Format("2006-01-02")
+				}
+				terminal = append(terminal, fmt.Sprintf("%s (terminal/non-reporting%s)", e.Symbol, review))
+				continue
+			}
 			if e.Source == "unknown" || e.Status != "" && e.Status != rpc.EarningsStatusDate {
 				reason := e.Reason
 				if reason == "" {
@@ -101,6 +123,9 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 				}
 				unresolved = append(unresolved, fmt.Sprintf("%s (%s)", e.Symbol, earningsOutcomeLabel(reason)))
 			}
+		}
+		if len(terminal) > 0 {
+			fmt.Fprintf(env.Stdout, "Earnings not applicable: %s — exact-contract evidence and provenance are available in --json.\n", strings.Join(terminal, ", "))
 		}
 		if len(unresolved) > 0 {
 			fmt.Fprintf(env.Stdout, "Earnings unresolved: %s — set an authoritative override with `ibkr settings set features.rulebook.earnings_overrides.<SYM>=YYYY-MM-DD` if needed (rules 6-8 stay unknown, never pass).\n",

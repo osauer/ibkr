@@ -41,6 +41,10 @@ type RateLimiter struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	// submitTimeoutFn is an internal test seam for proving that a request
+	// canceled by the limiter's own completion deadline cannot run later.
+	// Production leaves it nil and uses submitTimeout.
+	submitTimeoutFn func(RequestType) time.Duration
 }
 
 // RateLimiterMetrics tracks rate limiting statistics
@@ -59,7 +63,7 @@ type RateLimiterMetrics struct {
 type RateLimitedRequest struct {
 	Type       RequestType
 	Context    context.Context
-	SendFunc   func() error
+	SendFunc   func(context.Context) error
 	ResultChan chan error
 	Timestamp  time.Time
 	Retries    int
@@ -333,6 +337,16 @@ func (rl *RateLimiter) SubmitWithRetries(reqType RequestType, sendFunc func() er
 // request with a 60 s budget must leave that queue promptly when its caller is
 // gone.
 func (rl *RateLimiter) SubmitWithRetriesContext(ctx context.Context, reqType RequestType, sendFunc func() error, maxRetries int) error {
+	return rl.SubmitWithRetriesContextFunc(ctx, reqType, func(context.Context) error {
+		return sendFunc()
+	}, maxRetries)
+}
+
+// SubmitWithRetriesContextFunc passes the limiter-owned request context to the
+// admitted callback. In addition to caller cancellation, that context is
+// canceled synchronously by the limiter's own completion timeout, so work
+// already admitted but parked behind another transport cannot run late.
+func (rl *RateLimiter) SubmitWithRetriesContextFunc(ctx context.Context, reqType RequestType, sendFunc func(context.Context) error, maxRetries int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -340,9 +354,11 @@ func (rl *RateLimiter) SubmitWithRetriesContext(ctx context.Context, reqType Req
 		return err
 	}
 
+	requestCtx, cancelRequest := context.WithCancel(ctx)
+	defer cancelRequest()
 	req := &RateLimitedRequest{
 		Type:       reqType,
-		Context:    ctx,
+		Context:    requestCtx,
 		SendFunc:   sendFunc,
 		ResultChan: make(chan error, 1),
 		Timestamp:  time.Now(),
@@ -359,6 +375,9 @@ func (rl *RateLimiter) SubmitWithRetriesContext(ctx context.Context, reqType Req
 	default:
 	}
 	timeout := submitTimeout(reqType)
+	if rl.submitTimeoutFn != nil {
+		timeout = rl.submitTimeoutFn(reqType)
+	}
 	select {
 	case rl.requestQueue <- req:
 		// Wait for result with timeout
@@ -368,11 +387,17 @@ func (rl *RateLimiter) SubmitWithRetriesContext(ctx context.Context, reqType Req
 		case err := <-req.ResultChan:
 			return err
 		case <-timer.C:
+			// Revoke the queued dispatch synchronously before returning. This
+			// closes the scheduler gap where the caller could observe a timeout
+			// and the request could still acquire a token and reach SendFunc.
+			cancelRequest()
 			rl.incrementRejected()
 			return fmt.Errorf("request timeout after %s", timeout)
 		case <-ctx.Done():
+			cancelRequest()
 			return ctx.Err()
 		case <-rl.ctx.Done():
+			cancelRequest()
 			return fmt.Errorf("rate limiter stopped")
 		}
 	case <-ctx.Done():
@@ -518,7 +543,7 @@ func (rl *RateLimiter) executeRequest(req *RateLimitedRequest) error {
 	}
 
 	// Execute the actual request
-	err := req.SendFunc()
+	err := req.SendFunc(ctx)
 	if err != nil {
 		if isContextDone(err) {
 			return err

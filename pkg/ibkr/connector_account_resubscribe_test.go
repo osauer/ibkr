@@ -78,6 +78,52 @@ func TestCachedPositionsHealsDeadPortfolioStream(t *testing.T) {
 	}
 }
 
+func TestCachedPositionsWithHealthRepairsScopeConflictWithNonemptyCache(t *testing.T) {
+	c, conn, out := newAcctResubscribeRig(t)
+	conn.accountMu.Lock()
+	conn.account = "DU1234567"
+	conn.accountMu.Unlock()
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	c.acctUpdatesNow = func() time.Time { return now }
+	conn.resetPortfolioStreamHealth("DU1234567", now.Add(-time.Minute))
+	conn.handlePortfolioValue([]string{
+		"7", "8", "4391", "AMD", "STK", "", "0", "", "1", "NASDAQ", "USD", "AMD", "AMD",
+		"20", "100", "2000", "90", "200", "0", "DU1234567",
+	})
+	if !conn.completePortfolioDownload("DU1234567", now.Add(-30*time.Second)) {
+		t.Fatal("initial scoped portfolio completion was rejected")
+	}
+	if conn.acceptPortfolioAccountFrame("U1234567", now) {
+		t.Fatal("foreign portfolio frame was accepted")
+	}
+
+	acctFrame := conn.encodeMsg(reqAcctData, "2", "1", "DU1234567")
+	frames := func() int { return bytes.Count(out.Bytes(), acctFrame) }
+	positions, health, err := c.CachedPositionsWithHealth()
+	if err != nil || len(positions) != 1 {
+		t.Fatalf("CachedPositionsWithHealth = %v, %+v, %v", positions, health, err)
+	}
+	if frames() != 1 || !health.ScopeConflictAt.IsZero() || health.RequestedAt.IsZero() || !health.InitialCompletedAt.IsZero() {
+		t.Fatalf("first scope repair health=%+v frames=%d", health, frames())
+	}
+
+	// A repeated foreign frame re-latches the typed conflict. The throttle
+	// keeps the immediate read from looping, then re-arms at its boundary.
+	if conn.acceptPortfolioAccountFrame("U1234567", now.Add(time.Second)) {
+		t.Fatal("repeated foreign portfolio frame was accepted")
+	}
+	_, held, err := c.CachedPositionsWithHealth()
+	if err != nil || held.ScopeConflictAt.IsZero() || frames() != 1 {
+		t.Fatalf("throttled repeated conflict health=%+v frames=%d err=%v", held, frames(), err)
+	}
+
+	now = now.Add(acctUpdatesResubscribeThrottle)
+	_, repaired, err := c.CachedPositionsWithHealth()
+	if err != nil || frames() != 2 || !repaired.ScopeConflictAt.IsZero() || repaired.RequestedAt.IsZero() || !repaired.InitialCompletedAt.IsZero() {
+		t.Fatalf("repeated conflict repair health=%+v frames=%d err=%v", repaired, frames(), err)
+	}
+}
+
 func TestCachedPositionsKeepsZeroValueStockPositionsVisible(t *testing.T) {
 	c, conn, _ := newAcctResubscribeRig(t)
 	conn.positionsMu.Lock()

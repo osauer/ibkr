@@ -155,6 +155,54 @@ func TestCachedAccountSummaryEmptyOrNonCoreCacheReturnsNil(t *testing.T) {
 	}
 }
 
+func TestAccountSummaryRequestProvenanceDistinguishesStreamingFallback(t *testing.T) {
+	requestRows := map[string]string{"NetLiquidation": "100000", "TotalCashValue": "25000"}
+	fallbackRows := map[string]string{"NetLiquidation": "90000", "TotalCashValue": "15000"}
+
+	fresh, provenance, err := accountSummaryFromRequestRows(requestRows, fallbackRows, "DU123")
+	if err != nil || provenance != AccountSummaryProvenanceRequest || fresh.NetLiquidation == nil || *fresh.NetLiquidation != 100000 {
+		t.Fatalf("fresh request = %+v provenance=%q err=%v", fresh, provenance, err)
+	}
+
+	cached, provenance, err := accountSummaryFromRequestRows(nil, fallbackRows, "DU123")
+	if err != nil || provenance != AccountSummaryProvenanceCachedFallback || cached.NetLiquidation == nil || *cached.NetLiquidation != 90000 {
+		t.Fatalf("cached fallback = %+v provenance=%q err=%v", cached, provenance, err)
+	}
+}
+
+func TestAccountBaseCurrencyEvidenceAcceptsEveryAllowlistedValueSuffix(t *testing.T) {
+	for _, tag := range accountBaseCurrencyValueTags {
+		t.Run(tag, func(t *testing.T) {
+			currency, provenance := accountBaseCurrencyEvidence(map[string]string{
+				tag + "_eur": "1",
+			})
+			if currency != "EUR" || provenance != AccountBaseCurrencyValueSuffix {
+				t.Fatalf("evidence = (%q, %q), want (EUR, %q)", currency, provenance, AccountBaseCurrencyValueSuffix)
+			}
+		})
+	}
+}
+
+func TestAccountBaseCurrencyEvidenceRejectsConflictingValueSuffixes(t *testing.T) {
+	currency, provenance := accountBaseCurrencyEvidence(map[string]string{
+		"NetLiquidation_USD": "100000",
+		"UnrealizedPnL_EUR":  "100",
+	})
+	if currency != "" || provenance != AccountBaseCurrencyUnknown {
+		t.Fatalf("evidence = (%q, %q), want unknown", currency, provenance)
+	}
+}
+
+func TestAccountBaseCurrencyEvidenceDoesNotInferFromExchangeRate(t *testing.T) {
+	currency, provenance := accountBaseCurrencyEvidence(map[string]string{
+		"ExchangeRate_USD": "1",
+		"ExchangeRate_EUR": "0.92",
+	})
+	if currency != "" || provenance != AccountBaseCurrencyUnknown {
+		t.Fatalf("evidence = (%q, %q), want unknown", currency, provenance)
+	}
+}
+
 func TestLookupAccountValue_OrderingDeterministic(t *testing.T) {
 	raw := map[string]string{
 		"NetLiquidation_EUR": "90000.00",

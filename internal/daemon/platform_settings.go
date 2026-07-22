@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,17 +24,29 @@ type platformSettingsStore struct {
 	path     string // legacy importer/test helper only; live daemon binds core
 	core     *corestore.Store
 	revision int64
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	data     platformSettingsData
 }
 
 type platformSettingsData struct {
-	Version  int                         `json:"version"`
-	Features platformFeatureSettingsData `json:"features"`
-	Trading  platformTradingSettingsData `json:"trading"`
-	Regime   platformRegimeSettingsData  `json:"regime"`
-	Canary   platformCanarySettingsData  `json:"canary"`
-	History  platformHistorySettingsData `json:"history"`
+	Version                  int                         `json:"version"`
+	TradingControlGeneration uint64                      `json:"trading_control_generation"`
+	Features                 platformFeatureSettingsData `json:"features"`
+	Trading                  platformTradingSettingsData `json:"trading"`
+	Regime                   platformRegimeSettingsData  `json:"regime"`
+	Canary                   platformCanarySettingsData  `json:"canary"`
+	History                  platformHistorySettingsData `json:"history"`
+}
+
+type platformSettingsUpdateEventV1 struct {
+	Version                     int                        `json:"version"`
+	Keys                        []string                   `json:"keys"`
+	Before                      map[string]json.RawMessage `json:"before"`
+	After                       map[string]json.RawMessage `json:"after"`
+	ExpectedRevision            int64                      `json:"expected_revision"`
+	NewRevision                 int64                      `json:"new_revision"`
+	OldTradingControlGeneration uint64                     `json:"old_trading_control_generation"`
+	NewTradingControlGeneration uint64                     `json:"new_trading_control_generation"`
 }
 
 type platformRegimeSettingsData struct {
@@ -163,9 +178,80 @@ func (s *platformSettingsStore) snapshot() platformSettingsData {
 	if s == nil {
 		return platformSettingsData{Version: 1}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.data
+}
+
+// tradingControlGeneration returns the durable generation covering the five
+// runtime controls that can change whether a broker write is permitted:
+// freeze, both size caps, stock shorting, and option sell-to-open. It is a
+// store property rather than an RPC revision so wire guards can compare one
+// monotonic value without depending on publication timing at another surface.
+func (s *platformSettingsStore) tradingControlGeneration() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data.TradingControlGeneration
+}
+
+// tradingControlSnapshot applies the four configurable trading-limit
+// overrides and returns them with the exact generation observed under the
+// same lock. Freeze is intentionally not a config.Trading field, but every
+// freeze change still advances the returned generation so a caller binding
+// this pair cannot miss a concurrent brake transition.
+func (s *platformSettingsStore) tradingControlSnapshot(base config.Trading, applyOverrides bool) (config.Trading, uint64) {
+	if s == nil {
+		return base, 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if applyOverrides {
+		if s.data.Trading.MaxNotional != nil {
+			base.MaxNotional = *s.data.Trading.MaxNotional
+		}
+		if s.data.Trading.MaxOptionContracts != nil {
+			base.MaxOptionContracts = *s.data.Trading.MaxOptionContracts
+		}
+		if s.data.Trading.AllowStockShort != nil {
+			base.AllowStockShort = *s.data.Trading.AllowStockShort
+		}
+		if s.data.Trading.AllowOptionSellToOpen != nil {
+			base.AllowOptionSellToOpen = *s.data.Trading.AllowOptionSellToOpen
+		}
+	}
+	return base, s.data.TradingControlGeneration
+}
+
+// lockTradingControlSnapshot acquires the short final-wire read lease. The
+// caller must invoke release after the protected broker send returns. Runtime
+// settings remain fully concurrent while an order waits in pacing; only the
+// final authority check plus frame write/flush excludes a control commit.
+//
+//lint:ignore U1000 Used by the trading-tagged physical write guard.
+func (s *platformSettingsStore) lockTradingControlSnapshot(base config.Trading, applyOverrides bool) (cfg config.Trading, generation uint64, frozen bool, release func()) {
+	if s == nil {
+		return base, 0, false, func() {}
+	}
+	s.mu.RLock()
+	if applyOverrides {
+		if s.data.Trading.MaxNotional != nil {
+			base.MaxNotional = *s.data.Trading.MaxNotional
+		}
+		if s.data.Trading.MaxOptionContracts != nil {
+			base.MaxOptionContracts = *s.data.Trading.MaxOptionContracts
+		}
+		if s.data.Trading.AllowStockShort != nil {
+			base.AllowStockShort = *s.data.Trading.AllowStockShort
+		}
+		if s.data.Trading.AllowOptionSellToOpen != nil {
+			base.AllowOptionSellToOpen = *s.data.Trading.AllowOptionSellToOpen
+		}
+	}
+	frozen = s.data.Trading.Freeze != nil && *s.data.Trading.Freeze
+	return base, s.data.TradingControlGeneration, frozen, s.mu.RUnlock
 }
 
 func (s *platformSettingsStore) update(fn func(*platformSettingsData) error) error {
@@ -181,6 +267,13 @@ func (s *platformSettingsStore) update(fn func(*platformSettingsData) error) err
 	if err := fn(&next); err != nil {
 		return err
 	}
+	// The callback cannot assign or roll back this authority counter. Derive it
+	// solely from the committed predecessor and the semantic before/after
+	// values. A patch that changes several controls advances once; reapplying
+	// an equal value does not advance merely because it allocated a new pointer.
+	if err := deriveTradingControlGeneration(s.data, &next); err != nil {
+		return err
+	}
 	if err := s.saveLocked(next); err != nil {
 		return err
 	}
@@ -188,6 +281,164 @@ func (s *platformSettingsStore) update(fn func(*platformSettingsData) error) err
 	// database therefore cannot relax an in-memory freeze or limit.
 	s.data = next
 	return nil
+}
+
+func (s *platformSettingsStore) updateWithAudit(ctx context.Context, at time.Time, origin string, requestedKeys []string, fn func(*platformSettingsData) error) error {
+	if s == nil {
+		return errBadRequest("runtime settings store is unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	} else {
+		at = at.UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := s.data
+	if next.Version == 0 {
+		next.Version = 1
+	}
+	if err := fn(&next); err != nil {
+		return err
+	}
+	if err := deriveTradingControlGeneration(s.data, &next); err != nil {
+		return err
+	}
+	keys := append([]string(nil), requestedKeys...)
+	sort.Strings(keys)
+	keys = slices.Compact(keys)
+	before := make(map[string]json.RawMessage, len(keys))
+	after := make(map[string]json.RawMessage, len(keys))
+	changed := keys[:0]
+	for _, key := range keys {
+		oldValue, err := canonicalPlatformSettingValue(s.data, key)
+		if err != nil {
+			return err
+		}
+		newValue, err := canonicalPlatformSettingValue(next, key)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(oldValue, newValue) {
+			continue
+		}
+		changed = append(changed, key)
+		before[key] = oldValue
+		after[key] = newValue
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	if s.core == nil {
+		if err := s.saveLocked(next); err != nil {
+			return err
+		}
+		s.data = next
+		return nil
+	}
+	rawState, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	event := platformSettingsUpdateEventV1{
+		Version: 1, Keys: append([]string(nil), changed...), Before: before, After: after,
+		ExpectedRevision: s.revision, NewRevision: s.revision + 1,
+		OldTradingControlGeneration: s.data.TradingControlGeneration,
+		NewTradingControlGeneration: next.TradingControlGeneration,
+	}
+	rawEvent, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	input := corestore.EventInput{
+		ScopeKey:    daemonStateScope,
+		EventKey:    coreEventKey(coreEventPlatformSettings, at, rawEvent, int(event.NewRevision)),
+		Type:        coreEventPlatformSettings,
+		Action:      coreEventActionUpdate,
+		Origin:      normalizedWriteOrigin(origin),
+		OccurredAt:  at,
+		PayloadJSON: rawEvent,
+	}
+	saved, _, err := s.core.CompareAndSwapStateDocumentWithEvents(ctx, corestore.StateDocumentCAS{
+		ScopeKey: daemonStateScope, Kind: stateKindPlatformSettings,
+		ExpectedRevision: s.revision, JSON: rawState,
+	}, []corestore.EventInput{input})
+	if err != nil {
+		return fmt.Errorf("persist platform settings and audit event in SQLite: %w", err)
+	}
+	s.revision = saved.Revision
+	s.data = next
+	return nil
+}
+
+func deriveTradingControlGeneration(current platformSettingsData, next *platformSettingsData) error {
+	next.TradingControlGeneration = current.TradingControlGeneration
+	if sameTradingControls(current.Trading, next.Trading) {
+		return nil
+	}
+	if next.TradingControlGeneration == math.MaxUint64 {
+		return fmt.Errorf("platform trading-control generation is exhausted")
+	}
+	next.TradingControlGeneration++
+	return nil
+}
+
+func canonicalPlatformSettingValue(data platformSettingsData, key string) (json.RawMessage, error) {
+	var value any
+	switch key {
+	case "features.purge_restore.enabled":
+		value = data.Features.PurgeRestore.Enabled
+	case "features.stock_protection.enabled":
+		value = data.Features.StockProtection.Enabled
+	case "features.rulebook.enabled":
+		value = data.Features.Rulebook.Enabled
+	case "features.rulebook.earnings_overrides":
+		value = data.Features.Rulebook.EarningsOverrides
+	case "trading.freeze":
+		value = data.Trading.Freeze
+	case "trading.limits.max_notional":
+		value = data.Trading.MaxNotional
+	case "trading.limits.max_option_contracts":
+		value = data.Trading.MaxOptionContracts
+	case "trading.limits.allow_stock_short":
+		value = data.Trading.AllowStockShort
+	case "trading.limits.allow_option_sell_to_open":
+		value = data.Trading.AllowOptionSellToOpen
+	case "regime.journal.enabled":
+		value = data.Regime.Journal.Enabled
+	case "canary.journal.enabled":
+		value = data.Canary.Journal.Enabled
+	default:
+		return nil, errBadRequest("unknown settings field " + key)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+func sameTradingControls(a, b platformTradingSettingsData) bool {
+	return sameOptionalFloat64(a.MaxNotional, b.MaxNotional) &&
+		sameOptionalInt(a.MaxOptionContracts, b.MaxOptionContracts) &&
+		sameOptionalBool(a.AllowStockShort, b.AllowStockShort) &&
+		sameOptionalBool(a.AllowOptionSellToOpen, b.AllowOptionSellToOpen) &&
+		sameOptionalBool(a.Freeze, b.Freeze)
+}
+
+func sameOptionalBool(a, b *bool) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
+func sameOptionalInt(a, b *int) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
+func sameOptionalFloat64(a, b *float64) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
 }
 
 func (s *platformSettingsStore) saveLocked(next platformSettingsData) error {
@@ -223,7 +474,7 @@ func (s *Server) handleSettingsGet() (*rpc.PlatformSettings, error) {
 	return &out, nil
 }
 
-func (s *Server) handleSettingsUpdate(_ context.Context, req *rpc.Request) (*rpc.PlatformSettings, error) {
+func (s *Server) handleSettingsUpdate(ctx context.Context, req *rpc.Request) (*rpc.PlatformSettings, error) {
 	if len(bytes.TrimSpace(req.Params)) == 0 {
 		return nil, errBadRequest("settings patch body is required")
 	}
@@ -246,7 +497,7 @@ func (s *Server) handleSettingsUpdate(_ context.Context, req *rpc.Request) (*rpc
 		})
 		return &out, nil
 	}
-	if err := s.applyPlatformSettingsPatch(patch, origin); err != nil {
+	if err := s.applyPlatformSettingsPatch(ctx, patch, origin); err != nil {
 		return nil, err
 	}
 	health := s.handleStatusHealth()
@@ -257,22 +508,26 @@ func (s *Server) handleSettingsUpdate(_ context.Context, req *rpc.Request) (*rpc
 	return &out, nil
 }
 
-func (s *Server) applyPlatformSettingsPatch(patch map[string]json.RawMessage, origin string) error {
+func (s *Server) applyPlatformSettingsPatch(ctx context.Context, patch map[string]json.RawMessage, origin string) error {
 	flat, err := flattenSettingsPatch(patch)
 	if err != nil {
 		return err
 	}
 	specs := settingsSpecsByKey()
 	for key := range flat {
-		// Trading safety settings are part of the broker-write surface: when
-		// the configured route is live, agent-origin sessions may not touch
-		// them. Paper keeps the full path open for testing.
-		if strings.HasPrefix(key, "trading.") && s.cfg.Trading.Mode == config.TradingModeLive && !originIsHuman(origin) {
-			return errBadRequest("live trading settings are blocked for agent-origin requests; a human must change trading limits from an interactive terminal")
+		// Freeze and limit authority is terminal-only in every mode. A paired
+		// device is a human broker-write origin, but it is not authorized to
+		// change the controls that govern later writes.
+		if strings.HasPrefix(key, "trading.") && !settingsTradingOriginAuthorized(origin) {
+			return errBadRequest("trading safety settings are terminal-only; use an interactive human terminal to change freeze or limits")
 		}
 	}
 	limitsWritable, reason := s.tradingLimitWritability()
-	return s.platformSettings.update(func(next *platformSettingsData) error {
+	keys := make([]string, 0, len(flat))
+	for key := range flat {
+		keys = append(keys, key)
+	}
+	return s.platformSettings.updateWithAudit(ctx, s.orderNow(), origin, keys, func(next *platformSettingsData) error {
 		for key, raw := range flat {
 			if specs[key].Class == rpc.SettingsClassTradingLimit && !limitsWritable {
 				return errBadRequest("trading.limits is read-only: " + reason)
@@ -283,6 +538,10 @@ func (s *Server) applyPlatformSettingsPatch(patch map[string]json.RawMessage, or
 		}
 		return nil
 	})
+}
+
+func settingsTradingOriginAuthorized(origin string) bool {
+	return origin == rpc.OrderOriginHumanTTY
 }
 
 func settingsSpecsByKey() map[string]rpc.SettingsKeySpec {
@@ -638,27 +897,33 @@ func (s *Server) tradingLimitWritability() (bool, string) {
 	return true, ""
 }
 
-func (s *Server) effectiveTradingConfig() config.Trading {
+func (s *Server) effectiveTradingControlSnapshot() (config.Trading, uint64) {
 	tr := config.Trading{}.WithDefaults()
-	if s != nil && s.cfg != nil {
+	if s == nil {
+		return tr, 0
+	}
+	if s.cfg != nil {
 		tr = s.cfg.Trading.WithDefaults()
 	}
-	if ok, _ := s.tradingLimitWritability(); !ok {
-		return tr
+	writable, _ := s.tradingLimitWritability()
+	return s.platformSettings.tradingControlSnapshot(tr, writable)
+}
+
+//lint:ignore U1000 Used by the trading-tagged physical write guard.
+func (s *Server) lockEffectiveTradingControlSnapshot() (config.Trading, uint64, bool, func()) {
+	tr := config.Trading{}.WithDefaults()
+	if s == nil {
+		return tr, 0, false, func() {}
 	}
-	data := s.platformSettings.snapshot()
-	if data.Trading.MaxNotional != nil {
-		tr.MaxNotional = *data.Trading.MaxNotional
+	if s.cfg != nil {
+		tr = s.cfg.Trading.WithDefaults()
 	}
-	if data.Trading.MaxOptionContracts != nil {
-		tr.MaxOptionContracts = *data.Trading.MaxOptionContracts
-	}
-	if data.Trading.AllowStockShort != nil {
-		tr.AllowStockShort = *data.Trading.AllowStockShort
-	}
-	if data.Trading.AllowOptionSellToOpen != nil {
-		tr.AllowOptionSellToOpen = *data.Trading.AllowOptionSellToOpen
-	}
+	writable, _ := s.tradingLimitWritability()
+	return s.platformSettings.lockTradingControlSnapshot(tr, writable)
+}
+
+func (s *Server) effectiveTradingConfig() config.Trading {
+	tr, _ := s.effectiveTradingControlSnapshot()
 	return tr
 }
 

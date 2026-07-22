@@ -35,8 +35,9 @@ type EarningsInfo struct {
 	TimeOfDay string `json:"time_of_day,omitempty"`
 	// Estimated marks provider-flagged estimated (unconfirmed) dates.
 	Estimated bool `json:"estimated,omitempty"`
-	// Source is fetched | override | unknown. Provider-level provenance lives
-	// in Providers so existing clients do not have to infer agreement.
+	// Source is fetched | override | verified_terminal | unknown.
+	// Provider-level provenance lives in Providers; Terminal carries the
+	// exact-contract evidence when no future issuer earnings event applies.
 	Source string `json:"source"`
 	// Status is date or a typed unresolved outcome. Conflicting provider
 	// dates never populate Date.
@@ -49,17 +50,50 @@ type EarningsInfo struct {
 	ObservedAt time.Time              `json:"observed_at,omitzero"`
 	Stale      bool                   `json:"stale,omitempty"`
 	Providers  []EarningsProviderInfo `json:"providers,omitempty"`
+	Terminal   *EarningsTerminalInfo  `json:"terminal,omitempty"`
 }
 
 // Earnings statuses are the closed aggregate/provider outcome vocabulary.
 const (
-	EarningsStatusDate                = "date"
-	EarningsStatusNoDatePublished     = "no_date_published"
-	EarningsStatusUnsupportedSecurity = "unsupported_security"
-	EarningsStatusFormatChange        = "format_change"
-	EarningsStatusTransportFailure    = "transport_failure"
-	EarningsStatusConflictingSources  = "conflicting_sources"
+	EarningsStatusDate                    = "date"
+	EarningsStatusNoDatePublished         = "no_date_published"
+	EarningsStatusUnsupportedSecurity     = "unsupported_security"
+	EarningsStatusFormatChange            = "format_change"
+	EarningsStatusTransportFailure        = "transport_failure"
+	EarningsStatusConflictingSources      = "conflicting_sources"
+	EarningsStatusTerminalNonReporting    = "terminal_non_reporting"
+	EarningsStatusTerminalEvidenceExpired = "terminal_evidence_expired"
 )
+
+// EarningsTerminalInfo is compiled, reviewed evidence that one exact broker
+// contract no longer has a future issuer earnings cycle. It is deliberately
+// contract-bound rather than symbol-wide: ticker reuse or a different listing
+// must fall back to ordinary provider resolution. RevalidateAfter is a hard
+// fail-closed boundary; expired evidence becomes unknown until the catalog is
+// reviewed and updated. AuthorityReviewedAt is the monotonic catalog watermark
+// that also survives explicit record revocation.
+type EarningsTerminalInfo struct {
+	ContractConID        int                         `json:"contract_con_id"`
+	Issuer               string                      `json:"issuer"`
+	CIK                  string                      `json:"cik,omitempty"`
+	Classification       string                      `json:"classification"`
+	EffectiveDate        string                      `json:"effective_date"`
+	VerifiedAt           time.Time                   `json:"verified_at"`
+	RevalidateAfter      time.Time                   `json:"revalidate_after"`
+	AuthorityRevision    int64                       `json:"authority_revision"`
+	AuthorityReviewedAt  time.Time                   `json:"authority_reviewed_at"`
+	AuthorityFingerprint string                      `json:"authority_fingerprint"`
+	Evidence             []EarningsEvidenceReference `json:"evidence"`
+}
+
+// EarningsEvidenceReference is one allowlisted primary-source document used
+// by the terminal classification. These strings are compiled authority, not
+// instructions parsed from live provider content.
+type EarningsEvidenceReference struct {
+	Authority string `json:"authority"`
+	Document  string `json:"document"`
+	URL       string `json:"url"`
+}
 
 // EarningsProviderInfo is one provider's latest typed outcome. A transport
 // failure may coexist with a retained LastGoodDate, but Date is populated only
@@ -94,7 +128,8 @@ type RulesResult struct {
 	BreachCounts map[string]int `json:"breach_counts,omitempty"`
 	// InputHealth is the result-level gate: when positions or account are
 	// pending/stale/absent every portfolio-dependent row is unknown, never
-	// pass. One entry per source: positions, account, tape, earnings.
+	// pass. Canonical snapshots carry exactly one entry for account,
+	// positions, earnings, regime_stage, and tape.
 	InputHealth []SourceHealth `json:"input_health,omitempty"`
 	Earnings    []EarningsInfo `json:"earnings,omitempty"`
 	// Policy provenance, mirroring proposals/canary.

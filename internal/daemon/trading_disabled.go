@@ -28,23 +28,34 @@ func (s *Server) handleTradingPaperSmoke(_ context.Context, _ *rpc.Request) (any
 	return nil, ErrTradingDisabled
 }
 
-func (s *Server) reserveBrokerOrderID(ctx context.Context) (int, error) {
+func (s *Server) reserveBoundBrokerOrderID(ctx context.Context, binding brokerWriteTransactionBinding) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := s.requireBrokerWriteTransactionCurrent(binding); err != nil {
+		return 0, err
+	}
 	if s.orderReserveBrokerID != nil {
 		return s.orderReserveBrokerID(ctx)
 	}
 	return 0, ErrTradingDisabled
 }
 
-func (s *Server) submitConfiguredOrder(ctx context.Context, status rpc.TradingStatus, contract *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
+func (s *Server) submitBoundConfiguredOrder(ctx context.Context, binding brokerWriteTransactionBinding, status rpc.TradingStatus, contract *ibkrlib.Contract, order *ibkrlib.RawOrder) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	auth := s.brokerWriteAuthorization(status)
-	if !auth.Allowed {
-		return fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
+	if s.orderWriteBeforeBrokerSend != nil {
+		s.orderWriteBeforeBrokerSend()
 	}
-	if s.orderPlaceBroker != nil {
-		return s.orderPlaceBroker(ctx, contract, order)
-	}
-	return ErrTradingDisabled
+	return s.withBoundBrokerWriteTransaction(binding, func() error {
+		auth := s.brokerWriteAuthorization(status)
+		if !auth.Allowed {
+			return fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
+		}
+		if s.orderPlaceBroker != nil {
+			return s.orderPlaceBroker(ctx, contract, order)
+		}
+		return ErrTradingDisabled
+	})
 }

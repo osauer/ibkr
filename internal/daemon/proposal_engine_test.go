@@ -978,7 +978,7 @@ func hasDetailContaining(details []string, substr string) bool {
 }
 
 func TestTrailingStopFastPathPreviewUsesCurrentSnapshot(t *testing.T) {
-	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000, AllowStockShort: true})
 	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
 	srv.orderPreviewPositionImpact = fixedPreviewPosition(1, 0, rpc.OrderPositionEffectClose)
 	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
@@ -1057,7 +1057,7 @@ func TestTrailingStopFastPathPreviewUsesCurrentSnapshot(t *testing.T) {
 // with zero blockers; each unit gate passing individually does not prove a
 // missed DAY assumption isn't hiding between them.
 func TestTrailingStopFastPathPreviewGTCEndToEnd(t *testing.T) {
-	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000, AllowStockShort: true})
 	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
 	srv.orderPreviewPositionImpact = fixedPreviewPosition(1, 0, rpc.OrderPositionEffectClose)
 	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
@@ -1128,7 +1128,7 @@ func TestTrailingStopFastPathPreviewGTCEndToEnd(t *testing.T) {
 }
 
 func TestTrailingStopPreviewBlocksWhenWhatIfNotSubmitEligible(t *testing.T) {
-	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000, AllowStockShort: true})
 	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
 	srv.orderPreviewPositionImpact = fixedPreviewPosition(1, 0, rpc.OrderPositionEffectClose)
 	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
@@ -1192,12 +1192,11 @@ func TestTrailingStopPreviewBlocksWhenWhatIfNotSubmitEligible(t *testing.T) {
 	}
 }
 
-// TestProposalPreviewExemptsRiskReducingFromCaps drives all three protection
-// buckets through the full fast-path preview chain with order sizes far above
-// [trading].max_notional (10k) and max_option_contracts (5): reduce-only
-// protective orders must reach SubmitEligible instead of dying at the size
-// caps on orders the daemon itself proposed (preview_failed).
-func TestProposalPreviewExemptsRiskReducingFromCaps(t *testing.T) {
+// TestProposalPreviewCapsEveryProtectiveOrder pins the deliberate fail-closed
+// posture for apparent exits. This client cannot prove that a manual TWS order
+// has not already consumed exit capacity, so all three protection buckets stay
+// subject to max_notional/max_option_contracts at preview.
+func TestProposalPreviewCapsEveryProtectiveOrder(t *testing.T) {
 	now := time.Date(2026, 6, 11, 13, 0, 0, 0, time.UTC)
 	policyFingerprint := rpc.Fingerprint{Version: rpc.ProtectionPolicyFingerprintVersion, Key: "sha256:policy"}
 	trailAmount := 8.0
@@ -1207,6 +1206,7 @@ func TestProposalPreviewExemptsRiskReducingFromCaps(t *testing.T) {
 		position func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error)
 		prop     rpc.TradeProposal
 		quantity int
+		wantCap  string
 	}{
 		{
 			name: "trailing stop full position",
@@ -1223,6 +1223,7 @@ func TestProposalPreviewExemptsRiskReducingFromCaps(t *testing.T) {
 				Contract:       rpc.ContractParams{Symbol: "AMD", SecType: "STK", Exchange: "SMART", Currency: "USD", Multiplier: 1},
 			},
 			quantity: 150,
+			wantCap:  "exceeds [trading].max_notional",
 		},
 		{
 			name: "risk reduction half position",
@@ -1238,6 +1239,7 @@ func TestProposalPreviewExemptsRiskReducingFromCaps(t *testing.T) {
 				Contract:       rpc.ContractParams{Symbol: "AMD", SecType: "STK", Exchange: "SMART", Currency: "USD", Multiplier: 1},
 			},
 			quantity: 75,
+			wantCap:  "exceeds [trading].max_notional",
 		},
 		{
 			name: "theta hygiene 30 contracts",
@@ -1253,6 +1255,7 @@ func TestProposalPreviewExemptsRiskReducingFromCaps(t *testing.T) {
 				Contract:       rpc.ContractParams{Symbol: "SPY", SecType: "OPT", Expiry: "20260619", Right: "C", Strike: 520, Multiplier: 100},
 			},
 			quantity: 30,
+			wantCap:  "exceeds [trading].max_option_contracts",
 		},
 	}
 	for _, tc := range cases {
@@ -1275,20 +1278,8 @@ func TestProposalPreviewExemptsRiskReducingFromCaps(t *testing.T) {
 				// the slow path's Refresh needs a live gateway, so exercise
 				// the identical post-resolution chain Preview runs.
 				preview, err := srv.previewOrder(context.Background(), proposalOrderPreviewParams(prop, selectedProposalQty(prop, tc.quantity), 20))
-				if err != nil {
-					t.Fatalf("previewOrder err = %v, want reduce-only order exempt from size caps", err)
-				}
-				if !preview.SubmitEligible {
-					t.Fatalf("preview = %+v, want submit eligible", preview)
-				}
-				if blockers := proposalPreviewSafetyBlockers(prop, preview); len(blockers) != 0 {
-					t.Fatalf("safety blockers = %+v, want none", blockers)
-				}
-				if preview.Notional <= 10_000 {
-					t.Fatalf("preview notional = %.2f, want above the 10k cap to prove the exemption", preview.Notional)
-				}
-				if preview.MaxNotional != 0 {
-					t.Fatalf("exempt preview MaxNotional = %.2f, want 0 (cap did not bind)", preview.MaxNotional)
+				if err == nil || !strings.Contains(err.Error(), tc.wantCap) {
+					t.Fatalf("previewOrder = %+v err=%v, want cap refusal containing %q", preview, err, tc.wantCap)
 				}
 				return
 			}
@@ -1324,14 +1315,11 @@ func TestProposalPreviewExemptsRiskReducingFromCaps(t *testing.T) {
 			if err != nil {
 				t.Fatalf("fast preview err = %v", err)
 			}
-			if !res.Accepted || !res.SubmitEligible || res.Preview == nil || len(res.Blockers) != 0 {
-				t.Fatalf("fast preview = %+v, want accepted submit-eligible with no blockers", res)
+			if res.Accepted || res.SubmitEligible || res.Preview != nil || !hasBlocker(res.Blockers, "preview_failed") {
+				t.Fatalf("fast preview = %+v, want typed preview_failed cap refusal", res)
 			}
-			if res.Preview.Notional <= 10_000 {
-				t.Fatalf("preview notional = %.2f, want above the 10k cap to prove the exemption", res.Preview.Notional)
-			}
-			if res.Preview.MaxNotional != 0 {
-				t.Fatalf("exempt preview MaxNotional = %.2f, want 0 (cap did not bind)", res.Preview.MaxNotional)
+			if len(res.Blockers) == 0 || !strings.Contains(res.Blockers[0].Message, tc.wantCap) {
+				t.Fatalf("fast preview blockers = %+v, want cap refusal containing %q", res.Blockers, tc.wantCap)
 			}
 		})
 	}
@@ -1539,7 +1527,7 @@ func TestTrailingStopSubmitUsesFreshCachedSnapshotWhenRevisionMatches(t *testing
 	if !orderWritesAvailable {
 		t.Skip("proposal submit place path requires trading build")
 	}
-	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000, AllowStockShort: true})
 	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
 	srv.orderPreviewPositionImpact = fixedPreviewPosition(1, 0, rpc.OrderPositionEffectClose)
 	srv.orderPreviewWhatIf = func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error) {
@@ -1662,7 +1650,7 @@ func TestTrailingStopSubmitLiveAgentUsesGatedPreview(t *testing.T) {
 	if !orderWritesAvailable {
 		t.Skip("live-agent submit preview path requires trading build")
 	}
-	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModeLive, MaxNotional: 10_000})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModeLive, MaxNotional: 10_000, AllowStockShort: true})
 	livePort := 4001
 	srv.cfg.Gateway.Port = &livePort
 	srv.cfg.Gateway.Account = "U1234567"
@@ -2580,18 +2568,16 @@ func TestProposalSubsystemHealthReportsRefreshStreak(t *testing.T) {
 	}
 }
 
-// TestGenerateDoesNotCapProtectiveProposals proves generation no longer
-// renders an over-cap protective proposal blocked: the preview gate exempts
-// reduce-only orders from [trading].max_notional, so an 8000-notional
-// proposal must stay ready even under a 5000 runtime cap (trading-capable
-// builds; on stable builds the runtime limits write is refused and the cap
-// stays at the 10000 TOML default — ready either way).
-func TestGenerateDoesNotCapProtectiveProposals(t *testing.T) {
+// TestGeneratePreservesOverCapProtectiveCandidateForPreviewGate keeps proposal
+// generation advisory: it reports the full candidate quantity and notional,
+// while the session-bound preview above remains the authority that applies the
+// every-order cap. Generated never means submit eligible.
+func TestGeneratePreservesOverCapProtectiveCandidateForPreviewGate(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 11, 14, 0, 0, 0, time.UTC)
 	srv := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	srv.now = func() time.Time { return now }
-	_, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"limits":{"max_notional":5000}}}`)})
+	_, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"origin":"human-tty","trading":{"limits":{"max_notional":5000}}}`)})
 	if orderWritesAvailable && err != nil {
 		t.Fatalf("set runtime max_notional override: %v", err)
 	}
@@ -2624,7 +2610,7 @@ func TestGenerateDoesNotCapProtectiveProposals(t *testing.T) {
 		t.Fatalf("proposal notional = %.2f, want mark-based 8000", p.Notional)
 	}
 	if p.State != rpc.TradeProposalStateGenerated || len(p.Blockers) != 0 {
-		t.Fatalf("proposal = %+v, want ready: size caps bind risk-increasing orders only, never a protective close/reduce", p)
+		t.Fatalf("proposal = %+v, want an unmodified advisory candidate for the preview gate", p)
 	}
 }
 

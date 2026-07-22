@@ -239,11 +239,20 @@ type Connection struct {
 	scanner *bufio.Scanner
 
 	// Protocol state
-	serverVersion  int
-	connTime       string
-	reqIDSeq       int
-	reqIDMu        sync.Mutex
-	nextOrderID    int
+	serverVersion      int
+	connTime           string
+	reqIDSeq           int
+	reqIDMu            sync.Mutex
+	nextOrderID        int
+	haveNextValidID    bool
+	brokerIDExhausted  bool
+	reservedOrderIDs   map[int]struct{}
+	reservedRequestIDs map[int]struct{}
+	brokerSessionEpoch atomic.Uint64
+	// inboundEpochMu makes the second current-epoch check and all msgErrMsg
+	// side effects atomic with socket-generation rollover. It is deliberately
+	// separate from outbound invalidation so late receipts remain attributable.
+	inboundEpochMu sync.RWMutex
 	account        string
 	handshakeMu    sync.RWMutex
 	handshakeReady chan struct{}
@@ -253,6 +262,15 @@ type Connection struct {
 	transportMu     sync.Mutex
 	transportCond   *sync.Cond
 	transportPaused bool
+	// outboundSessionState is independent of brokerSessionEpoch: disconnect
+	// atomically publishes a new revoked outbound generation immediately, while
+	// the inbound epoch is intentionally retained so late decoded receipts stay
+	// attributable. Low bit 1 means revoked; upper bits are the generation.
+	// Zero is the initial active state used by standalone Connection fixtures.
+	outboundSessionState atomic.Uint64
+	// evidenceBarrier is installed by Connector and shared with structural
+	// portfolio/session writers. Nil is valid for standalone Connection tests.
+	evidenceBarrier *sync.RWMutex
 
 	packetLogger       PacketLogger
 	packetLoggerMu     sync.RWMutex
@@ -274,6 +292,10 @@ type Connection struct {
 	// Ensure write path runs serially
 	writeMu         sync.Mutex
 	writeInProgress atomic.Bool
+	// Connector-owned publication boundary. Account identity changes take its
+	// exclusive side so a bound daemon write cannot pass a scope check under
+	// one account and reach the wire after managed-account drift.
+	publicationBarrier *sync.RWMutex
 
 	// Guard against repeated suspicious logs per symbol/payload.
 	suspectMu        sync.Mutex
@@ -291,13 +313,13 @@ type Connection struct {
 	onDisconnect func(error)
 
 	// Message handling
-	msgHandlers        map[int][]handlerEntry
-	handlersMu         sync.RWMutex
-	handlerSeq         uint64
-	pendingHandlersMu  sync.Mutex
-	pendingHandlerMsgs map[int][][]string
-	whatIfOrdersMu     sync.Mutex
-	whatIfOrderIDs     map[int]struct{}
+	msgHandlers         map[int][]handlerEntry
+	handlersMu          sync.RWMutex
+	handlerSeq          uint64
+	whatIfOrdersMu      sync.Mutex
+	whatIfOrderIDs      map[int]struct{}
+	openOrderObserverMu sync.RWMutex
+	openOrderObserver   func(msgID int, fields []string, epoch uint64)
 
 	// Market data type per reqID (1=RealTime,2=Frozen,3=Delayed,4=DelayedFrozen)
 	mktDataType   map[int]int
@@ -307,29 +329,34 @@ type Connection struct {
 	optionContractCache map[string]ContractDetailsLite
 
 	systemNoticeMu      sync.RWMutex
-	systemNoticeHandler func(note *systemNotification, alias reqAliasEntry)
-	// pendingSystemNotices holds notices that arrived before the connector
-	// wired its handler. The gateway sends the farm-status burst
-	// (2104/2106/2158) immediately after startAPI, and the read loop starts
-	// consuming it before Connect() fires onConnect -> registerHandlers ->
-	// SetSystemNoticeHandler. Without this buffer those notices are logged
-	// but dropped, and because the gateway only re-sends farm status on
-	// change, DataFarmStatuses() stays empty for the whole session — the
-	// false-degraded quote/scanner/history/chain status. Drained and
-	// replayed when a non-nil handler is set. Bounded like the
-	// order-message pending buffer so a permanently-nil handler cannot leak.
-	pendingSystemNotices []pendingSystemNotice
+	systemNoticeHandler func(note *systemNotification, alias reqAliasEntry, epoch uint64) func()
+	errorPostActionMu   sync.RWMutex
+	errorPostAction     func(fields []string, epoch uint64) func()
 
 	// Competing live session detection (error 10197)
 	competingMu          sync.RWMutex
 	competingLiveSession bool
 
 	// Portfolio data storage
-	positions         map[string]*RawPosition
-	positionsMu       sync.RWMutex
-	portfolioHealthMu sync.RWMutex
-	portfolioHealth   PortfolioStreamHealth
-	accountSummary    map[string]string
+	positions   map[string]*RawPosition
+	positionsMu sync.RWMutex
+	// portfolioStaging is the current reqAccountUpdates initial generation.
+	// Published positions remain visible only with incomplete health until the
+	// matching accountDownloadEnd atomically replaces them.
+	portfolioStaging       map[string]*RawPosition
+	portfolioStagingActive bool
+	// positionsSnapshot is isolated reqPositions state. It must never mutate
+	// the streaming projection or its health while a one-shot fill is partial.
+	positionsSnapshot       map[string]*RawPosition
+	positionsSnapshotResult map[string]*RawPosition
+	positionsSnapshotActive bool
+	// portfolioProjectionMu makes the cached rows and their stream receipt
+	// one read model. Writers hold it across both projections; the atomic
+	// getter holds its read side while copying each protected component.
+	portfolioProjectionMu sync.RWMutex
+	portfolioHealthMu     sync.RWMutex
+	portfolioHealth       PortfolioStreamHealth
+	accountSummary        map[string]string
 	// summarySnapshots accumulates account-summary rows per reqID so a
 	// synchronous reqAccountSummary read cannot be clobbered by the
 	// streaming reqAccountUpdates subscription, which writes the shared
@@ -351,28 +378,51 @@ type Connection struct {
 	// this bookkeeping a single subscription would over-release the slot
 	// semaphore on cleanup. Keyed by reqID; presence == slot held.
 	marketDataSlotsMu sync.Mutex
-	marketDataSlots   map[int]struct{}
+	marketDataSlots   map[int]uint64
 
 	// Start API failure tracking for adaptive backoff
 	startAPIMu          sync.Mutex
 	startAPIFailures    int
 	lastStartAPIFailure time.Time
+
+	// errorMessageAfterInitialEpochCheck is a deterministic race seam used to
+	// advance the socket epoch after processMessageAtEpoch's fast-path check.
+	errorMessageAfterInitialEpochCheck func()
+	// systemNoticeAfterInitialEpochCheck is the msg-204 equivalent. Production
+	// leaves it nil; tests pause between the optimistic and leased epoch checks.
+	systemNoticeAfterInitialEpochCheck func()
+	// messageAfterInitialEpochCheck covers ordinary authority frames.
+	messageAfterInitialEpochCheck func(msgID int)
 }
 
 type handlerEntry struct {
-	id uint64
-	fn func([]string)
+	id        uint64
+	fn        func([]string)
+	fnAtEpoch func([]string, uint64)
 }
 
 // PortfolioStreamHealth is receipt metadata for the streaming
 // reqAccountUpdates portfolio cache. It contains no positions or balances;
-// callers use it only to decide whether an empty cache is a trustworthy
-// negative rather than an unprimed or silent stream.
+// callers use it only to decide whether a cached projection is current enough
+// to support a trustworthy negative rather than an unprimed or silent stream.
 type PortfolioStreamHealth struct {
 	Account            string
 	RequestedAt        time.Time
 	InitialCompletedAt time.Time
 	LastUpdateAt       time.Time
+	// ProjectionGeneration advances only when the structural portfolio
+	// authority changes: scope/completeness/invalidity, contract set, or held
+	// quantity. Mark-to-market and PnL-only ticks deliberately do not advance it.
+	ProjectionGeneration uint64
+	// ScopeConflictAt is set when the stream emits a portfolio or completion
+	// frame for a blank or foreign account. Rows are retained as context, but
+	// no receipt is trustworthy until reqAccountUpdates is resubscribed.
+	ScopeConflictAt time.Time
+	// InvalidPayloadAt is set when a portfolio generation contains a malformed
+	// required identity, quantity, or valuation field. The entire staged
+	// generation is discarded; later completion/heartbeat frames cannot bless
+	// a partial projection.
+	InvalidPayloadAt time.Time
 }
 
 type reqAliasEntry struct {
@@ -413,64 +463,75 @@ func (c *Connection) lookupReqAlias(reqID int) (reqAliasEntry, bool) {
 	return alias, ok
 }
 
-// pendingSystemNotice is a system notice captured while no handler was wired,
-// held for replay once SetSystemNoticeHandler installs one. note is a freshly
-// parsed pointer per message (parseSystemNotificationPayload never reuses one),
-// so buffering it by pointer is safe.
-type pendingSystemNotice struct {
-	note  *systemNotification
-	alias reqAliasEntry
+// SetSystemNoticeHandler is the compatibility form of
+// [Connection.SetSystemNoticeHandlerAtEpoch].
+func (c *Connection) SetSystemNoticeHandler(handler func(note *systemNotification, alias reqAliasEntry)) {
+	if handler == nil {
+		c.SetSystemNoticeHandlerAtEpoch(nil)
+		return
+	}
+	c.SetSystemNoticeHandlerAtEpoch(func(note *systemNotification, alias reqAliasEntry, _ uint64) {
+		handler(note, alias)
+	})
 }
 
-// pendingSystemNoticeLimit bounds the startup-race buffer, mirroring
-// pendingHandlerMessageLimit for order messages. The real burst is ~6 farm
-// notices; the cap only matters if a handler is never wired at all.
-const pendingSystemNoticeLimit = 256
+// SetSystemNoticeHandlerAtEpoch replaces the callback for parsed gateway
+// system notices. Passing nil disables delivery. Connector installs this
+// before Connection.Connect starts the reader, so wire notices never cross a
+// handler-registration gap.
+func (c *Connection) SetSystemNoticeHandlerAtEpoch(handler func(note *systemNotification, alias reqAliasEntry, epoch uint64)) {
+	if handler == nil {
+		c.SetSystemNoticeHandlerAtEpochWithPostAction(nil)
+		return
+	}
+	c.SetSystemNoticeHandlerAtEpochWithPostAction(func(note *systemNotification, alias reqAliasEntry, epoch uint64) func() {
+		handler(note, alias, epoch)
+		return nil
+	})
+}
 
-// SetSystemNoticeHandler replaces the callback for parsed gateway system
-// notices. Passing nil disables delivery. When a non-nil handler is installed,
-// buffered startup notices are replayed synchronously before this method
-// returns. The callback parameter types are internal to package ibkr, so only
-// code in this package can install a non-nil callback.
-func (c *Connection) SetSystemNoticeHandler(handler func(note *systemNotification, alias reqAliasEntry)) {
+// SetSystemNoticeHandlerAtEpochWithPostAction is the Connector-facing form.
+// The returned one-shot action runs only after Connection releases its inbound
+// generation lease. This lets a current notice mark state atomically while
+// deferring any outbound recovery frame until reconnect can no longer deadlock
+// behind the reader.
+func (c *Connection) SetSystemNoticeHandlerAtEpochWithPostAction(handler func(note *systemNotification, alias reqAliasEntry, epoch uint64) func()) {
 	c.systemNoticeMu.Lock()
 	c.systemNoticeHandler = handler
-	var replay []pendingSystemNotice
-	if handler != nil && len(c.pendingSystemNotices) > 0 {
-		replay = c.pendingSystemNotices
-		c.pendingSystemNotices = nil
-	}
 	c.systemNoticeMu.Unlock()
-	// Replay outside the lock: the handler runs connector recovery
-	// (processSystemNotice) that must not re-enter systemNoticeMu.
-	for _, p := range replay {
-		handler(p.note, p.alias)
-	}
 }
 
-func (c *Connection) dispatchSystemNotice(note *systemNotification, alias reqAliasEntry) {
+func (c *Connection) dispatchSystemNotice(note *systemNotification, alias reqAliasEntry, epochs ...uint64) func() {
+	epoch := c.BrokerSessionEpoch()
+	if len(epochs) > 0 {
+		epoch = epochs[0]
+	}
 	c.systemNoticeMu.RLock()
 	handler := c.systemNoticeHandler
 	c.systemNoticeMu.RUnlock()
 	if handler != nil {
-		handler(note, alias)
-		return
+		return handler(note, alias, epoch)
 	}
-	// No handler yet — buffer for replay. Re-check under the write lock in
-	// case SetSystemNoticeHandler won the race between the RUnlock above and
-	// here; if so, dispatch directly rather than stranding the notice in a
-	// buffer that has already been drained.
-	c.systemNoticeMu.Lock()
-	if c.systemNoticeHandler != nil {
-		handler = c.systemNoticeHandler
-		c.systemNoticeMu.Unlock()
-		handler(note, alias)
-		return
+	return nil
+}
+
+// setErrorPostActionHandler installs the Connector-owned msgErr handler whose
+// returned action may perform outbound recovery only after the inbound socket-
+// generation lease has been released. Connector installs it before Connect.
+func (c *Connection) setErrorPostActionHandler(handler func(fields []string, epoch uint64) func()) {
+	c.errorPostActionMu.Lock()
+	c.errorPostAction = handler
+	c.errorPostActionMu.Unlock()
+}
+
+func (c *Connection) dispatchErrorPostAction(fields []string, epoch uint64) func() {
+	c.errorPostActionMu.RLock()
+	handler := c.errorPostAction
+	c.errorPostActionMu.RUnlock()
+	if handler == nil {
+		return nil
 	}
-	if len(c.pendingSystemNotices) < pendingSystemNoticeLimit {
-		c.pendingSystemNotices = append(c.pendingSystemNotices, pendingSystemNotice{note: note, alias: alias})
-	}
-	c.systemNoticeMu.Unlock()
+	return handler(fields, epoch)
 }
 
 func (c *Connection) resetReadStartCh() {
@@ -558,6 +619,8 @@ func NewConnection(config *ConnectionConfig) *Connection {
 		accountSummary:      make(map[string]string),
 		summarySnapshots:    make(map[int]*summarySnapshot),
 		reqIDSeq:            1,
+		reservedOrderIDs:    make(map[int]struct{}),
+		reservedRequestIDs:  make(map[int]struct{}),
 		openOrders:          make(map[int]*IBKROrder),
 		orderStatus:         make(map[int]string),
 		reqAlias:            make(map[int]reqAliasEntry),
@@ -570,7 +633,7 @@ func NewConnection(config *ConnectionConfig) *Connection {
 		ctx:                 ctx,
 		cancel:              cancel,
 		rateLimiter:         NewRateLimiter(ctx),
-		marketDataSlots:     make(map[int]struct{}),
+		marketDataSlots:     make(map[int]uint64),
 		positionsEndChan:    make(chan struct{}, 1),
 		acctSummaryEndChan:  make(chan struct{}, 1),
 		serverVersion:       0,
@@ -795,10 +858,11 @@ func (c *Connection) connectWithClientID(ctx context.Context) error {
 			connectLogger.Warnf("Client %d: retrying with tls=%v after error: %v", c.config.ClientID, useTLS, lastErr)
 		}
 
-		c.pauseTransport()
+		outboundEpoch := c.beginOutboundSession()
 		c.resetHandshakeReady()
+		c.resetOrderIDReadiness()
 
-		if err := c.connectAttempt(ctx, useTLS); err != nil {
+		if err := c.connectAttempt(ctx, useTLS, outboundEpoch); err != nil {
 			lastErr = err
 			c.closeConnection()
 			c.resumeTransport()
@@ -824,7 +888,7 @@ func (c *Connection) connectWithClientID(ctx context.Context) error {
 	return fmt.Errorf("failed to connect to IBKR (client %d)", c.config.ClientID)
 }
 
-func (c *Connection) connectAttempt(ctx context.Context, useTLS bool) error {
+func (c *Connection) connectAttempt(ctx context.Context, useTLS bool, outboundEpoch uint64) error {
 	addr := fmt.Sprintf("%s:%d", c.config.Host, c.config.Port)
 	connectLogger.Debugf("Client %d: Connecting to %s (tls=%v)...", c.config.ClientID, addr, useTLS)
 
@@ -893,8 +957,6 @@ func (c *Connection) connectAttempt(ctx context.Context, useTLS bool) error {
 	}
 	connectLogger.Infof("Client %d: API started successfully", c.config.ClientID)
 	c.resetStartAPIFailure()
-	c.resumeTransport()
-
 	c.lastHeartbeatNano.Store(time.Now().UnixNano())
 	c.statusMu.Lock()
 	c.status = StatusConnected
@@ -902,6 +964,10 @@ func (c *Connection) connectAttempt(ctx context.Context, useTLS bool) error {
 	c.errorCount = 0
 	c.lastError = nil
 	c.statusMu.Unlock()
+	if !c.activateOutboundSession(outboundEpoch) {
+		c.setStatus(StatusDisconnected)
+		return fmt.Errorf("connection invalidated before outbound session publication")
+	}
 
 	c.useTLS = useTLS
 
@@ -924,6 +990,11 @@ func (c *Connection) connectAttempt(ctx context.Context, useTLS bool) error {
 // Disconnect closes the protocol session and stops its background work. It is
 // safe to call more than once.
 func (c *Connection) Disconnect() error {
+	// Invalidate and release queued protected sends before publishing the
+	// lifecycle status change. The invalidation is serialized with the writer,
+	// so an already-writing frame linearizes before Disconnect while every
+	// queued frame is a definite zero-byte refusal.
+	c.invalidateOutboundSession(false)
 	c.statusMu.Lock()
 	wasConnected := c.status == StatusConnected
 	c.status = StatusDisconnected
@@ -933,10 +1004,6 @@ func (c *Connection) Disconnect() error {
 	c.stopOnce.Do(func() {
 		close(c.stopChan)
 	})
-
-	// A disconnect may race a reconnect pause. Wake any admitted writer so the
-	// rate limiter can drain instead of waiting forever on a final shutdown.
-	c.resumeTransport()
 
 	// Stop the rate limiter - this drains the queue and waits for in-flight requests
 	if c.rateLimiter != nil {
@@ -1112,6 +1179,9 @@ func (c *Connection) heartbeatMonitor() {
 
 // handleDisconnection triggers reconnection if auto-reconnect is enabled
 func (c *Connection) handleDisconnection(err error) {
+	// Preserve brokerSessionEpoch for late inbound receipt attribution, but
+	// revoke all outbound authority before any reconnect can reuse the object.
+	c.invalidateOutboundSession(true)
 	c.statusMu.Lock()
 	if c.status != StatusConnected {
 		c.statusMu.Unlock()
@@ -1724,6 +1794,9 @@ func (c *Connection) startAPI() error {
 	if clientIDError != nil {
 		return clientIDError
 	}
+	if !c.BrokerIDNamespaceReady() {
+		return fmt.Errorf("%w: nextValidId not received during startup", errStartAPIFailed)
+	}
 
 	return nil
 }
@@ -1746,6 +1819,7 @@ func (c *Connection) readMessages() {
 		}
 	}()
 	c.signalReadStarted()
+	epoch := c.BrokerSessionEpoch()
 
 	for {
 		select {
@@ -1784,17 +1858,21 @@ func (c *Connection) readMessages() {
 			}
 
 			// Process the message
-			c.processMessage(msgBytes)
+			c.processMessageAtEpoch(msgBytes, epoch)
 
-			// Update heartbeat (atomic so the read path doesn't serialise
-			// behind statusMu.Lock on every inbound tick).
-			c.lastHeartbeatNano.Store(time.Now().UnixNano())
+			// Receipt freshness belongs to the exact socket that delivered the
+			// frame. A retired reader must not make its successor look healthy.
+			c.recordHeartbeatAtEpoch(epoch, time.Now().UnixNano())
 		}
 	}
 }
 
 // processMessage handles incoming messages from IBKR
 func (c *Connection) processMessage(msgBytes []byte) {
+	c.processMessageAtEpoch(msgBytes, c.BrokerSessionEpoch())
+}
+
+func (c *Connection) processMessageAtEpoch(msgBytes []byte, epoch uint64) {
 	fields := c.decodeMessage(msgBytes)
 	if len(fields) == 0 {
 		return
@@ -1810,19 +1888,73 @@ func (c *Connection) processMessage(msgBytes []byte) {
 	if c.wireTap != nil {
 		c.wireTap.RecordInbound(msgID, msgBytes, fields)
 	}
+	if epoch != c.BrokerSessionEpoch() {
+		// Only epoch-aware order handlers may observe a stale frame, solely so
+		// their owner can fail closed. Never run legacy handlers or mutate the
+		// current session's request, farm, portfolio, or local-order state.
+		c.dispatchStaleInboundMessage(msgID, fields, epoch)
+		return
+	}
+
+	// The first atomic check above is an inexpensive fast path. Every ordinary
+	// inbound frame then takes a final generation lease across all mutations
+	// and legacy callbacks, so a retired reader cannot contaminate the next
+	// socket's portfolio/account/request authority after reconnect begins.
+	// msgErrMsg and msgSystemNotification own equivalent scoped leases because
+	// they must run outbound recovery only after release. Broker-scope frames
+	// take publication W before this generation lease so daemon unpublication
+	// cannot deadlock behind a reader that is itself waiting for publication.
+	// The two small typed receipt handlers below take their own leases around
+	// their sole mutation.
+	switch msgID {
+	case msgErrMsg, msgSystemNotification, msgCurrentTimeMillis, msgMarketDataType:
+	case msgManagedAccts, msgAccountSummary:
+		if c.publicationBarrier != nil {
+			c.publicationBarrier.Lock()
+			defer c.publicationBarrier.Unlock()
+		}
+		c.inboundEpochMu.RLock()
+		defer c.inboundEpochMu.RUnlock()
+		if epoch != c.BrokerSessionEpoch() {
+			return
+		}
+		if c.evidenceBarrier != nil {
+			c.evidenceBarrier.RLock()
+			defer c.evidenceBarrier.RUnlock()
+		}
+	default:
+		if c.messageAfterInitialEpochCheck != nil {
+			c.messageAfterInitialEpochCheck(msgID)
+		}
+		c.inboundEpochMu.RLock()
+		defer c.inboundEpochMu.RUnlock()
+		if epoch != c.BrokerSessionEpoch() {
+			c.dispatchStaleInboundMessage(msgID, fields, epoch)
+			return
+		}
+	}
 
 	// Only log unusual messages for debugging
 	if msgID != 0 && !suppressedMessageLogIDs[msgID] && msgID != msgCurrentTime {
 		ibkrLogger.Debugf("Received message ID %d with %d fields", msgID, len(fields))
+	}
+	if orderID, ok := inboundOrderID(msgID, fields); ok {
+		c.observeInboundOrderIDAtEpoch(orderID, epoch)
+	}
+	if msgID == msgOpenOrder || msgID == msgOpenOrderEnd {
+		c.openOrderObserverMu.RLock()
+		observer := c.openOrderObserver
+		c.openOrderObserverMu.RUnlock()
+		if observer != nil {
+			observer(msgID, fields, epoch)
+		}
 	}
 
 	// Handle common messages
 	switch msgID {
 	case msgNextValidID:
 		if id, ok := parseNextValidOrderID(fields); ok {
-			c.reqIDMu.Lock()
-			c.nextOrderID = id
-			c.reqIDMu.Unlock()
+			c.observeNextValidOrderIDAtEpoch(id, epoch)
 			if c.config.ClientID == 1 {
 				ibkrLogger.Infof("Next Valid Order ID: %d", id)
 			}
@@ -1830,7 +1962,7 @@ func (c *Connection) processMessage(msgBytes []byte) {
 	case msgCurrentTimeMillis:
 		if len(fields) > 1 {
 			if ms, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
-				c.lastHeartbeatNano.Store(ms * int64(time.Millisecond))
+				c.recordHeartbeatAtEpoch(epoch, ms*int64(time.Millisecond))
 			}
 		}
 	case msgManagedAccts:
@@ -1845,13 +1977,10 @@ func (c *Connection) processMessage(msgBytes []byte) {
 			}
 		}
 	case msgErrMsg:
-		c.handleErrorMessage(fields)
-		// Also forward to any registered error handler for higher-level recovery
-		if handlers := c.snapshotHandlers(msgErrMsg); len(handlers) > 0 {
-			for _, h := range handlers {
-				h(fields)
-			}
+		if c.errorMessageAfterInitialEpochCheck != nil {
+			c.errorMessageAfterInitialEpochCheck()
 		}
+		c.processErrorMessageAtEpoch(fields, epoch)
 	case msgCurrentTime:
 		// IBKR heartbeat - silently process to maintain connection
 		// The timestamp is available in fields[1] if needed for debugging
@@ -1859,6 +1988,7 @@ func (c *Connection) processMessage(msgBytes []byte) {
 		c.handlePosition(fields)
 	case msgPositionEnd:
 		portfolioLogger.Infof("Position sync complete")
+		c.completePositionsSnapshot()
 		// Signal that positions are complete
 		select {
 		case c.positionsEndChan <- struct{}{}:
@@ -1866,7 +1996,7 @@ func (c *Connection) processMessage(msgBytes []byte) {
 			// Channel already has a signal
 		}
 	case msgAccountSummary:
-		c.handleAccountSummary(fields)
+		c.handleAccountSummaryUnderBrokerScopeLease(fields)
 	case msgAccountSummaryEnd:
 		// Wire-cadence event: the daemon re-polls the summary every few
 		// seconds, so at Info this line alone dominated the log (~9% of
@@ -1893,35 +2023,27 @@ func (c *Connection) processMessage(msgBytes []byte) {
 			// log volume (observed 2026-06-11).
 			portfolioLogger.Debugf("Account update time: %s", fields[2])
 		}
+		c.portfolioProjectionMu.Lock()
 		c.portfolioHealthMu.Lock()
-		c.portfolioHealth.LastUpdateAt = time.Now().UTC()
+		if c.portfolioHealth.ScopeConflictAt.IsZero() && c.portfolioHealth.InvalidPayloadAt.IsZero() {
+			c.portfolioHealth.LastUpdateAt = time.Now().UTC()
+		}
 		c.portfolioHealthMu.Unlock()
+		c.portfolioProjectionMu.Unlock()
 	case msgAcctDownloadEnd:
 		portfolioLogger.Infof("Account download complete")
-		c.portfolioHealthMu.Lock()
-		if len(fields) > 2 && accountCodeConcrete(fields[2]) {
-			c.portfolioHealth.Account = strings.TrimSpace(fields[2])
+		account := ""
+		if len(fields) > 2 {
+			account = fields[2]
 		}
-		c.portfolioHealth.InitialCompletedAt = time.Now().UTC()
-		c.portfolioHealthMu.Unlock()
+		c.completePortfolioDownload(account, time.Now().UTC())
 	case msgMarketDataType:
-		// Market data type notification (live/delayed/frozen)
-		// Format: [msgID, version, reqID, type]
-		if len(fields) >= 4 {
-			rid, _ := strconv.Atoi(fields[2])
-			dt, _ := strconv.Atoi(fields[3])
-			c.mktDataTypeMu.Lock()
-			c.mktDataType[rid] = dt
-			c.mktDataTypeMu.Unlock()
-			ibkrLogger.Debugf("[cid=%d] MarketDataType notice: reqID=%d, type=%d", c.config.ClientID, rid, dt)
-		}
+		c.processMarketDataTypeAtEpoch(fields, epoch)
 	case msgSystemNotification:
-		c.handleSystemNotification(fields)
-		if handlers := c.snapshotHandlers(msgSystemNotification); len(handlers) > 0 {
-			for _, handler := range handlers {
-				handler(fields)
-			}
+		if c.systemNoticeAfterInitialEpochCheck != nil {
+			c.systemNoticeAfterInitialEpochCheck()
 		}
+		c.processSystemNoticeMessageAtEpoch(fields, epoch)
 	case msgTickNews:
 		// News tick - handle silently for now
 		// Format: [msgID, reqID, timeStamp, providerCode, articleID, headline, extraData]
@@ -1934,30 +2056,18 @@ func (c *Connection) processMessage(msgBytes []byte) {
 		// Format: [msgID, version, reqID, tickType, value]
 		// Route to a registered handler if present so upstream components can
 		// capture items like option implied volatility (tick 106).
-		if handlers := c.snapshotHandlers(msgTickGeneric); len(handlers) > 0 {
-			for _, handler := range handlers {
-				handler(fields)
-			}
+		if c.dispatchHandlers(msgTickGeneric, fields, epoch) {
 			return
 		}
 	case msgSecurityDefinitionOptionalParameter, msgSecurityDefinitionOptionalParameterEnd:
 		// reqSecDefOptParams (78) responses arrive once per exchange (75) before
 		// a single end marker (76). Connector.FetchOptionExpiries registers
 		// per-message handlers via RegisterHandler; route both IDs there.
-		if handlers := c.snapshotHandlers(msgID); len(handlers) > 0 {
-			for _, handler := range handlers {
-				handler(fields)
-			}
-		}
+		c.dispatchHandlers(msgID, fields, epoch)
 		return
 	default:
 		// Check for registered handler
-		if handlers := c.snapshotHandlers(msgID); len(handlers) > 0 {
-			for _, handler := range handlers {
-				handler(fields)
-			}
-		} else if c.bufferPendingHandlerMessage(msgID, fields) {
-			return
+		if c.dispatchHandlers(msgID, fields, epoch) {
 		} else if isBenignUnhandledMessage(msgID) {
 			// Contract details may arrive even when the connector did not register a handler.
 			// Avoid logging warnings for these routine responses.
@@ -1968,6 +2078,82 @@ func (c *Connection) processMessage(msgBytes []byte) {
 	}
 }
 
+func (c *Connection) dispatchStaleInboundMessage(msgID int, fields []string, epoch uint64) {
+	switch msgID {
+	case msgOpenOrder, msgOrderStatus, msgExecDetails:
+		c.dispatchEpochHandlers(msgID, fields, epoch)
+	case msgErrMsg:
+		// The Connector-owned handler publishes only an exact stale receipt;
+		// any returned outbound action is intentionally discarded.
+		_ = c.dispatchErrorPostAction(fields, epoch)
+		c.dispatchEpochHandlers(msgID, fields, epoch)
+	case msgSystemNotification:
+		c.dispatchStaleSystemNotice(fields, epoch)
+	}
+}
+
+// processErrorMessageAtEpoch keeps the final epoch check, all current-session
+// side effects, and legacy handler delivery in one inbound-generation read
+// section. The scoped defer is intentional: a panicking handler must not leave
+// reconnect permanently unable to advance the socket generation. Stale-frame
+// receipt handlers run only after the lock is released and never reach the
+// current-session legacy surface.
+func (c *Connection) processErrorMessageAtEpoch(fields []string, epoch uint64) {
+	current := false
+	var postLease []func()
+	func() {
+		c.inboundEpochMu.RLock()
+		defer c.inboundEpochMu.RUnlock()
+		if epoch != c.BrokerSessionEpoch() {
+			return
+		}
+		current = true
+		if post := c.handleErrorMessage(fields, epoch); post != nil {
+			postLease = append(postLease, post)
+		}
+		if post := c.dispatchErrorPostAction(fields, epoch); post != nil {
+			postLease = append(postLease, post)
+		}
+		// Also forward to registered error handlers for higher-level recovery.
+		// The read lock makes current-session delivery atomic with epoch rollover.
+		c.dispatchHandlers(msgErrMsg, fields, epoch)
+	}()
+	if !current {
+		c.dispatchEpochHandlers(msgErrMsg, fields, epoch)
+		return
+	}
+	for _, post := range postLease {
+		post()
+	}
+}
+
+// processSystemNoticeMessageAtEpoch gives msg-204 the same final socket-
+// generation lease as msgErrMsg. All current-session parsing, Connector
+// mutations, and legacy handler delivery complete under inboundEpochMu.R.
+// Stale receipts reach only the epoch-aware system-notice owner. Any outbound
+// recovery action runs after the lease is released.
+func (c *Connection) processSystemNoticeMessageAtEpoch(fields []string, epoch uint64) {
+	current := false
+	var postLease func()
+	func() {
+		c.inboundEpochMu.RLock()
+		defer c.inboundEpochMu.RUnlock()
+		if epoch != c.BrokerSessionEpoch() {
+			return
+		}
+		current = true
+		postLease = c.handleSystemNotificationAtEpoch(fields, epoch)
+		c.dispatchHandlers(msgSystemNotification, fields, epoch)
+	}()
+	if !current {
+		c.dispatchStaleSystemNotice(fields, epoch)
+		return
+	}
+	if postLease != nil {
+		postLease()
+	}
+}
+
 func isBenignUnhandledMessage(msgID int) bool {
 	switch msgID {
 	case msgContractData, msgContractDataEnd:
@@ -1975,46 +2161,6 @@ func isBenignUnhandledMessage(msgID int) bool {
 	default:
 		return false
 	}
-}
-
-const pendingHandlerMessageLimit = 256
-
-func isPendingHandlerMessage(msgID int) bool {
-	switch msgID {
-	case msgOrderStatus, msgOpenOrder, msgExecDetails, msgOpenOrderEnd:
-		return true
-	default:
-		return false
-	}
-}
-
-func (c *Connection) bufferPendingHandlerMessage(msgID int, fields []string) bool {
-	if !isPendingHandlerMessage(msgID) {
-		return false
-	}
-	c.pendingHandlersMu.Lock()
-	defer c.pendingHandlersMu.Unlock()
-	if c.pendingHandlerMsgs == nil {
-		c.pendingHandlerMsgs = make(map[int][][]string)
-	}
-	copied := append([]string{}, fields...)
-	pending := c.pendingHandlerMsgs[msgID]
-	if len(pending) >= pendingHandlerMessageLimit {
-		pending = pending[1:]
-	}
-	c.pendingHandlerMsgs[msgID] = append(pending, copied)
-	return true
-}
-
-func (c *Connection) takePendingHandlerMessages(msgID int) [][]string {
-	c.pendingHandlersMu.Lock()
-	defer c.pendingHandlersMu.Unlock()
-	pending := c.pendingHandlerMsgs[msgID]
-	if len(pending) == 0 {
-		return nil
-	}
-	delete(c.pendingHandlerMsgs, msgID)
-	return pending
 }
 
 // getErrorDescription returns a human-readable description for IBKR error codes
@@ -2086,7 +2232,7 @@ func getErrorDescription(code int) string {
 }
 
 // handleErrorMessage processes error messages from IBKR
-func (c *Connection) handleErrorMessage(fields []string) {
+func (c *Connection) handleErrorMessage(fields []string, epoch uint64) (postLease func()) {
 	if len(fields) < 3 {
 		ibkrLogger.Warnf("[WARNING] Invalid error message: %v", fields)
 		return
@@ -2164,20 +2310,31 @@ func (c *Connection) handleErrorMessage(fields []string) {
 	} else if code == 200 {
 		ibkrLogger.Warnf("[cid=%d] Market Data Error (ReqID %s): %s", c.config.ClientID, reqID, errorMsg)
 		if rid, err := strconv.Atoi(reqID); err == nil {
-			c.releaseMarketDataSlot(rid)
+			c.releaseMarketDataSlotAtEpoch(rid, epoch)
 		}
 	} else if code == 320 || code == 321 || code == 322 || code == 354 {
 		// Market data errors
 		ibkrLogger.Warnf("[cid=%d] Market Data Error (ReqID %s): %s", c.config.ClientID, reqID, errorMsg)
 		if code == 354 {
 			if rid, err := strconv.Atoi(reqID); err == nil {
-				c.releaseMarketDataSlot(rid)
+				c.releaseMarketDataSlotAtEpoch(rid, epoch)
 			}
 		}
 	} else if code == 10197 {
 		// Competing live session blocks real-time data; switch to delayed
 		ibkrLogger.Warnf("[cid=%d] Market Data Error (ReqID %s): %s", c.config.ClientID, reqID, errorMsg)
-		c.handleCompetingLiveSession(reqID, errorMsg)
+		if c.markCompetingLiveSession(reqID) {
+			// Never enter outbound pacing/transport while holding inboundEpochMu.R:
+			// reconnect pauses transport before taking inboundEpochMu.W. The exact
+			// epoch-bound send below runs only after the inbound lease is released.
+			postLease = func() {
+				if err := c.setMarketDataTypeAtEpoch(3, epoch); err != nil {
+					ibkrLogger.Errorf("[cid=%d] Failed to request delayed market data after 10197: %v", c.config.ClientID, err)
+				} else {
+					ibkrLogger.Warnf("[cid=%d] Forced delayed market data after 10197 (%s)", c.config.ClientID, errorMsg)
+				}
+			}
+		}
 	} else if code < 0 || code == 0 {
 		// Codes -1 or 0 often contain system messages
 		if errorMsg != "" && errorMsg != "0" {
@@ -2210,6 +2367,7 @@ func (c *Connection) handleErrorMessage(fields []string) {
 		// Other errors
 		ibkrLogger.Warnf("[cid=%d] Error (ReqID %s): %s (Code %d)", c.config.ClientID, reqID, errorMsg, code)
 	}
+	return postLease
 }
 
 // HasCompetingLiveSession returns true if IBKR reported code 10197 for this connection.
@@ -2219,23 +2377,18 @@ func (c *Connection) HasCompetingLiveSession() bool {
 	return c.competingLiveSession
 }
 
-// handleCompetingLiveSession forces delayed market data when IBKR reports code 10197.
-func (c *Connection) handleCompetingLiveSession(reqID, errorMsg string) {
+func (c *Connection) markCompetingLiveSession(reqID string) bool {
 	c.competingMu.Lock()
 	already := c.competingLiveSession
 	c.competingLiveSession = true
 	c.competingMu.Unlock()
 
 	if already {
-		return
+		return false
 	}
 
 	ibkrLogger.Warnf("[cid=%d] 10197 competing live session detected (reqID=%s) – requesting delayed market data", c.config.ClientID, reqID)
-	if err := c.SetMarketDataType(3); err != nil {
-		ibkrLogger.Errorf("[cid=%d] Failed to request delayed market data after 10197: %v", c.config.ClientID, err)
-	} else {
-		ibkrLogger.Warnf("[cid=%d] Forced delayed market data after 10197 (%s)", c.config.ClientID, errorMsg)
-	}
+	return true
 }
 
 // acquireMarketDataSlot acquires a market data slot and records the holding
@@ -2248,7 +2401,7 @@ func (c *Connection) acquireMarketDataSlot(ctx context.Context, reqID int) error
 		return err
 	}
 	c.marketDataSlotsMu.Lock()
-	c.marketDataSlots[reqID] = struct{}{}
+	c.marketDataSlots[reqID] = c.BrokerSessionEpoch()
 	c.marketDataSlotsMu.Unlock()
 	return nil
 }
@@ -2258,13 +2411,23 @@ func (c *Connection) acquireMarketDataSlot(ctx context.Context, reqID int) error
 // reqID; the bookkeeping makes the call idempotent so the underlying semaphore
 // never over-releases.
 func (c *Connection) releaseMarketDataSlot(reqID int) {
+	c.releaseMarketDataSlotAtEpoch(reqID, 0)
+}
+
+// releaseMarketDataSlotAtEpoch releases reqID only when its slot belongs to
+// epoch. A zero epoch is the compatibility form for a current synchronous
+// caller. Exact stale cleanup uses a nonzero epoch so a retired subscription
+// can never release a successor socket's reused request ID.
+func (c *Connection) releaseMarketDataSlotAtEpoch(reqID int, epoch uint64) {
 	if c.rateLimiter == nil {
 		return
 	}
 	c.marketDataSlotsMu.Lock()
-	_, held := c.marketDataSlots[reqID]
-	if held {
+	heldEpoch, held := c.marketDataSlots[reqID]
+	if held && (epoch == 0 || heldEpoch == epoch) {
 		delete(c.marketDataSlots, reqID)
+	} else {
+		held = false
 	}
 	c.marketDataSlotsMu.Unlock()
 	if held {
@@ -2413,35 +2576,145 @@ func (c *Connection) handlePosition(fields []string) {
 		return
 	}
 
-	// Create position key
-	key := contract.Symbol
-	if contract.SecType == "OPT" {
-		key = fmt.Sprintf("%s_%s_%s%.0f", contract.Symbol, contract.Expiry, contract.Right, contract.Strike)
+	c.portfolioProjectionMu.Lock()
+	defer c.portfolioProjectionMu.Unlock()
+	if !c.positionsSnapshotActive {
+		// msgPosition belongs only to the singleton reqPositions stream. An
+		// unsolicited/late row cannot mutate the streaming account-updates
+		// authority or a completed one-shot result.
+		return
 	}
+	key := cachedPositionKey(fields[2], contract)
 	if positionSize == 0 {
-		c.positionsMu.Lock()
-		delete(c.positions, key)
-		c.positionsMu.Unlock()
+		delete(c.positionsSnapshot, key)
 		portfolioLogger.Debugf("Position closed: %s %s", fields[2], key)
 		return
 	}
 
-	// Store position
-	c.positionsMu.Lock()
-	c.positions[key] = &RawPosition{
+	next := &RawPosition{
 		Account:     fields[2],
 		Contract:    contract,
 		Position:    positionSize,
 		AverageCost: avgCost,
 	}
-	c.positionsMu.Unlock()
+	if existing := c.positionsSnapshot[key]; existing != nil && existing.Contract.ConID == contract.ConID {
+		next.Contract = mergeCachedPositionContract(existing.Contract, next.Contract)
+		next.MarketPrice = existing.MarketPrice
+		next.MarketValue = existing.MarketValue
+		next.UnrealizedPNL = existing.UnrealizedPNL
+		next.RealizedPNL = existing.RealizedPNL
+	}
+	c.positionsSnapshot[key] = next
 
 	portfolioLogger.Debugf("Position: %s %s %.2f @ %.2f",
 		fields[2], key, positionSize, avgCost)
 }
 
+// cachedPositionKey preserves exact account+contract identity whenever the
+// broker supplies a positive ConID. Symbol-only keys caused same-symbol stock
+// and futures contracts to overwrite before a daemon consumer could apply its
+// own scope and risk checks. The descriptive fallbacks exist only for legacy
+// one-shot rows without a ConID; streaming portfolio generations reject those
+// rows before this function is called.
+func cachedPositionKey(account string, contract Contract) string {
+	account = strings.ToUpper(strings.TrimSpace(account))
+	secType := strings.ToUpper(strings.TrimSpace(contract.SecType))
+	if contract.ConID > 0 {
+		return fmt.Sprintf("%s|%s:%d", account, secType, contract.ConID)
+	}
+	if secType == "OPT" || secType == "FOP" {
+		return fmt.Sprintf("%s|%s:%s_%s_%s%.0f", account, secType, contract.Symbol, contract.Expiry, contract.Right, contract.Strike)
+	}
+	return fmt.Sprintf("%s|%s:%s", account, secType, contract.Symbol)
+}
+
+func mergeCachedPositionContract(existing, incoming Contract) Contract {
+	if incoming.Exchange == "" {
+		incoming.Exchange = existing.Exchange
+	}
+	if incoming.PrimaryExch == "" {
+		incoming.PrimaryExch = existing.PrimaryExch
+	}
+	if incoming.Currency == "" {
+		incoming.Currency = existing.Currency
+	}
+	if incoming.LocalSymbol == "" {
+		incoming.LocalSymbol = existing.LocalSymbol
+	}
+	if incoming.TradingClass == "" {
+		incoming.TradingClass = existing.TradingClass
+	}
+	return incoming
+}
+
+func normalizedContractIdentity(contract Contract) Contract {
+	contract.Symbol = strings.ToUpper(strings.TrimSpace(contract.Symbol))
+	contract.SecType = strings.ToUpper(strings.TrimSpace(contract.SecType))
+	contract.Expiry = strings.TrimSpace(contract.Expiry)
+	contract.Right = strings.ToUpper(strings.TrimSpace(contract.Right))
+	contract.Exchange = strings.ToUpper(strings.TrimSpace(contract.Exchange))
+	contract.PrimaryExch = strings.ToUpper(strings.TrimSpace(contract.PrimaryExch))
+	contract.Currency = strings.ToUpper(strings.TrimSpace(contract.Currency))
+	contract.LocalSymbol = strings.ToUpper(strings.TrimSpace(contract.LocalSymbol))
+	contract.TradingClass = strings.ToUpper(strings.TrimSpace(contract.TradingClass))
+	contract.SecIDType = strings.ToUpper(strings.TrimSpace(contract.SecIDType))
+	contract.SecID = strings.TrimSpace(contract.SecID)
+	return contract
+}
+
+// samePortfolioStructure intentionally excludes prices, cost basis, and PnL.
+// Those values may tick frequently without changing which risk-bearing
+// position the daemon is evaluating. Exact contract identity, route, account,
+// and quantity are structural and must invalidate a captured evidence binding.
+func samePortfolioStructure(existing, next *RawPosition) bool {
+	if existing == nil || next == nil {
+		return existing == next
+	}
+	return strings.EqualFold(strings.TrimSpace(existing.Account), strings.TrimSpace(next.Account)) &&
+		existing.Position == next.Position &&
+		normalizedContractIdentity(existing.Contract) == normalizedContractIdentity(next.Contract)
+}
+
+func (c *Connection) lockEvidenceChange() func() {
+	if c == nil || c.evidenceBarrier == nil {
+		return func() {}
+	}
+	c.evidenceBarrier.RLock()
+	return c.evidenceBarrier.RUnlock
+}
+
+func (c *Connection) lockBrokerScopeChange() func() {
+	if c == nil {
+		return func() {}
+	}
+	if c.publicationBarrier != nil {
+		c.publicationBarrier.Lock()
+	}
+	if c.evidenceBarrier != nil {
+		c.evidenceBarrier.RLock()
+	}
+	return func() {
+		if c.evidenceBarrier != nil {
+			c.evidenceBarrier.RUnlock()
+		}
+		if c.publicationBarrier != nil {
+			c.publicationBarrier.Unlock()
+		}
+	}
+}
+
 // handleAccountSummary processes account summary updates from IBKR
 func (c *Connection) handleAccountSummary(fields []string) {
+	unlockEvidence := c.lockBrokerScopeChange()
+	defer unlockEvidence()
+	c.handleAccountSummaryUnderBrokerScopeLease(fields)
+}
+
+// handleAccountSummaryUnderBrokerScopeLease applies one summary row while the
+// caller owns publication W and evidence R. The inbound dispatcher additionally
+// owns the exact-generation read lease in publication-before-inbound order.
+func (c *Connection) handleAccountSummaryUnderBrokerScopeLease(fields []string) {
+
 	// Expected fields:
 	// 0: msgID (63)
 	// 1: version
@@ -2461,29 +2734,43 @@ func (c *Connection) handleAccountSummary(fields []string) {
 	currency := fields[6]
 	account := strings.TrimSpace(fields[3])
 
-	// Store in account summary map and update active account. Summary
-	// rows can carry the aggregate group ("All") because the summary
-	// subscription spans the whole session; never let that overwrite a
-	// concrete code. c.account feeds account-scoped requests
-	// (reqAcctData, reqPnL) which TWS rejects for aggregates with error
-	// 321 — observed 2026-06-11: the portfolio stream never started and
-	// positions stayed empty for an entire daemon lifetime.
+	reqID, reqIDErr := strconv.Atoi(strings.TrimSpace(fields[2]))
+
+	// A registered one-shot is an account-scoped authority read. Keep it
+	// isolated from the shared streaming cache, and reject the whole row set
+	// if any row is blank, aggregate, or belongs to another account. This is
+	// intentionally stricter than filtering: mixing tags from two accounts
+	// could manufacture a coherent-looking snapshot that no account emitted.
 	c.accountMu.Lock()
-	if accountCodeConcrete(account) {
-		c.account = account
-	}
 	key := tag
 	if currency != "" && currency != "BASE" {
 		key = fmt.Sprintf("%s_%s", tag, currency)
 	}
-	c.accountSummary[key] = value
-	// Mirror the row into the per-request snapshot so the synchronous
-	// reqAccountSummary read is isolated from streaming overwrites.
-	if reqID, err := strconv.Atoi(strings.TrimSpace(fields[2])); err == nil {
+	if reqIDErr == nil {
 		if snap := c.summarySnapshots[reqID]; snap != nil {
+			if snap.scopeConflict || !accountCodeConcrete(account) || !strings.EqualFold(account, snap.expectedAccount) {
+				snap.scopeConflict = true
+				c.accountMu.Unlock()
+				return
+			}
+			snap.observedRows++
 			snap.values[key] = value
+			c.accountMu.Unlock()
+			return
 		}
 	}
+
+	// Unregistered account-summary traffic is context only. It may seed a
+	// single-account session, but a foreign concrete row can never overwrite
+	// the account-bound shared cache.
+	if !accountCodeConcrete(account) || (accountCodeConcrete(c.account) && !strings.EqualFold(account, c.account)) {
+		c.accountMu.Unlock()
+		return
+	}
+	if !accountCodeConcrete(c.account) {
+		c.account = account
+	}
+	c.accountSummary[key] = value
 	c.accountMu.Unlock()
 
 	// Log important values
@@ -2495,6 +2782,8 @@ func (c *Connection) handleAccountSummary(fields []string) {
 
 // handlePortfolioValue handles portfolio position updates (from reqAccountUpdates)
 func (c *Connection) handlePortfolioValue(fields []string) {
+	unlockEvidence := c.lockEvidenceChange()
+	defer unlockEvidence()
 	// Expected fields for msgPortfolioValue (7):
 	// 0: msgID
 	// 1: version
@@ -2519,15 +2808,61 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 
 	if len(fields) < 20 {
 		ibkrLogger.Warnf("[WARNING] Invalid portfolio value message: expected at least 20 fields, got %d", len(fields))
+		c.portfolioProjectionMu.Lock()
+		c.invalidatePortfolioGeneration(time.Now().UTC())
+		c.portfolioProjectionMu.Unlock()
+		return
+	}
+	c.portfolioProjectionMu.Lock()
+	defer c.portfolioProjectionMu.Unlock()
+	if !c.acceptPortfolioAccountFrame(fields[19], time.Now().UTC()) {
+		portfolioLogger.Warnf("Portfolio frame account did not match the requested account; stream health is unavailable until resubscribe")
 		return
 	}
 
-	// Parse contract
-	conID, _ := strconv.Atoi(fields[2])
-	strike, _ := strconv.ParseFloat(fields[6], 64)
-	multiplier, _ := strconv.Atoi(fields[8])
-	if multiplier == 0 {
+	// A malformed row invalidates the whole staged generation. Treating a bad
+	// position as zero would silently delete a held row and could establish a
+	// false all-clear at accountDownloadEnd.
+	conID, conIDErr := strconv.Atoi(strings.TrimSpace(fields[2]))
+	secType := strings.ToUpper(strings.TrimSpace(fields[4]))
+	strikeRaw := strings.TrimSpace(fields[6])
+	strike := 0.0
+	var strikeErr error
+	if strikeRaw != "" {
+		strike, strikeErr = strconv.ParseFloat(strikeRaw, 64)
+	}
+	multiplierRaw := strings.TrimSpace(fields[8])
+	multiplier := 1
+	var multiplierErr error
+	if multiplierRaw != "" {
+		multiplier, multiplierErr = strconv.Atoi(multiplierRaw)
+	}
+	// IB stock frames commonly omit multiplier or encode it as zero; one
+	// share remains the correct normalization. Derivatives need a positive
+	// multiplier, and options need an explicit strike.
+	derivativeIdentity := secType == "OPT" || secType == "FOP" || secType == "WAR"
+	requiresDerivativeTerms := secType == "OPT" || secType == "FOP"
+	right := strings.ToUpper(strings.TrimSpace(fields[7]))
+	requiresMultiplier := secType != "STK"
+	if secType == "STK" && multiplierErr == nil && multiplier == 0 {
 		multiplier = 1
+	}
+	position, positionErr := strconv.ParseFloat(strings.TrimSpace(fields[13]), 64)
+	marketPrice, marketPriceErr := strconv.ParseFloat(strings.TrimSpace(fields[14]), 64)
+	marketValue, marketValueErr := strconv.ParseFloat(strings.TrimSpace(fields[15]), 64)
+	averageCost, averageCostErr := strconv.ParseFloat(strings.TrimSpace(fields[16]), 64)
+	unrealizedPNL, unrealizedPNLErr := strconv.ParseFloat(strings.TrimSpace(fields[17]), 64)
+	realizedPNL, realizedPNLErr := strconv.ParseFloat(strings.TrimSpace(fields[18]), 64)
+	if conIDErr != nil || conID <= 0 || strings.TrimSpace(fields[3]) == "" || secType == "" ||
+		strikeErr != nil || !finiteFloat(strike) || (derivativeIdentity && strikeRaw == "") ||
+		(requiresDerivativeTerms && (strings.TrimSpace(fields[5]) == "" || (right != "C" && right != "P"))) ||
+		multiplierErr != nil || multiplier <= 0 || (requiresMultiplier && multiplierRaw == "") ||
+		positionErr != nil || !finiteFloat(position) || marketPriceErr != nil || !finiteFloat(marketPrice) ||
+		marketValueErr != nil || !finiteFloat(marketValue) || averageCostErr != nil || !finiteFloat(averageCost) ||
+		unrealizedPNLErr != nil || !finiteFloat(unrealizedPNL) || realizedPNLErr != nil || !finiteFloat(realizedPNL) {
+		c.invalidatePortfolioGeneration(time.Now().UTC())
+		portfolioLogger.Warnf("Portfolio generation contained a malformed required field; generation discarded")
+		return
 	}
 
 	contract := Contract{
@@ -2538,36 +2873,34 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 		Strike:       strike,
 		Right:        fields[7],
 		Multiplier:   multiplier,
-		Exchange:     fields[9],
+		PrimaryExch:  fields[9],
 		Currency:     fields[10],
 		LocalSymbol:  fields[11],
 		TradingClass: fields[12],
 	}
 
-	// Parse position data
-	position, _ := strconv.ParseFloat(fields[13], 64)
-	marketPrice, _ := strconv.ParseFloat(fields[14], 64)
-	marketValue, _ := strconv.ParseFloat(fields[15], 64)
-	averageCost, _ := strconv.ParseFloat(fields[16], 64)
-	unrealizedPNL, _ := strconv.ParseFloat(fields[17], 64)
-	realizedPNL, _ := strconv.ParseFloat(fields[18], 64)
-
-	// Create position key
-	key := contract.Symbol
-	if contract.SecType == "OPT" {
-		key = fmt.Sprintf("%s_%s_%s%.0f", contract.Symbol, contract.Expiry, contract.Right, contract.Strike)
+	key := cachedPositionKey(fields[19], contract)
+	target := c.positions
+	if c.portfolioStagingActive {
+		target = c.portfolioStaging
 	}
 	if position == 0 {
-		c.positionsMu.Lock()
-		delete(c.positions, key)
-		c.positionsMu.Unlock()
+		if c.portfolioStagingActive {
+			delete(target, key)
+		} else {
+			c.positionsMu.Lock()
+			_, changed := target[key]
+			delete(target, key)
+			if changed {
+				c.advancePortfolioProjectionGeneration()
+			}
+			c.positionsMu.Unlock()
+		}
 		portfolioLogger.Debugf("Position closed: %s", key)
 		return
 	}
 
-	// Store position with full data
-	c.positionsMu.Lock()
-	c.positions[key] = &RawPosition{
+	next := &RawPosition{
 		Account:       fields[19],
 		Contract:      contract,
 		Position:      position,
@@ -2577,7 +2910,24 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 		UnrealizedPNL: unrealizedPNL,
 		RealizedPNL:   realizedPNL,
 	}
-	c.positionsMu.Unlock()
+	if c.portfolioStagingActive {
+		if existing := target[key]; existing != nil && existing.Contract.ConID == contract.ConID {
+			next.Contract = mergeCachedPositionContract(existing.Contract, next.Contract)
+		}
+		target[key] = next
+	} else {
+		c.positionsMu.Lock()
+		existing := target[key]
+		if existing != nil && existing.Contract.ConID == contract.ConID {
+			next.Contract = mergeCachedPositionContract(existing.Contract, next.Contract)
+		}
+		structuralChange := !samePortfolioStructure(existing, next)
+		target[key] = next
+		if structuralChange {
+			c.advancePortfolioProjectionGeneration()
+		}
+		c.positionsMu.Unlock()
+	}
 
 	// Seed the option contract cache from portfolio data so SubscribeOption
 	// can skip the reqContractData round-trip for held options. msgPortfolioValue
@@ -2586,9 +2936,12 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 	// option leg pays a 5 s × N-exchange-attempts penalty on cold cache,
 	// blowing the positions deadline before the Greeks tick can be captured.
 	//
-	// Note: msgPortfolioValue field 9 is *primaryExchange* (not Exchange);
-	// the parsed Contract above stores it under Exchange, which is a wire
-	// quirk we don't fix here. We feed it into PrimaryExch in the cache —
+	// Note: msgPortfolioValue field 9 is *primaryExchange* (not Exchange).
+	// We retain that distinction in the cached position and feed it into the
+	// option contract cache; an actual exchange route may be merged from the
+	// exact Position stream when it names the same ConID. We never fabricate
+	// SMART from a primary listing venue.
+	//
 	// SubscribeOption initialises Exchange="SMART" for option contracts,
 	// and applyContractDetailLite only overwrites Exchange if the cache
 	// has a non-empty value, so leaving Exchange="" preserves the SMART
@@ -2602,7 +2955,7 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 			Strike:       contract.Strike,
 			Right:        contract.Right,
 			Exchange:     "",
-			PrimaryExch:  contract.Exchange,
+			PrimaryExch:  contract.PrimaryExch,
 			ConID:        conID,
 			LocalSymbol:  contract.LocalSymbol,
 			TradingClass: contract.TradingClass,
@@ -2614,6 +2967,132 @@ func (c *Connection) handlePortfolioValue(fields []string) {
 
 	portfolioLogger.Debugf("Updated: %s %.2f @ %.2f, PnL: %.2f",
 		key, position, marketPrice, unrealizedPNL)
+}
+
+func (c *Connection) acceptPortfolioAccountFrame(account string, observedAt time.Time) bool {
+	account = strings.TrimSpace(account)
+	c.portfolioHealthMu.Lock()
+	defer c.portfolioHealthMu.Unlock()
+	if !c.portfolioHealth.ScopeConflictAt.IsZero() || !c.portfolioHealth.InvalidPayloadAt.IsZero() {
+		return false
+	}
+	if !accountCodeConcrete(account) {
+		c.latchPortfolioScopeConflictLocked(observedAt)
+		return false
+	}
+	bound := strings.TrimSpace(c.portfolioHealth.Account)
+	if accountCodeConcrete(bound) {
+		if !strings.EqualFold(account, bound) {
+			c.latchPortfolioScopeConflictLocked(observedAt)
+			return false
+		}
+		return true
+	}
+	if accountCodeConcrete(account) {
+		c.portfolioHealth.Account = account
+	}
+	return true
+}
+
+func (c *Connection) completePortfolioDownload(account string, completedAt time.Time) bool {
+	unlockEvidence := c.lockEvidenceChange()
+	defer unlockEvidence()
+	c.portfolioProjectionMu.Lock()
+	defer c.portfolioProjectionMu.Unlock()
+	account = strings.TrimSpace(account)
+	c.portfolioHealthMu.Lock()
+	defer c.portfolioHealthMu.Unlock()
+	if !c.portfolioHealth.ScopeConflictAt.IsZero() || !c.portfolioHealth.InvalidPayloadAt.IsZero() {
+		c.portfolioStaging = nil
+		c.portfolioStagingActive = false
+		return false
+	}
+	if !accountCodeConcrete(account) {
+		c.latchPortfolioScopeConflictLocked(completedAt)
+		c.portfolioStaging = nil
+		c.portfolioStagingActive = false
+		return false
+	}
+	bound := strings.TrimSpace(c.portfolioHealth.Account)
+	if accountCodeConcrete(bound) && !strings.EqualFold(account, bound) {
+		c.latchPortfolioScopeConflictLocked(completedAt)
+		c.portfolioStaging = nil
+		c.portfolioStagingActive = false
+		return false
+	}
+	if !accountCodeConcrete(bound) && accountCodeConcrete(account) {
+		c.portfolioHealth.Account = account
+	}
+	if !c.portfolioStagingActive {
+		return false
+	}
+	next := make(map[string]*RawPosition, len(c.portfolioStaging))
+	maps.Copy(next, c.portfolioStaging)
+	c.positionsMu.Lock()
+	c.positions = next
+	c.positionsMu.Unlock()
+	c.portfolioStaging = nil
+	c.portfolioStagingActive = false
+	c.portfolioHealth.InitialCompletedAt = completedAt.UTC()
+	c.advancePortfolioProjectionGenerationLocked()
+	return true
+}
+
+func (c *Connection) latchPortfolioScopeConflictLocked(observedAt time.Time) {
+	changed := c.portfolioHealth.ScopeConflictAt.IsZero()
+	c.portfolioHealth.RequestedAt = time.Time{}
+	c.portfolioHealth.InitialCompletedAt = time.Time{}
+	c.portfolioHealth.LastUpdateAt = time.Time{}
+	c.portfolioHealth.ScopeConflictAt = observedAt.UTC()
+	if changed {
+		c.advancePortfolioProjectionGenerationLocked()
+	}
+}
+
+func finiteFloat(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+// invalidatePortfolioGeneration is called with portfolioProjectionMu held.
+// It retains the last published rows only as context while ensuring neither a
+// later end marker nor heartbeat can make the malformed generation current.
+func (c *Connection) invalidatePortfolioGeneration(observedAt time.Time) {
+	c.portfolioHealthMu.Lock()
+	changed := c.portfolioHealth.InvalidPayloadAt.IsZero()
+	c.portfolioHealth.RequestedAt = time.Time{}
+	c.portfolioHealth.InitialCompletedAt = time.Time{}
+	c.portfolioHealth.LastUpdateAt = time.Time{}
+	c.portfolioHealth.InvalidPayloadAt = observedAt.UTC()
+	if changed {
+		c.advancePortfolioProjectionGenerationLocked()
+	}
+	c.portfolioHealthMu.Unlock()
+	c.portfolioStaging = nil
+	c.portfolioStagingActive = false
+}
+
+func (c *Connection) resetPortfolioStreamHealth(account string, requestedAt time.Time) {
+	unlockEvidence := c.lockEvidenceChange()
+	defer unlockEvidence()
+	c.portfolioProjectionMu.Lock()
+	defer c.portfolioProjectionMu.Unlock()
+	c.portfolioHealthMu.Lock()
+	generation := c.portfolioHealth.ProjectionGeneration
+	c.portfolioHealth = PortfolioStreamHealth{Account: strings.TrimSpace(account), RequestedAt: requestedAt.UTC(), ProjectionGeneration: generation}
+	c.advancePortfolioProjectionGenerationLocked()
+	c.portfolioHealthMu.Unlock()
+	c.portfolioStaging = make(map[string]*RawPosition)
+	c.portfolioStagingActive = true
+}
+
+func (c *Connection) advancePortfolioProjectionGeneration() {
+	c.portfolioHealthMu.Lock()
+	c.advancePortfolioProjectionGenerationLocked()
+	c.portfolioHealthMu.Unlock()
+}
+
+func (c *Connection) advancePortfolioProjectionGenerationLocked() {
+	c.portfolioHealth.ProjectionGeneration++
 }
 
 // handleAccountValue handles account value updates (from reqAccountUpdates)
@@ -2665,15 +3144,35 @@ func (c *Connection) handleAccountValue(fields []string) {
 }
 
 func (c *Connection) handleSystemNotification(fields []string) {
+	if post := c.handleSystemNotificationAtEpoch(fields, c.BrokerSessionEpoch()); post != nil {
+		post()
+	}
+}
+
+func (c *Connection) dispatchStaleSystemNotice(fields []string, epoch uint64) {
+	if len(fields) < 2 {
+		return
+	}
+	note, err := parseSystemNotificationPayload([]byte(fields[1]))
+	if err != nil {
+		return
+	}
+	// Alias and recovery state belong to the current epoch. The exact-origin
+	// Connector handler may use the numeric ID only to publish a stale order
+	// receipt and latch uncertainty; it must reject all other mutations.
+	c.dispatchSystemNotice(note, reqAliasEntry{}, epoch)
+}
+
+func (c *Connection) handleSystemNotificationAtEpoch(fields []string, epoch uint64) func() {
 	if len(fields) < 2 {
 		ibkrLogger.Warnf("[IBKR cid=%d] System notice: missing payload", c.config.ClientID)
-		return
+		return nil
 	}
 
 	note, err := parseSystemNotificationPayload([]byte(fields[1]))
 	if err != nil {
 		ibkrLogger.Warnf("[IBKR cid=%d] System notice decode error: %v", c.config.ClientID, err)
-		return
+		return nil
 	}
 
 	scope := "global"
@@ -2732,9 +3231,7 @@ func (c *Connection) handleSystemNotification(fields []string) {
 		msgText = fmt.Sprintf("%s | frame=%s", msgText, context)
 	}
 	if note.code == 326 {
-		c.statusMu.Lock()
-		c.lastError = clientIDInUseError(c.config.ClientID, note.message)
-		c.statusMu.Unlock()
+		c.setClientIDInUseErrorAtEpoch(epoch, note.message)
 	}
 
 	if note.timestamp.IsZero() {
@@ -2750,8 +3247,7 @@ func (c *Connection) handleSystemNotification(fields []string) {
 		default:
 			ibkrLogger.Infof(format, args...)
 		}
-		c.dispatchSystemNotice(note, aliasEntry)
-		return
+		return c.dispatchSystemNotice(note, aliasEntry, epoch)
 	}
 
 	format := "[IBKR cid=%d] System notice %s %s @ %s: %s"
@@ -2766,7 +3262,18 @@ func (c *Connection) handleSystemNotification(fields []string) {
 	default:
 		ibkrLogger.Infof(format, args...)
 	}
-	c.dispatchSystemNotice(note, aliasEntry)
+	return c.dispatchSystemNotice(note, aliasEntry, epoch)
+}
+
+func (c *Connection) setClientIDInUseErrorAtEpoch(epoch uint64, message string) {
+	c.reqIDMu.Lock()
+	defer c.reqIDMu.Unlock()
+	if c.brokerSessionEpoch.Load() != epoch {
+		return
+	}
+	c.statusMu.Lock()
+	c.lastError = clientIDInUseError(c.config.ClientID, message)
+	c.statusMu.Unlock()
 }
 
 // Message encoding/decoding methods
@@ -2865,40 +3372,123 @@ func (c *Connection) sendMessageWithType(msg []byte, reqType RequestType) error 
 	return c.sendMessageWithTypeContext(context.Background(), msg, reqType)
 }
 
+func brokerSendError(err error, disposition SendDisposition, typed bool) error {
+	if err == nil || !typed {
+		return err
+	}
+	return WithSendDisposition(err, disposition)
+}
+
+func brokerSendMayHaveBeenWritten(err error) bool {
+	switch SendDispositionOf(err) {
+	case SendDispositionMayHaveWritten, SendDispositionUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // sendMessageWithTypeContext sends a message with caller-owned cancellation
 // while waiting in the rate limiter. Historical requests use this so an
 // interactive caller can leave the paced HMDS queue when its RPC deadline
 // expires instead of lingering behind background fan-out.
 func (c *Connection) sendMessageWithTypeContext(ctx context.Context, msg []byte, reqType RequestType) error {
+	return c.sendMessageWithTypeContextForEpoch(ctx, msg, reqType, 0, false)
+}
+
+func (c *Connection) sendMessageWithTypeContextForEpoch(ctx context.Context, msg []byte, reqType RequestType, epoch uint64, requireEpoch bool) error {
+	return c.sendMessageWithTypeContextForEpochGuarded(ctx, msg, reqType, epoch, requireEpoch, nil)
+}
+
+// sendMessageWithTypeContextForEpochGuarded is the exact broker-instruction
+// transport boundary. guard runs once under transportMu after pacing,
+// handshake, cancellation, and socket-epoch checks, immediately before any
+// frame byte can be written. A guard failure is a definite pre-wire refusal
+// and is never retried.
+func (c *Connection) sendMessageWithTypeContextForEpochGuarded(ctx context.Context, msg []byte, reqType RequestType, epoch uint64, requireEpoch bool, guard func() error) error {
+	// Broker instructions and epoch-bound authority reads must be exactly-once
+	// at this transport boundary. In particular, a partial place/cancel/
+	// exercise write is not safe to replay, and reqAllOpenOrders has no request
+	// ID with which to distinguish a late terminator from a later flight.
+	protectedSend := requireEpoch || reqType == RequestTypeOrder
+	outboundState := c.outboundSessionState.Load()
 	// Check connection status before queueing - reject if disconnecting
 	c.statusMu.RLock()
 	status := c.status
 	c.statusMu.RUnlock()
 	if status != StatusConnected {
-		return fmt.Errorf("cannot send message: connection status is %v", status)
+		return brokerSendError(fmt.Errorf("cannot send message: connection status is %v", status), SendDispositionDefinitelyUnsent, protectedSend)
 	}
 
-	return c.rateLimiter.SubmitContext(ctx, reqType, func() error {
-		if err := ctx.Err(); err != nil {
-			return err
+	sendCtx := ctx
+	cancel := func() {}
+	if protectedSend {
+		sendCtx, cancel = context.WithCancel(ctx)
+	}
+	var dispatchEntered atomic.Bool
+	maxRetries := 3
+	if protectedSend {
+		maxRetries = 0
+	}
+	err := c.rateLimiter.SubmitWithRetriesContextFunc(sendCtx, reqType, func(dispatchCtx context.Context) error {
+		dispatchEntered.Store(true)
+		if err := dispatchCtx.Err(); err != nil {
+			return brokerSendError(err, SendDispositionDefinitelyUnsent, protectedSend)
 		}
-		if err := c.waitForHandshakeReady(); err != nil {
-			return err
+		if err := c.waitForHandshakeReadyContext(dispatchCtx); err != nil {
+			return brokerSendError(err, SendDispositionDefinitelyUnsent, protectedSend)
 		}
-		if err := ctx.Err(); err != nil {
-			return err
+		if err := dispatchCtx.Err(); err != nil {
+			return brokerSendError(err, SendDispositionDefinitelyUnsent, protectedSend)
 		}
 		return c.withTransport(false, func() error {
+			if protectedSend && c.publicationBarrier != nil {
+				// Daemon connector publication takes the exclusive side before it
+				// changes the published Connector identity. Acquire this lease only
+				// after pacing and transport admission: a queued sender must never
+				// keep unpublication waiting while reconnect has the transport
+				// paused. Publication and evidence always use this lock order.
+				c.publicationBarrier.RLock()
+				defer c.publicationBarrier.RUnlock()
+			}
+			if protectedSend && c.evidenceBarrier != nil {
+				// Structural portfolio/session writers take the read side. Holding
+				// the exclusive side through the final guard and flush makes the
+				// validated projection generation the first-byte authority.
+				c.evidenceBarrier.Lock()
+				defer c.evidenceBarrier.Unlock()
+			}
+			// Recheck cancellation while holding transportMu. If the limiter or
+			// caller returned while this dispatch was queued, no later socket
+			// write can escape after cancel closes sendCtx.
+			if err := dispatchCtx.Err(); err != nil {
+				return brokerSendError(err, SendDispositionDefinitelyUnsent, protectedSend)
+			}
+			if requireEpoch {
+				// Epoch and namespace readiness are one allocator state. Reading
+				// them under the same lock closes the reconnect window where an
+				// old epoch check could be followed by new-epoch readiness.
+				c.reqIDMu.Lock()
+				currentEpoch := c.brokerSessionEpoch.Load()
+				ready := c.haveNextValidID
+				c.reqIDMu.Unlock()
+				if currentEpoch != epoch {
+					return brokerSendError(fmt.Errorf("broker socket generation changed before request send"), SendDispositionDefinitelyUnsent, true)
+				}
+				if !ready {
+					return brokerSendError(fmt.Errorf("broker id namespace not ready for request send"), SendDispositionDefinitelyUnsent, true)
+				}
+			}
 			if c.writer == nil {
-				return fmt.Errorf("ibkr: send before writer initialised (connection state inconsistent)")
+				return brokerSendError(fmt.Errorf("ibkr: send before writer initialised (connection state inconsistent)"), SendDispositionDefinitelyUnsent, protectedSend)
+			}
+			if protectedSend && (outboundState&1 != 0 || c.outboundSessionState.Load() != outboundState) {
+				return brokerSendError(fmt.Errorf("broker outbound session changed before request send"), SendDispositionDefinitelyUnsent, true)
 			}
 			fields := c.decodeOutboundMessage(msg)
 			msgID := determineMessageID(c.serverVersion, msg)
 
 			c.logSuspiciousOutbound(msgID, fields)
-			if c.wireTap != nil {
-				c.wireTap.RecordOutbound(msgID, msg, fields)
-			}
 
 			lengthBytes := make([]byte, 4)
 			binary.BigEndian.PutUint32(lengthBytes, uint32(len(msg)))
@@ -2906,19 +3496,77 @@ func (c *Connection) sendMessageWithTypeContext(ctx context.Context, msg []byte,
 			// Debug: hex dump outgoing message
 			c.logOutgoingMessageHex(msg)
 
-			if _, err := c.writer.Write(lengthBytes); err != nil {
-				return err
+			if guard != nil {
+				if err := guard(); err != nil {
+					return brokerSendError(fmt.Errorf("broker wire guard: %w", err), SendDispositionDefinitelyUnsent, protectedSend)
+				}
+			}
+			// The outbound generation and invalidation flag are protected by
+			// transportMu, which is still held here. This is the last lifecycle
+			// read before the first byte and therefore the write linearization
+			// point relative to Disconnect/connection loss.
+			if err := dispatchCtx.Err(); err != nil {
+				return brokerSendError(err, SendDispositionDefinitelyUnsent, protectedSend)
+			}
+			if protectedSend && (outboundState&1 != 0 || c.outboundSessionState.Load() != outboundState) {
+				return brokerSendError(fmt.Errorf("broker outbound session changed before request send"), SendDispositionDefinitelyUnsent, true)
+			}
+			bufferedBefore := c.writer.Buffered()
+			accepted := 0
+			n, err := c.writer.Write(lengthBytes)
+			accepted += n
+			if err != nil {
+				return brokerSendError(err, bufferedWriteDisposition(c.writer, bufferedBefore, accepted), protectedSend)
 			}
 
-			if _, err := c.writer.Write(msg); err != nil {
-				return err
+			n, err = c.writer.Write(msg)
+			accepted += n
+			if err != nil {
+				return brokerSendError(err, bufferedWriteDisposition(c.writer, bufferedBefore, accepted), protectedSend)
+			}
+			if c.wireTap != nil {
+				c.wireTap.RecordOutbound(msgID, msg, fields)
 			}
 
 			c.logPacketOutbound(msg)
 
-			return c.writer.Flush()
+			if err := c.writer.Flush(); err != nil {
+				return brokerSendError(err, bufferedWriteDisposition(c.writer, bufferedBefore, accepted), protectedSend)
+			}
+			return nil
 		})
-	})
+	}, maxRetries)
+	// SubmitWithRetriesContext has its own completion deadline. Cancel its
+	// child before returning so a queued dispatch cannot later reach the wire.
+	cancel()
+	if !protectedSend || err == nil {
+		return err
+	}
+	if _, ok := errors.AsType[*SendDispositionError](err); ok {
+		return err
+	}
+	// A limiter-level return after dispatch began is conservatively uncertain:
+	// the transport callback may still be finishing. The caller must poison or
+	// reconcile. A request that never entered is proven pre-wire because the
+	// canceled child is rechecked under transportMu.
+	if !dispatchEntered.Load() {
+		return brokerSendError(err, SendDispositionDefinitelyUnsent, true)
+	}
+	return brokerSendError(err, SendDispositionUnknown, true)
+}
+
+// bufferedWriteDisposition distinguishes a writer refusal that accepted no
+// frame byte from a partial/direct write. bufio retains unwritten bytes after a
+// failed flush, so all newly accepted bytes still buffered proves zero wire
+// progress. Pre-existing buffered data makes the boundary conservative.
+func bufferedWriteDisposition(writer *bufio.Writer, bufferedBefore, accepted int) SendDisposition {
+	if writer == nil || bufferedBefore != 0 {
+		return SendDispositionMayHaveWritten
+	}
+	if accepted >= 0 && writer.Buffered() >= accepted {
+		return SendDispositionDefinitelyUnsent
+	}
+	return SendDispositionMayHaveWritten
 }
 
 func (c *Connection) logOutgoingMessageHex(msg []byte) {
@@ -3282,6 +3930,13 @@ func (c *Connection) signalHandshakeReady() {
 }
 
 func (c *Connection) waitForHandshakeReady() error {
+	return c.waitForHandshakeReadyContext(context.Background())
+}
+
+func (c *Connection) waitForHandshakeReadyContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	c.handshakeMu.RLock()
 	ch := c.handshakeReady
 	c.handshakeMu.RUnlock()
@@ -3303,6 +3958,8 @@ func (c *Connection) waitForHandshakeReady() error {
 	select {
 	case <-ch:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-c.ctx.Done():
 		return fmt.Errorf("connection context closed before handshake ready: %w", c.ctx.Err())
 	case <-time.After(timeout):
@@ -3512,6 +4169,37 @@ func (c *Connection) snapshotHandlers(msgID int) []func([]string) {
 	return fns
 }
 
+// dispatchHandlers invokes a stable copy of both legacy and epoch-aware
+// handlers. Epoch-aware handlers receive the socket generation that read the
+// frame, including when an early message is buffered and replayed later.
+func (c *Connection) dispatchHandlers(msgID int, fields []string, epoch uint64) bool {
+	c.handlersMu.RLock()
+	entries := append([]handlerEntry(nil), c.msgHandlers[msgID]...)
+	c.handlersMu.RUnlock()
+	for _, entry := range entries {
+		if entry.fnAtEpoch != nil {
+			entry.fnAtEpoch(fields, epoch)
+		} else if entry.fn != nil {
+			entry.fn(fields)
+		}
+	}
+	return len(entries) > 0
+}
+
+func (c *Connection) dispatchEpochHandlers(msgID int, fields []string, epoch uint64) bool {
+	c.handlersMu.RLock()
+	entries := append([]handlerEntry(nil), c.msgHandlers[msgID]...)
+	c.handlersMu.RUnlock()
+	called := false
+	for _, entry := range entries {
+		if entry.fnAtEpoch != nil {
+			entry.fnAtEpoch(fields, epoch)
+			called = true
+		}
+	}
+	return called
+}
+
 // UnregisterHandler removes a previously registered handler for a message type.
 func (c *Connection) UnregisterHandler(msgID int, handlerID uint64) {
 	c.handlersMu.Lock()
@@ -3540,7 +4228,10 @@ func (c *Connection) RequestContractDetails(contract Contract) (int, error) {
 		return 0, fmt.Errorf("not connected to IBKR")
 	}
 
-	reqID := c.GetNextRequestID()
+	reqID, err := c.nextRequestID()
+	if err != nil {
+		return 0, err
+	}
 	if err := c.sendContractDetailsRequest(contract, reqID); err != nil {
 		return 0, err
 	}
@@ -3548,6 +4239,14 @@ func (c *Connection) RequestContractDetails(contract Contract) (int, error) {
 }
 
 func (c *Connection) sendContractDetailsRequest(contract Contract, reqID int) error {
+	return c.sendMessage(c.contractDetailsRequestMessage(contract, reqID))
+}
+
+func (c *Connection) sendContractDetailsRequestForEpoch(ctx context.Context, contract Contract, reqID int, epoch uint64) error {
+	return c.sendMessageWithTypeContextForEpoch(ctx, c.contractDetailsRequestMessage(contract, reqID), RequestTypeGeneral, epoch, true)
+}
+
+func (c *Connection) contractDetailsRequestMessage(contract Contract, reqID int) []byte {
 	c.registerReqAlias(reqID, contract)
 
 	// Handle strike field: IB API expects empty string (not "0") for non-option contracts
@@ -3573,25 +4272,34 @@ func (c *Connection) sendContractDetailsRequest(contract Contract, reqID int) er
 	localSymbol := contract.LocalSymbol
 	tradingClass := contract.TradingClass
 
+	// Discovery requests need SMART defaults. An exact positive-ConID lookup
+	// deliberately does not: an empty executable route is the fact being
+	// resolved, and fabricating SMART would turn route acquisition into an
+	// alternate-routing request.
+	exchangeField := contract.Exchange
+	if contract.ConID == 0 {
+		exchangeField = ifEmpty(exchangeField, "SMART")
+	}
+
 	fields := []any{
 		reqContractData,
 		8,     // version
 		reqID, // request id
-		0,     // contractId (0 when using fields)
+		contract.ConID,
 		contract.Symbol,
 		contract.SecType,
 		contract.Expiry,
 		strikeField, // use empty string for stocks, actual value for options
 		contract.Right,
 		multiplierField,
-		ifEmpty(contract.Exchange, "SMART"),
+		exchangeField,
 		primaryField,
 		ifEmpty(contract.Currency, "USD"),
 		localSymbol,
 		tradingClass,
-		0,  // includeExpired = false
-		"", // secIdType
-		"", // secId
+		0, // includeExpired = false
+		contract.SecIDType,
+		contract.SecID,
 		"", // issuerId (required for server >= 147, added for server 203)
 	}
 
@@ -3604,7 +4312,7 @@ func (c *Connection) sendContractDetailsRequest(contract Contract, reqID int) er
 			c.config.ClientID, contract.Symbol, reqID, localSymbol, tradingClass, c.decodeMessage(msg))
 	}
 
-	return c.sendMessage(msg)
+	return msg
 }
 
 func ifEmpty(s, d string) string {
@@ -3634,6 +4342,11 @@ func (c *Connection) SetMarketDataType(dataType int) error {
 	return c.sendMessage(msg)
 }
 
+func (c *Connection) setMarketDataTypeAtEpoch(dataType int, epoch uint64) error {
+	msg := c.encodeMsg(reqMarketDataType, 1, dataType)
+	return c.sendMessageWithTypeContextForEpochGuarded(context.Background(), msg, RequestTypeGeneral, epoch, true, nil)
+}
+
 // MarketDataType returns the current market data type for a reqID.
 // 1=RealTime, 2=Frozen, 3=Delayed, 4=DelayedFrozen. 0 if unknown.
 func (c *Connection) MarketDataType(reqID int) int {
@@ -3645,15 +4358,52 @@ func (c *Connection) MarketDataType(reqID int) int {
 	return 0
 }
 
+func (c *Connection) recordHeartbeatAtEpoch(epoch uint64, heartbeatNano int64) bool {
+	if c == nil || heartbeatNano <= 0 {
+		return false
+	}
+	c.inboundEpochMu.RLock()
+	defer c.inboundEpochMu.RUnlock()
+	if epoch != c.BrokerSessionEpoch() {
+		return false
+	}
+	c.lastHeartbeatNano.Store(heartbeatNano)
+	return true
+}
+
+func (c *Connection) processMarketDataTypeAtEpoch(fields []string, epoch uint64) bool {
+	if len(fields) < 4 {
+		return false
+	}
+	rid, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return false
+	}
+	dt, err := strconv.Atoi(fields[3])
+	if err != nil {
+		return false
+	}
+	c.inboundEpochMu.RLock()
+	defer c.inboundEpochMu.RUnlock()
+	if epoch != c.BrokerSessionEpoch() {
+		return false
+	}
+	c.mktDataTypeMu.Lock()
+	c.mktDataType[rid] = dt
+	c.mktDataTypeMu.Unlock()
+	ibkrLogger.Debugf("[cid=%d] MarketDataType notice: reqID=%d, type=%d", c.config.ClientID, rid, dt)
+	return true
+}
+
 // PlaceOrder sends a placeOrder request using the v45+ wire format. The default
 // build returns [ErrTradingDisabled]; the "trading" build enables the raw write
 // but does not grant application submit authority. A nil error means the frame
 // was written, not that IBKR accepted or finalized the order.
 func (c *Connection) PlaceOrder(order *IBKROrder) error {
 	if !tradingEnabled {
-		return ErrTradingDisabled
+		return definitelyUnsent(ErrTradingDisabled)
 	}
-	return c.placeOrder(order)
+	return c.placeOrder(context.Background(), order, nil, nil)
 }
 
 // PlacePaperOrder validates gate against the connection and sends a paper
@@ -3662,24 +4412,45 @@ func (c *Connection) PlaceOrder(order *IBKROrder) error {
 // not that IBKR accepted or finalized the order.
 func (c *Connection) PlacePaperOrder(gate PaperOrderGate, order *IBKROrder) error {
 	if err := gate.validateConnection(c); err != nil {
-		return err
+		return definitelyUnsent(err)
 	}
-	return c.placeOrder(order)
+	return c.placeOrder(context.Background(), order, nil, nil)
 }
 
-func (c *Connection) placeOrder(order *IBKROrder) error {
+func (c *Connection) placePaperOrderForEpochGuarded(ctx context.Context, gate PaperOrderGate, order *IBKROrder, epoch uint64, guard func() error) error {
+	if err := gate.validateConnection(c); err != nil {
+		return definitelyUnsent(err)
+	}
+	return c.placeOrder(ctx, order, &epoch, guard)
+}
+
+func (c *Connection) placeOrderForEpochGuarded(ctx context.Context, order *IBKROrder, epoch uint64, guard func() error) error {
+	if !tradingEnabled {
+		return definitelyUnsent(ErrTradingDisabled)
+	}
+	return c.placeOrder(ctx, order, &epoch, guard)
+}
+
+func (c *Connection) placeOrder(ctx context.Context, order *IBKROrder, expectedEpoch *uint64, guard func() error) error {
+	if ctx == nil {
+		return definitelyUnsent(fmt.Errorf("broker order context is nil"))
+	}
+	if err := ctx.Err(); err != nil {
+		return definitelyUnsent(err)
+	}
 	if order == nil {
-		return fmt.Errorf("order is nil")
+		return definitelyUnsent(fmt.Errorf("order is nil"))
 	}
 	if !c.IsConnected() {
-		return fmt.Errorf("not connected to IBKR")
+		return definitelyUnsent(fmt.Errorf("not connected to IBKR"))
 	}
 	if c.serverVersion > 0 && c.serverVersion < minServerVerProtoBufPlaceOrder {
-		return fmt.Errorf("server version %d is too old for placeOrder v45+ encoding; upgrade TWS/IB Gateway", c.serverVersion)
+		return definitelyUnsent(fmt.Errorf("server version %d is too old for placeOrder v45+ encoding; upgrade TWS/IB Gateway", c.serverVersion))
 	}
 
-	if err := preparePlaceOrder(order, c); err != nil {
-		return err
+	epoch, err := preparePlaceOrder(order, c, expectedEpoch)
+	if err != nil {
+		return definitelyUnsent(err)
 	}
 	if !order.Transmit {
 		order.Transmit = true
@@ -3687,7 +4458,7 @@ func (c *Connection) placeOrder(order *IBKROrder) error {
 	order.WhatIf = false
 	c.clearWhatIfOrderID(order.OrderID)
 
-	if err := c.sendPlaceOrderFrame(order); err != nil {
+	if err := c.sendPlaceOrderFrameGuarded(ctx, order, epoch, guard); err != nil {
 		return err
 	}
 
@@ -3713,9 +4484,13 @@ func (c *Connection) placeOrder(order *IBKROrder) error {
 // the frame was written, not that IBKR confirmed cancellation.
 func (c *Connection) CancelOrder(orderID int) error {
 	if !tradingEnabled {
-		return ErrTradingDisabled
+		return definitelyUnsent(ErrTradingDisabled)
 	}
-	return c.cancelOrder(orderID)
+	epoch, err := c.captureBrokerInstructionEpoch()
+	if err != nil {
+		return definitelyUnsent(err)
+	}
+	return c.cancelOrderForEpoch(orderID, epoch)
 }
 
 // CancelPaperOrder validates gate against the connection and sends a paper
@@ -3724,34 +4499,44 @@ func (c *Connection) CancelOrder(orderID int) error {
 // not that IBKR confirmed cancellation.
 func (c *Connection) CancelPaperOrder(gate PaperOrderGate, orderID int) error {
 	if err := gate.validateConnection(c); err != nil {
-		return err
+		return definitelyUnsent(err)
 	}
-	return c.cancelOrder(orderID)
+	epoch, err := c.captureBrokerInstructionEpoch()
+	if err != nil {
+		return definitelyUnsent(err)
+	}
+	return c.cancelOrderForEpoch(orderID, epoch)
 }
 
-func (c *Connection) cancelOrder(orderID int) error {
+func (c *Connection) cancelPaperOrderForEpochGuarded(ctx context.Context, gate PaperOrderGate, orderID int, epoch uint64, guard func() error) error {
+	if err := gate.validateConnection(c); err != nil {
+		return definitelyUnsent(err)
+	}
+	return c.cancelOrderForEpochGuarded(ctx, orderID, epoch, guard)
+}
+
+func (c *Connection) cancelOrderForEpoch(orderID int, epoch uint64) error {
+	return c.cancelOrderForEpochGuarded(context.Background(), orderID, epoch, nil)
+}
+
+func (c *Connection) cancelOrderForEpochGuarded(ctx context.Context, orderID int, epoch uint64, guard func() error) error {
+	if ctx == nil {
+		return definitelyUnsent(fmt.Errorf("broker cancel context is nil"))
+	}
+	if err := ctx.Err(); err != nil {
+		return definitelyUnsent(err)
+	}
 	if !c.IsConnected() {
-		return fmt.Errorf("not connected to IBKR")
+		return definitelyUnsent(fmt.Errorf("not connected to IBKR"))
 	}
 
 	msg, err := c.encodeCancelOrderMessage(orderID)
 	if err != nil {
+		return definitelyUnsent(err)
+	}
+	if err := c.sendMessageWithTypeContextForEpochGuarded(ctx, msg, RequestTypeOrder, epoch, true, guard); err != nil {
 		return err
 	}
-	if err := c.sendMessageWithType(msg, RequestTypeOrder); err != nil {
-		return err
-	}
-
-	c.ordersMu.Lock()
-	if ord, ok := c.openOrders[orderID]; ok {
-		ord.Status = "Cancelled"
-		now := time.Now()
-		if ord.CancelledTime == nil {
-			ord.CancelledTime = &now
-		}
-		delete(c.openOrders, orderID)
-	}
-	c.ordersMu.Unlock()
 
 	return nil
 }
@@ -3946,16 +4731,260 @@ func setBoolField(fields []string, idx int, value bool) {
 	}
 }
 
-// GetNextOrderID reserves the next broker order ID learned from nextValidId.
+// GetNextOrderID reserves the next broker order ID after TWS has supplied a
+// nextValidId for the current socket. Request and order IDs share one local
+// monotonic namespace because msgErrMsg/msg-204 multiplex both kinds through
+// one integer field. Zero means nextValidId has not arrived or the signed
+// 32-bit broker namespace is exhausted; callers must not send an order then.
 func (c *Connection) GetNextOrderID() int {
+	id, _, err := c.reserveNextOrderID()
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+// reserveNextOrderID returns both the reserved ID and the exact socket epoch
+// that owned the reservation. The pair is read atomically with readiness so a
+// caller can bind any later claim and write to the same socket generation.
+func (c *Connection) reserveNextOrderID() (int, uint64, error) {
 	c.reqIDMu.Lock()
 	defer c.reqIDMu.Unlock()
-	if c.nextOrderID <= 0 {
-		c.nextOrderID = 1
+	return c.reserveNextOrderIDLocked()
+}
+
+func (c *Connection) reserveNextOrderIDForEpoch(expectedEpoch uint64) (int, uint64, error) {
+	c.reqIDMu.Lock()
+	defer c.reqIDMu.Unlock()
+	if epoch := c.brokerSessionEpoch.Load(); epoch != expectedEpoch {
+		return 0, epoch, fmt.Errorf("%w: broker socket generation changed before order ID reservation", ErrBrokerIDNamespaceConflict)
 	}
-	id := c.nextOrderID
-	c.nextOrderID++
-	return id
+	return c.reserveNextOrderIDLocked()
+}
+
+func (c *Connection) reserveNextOrderIDLocked() (int, uint64, error) {
+	epoch := c.brokerSessionEpoch.Load()
+	if !c.haveNextValidID || c.brokerIDExhausted {
+		return 0, epoch, fmt.Errorf("broker order ID unavailable before nextValidId or after namespace exhaustion")
+	}
+	id := max(c.nextOrderID, c.reqIDSeq)
+	if id <= 0 {
+		id = 1
+	}
+	if id > maxProtoInt32 {
+		c.brokerIDExhausted = true
+		return 0, epoch, fmt.Errorf("broker order ID unavailable before nextValidId or after namespace exhaustion")
+	}
+	if id == maxProtoInt32 {
+		c.brokerIDExhausted = true
+	} else {
+		c.nextOrderID = id + 1
+	}
+	c.reservedOrderIDs[id] = struct{}{}
+	return id, epoch, nil
+}
+
+func (c *Connection) observeNextValidOrderID(id int) {
+	if id <= 0 || id > maxProtoInt32 {
+		return
+	}
+	c.reqIDMu.Lock()
+	c.observeNextValidOrderIDLocked(id)
+	c.reqIDMu.Unlock()
+}
+
+func (c *Connection) observeNextValidOrderIDAtEpoch(id int, epoch uint64) {
+	if id <= 0 || id > maxProtoInt32 {
+		return
+	}
+	c.reqIDMu.Lock()
+	defer c.reqIDMu.Unlock()
+	if c.brokerSessionEpoch.Load() != epoch {
+		return
+	}
+	c.observeNextValidOrderIDLocked(id)
+}
+
+func (c *Connection) observeNextValidOrderIDLocked(id int) {
+	c.haveNextValidID = true
+	if id > c.nextOrderID {
+		c.nextOrderID = id
+	}
+	if c.reqIDSeq > c.nextOrderID {
+		c.nextOrderID = c.reqIDSeq
+	}
+}
+
+func (c *Connection) resetOrderIDReadiness() {
+	c.inboundEpochMu.Lock()
+	defer c.inboundEpochMu.Unlock()
+	// The canonical order is inbound generation then evidence. msgErr handling
+	// holds the inbound read side while its side effects may take evidence read
+	// locks; reversing these here creates a writer-preference deadlock when an
+	// evidence writer is already queued.
+	unlockEvidence := c.lockEvidenceChange()
+	defer unlockEvidence()
+	c.reqIDMu.Lock()
+	// Epoch, readiness, and reservation provenance are one state transition.
+	// Claims holding reqIDMu see either the complete old epoch or the complete
+	// reset epoch, never a mixed combination.
+	c.brokerSessionEpoch.Add(1)
+	c.haveNextValidID = false
+	clear(c.reservedOrderIDs)
+	clear(c.reservedRequestIDs)
+	c.reqIDMu.Unlock()
+	c.invalidateUnstampedObservationAuthority()
+	c.mktDataTypeMu.Lock()
+	clear(c.mktDataType)
+	c.mktDataTypeMu.Unlock()
+	c.lastHeartbeatNano.Store(0)
+}
+
+// invalidateUnstampedObservationAuthority clears every connection-local
+// account, portfolio, quote-routing, and subscription-budget observation that
+// lacks an exact socket epoch in its public contract. A reused AutoReconnect
+// Connection therefore starts the successor session incomplete instead of
+// briefly publishing the prior account/portfolio as current.
+//
+// Caller owns inboundEpochMu.W and the Connector evidence read lease.
+func (c *Connection) invalidateUnstampedObservationAuthority() {
+	c.portfolioProjectionMu.Lock()
+	c.positionsMu.Lock()
+	clear(c.positions)
+	clear(c.positionsSnapshot)
+	clear(c.positionsSnapshotResult)
+	c.positionsSnapshotActive = false
+	c.positionsMu.Unlock()
+	c.portfolioStaging = nil
+	c.portfolioStagingActive = false
+	c.portfolioHealthMu.Lock()
+	generation := c.portfolioHealth.ProjectionGeneration + 1
+	c.portfolioHealth = PortfolioStreamHealth{ProjectionGeneration: generation}
+	c.portfolioHealthMu.Unlock()
+	c.portfolioProjectionMu.Unlock()
+
+	c.accountMu.Lock()
+	c.account = ""
+	clear(c.accountSummary)
+	clear(c.summarySnapshots)
+	c.accountMu.Unlock()
+
+	c.aliasMu.Lock()
+	clear(c.reqAlias)
+	c.aliasMu.Unlock()
+	c.optionContractMu.Lock()
+	clear(c.optionContractCache)
+	c.optionContractMu.Unlock()
+	c.competingMu.Lock()
+	c.competingLiveSession = false
+	c.competingMu.Unlock()
+
+	c.marketDataSlotsMu.Lock()
+	heldSlots := len(c.marketDataSlots)
+	clear(c.marketDataSlots)
+	c.marketDataSlotsMu.Unlock()
+	if c.rateLimiter != nil {
+		for range heldSlots {
+			c.rateLimiter.ReleaseMarketDataSlot()
+		}
+	}
+}
+
+// captureBrokerInstructionEpoch binds an instruction without an allocator
+// claim (currently cancelOrder) to the exact ready socket generation at the
+// authority handoff. The returned epoch must be carried to the wire check.
+func (c *Connection) captureBrokerInstructionEpoch() (uint64, error) {
+	if c == nil {
+		return 0, fmt.Errorf("no active connection")
+	}
+	c.reqIDMu.Lock()
+	defer c.reqIDMu.Unlock()
+	epoch := c.brokerSessionEpoch.Load()
+	if !c.haveNextValidID {
+		return epoch, fmt.Errorf("broker id namespace not ready for instruction send")
+	}
+	return epoch, nil
+}
+
+// BrokerSessionEpoch identifies the current socket generation. It advances
+// before each connection attempt so request collectors can reject callbacks
+// from an older socket even when the Connection object itself is reused.
+func (c *Connection) BrokerSessionEpoch() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.brokerSessionEpoch.Load()
+}
+
+// BrokerIDNamespaceReady reports whether nextValidId established the shared
+// request/order correlation frontier for the current socket.
+func (c *Connection) BrokerIDNamespaceReady() bool {
+	if c == nil {
+		return false
+	}
+	c.reqIDMu.Lock()
+	ready := c.haveNextValidID && !c.brokerIDExhausted
+	c.reqIDMu.Unlock()
+	return ready
+}
+
+func (c *Connection) setOpenOrderSnapshotObserver(observer func(msgID int, fields []string, epoch uint64)) {
+	c.openOrderObserverMu.Lock()
+	c.openOrderObserver = observer
+	c.openOrderObserverMu.Unlock()
+}
+
+func (c *Connection) observeInboundOrderIDAtEpoch(id int, expectedEpoch uint64) {
+	if id <= 0 || id > maxProtoInt32 {
+		return
+	}
+	c.reqIDMu.Lock()
+	if c.brokerSessionEpoch.Load() != expectedEpoch {
+		c.reqIDMu.Unlock()
+		return
+	}
+	c.advanceBrokerIDPastLocked(id)
+	c.reqIDMu.Unlock()
+}
+
+func (c *Connection) advanceBrokerIDPastLocked(id int) {
+	if id <= 0 {
+		return
+	}
+	delete(c.reservedOrderIDs, id)
+	delete(c.reservedRequestIDs, id)
+	if id >= maxProtoInt32 {
+		c.brokerIDExhausted = true
+		return
+	}
+	next := id + 1
+	if c.reqIDSeq < next {
+		c.reqIDSeq = next
+	}
+	if c.nextOrderID < next {
+		c.nextOrderID = next
+	}
+}
+
+func inboundOrderID(msgID int, fields []string) (int, bool) {
+	if msgID != msgOpenOrder && msgID != msgOrderStatus {
+		return 0, false
+	}
+	var raw string
+	if len(fields) > 1 && fields[1] == "protobuf" {
+		raw = summaryFieldValue(fields, "orderId=")
+	} else {
+		start := 1
+		if len(fields) > 2 && isNumeric(fields[1]) && isNumeric(fields[2]) {
+			start = 2
+		}
+		if len(fields) <= start {
+			return 0, false
+		}
+		raw = fields[start]
+	}
+	id, err := strconv.Atoi(strings.TrimSpace(raw))
+	return id, err == nil && id > 0 && id <= maxProtoInt32
 }
 
 func parseNextValidOrderID(fields []string) (int, bool) {
@@ -4065,7 +5094,10 @@ func (c *Connection) requestMarketDataWithContract(ctx context.Context, contract
 		return 0, err
 	}
 
-	reqID := c.GetNextRequestID()
+	reqID, err := c.nextRequestID()
+	if err != nil {
+		return 0, err
+	}
 
 	// Copy the contract to avoid caller mutations affecting queued send.
 	contractCopy := contract
@@ -4093,6 +5125,56 @@ func (c *Connection) requestMarketDataWithContract(ctx context.Context, contract
 		return 0, fmt.Errorf("failed to request market data: %w", err)
 	}
 
+	return reqID, nil
+}
+
+// requestMarketDataWithContractForEpoch is the exact-socket form used by
+// broker-write previews. It binds both request-ID allocation and the final
+// transport check to expectedEpoch, so a queued quote request never crosses a
+// reconnect onto the successor socket.
+func (c *Connection) requestMarketDataWithContractForEpoch(ctx context.Context, contract Contract, genericTicks string, snapshot bool, regulatorySnap bool, expectedEpoch uint64, beforeSend func(reqID int) func()) (int, error) {
+	if !c.IsConnected() {
+		return 0, fmt.Errorf("not connected to IBKR")
+	}
+	if err := c.requireServerVersion("RequestMarketData"); err != nil {
+		return 0, err
+	}
+	if contract.ConID <= 0 {
+		return 0, fmt.Errorf("exact market-data contract requires positive ConID")
+	}
+	if contract.Symbol == "" {
+		return 0, fmt.Errorf("contract symbol is required for market data")
+	}
+	if contract.Currency == "" {
+		contract.Currency = "USD"
+	}
+	if err := ensureASCII("symbol", contract.Symbol); err != nil {
+		return 0, err
+	}
+	reqID, epoch, err := c.reserveNextRequestIDForEpoch(expectedEpoch)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := c.claimRequestIDForEpoch(reqID, epoch); err != nil {
+		return 0, err
+	}
+	contractCopy := contract
+	c.registerReqAlias(reqID, contractCopy)
+	msg := c.encodeMsg(c.buildReqMktDataFields(contractCopy, reqID, genericTicks, snapshot, regulatorySnap)...)
+	if err := c.acquireMarketDataSlot(ctx, reqID); err != nil {
+		return 0, fmt.Errorf("market data subscription limit reached: %w", err)
+	}
+	var cleanup func()
+	if beforeSend != nil {
+		cleanup = beforeSend(reqID)
+	}
+	if err := c.sendMessageWithTypeContextForEpoch(ctx, msg, RequestTypeMarketData, expectedEpoch, true); err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		c.releaseMarketDataSlotAtEpoch(reqID, expectedEpoch)
+		return 0, fmt.Errorf("failed to request exact market data: %w", err)
+	}
 	return reqID, nil
 }
 
@@ -4231,6 +5313,14 @@ func normalizeResolvedOptionMarketDataContract(contract *Contract) {
 // list past whatToShow mirrors the reqHistoricalData wire message
 // field-for-field (useRTH, includeExpired, formatDate, keepUpToDate).
 func (c *Connection) RequestHistoricalData(ctx context.Context, contract Contract, endDateTime, duration, barSize, whatToShow string, useRTH bool, includeExpired bool, formatDate int, keepUpToDate bool, beforeSend func(int)) (int, error) {
+	return c.requestHistoricalDataWithIDGuard(ctx, contract, endDateTime, duration, barSize, whatToShow, useRTH, includeExpired, formatDate, keepUpToDate, nil, beforeSend)
+}
+
+// requestHistoricalDataWithIDGuard is the narrow internal form used when a
+// caller needs an additional request-ID ownership guard around the shared
+// monotonic broker namespace. The guard is bounded; it never guesses from
+// broker prose or silently sends an id that the caller rejected.
+func (c *Connection) requestHistoricalDataWithIDGuard(ctx context.Context, contract Contract, endDateTime, duration, barSize, whatToShow string, useRTH bool, includeExpired bool, formatDate int, keepUpToDate bool, requestIDAllowed func(int) bool, beforeSend func(int)) (int, error) {
 	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected to IBKR")
 	}
@@ -4250,7 +5340,10 @@ func (c *Connection) RequestHistoricalData(ctx context.Context, contract Contrac
 
 	duration = normalizeHistoricalDuration(duration)
 
-	reqID := c.GetNextRequestID()
+	reqID, err := c.reserveRequestID(requestIDAllowed)
+	if err != nil {
+		return 0, err
+	}
 
 	multiplier := ""
 	if contract.Multiplier != 0 {
@@ -4354,6 +5447,9 @@ func normalizeHistoricalDuration(duration string) string {
 // CancelHistoricalData cancels an active historical request and honors ctx
 // while waiting for rate-limiter admission.
 func (c *Connection) CancelHistoricalData(ctx context.Context, reqID int) error {
+	if reqID <= 0 || reqID > maxProtoInt32 {
+		return fmt.Errorf("historical request ID must be a positive signed 32-bit integer")
+	}
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
@@ -4377,7 +5473,10 @@ func (c *Connection) RequestSecDefOptParams(underlyingSymbol, futFopExchange, un
 		return 0, fmt.Errorf("reqSecDefOptParams: underlying conID required")
 	}
 
-	reqID := c.GetNextRequestID()
+	reqID, err := c.nextRequestID()
+	if err != nil {
+		return 0, err
+	}
 
 	msg := c.encodeMsg(
 		reqSecDefOptParams,
@@ -4416,7 +5515,10 @@ func (c *Connection) RequestMarketDataWithPrimary(ctx context.Context, symbol st
 		return 0, err
 	}
 
-	reqID := c.GetNextRequestID()
+	reqID, err := c.nextRequestID()
+	if err != nil {
+		return 0, err
+	}
 
 	// Determine security type and base exchange based on symbol
 	secType, exchange, currency, primaryHint := classifySymbol(symbol)
@@ -4470,7 +5572,10 @@ func (c *Connection) RequestOptionsMarketData(ctx context.Context, symbol string
 		return 0, err
 	}
 
-	reqID := c.GetNextRequestID()
+	reqID, err := c.nextRequestID()
+	if err != nil {
+		return 0, err
+	}
 
 	secType := "OPT"
 	exchange := "SMART"
@@ -4648,7 +5753,10 @@ func (c *Connection) fetchContractDetailFirst(ctx context.Context, contract Cont
 	}
 	detailsCh := make(chan ContractDetailsLite, 1)
 	serverVersion := c.serverVersion
-	reqID := c.GetNextRequestID()
+	reqID, err := c.nextRequestID()
+	if err != nil {
+		return nil, err
+	}
 	dataHandlerID := c.RegisterHandler(msgContractData, func(fields []string) {
 		if lite, ok := parseContractDetailsLite(fields, reqID, serverVersion); ok {
 			select {
@@ -4683,7 +5791,10 @@ func (c *Connection) fetchOptionContractDetail(ctx context.Context, contract Con
 	doneCh := make(chan struct{})
 
 	serverVersion := c.serverVersion
-	reqID := c.GetNextRequestID()
+	reqID, err := c.nextRequestID()
+	if err != nil {
+		return nil, err
+	}
 
 	dataHandlerID := c.RegisterHandler(msgContractData, func(fields []string) {
 		if lite, ok := parseContractDetailsLite(fields, reqID, serverVersion); ok {
@@ -4706,7 +5817,7 @@ func (c *Connection) fetchOptionContractDetail(ctx context.Context, contract Con
 		}
 	})
 
-	err := c.sendContractDetailsRequest(contract, reqID)
+	err = c.sendContractDetailsRequest(contract, reqID)
 	if err != nil {
 		c.UnregisterHandler(msgContractData, dataHandlerID)
 		c.UnregisterHandler(msgContractDataEnd, endHandlerID)
@@ -4895,7 +6006,10 @@ func (c *Connection) prewarmOneExpiryAttempt(ctx context.Context, contract Contr
 	doneCh := make(chan struct{})
 	var dropped atomic.Int32
 	serverVersion := c.serverVersion
-	reqID := c.GetNextRequestID()
+	reqID, err := c.nextRequestID()
+	if err != nil {
+		return 0, 0, err
+	}
 
 	dataHandlerID := c.RegisterHandler(msgContractData, func(fields []string) {
 		if lite, ok := parseContractDetailsLite(fields, reqID, serverVersion); ok {
@@ -4985,6 +6099,9 @@ func (c *Connection) prewarmOneExpiryAttempt(ctx context.Context, contract Contr
 
 // CancelMarketData cancels the market-data subscription identified by reqID.
 func (c *Connection) CancelMarketData(reqID int) error {
+	if reqID <= 0 || reqID > maxProtoInt32 {
+		return fmt.Errorf("market-data request ID must be a positive signed 32-bit integer")
+	}
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
@@ -5000,6 +6117,16 @@ func (c *Connection) CancelMarketData(reqID int) error {
 	return err
 }
 
+func (c *Connection) cancelMarketDataForEpoch(ctx context.Context, reqID int, epoch uint64) error {
+	if reqID <= 0 || reqID > maxProtoInt32 {
+		return fmt.Errorf("market-data request ID must be a positive signed 32-bit integer")
+	}
+	msg := c.encodeMsg(cancelMktData, 1, reqID)
+	err := c.sendMessageWithTypeContextForEpoch(ctx, msg, RequestTypeMarketData, epoch, true)
+	c.releaseMarketDataSlotAtEpoch(reqID, epoch)
+	return err
+}
+
 // RequestPositions requests current positions via the one-shot reqPositions
 // wire path. Library-callable; the daemon prefers the streaming portfolio
 // path through Connector.CachedPositions backed by RequestAccountUpdates
@@ -5011,10 +6138,14 @@ func (c *Connection) RequestPositions() error {
 		return fmt.Errorf("not connected to IBKR")
 	}
 
-	// Clear existing positions before requesting new ones
-	c.positionsMu.Lock()
-	c.positions = make(map[string]*RawPosition)
-	c.positionsMu.Unlock()
+	// Begin an isolated generation. The streaming projection and its current
+	// health remain untouched while the singleton reqPositions response is
+	// empty or partial.
+	c.portfolioProjectionMu.Lock()
+	c.positionsSnapshot = make(map[string]*RawPosition)
+	c.positionsSnapshotResult = nil
+	c.positionsSnapshotActive = true
+	c.portfolioProjectionMu.Unlock()
 
 	// Clear the end channel to ensure we wait for new data
 	select {
@@ -5038,26 +6169,47 @@ func (c *Connection) WaitForPositionsEnd(timeout time.Duration) error {
 	}
 }
 
+func (c *Connection) completePositionsSnapshot() {
+	c.portfolioProjectionMu.Lock()
+	defer c.portfolioProjectionMu.Unlock()
+	if !c.positionsSnapshotActive {
+		return
+	}
+	c.positionsSnapshotResult = make(map[string]*RawPosition, len(c.positionsSnapshot))
+	maps.Copy(c.positionsSnapshotResult, c.positionsSnapshot)
+	c.positionsSnapshot = nil
+	c.positionsSnapshotActive = false
+}
+
 // summarySnapshot accumulates the account-summary rows for one
 // reqAccountSummary request, keyed like the shared accountSummary map
 // (`<tag>` or `<tag>_<CCY>`). done is closed when the gateway emits
 // accountSummaryEnd for the request's reqID.
 type summarySnapshot struct {
-	values map[string]string
-	done   chan struct{}
+	values          map[string]string
+	done            chan struct{}
+	expectedAccount string
+	observedRows    int
+	scopeConflict   bool
+}
+
+type summarySnapshotResult struct {
+	values        map[string]string
+	scopeConflict bool
 }
 
 // registerSummarySnapshot opens a per-request accumulation for reqID.
 // Must run before the request hits the wire so no row can be missed.
-func (c *Connection) registerSummarySnapshot(reqID int) {
+func (c *Connection) registerSummarySnapshot(reqID int, expectedAccount string) {
 	c.accountMu.Lock()
 	defer c.accountMu.Unlock()
 	if c.summarySnapshots == nil {
 		c.summarySnapshots = make(map[int]*summarySnapshot)
 	}
 	c.summarySnapshots[reqID] = &summarySnapshot{
-		values: make(map[string]string),
-		done:   make(chan struct{}),
+		values:          make(map[string]string),
+		done:            make(chan struct{}),
+		expectedAccount: strings.TrimSpace(expectedAccount),
 	}
 }
 
@@ -5065,15 +6217,15 @@ func (c *Connection) registerSummarySnapshot(reqID int) {
 // returns whatever rows arrived. Safe against late rows: the row handler
 // looks the snapshot up under the same mutex, so after removal further
 // rows only touch the shared map.
-func (c *Connection) dropSummarySnapshot(reqID int) map[string]string {
+func (c *Connection) dropSummarySnapshot(reqID int) summarySnapshotResult {
 	c.accountMu.Lock()
 	defer c.accountMu.Unlock()
 	snap := c.summarySnapshots[reqID]
 	delete(c.summarySnapshots, reqID)
 	if snap == nil {
-		return nil
+		return summarySnapshotResult{}
 	}
-	return snap.values
+	return summarySnapshotResult{values: snap.values, scopeConflict: snap.scopeConflict}
 }
 
 // signalSummaryEnd closes the per-request done channel for the reqID
@@ -5102,16 +6254,31 @@ func (c *Connection) signalSummaryEnd(fields []string) {
 // RequestAccountSummary starts an account-summary request for reqID. An empty
 // tags string requests the package's default set of account values.
 func (c *Connection) RequestAccountSummary(reqID int, tags string) error {
+	return c.RequestAccountSummaryForAccount(reqID, tags, c.GetAccountCode())
+}
+
+// RequestAccountSummaryForAccount starts one account-bound summary read. TWS
+// still receives group "All" because account codes are not account-group
+// names; every returned row is checked against expectedAccount before it can
+// enter the per-request snapshot.
+func (c *Connection) RequestAccountSummaryForAccount(reqID int, tags, expectedAccount string) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
+	}
+	expectedAccount = strings.TrimSpace(expectedAccount)
+	if !accountCodeConcrete(expectedAccount) {
+		return ErrAccountSummaryScopeConflict
 	}
 
 	// If no tags specified, request all important ones
 	if tags == "" {
 		tags = "NetLiquidation,BuyingPower,TotalCashValue,GrossPositionValue,UnrealizedPnL,RealizedPnL"
 	}
+	if err := c.claimRequestID(reqID); err != nil {
+		return err
+	}
 
-	c.registerSummarySnapshot(reqID)
+	c.registerSummarySnapshot(reqID, expectedAccount)
 
 	// Clear the legacy end channel to ensure we wait for new data
 	select {
@@ -5160,7 +6327,11 @@ func (c *Connection) awaitAccountSummarySnapshot(reqID int, timeout time.Duratio
 	}
 	select {
 	case <-snap.done:
-		return c.dropSummarySnapshot(reqID), nil
+		result := c.dropSummarySnapshot(reqID)
+		if result.scopeConflict {
+			return nil, ErrAccountSummaryScopeConflict
+		}
+		return result.values, nil
 	case <-time.After(timeout):
 		c.dropSummarySnapshot(reqID)
 		return nil, fmt.Errorf("timeout waiting for account summary end")
@@ -5169,6 +6340,9 @@ func (c *Connection) awaitAccountSummarySnapshot(reqID int, timeout time.Duratio
 
 // CancelAccountSummary cancels the account-summary request identified by reqID.
 func (c *Connection) CancelAccountSummary(reqID int) error {
+	if reqID <= 0 || reqID > maxProtoInt32 {
+		return fmt.Errorf("account-summary request ID must be a positive signed 32-bit integer")
+	}
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
@@ -5188,10 +6362,26 @@ func (c *Connection) GetPositions() map[string]*RawPosition {
 	return result
 }
 
+// GetPositionsSnapshot returns the most recent complete reqPositions result.
+// It is isolated from the streaming reqAccountUpdates projection; nil means no
+// one-shot generation has completed in this connection.
+func (c *Connection) GetPositionsSnapshot() map[string]*RawPosition {
+	c.portfolioProjectionMu.RLock()
+	defer c.portfolioProjectionMu.RUnlock()
+	if c.positionsSnapshotResult == nil {
+		return nil
+	}
+	result := make(map[string]*RawPosition, len(c.positionsSnapshotResult))
+	maps.Copy(result, c.positionsSnapshotResult)
+	return result
+}
+
 // GetPositionsWithPortfolioHealth captures the cached portfolio rows and the
 // stream receipts under one lock order. The returned map and health value are
 // detached copies.
 func (c *Connection) GetPositionsWithPortfolioHealth() (map[string]*RawPosition, PortfolioStreamHealth) {
+	c.portfolioProjectionMu.RLock()
+	defer c.portfolioProjectionMu.RUnlock()
 	c.positionsMu.RLock()
 	c.portfolioHealthMu.RLock()
 	result := make(map[string]*RawPosition, len(c.positions))
@@ -5200,6 +6390,20 @@ func (c *Connection) GetPositionsWithPortfolioHealth() (map[string]*RawPosition,
 	c.portfolioHealthMu.RUnlock()
 	c.positionsMu.RUnlock()
 	return result, health
+}
+
+// PortfolioProjectionGeneration returns the current structural portfolio
+// generation. Price, mark, and P&L-only updates do not advance it.
+func (c *Connection) PortfolioProjectionGeneration() uint64 {
+	if c == nil {
+		return 0
+	}
+	c.portfolioProjectionMu.RLock()
+	c.portfolioHealthMu.RLock()
+	generation := c.portfolioHealth.ProjectionGeneration
+	c.portfolioHealthMu.RUnlock()
+	c.portfolioProjectionMu.RUnlock()
+	return generation
 }
 
 // GetPosition returns the cached position for key, if present.
@@ -5250,9 +6454,7 @@ func (c *Connection) RequestAccountUpdates(account string) error {
 	if !accountCodeConcrete(bound) {
 		bound = strings.TrimSpace(c.GetAccountCode())
 	}
-	c.portfolioHealthMu.Lock()
-	c.portfolioHealth = PortfolioStreamHealth{Account: bound, RequestedAt: time.Now().UTC()}
-	c.portfolioHealthMu.Unlock()
+	c.resetPortfolioStreamHealth(bound, time.Now().UTC())
 
 	msg := c.encodeMsg(reqAcctData, "2", "1", account)
 	return c.sendMessage(msg)
@@ -5293,6 +6495,67 @@ func (c *Connection) pauseTransport() {
 	c.transportMu.Lock()
 	c.transportPaused = true
 	c.transportMu.Unlock()
+}
+
+// beginOutboundSession invalidates the prior outbound socket generation and
+// pauses ordinary writers while a new handshake is in progress. The returned
+// generation may be published only by activateOutboundSession.
+func (c *Connection) beginOutboundSession() uint64 {
+	state := c.publishRevokedOutboundSession()
+	if c.transportCond == nil {
+		return state
+	}
+	c.transportMu.Lock()
+	c.transportPaused = true
+	c.transportMu.Unlock()
+	return state
+}
+
+// activateOutboundSession publishes a successfully handshaken generation. A
+// concurrent Disconnect or connection-loss invalidation advances the epoch,
+// so a stale connect attempt cannot re-enable its retired writer.
+func (c *Connection) activateOutboundSession(state uint64) bool {
+	if c.transportCond == nil {
+		return state&1 != 0 && c.outboundSessionState.CompareAndSwap(state, state&^uint64(1))
+	}
+	c.transportMu.Lock()
+	defer c.transportMu.Unlock()
+	if state&1 == 0 || !c.outboundSessionState.CompareAndSwap(state, state&^uint64(1)) {
+		return false
+	}
+	c.transportPaused = false
+	c.transportCond.Broadcast()
+	return true
+}
+
+// invalidateOutboundSession revokes protected-write authority under the same
+// lock as the first socket byte. pause keeps queued work parked for reconnect;
+// final shutdown releases it so each request can return a zero-byte refusal.
+func (c *Connection) invalidateOutboundSession(pause bool) {
+	// Publish revocation before waiting for a writer that already owns
+	// transportMu. A queued sender that wins the mutex next observes the new
+	// generation; a sender already past its final check linearizes first.
+	c.publishRevokedOutboundSession()
+	if c.transportCond == nil {
+		return
+	}
+	c.transportMu.Lock()
+	c.transportPaused = pause
+	if !pause {
+		c.transportCond.Broadcast()
+	}
+	c.transportMu.Unlock()
+}
+
+func (c *Connection) publishRevokedOutboundSession() uint64 {
+	for {
+		old := c.outboundSessionState.Load()
+		nextGeneration := (old >> 1) + 1
+		next := (nextGeneration << 1) | 1
+		if c.outboundSessionState.CompareAndSwap(old, next) {
+			return next
+		}
+	}
 }
 
 // resumeTransport unblocks any goroutines waiting to send IBKR messages.
@@ -5337,21 +6600,283 @@ func (c *Connection) RegisterHandler(msgID int, handler func([]string)) uint64 {
 	entry := handlerEntry{id: c.handlerSeq, fn: handler}
 	c.msgHandlers[msgID] = append(c.msgHandlers[msgID], entry)
 	c.handlersMu.Unlock()
+	return entry.id
+}
 
-	for _, fields := range c.takePendingHandlerMessages(msgID) {
-		handler(fields)
+// RegisterHandlerAtEpoch adds a handler that receives the socket epoch that
+// read each frame. Connector installs its fixed handler set before starting
+// the Connection reader; dynamic handlers must likewise register before the
+// request that can produce their response.
+func (c *Connection) RegisterHandlerAtEpoch(msgID int, handler func([]string, uint64)) uint64 {
+	if handler == nil {
+		return 0
 	}
+	c.handlersMu.Lock()
+	c.handlerSeq++
+	entry := handlerEntry{id: c.handlerSeq, fnAtEpoch: handler}
+	c.msgHandlers[msgID] = append(c.msgHandlers[msgID], entry)
+	c.handlersMu.Unlock()
 	return entry.id
 }
 
 // GetNextRequestID reserves and returns the next connection-local request ID.
+// Request and order IDs deliberately share one monotonic frontier so a delayed
+// broker error can never be reinterpreted as a later order event. Zero means
+// the signed 32-bit broker namespace is exhausted.
 func (c *Connection) GetNextRequestID() int {
+	reqID, _, err := c.reserveNextRequestID()
+	if err != nil {
+		return 0
+	}
+	return reqID
+}
+
+func (c *Connection) reserveNextRequestID() (int, uint64, error) {
 	c.reqIDMu.Lock()
 	defer c.reqIDMu.Unlock()
+	return c.reserveNextRequestIDLocked()
+}
 
-	reqID := c.reqIDSeq
-	c.reqIDSeq++
-	return reqID
+func (c *Connection) reserveNextRequestIDForEpoch(expectedEpoch uint64) (int, uint64, error) {
+	c.reqIDMu.Lock()
+	defer c.reqIDMu.Unlock()
+	if epoch := c.brokerSessionEpoch.Load(); epoch != expectedEpoch {
+		return 0, epoch, fmt.Errorf("%w: broker socket generation changed before request ID reservation", ErrBrokerIDNamespaceConflict)
+	}
+	return c.reserveNextRequestIDLocked()
+}
+
+func (c *Connection) reserveNextRequestIDLocked() (int, uint64, error) {
+	epoch := c.brokerSessionEpoch.Load()
+	if !c.haveNextValidID || c.brokerIDExhausted {
+		return 0, epoch, fmt.Errorf("broker request/order id namespace unavailable")
+	}
+	reqID := max(c.reqIDSeq, c.nextOrderID)
+	if reqID <= 0 {
+		reqID = 1
+	}
+	if reqID > maxProtoInt32 {
+		c.brokerIDExhausted = true
+		return 0, epoch, fmt.Errorf("broker request/order id namespace unavailable")
+	}
+	if reqID == maxProtoInt32 {
+		c.brokerIDExhausted = true
+	} else {
+		c.reqIDSeq = reqID + 1
+	}
+	c.reservedRequestIDs[reqID] = struct{}{}
+	return reqID, epoch, nil
+}
+
+func (c *Connection) nextRequestID() (int, error) {
+	id, epoch, err := c.reserveNextRequestID()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := c.claimRequestIDForEpoch(id, epoch); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func (c *Connection) nextRequestIDForForwarding() (int, error) {
+	id, _, err := c.nextRequestIDForForwardingWithEpoch()
+	return id, err
+}
+
+func (c *Connection) nextRequestIDForForwardingWithEpoch() (int, uint64, error) {
+	return c.reserveNextRequestID()
+}
+
+// discardRequestIDReservation drops retry provenance without moving the
+// frontier backward. It is used when an internally generated request ID never
+// reaches the Connection claim/send boundary.
+func (c *Connection) discardRequestIDReservation(id int) {
+	if c == nil || id <= 0 {
+		return
+	}
+	c.reqIDMu.Lock()
+	delete(c.reservedRequestIDs, id)
+	c.reqIDMu.Unlock()
+}
+
+func (c *Connection) discardOrderIDReservation(id int) {
+	if c == nil || id <= 0 {
+		return
+	}
+	c.reqIDMu.Lock()
+	delete(c.reservedOrderIDs, id)
+	c.reqIDMu.Unlock()
+}
+
+func (c *Connection) claimRequestID(id int) error {
+	_, err := c.claimRequestIDCurrentEpoch(id)
+	return err
+}
+
+func (c *Connection) claimRequestIDCurrentEpoch(id int) (uint64, error) {
+	if id <= 0 || id > maxProtoInt32 {
+		return 0, fmt.Errorf("%w: request ID is outside the signed 32-bit broker namespace", ErrBrokerIDNamespaceConflict)
+	}
+	c.reqIDMu.Lock()
+	defer c.reqIDMu.Unlock()
+	return c.claimRequestIDLocked(id, nil)
+}
+
+func (c *Connection) claimRequestIDForEpoch(id int, expectedEpoch uint64) (uint64, error) {
+	if id <= 0 || id > maxProtoInt32 {
+		return 0, fmt.Errorf("%w: request ID is outside the signed 32-bit broker namespace", ErrBrokerIDNamespaceConflict)
+	}
+	c.reqIDMu.Lock()
+	defer c.reqIDMu.Unlock()
+	return c.claimRequestIDLocked(id, &expectedEpoch)
+}
+
+func (c *Connection) claimRequestIDLocked(id int, expectedEpoch *uint64) (uint64, error) {
+	epoch := c.brokerSessionEpoch.Load()
+	if expectedEpoch != nil && epoch != *expectedEpoch {
+		return epoch, fmt.Errorf("%w: broker socket generation changed before request ID claim", ErrBrokerIDNamespaceConflict)
+	}
+	if !c.haveNextValidID {
+		return epoch, fmt.Errorf("%w: nextValidId has not established the current socket request namespace", ErrBrokerIDNamespaceConflict)
+	}
+	_, reserved := c.reservedRequestIDs[id]
+	if !reserved {
+		frontier := max(c.reqIDSeq, c.nextOrderID)
+		if c.brokerIDExhausted || id < frontier {
+			return epoch, fmt.Errorf("%w: explicit request ID is behind the consumed request/order frontier", ErrBrokerIDNamespaceConflict)
+		}
+	}
+	delete(c.reservedRequestIDs, id)
+	if id >= maxProtoInt32 {
+		c.brokerIDExhausted = true
+		return epoch, nil
+	}
+	next := id + 1
+	if c.reqIDSeq < next {
+		c.reqIDSeq = next
+	}
+	if c.nextOrderID < next {
+		c.nextOrderID = next
+	}
+	return epoch, nil
+}
+
+func (c *Connection) orderIDOwned(id int) bool {
+	if id <= 0 {
+		return false
+	}
+	c.ordersMu.RLock()
+	_, open := c.openOrders[id]
+	c.ordersMu.RUnlock()
+	return open || c.IsWhatIfOrderID(id)
+}
+
+// claimOrderID consumes id for an imminent order/WhatIf send. An arbitrary
+// caller-supplied ID must be at or above the shared frontier after nextValidId;
+// only an exact local reservation or already-owned order may remain below it.
+func (c *Connection) claimOrderID(id int, alreadyOwned bool) error {
+	_, err := c.claimOrderIDCurrentEpoch(id, alreadyOwned)
+	return err
+}
+
+func (c *Connection) claimOrderIDCurrentEpoch(id int, alreadyOwned bool) (uint64, error) {
+	if id <= 0 || id > maxProtoInt32 {
+		return 0, fmt.Errorf("%w: order ID is outside the signed 32-bit broker namespace", ErrBrokerIDNamespaceConflict)
+	}
+	c.reqIDMu.Lock()
+	defer c.reqIDMu.Unlock()
+	return c.claimOrderIDLocked(id, alreadyOwned, nil)
+}
+
+func (c *Connection) claimOrderIDForEpoch(id int, alreadyOwned bool, expectedEpoch uint64) (uint64, error) {
+	if id <= 0 || id > maxProtoInt32 {
+		return 0, fmt.Errorf("%w: order ID is outside the signed 32-bit broker namespace", ErrBrokerIDNamespaceConflict)
+	}
+	c.reqIDMu.Lock()
+	defer c.reqIDMu.Unlock()
+	return c.claimOrderIDLocked(id, alreadyOwned, &expectedEpoch)
+}
+
+func (c *Connection) claimOrderIDLocked(id int, alreadyOwned bool, expectedEpoch *uint64) (uint64, error) {
+	epoch := c.brokerSessionEpoch.Load()
+	if expectedEpoch != nil && epoch != *expectedEpoch {
+		return epoch, fmt.Errorf("%w: broker socket generation changed before order ID claim", ErrBrokerIDNamespaceConflict)
+	}
+	if !c.haveNextValidID {
+		return epoch, fmt.Errorf("%w: nextValidId has not established the current socket order namespace", ErrBrokerIDNamespaceConflict)
+	}
+	if _, requestReserved := c.reservedRequestIDs[id]; requestReserved {
+		return epoch, fmt.Errorf("%w: order ID is owned by a reserved read-only request", ErrBrokerIDNamespaceConflict)
+	}
+	_, reserved := c.reservedOrderIDs[id]
+	if !reserved && !alreadyOwned {
+		frontier := max(c.reqIDSeq, c.nextOrderID)
+		if c.brokerIDExhausted || id < frontier {
+			return epoch, fmt.Errorf("%w: explicit order ID is behind the consumed request/order frontier", ErrBrokerIDNamespaceConflict)
+		}
+	}
+	delete(c.reservedOrderIDs, id)
+	if id >= maxProtoInt32 {
+		c.brokerIDExhausted = true
+		return epoch, nil
+	}
+	next := id + 1
+	if c.reqIDSeq < next {
+		c.reqIDSeq = next
+	}
+	if c.nextOrderID < next {
+		c.nextOrderID = next
+	}
+	return epoch, nil
+}
+
+// claimOrderIDForForwarding validates a Connector-level explicit ID and leaves
+// one exact reservation for the subsequent Connection place/WhatIf encoder.
+// The shared frontier has already advanced, so intervening requests remain
+// disjoint while the Connector installs its local order correlation state.
+func (c *Connection) claimOrderIDForForwarding(id int, alreadyOwned bool) (uint64, error) {
+	return c.claimOrderIDForForwardingAtEpoch(id, alreadyOwned, nil)
+}
+
+func (c *Connection) claimOrderIDForForwardingAtEpoch(id int, alreadyOwned bool, expectedEpoch *uint64) (uint64, error) {
+	if id <= 0 || id > maxProtoInt32 {
+		return 0, fmt.Errorf("%w: order ID is outside the signed 32-bit broker namespace", ErrBrokerIDNamespaceConflict)
+	}
+	c.reqIDMu.Lock()
+	defer c.reqIDMu.Unlock()
+	epoch, err := c.claimOrderIDLocked(id, alreadyOwned, expectedEpoch)
+	if err != nil {
+		return 0, err
+	}
+	c.reservedOrderIDs[id] = struct{}{}
+	return epoch, nil
+}
+
+func (c *Connection) reserveRequestID(allowed func(int) bool) (int, error) {
+	id, _, err := c.reserveRequestIDWithEpoch(allowed)
+	return id, err
+}
+
+func (c *Connection) reserveRequestIDWithEpoch(allowed func(int) bool) (int, uint64, error) {
+	const maxRequestIDReservations = 1024
+	for range maxRequestIDReservations {
+		candidate, epoch, err := c.reserveNextRequestID()
+		if err != nil {
+			return 0, epoch, err
+		}
+		if allowed != nil && !allowed(candidate) {
+			c.reqIDMu.Lock()
+			delete(c.reservedRequestIDs, candidate)
+			c.reqIDMu.Unlock()
+			continue
+		}
+		if _, err := c.claimRequestIDForEpoch(candidate, epoch); err != nil {
+			return 0, epoch, err
+		}
+		return candidate, epoch, nil
+	}
+	return 0, 0, fmt.Errorf("broker request id namespace unavailable")
 }
 
 // scanMessages is a split function for the scanner to handle IBKR messages

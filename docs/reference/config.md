@@ -30,6 +30,7 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 | `[opportunities]` | `policy_file` | `string` | PolicyFile points to the local opportunity-policy TOML; default ~/.config/ibkr/policies/opportunity-policy.toml. |
 | `[opportunities]` | `refresh_cadence` | `duration` | RefreshCadence controls how often the daemon refreshes opportunities; default 2m. |
 | `[opportunities]` | `reload_interval` | `duration` | ReloadInterval controls how often the daemon checks the opportunity policy file for changes; default 30s. |
+| `[rulebook]` | `terminal_evidence_file` | `string` | TerminalEvidenceFile points to an optional JSON document of reviewed, exact-contract terminal/non-reporting issuer evidence for rules 6-8. |
 | `[scans.<name>]` | `exchange` | `string` | Exchange is the IBKR scanner locationCode, such as STK.US.MAJOR or STK.NASDAQ. |
 | `[scans.<name>]` | `instrument` | `string` | Instrument is the IBKR scanner instrument token, such as STK for US stocks or STOCK.EU for European stocks; empty defaults to STK. |
 | `[scans.<name>]` | `limit` | `int` | Limit caps returned rows for this preset. |
@@ -38,8 +39,8 @@ Config file is loaded from `$IBKR_CONFIG`, else `$XDG_CONFIG_HOME/ibkr/config.to
 | `[spx]` | `members_auto_refresh` | `*bool` | MembersAutoRefresh controls whether the daemon refreshes the S&P 500 constituent list from Wikipedia daily at 02:30 ET (default true; set false to pin the embedded baseline) — overridden symmetrically by the `IBKR_SPX_MEMBERS_AUTO_REFRESH` env var (`1` force-on, `0` force-off). |
 | `[trading]` | `allow_option_sell_to_open` | `bool` | AllowOptionSellToOpen permits option sell-to-open previews when true. |
 | `[trading]` | `allow_stock_short` | `bool` | AllowStockShort permits stock short/opening flip previews when true. |
-| `[trading]` | `max_notional` | `float64` | MaxNotional caps risk-increasing (opening/adding/flipping) equity/ETF order notional before broker WhatIf; reduce-only orders are exempt, bounded by the position itself; default 10000 in account currency. |
-| `[trading]` | `max_option_contracts` | `int` | MaxOptionContracts caps risk-increasing single-leg option quantity; reduce-only orders are exempt, bounded by the position itself; default 5. |
+| `[trading]` | `max_notional` | `float64` | MaxNotional caps every equity/ETF order before broker WhatIf; apparent close/reduce orders are not exempt because this client cannot prove that a manual TWS order has not already consumed the exit capacity. |
+| `[trading]` | `max_option_contracts` | `int` | MaxOptionContracts caps every single-leg option order; apparent close/reduce orders are not exempt because account-global working-order authority is incomplete. |
 | `[trading]` | `mode` | `string` | Mode selects the local order-entry state: "disabled" (default), "paper", or "live". |
 | `[trading]` | `paper_smoke_max_age` | `duration` | PaperSmokeMaxAge is how long a paper trading smoke remains acceptable for live enablement. |
 
@@ -108,17 +109,17 @@ Loaded from the path in `[opportunities].policy_file` (default `~/.config/ibkr/p
 
 ## Runtime platform settings
 
-Daemon-owned preferences persisted in `$XDG_STATE_HOME/ibkr/daemon.db` and changed at runtime — no restart — via `ibkr settings set <key>=<value>`, the SPA Settings tab, or `PATCH /api/settings`. Setting a key to `null` clears the runtime override, and every response field carries access/source/reason metadata. Keys in the trading-limit class are writable only on experimental trading builds with `[trading].mode` set, and live routes reject agent-origin writes. Ownership and semantics: `docs/design/platform-settings.md`.
+Daemon-owned preferences persisted in `$XDG_STATE_HOME/ibkr/daemon.db` and changed at runtime without a restart. Feature preferences may be changed via `ibkr settings set <key>=<value>`, the SPA Settings tab, or `PATCH /api/settings`. Setting a key to `null` clears the runtime override, and every response field carries access/source/reason metadata. `trading.freeze` and trading-limit keys require `ibkr settings set` from an interactive human terminal; missing, agent, and paired-device origins are rejected in disabled, paper, and live modes. Trading-limit keys additionally require an experimental trading build with `[trading].mode` set. Ownership and semantics: `docs/design/platform-settings.md`.
 
 | Key | Value | Class | Description |
 |-----|-------|-------|-------------|
-| `features.purge_restore.enabled` | `true/false/null` | runtime | Allows the purge/restore workflow; false blocks purge/restore write actions across CLI, RPC, API, and SPA while purge status stays readable (default true). |
+| `features.purge_restore.enabled` | `true/false/null` | runtime | Controls the purge/restore workflow/read surface while purge status stays readable; true does not authorize preview or broker submission, which remains unavailable until exact per-leg portfolio and account-global working-order authority exists (default true). |
 | `features.stock_protection.enabled` | `true/false/null` | runtime | Allows stock/ETF protection proposal actions; false blocks them with a stock_protection_disabled blocker while proposal snapshots stay readable (default true). |
 | `features.rulebook.enabled` | `true/false/null` | runtime | Turns the advisory daily trading-rulebook checklist on; false hides the SPA card, empties rules.snapshot, and stops advisory rule_* preview warnings — it can never affect broker-write gating (default true). |
 | `features.rulebook.earnings_overrides.<SYMBOL>` | `YYYY-MM-DD[Tamc/Tbmo]/null` | runtime | Manual SYMBOL → YYYY-MM-DD (optional Tamc/Tbmo suffix) earnings pins, authoritative over fetched dates for rules 6-8; patches merge per symbol. |
 | `trading.freeze` | `true/false/null` | runtime | Runtime trading brake: true blocks every new broker write while cancels stay allowed; human-only by policy, and the write origin is audited (default false). |
-| `trading.limits.max_notional` | `number/null` | trading-limit | Runtime override of [trading].max_notional, the opening-order notional cap; null falls back to the TOML value. |
-| `trading.limits.max_option_contracts` | `integer/null` | trading-limit | Runtime override of [trading].max_option_contracts, the opening option-quantity cap; null falls back to the TOML value. |
+| `trading.limits.max_notional` | `number/null` | trading-limit | Runtime override of [trading].max_notional, the notional cap for every equity/ETF order including apparent exits; null falls back to the TOML value. |
+| `trading.limits.max_option_contracts` | `integer/null` | trading-limit | Runtime override of [trading].max_option_contracts, the quantity cap for every single-leg option order including apparent exits; null falls back to the TOML value. |
 | `trading.limits.allow_stock_short` | `true/false/null` | trading-limit | Runtime override of [trading].allow_stock_short; null falls back to the TOML value. |
 | `trading.limits.allow_option_sell_to_open` | `true/false/null` | trading-limit | Runtime override of [trading].allow_option_sell_to_open; null falls back to the TOML value. |
 | `regime.journal.enabled` | `true/false/null` | runtime | Turns forward regime decision-event collection in daemon.db on (default true). |

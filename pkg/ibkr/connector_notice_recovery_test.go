@@ -23,7 +23,7 @@ import (
 // propagate (a caller that waits on data that will never come burns a
 // full timeout; see .claude_memory.md).
 func TestSystemNoticeFailsPendingHistorical(t *testing.T) {
-	c := NewConnector(&ConnectorConfig{})
+	c := readyBrokerEvidenceTestConnector(t)
 
 	req := c.createHistoricalRequest(202, "HGENQ")
 	c.processSystemNotice(reqAliasEntry{}, &systemNotification{
@@ -83,7 +83,7 @@ func TestSystemNoticeFailsPendingHistorical(t *testing.T) {
 // typed error instead of re-burning a request. The window expiry re-arms
 // the probe.
 func TestSystemNotice354RemembersAbsence(t *testing.T) {
-	c := NewConnector(&ConnectorConfig{})
+	c := readyBrokerEvidenceTestConnector(t)
 	now := time.Date(2026, 6, 11, 19, 14, 0, 0, time.UTC)
 	c.absenceNow = func() time.Time { return now }
 
@@ -228,8 +228,7 @@ func TestMarkSubscriptionRejectedGuardsStaleReqID(t *testing.T) {
 // competing-live-session side effect used to live only on the dead
 // msgErrMsg path.
 func TestSystemNotice10197ForcesDelayed(t *testing.T) {
-	c := NewConnector(&ConnectorConfig{})
-	defer c.conn.rateLimiter.Stop()
+	c := readyBrokerEvidenceTestConnector(t)
 	c.processSystemNotice(reqAliasEntry{symbol: "SPY", secType: "STK"}, &systemNotification{
 		tickerID: 31,
 		code:     10197,
@@ -284,6 +283,50 @@ func TestSystemNoticeOrderIDCollisionSkipsRequestRecovery(t *testing.T) {
 	}
 }
 
+func TestConnectionLossRetainsSystemNoticeHandlerForLateOrderErrorReceipt(t *testing.T) {
+	c := readyBrokerEvidenceTestConnector(t)
+	conn := c.conn
+	conn.serverVersion = 203
+	conn.config.AutoReconnect = false
+	c.attachConnectionHooks(conn)
+	epoch := conn.BrokerSessionEpoch()
+	c.orderMu.Lock()
+	c.brokerOrderIndex["91"] = "late-retired-order"
+	c.orderMu.Unlock()
+	receipts := make(chan OrderLifecycleReceipt, 1)
+	c.RegisterOrderLifecycleReceiptHandler(func(receipt OrderLifecycleReceipt) {
+		receipts <- receipt
+	})
+	// onConnectionLost is the Connector retirement boundary. A decoded frame
+	// may still arrive after it because Connection.Stop uses a bounded drain.
+	conn.handleDisconnection(errors.New("test connection retirement"))
+	if conn.Status() != StatusDisconnected {
+		t.Fatalf("connection status = %s, want disconnected retirement", conn.Status())
+	}
+	conn.processMessageAtEpoch(encodeSystemNotificationForTest(91, 201, "order rejected", ""), epoch)
+
+	select {
+	case receipt := <-receipts:
+		if receipt.Session.connector != c || receipt.Session.connection != conn || receipt.Session.epoch != epoch {
+			t.Fatalf("late receipt session = %+v, want retired Connector/Connection epoch %d", receipt.Session, epoch)
+		}
+		if receipt.Event.Type != OrderLifecycleEventError || receipt.Event.OrderID != 91 || receipt.Event.ErrorCode != 201 {
+			t.Fatalf("late msg-204 receipt = %+v", receipt.Event)
+		}
+		if c.SessionReceiptCurrent(receipt.Session) {
+			t.Fatal("retired Connection receipt was accepted as current")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late msg-204 order error was buffered instead of reaching the retained receipt handler")
+	}
+	conn.systemNoticeMu.RLock()
+	handlerRetained := conn.systemNoticeHandler != nil
+	conn.systemNoticeMu.RUnlock()
+	if !handlerRetained {
+		t.Fatal("retired system notice handler was cleared")
+	}
+}
+
 // TestStaleRefreshAfterServerRejectionKeepsSlotAccounting pins the
 // EnsureMarketDataSubscription stale-refresh seam: once the notice path
 // has released a rejected reqID's rate-limiter slot, a later stale
@@ -292,15 +335,14 @@ func TestSystemNoticeOrderIDCollisionSkipsRequestRecovery(t *testing.T) {
 // double-release and panic the semaphore ("Release called without
 // matching Acquire").
 func TestStaleRefreshAfterServerRejectionKeepsSlotAccounting(t *testing.T) {
-	c := NewConnector(&ConnectorConfig{})
-	defer c.conn.rateLimiter.Stop()
+	c := readyBrokerEvidenceTestConnector(t)
 	ctx := context.Background()
 
 	if err := c.conn.rateLimiter.AcquireMarketDataSlot(ctx); err != nil {
 		t.Fatalf("acquire slot: %v", err)
 	}
 	c.conn.marketDataSlotsMu.Lock()
-	c.conn.marketDataSlots[9] = struct{}{}
+	c.conn.marketDataSlots[9] = c.conn.BrokerSessionEpoch()
 	c.conn.marketDataSlotsMu.Unlock()
 
 	sub := &Subscription{Symbol: "HGENQ", ReqID: 9, LastTime: time.Now().Add(-time.Hour)}

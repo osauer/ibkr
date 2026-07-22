@@ -32,6 +32,12 @@ const opportunityRefreshRetryBase = 30 * time.Second
 // the wider cap adds no recovery lag. (2026-07-12)
 const opportunityRefreshBackoffCap = 15 * time.Minute
 
+var exerciseSubmissionUnavailableBlocker = rpc.TradingBlocker{
+	Code:    "exercise_submission_unavailable",
+	Message: "option exercise submission is unavailable because exact option-to-underlying risk policy and durable one-shot authority are not approved",
+	Action:  "Exercise manually in TWS after reviewing the resulting position, then refresh and reconcile the daemon.",
+}
+
 type opportunityEngine struct {
 	server  *Server
 	store   *opportunityStore
@@ -711,6 +717,10 @@ func (e *opportunityEngine) Preview(ctx context.Context, p rpc.OpportunityExerci
 	if err != nil {
 		return rpc.OpportunityExercisePreviewResult{Opportunity: opp, Blockers: blockers, AsOf: now}, err
 	}
+	return e.previewRevalidatedOpportunity(p, opp, blockers, now), nil
+}
+
+func (e *opportunityEngine) previewRevalidatedOpportunity(p rpc.OpportunityExercisePreviewParams, opp rpc.Opportunity, blockers []rpc.TradingBlocker, now time.Time) rpc.OpportunityExercisePreviewResult {
 	qty := p.Quantity
 	if qty <= 0 {
 		qty = opp.Quantity
@@ -718,6 +728,7 @@ func (e *opportunityEngine) Preview(ctx context.Context, p rpc.OpportunityExerci
 	if qty <= 0 || qty > opp.MaxQuantity {
 		blockers = appendTradingBlockerOnce(blockers, rpc.TradingBlocker{Code: "invalid_quantity", Message: "exercise quantity must be positive and no greater than the opportunity quantity"})
 	}
+	blockers = appendTradingBlockerOnce(blockers, exerciseSubmissionUnavailableBlocker)
 	auth := e.exerciseAuthorization(p.Origin)
 	if !auth.Allowed {
 		blockers = mergeTradingBlockers(blockers, auth.Blockers)
@@ -735,7 +746,7 @@ func (e *opportunityEngine) Preview(ctx context.Context, p rpc.OpportunityExerci
 		res.PreviewTokenID = opportunityPreviewTokenID(opp, qty)
 		res.PreviewTokenExpiresAt = now.Add(5 * time.Minute)
 	}
-	return res, nil
+	return res
 }
 
 func (e *opportunityEngine) Submit(ctx context.Context, p rpc.OpportunityExerciseSubmitParams) (rpc.OpportunityExerciseSubmitResult, error) {

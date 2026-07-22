@@ -28,6 +28,12 @@ const (
 	purgeOriginalSideShort = "SHORT"
 )
 
+var purgeSubmissionUnavailableBlocker = rpc.TradingBlocker{
+	Code:    "purge_submission_unavailable",
+	Message: "purge/restore broker submission is disabled until exact per-leg portfolio and account-global working-order authority is available",
+	Action:  "Use TWS for manual purge/restore, then refresh and reconcile the daemon afterward.",
+}
+
 func (s *Server) handlePurgeExecute(ctx context.Context, req *rpc.Request) (*rpc.PurgeExecuteResult, error) {
 	var p rpc.PurgeExecuteParams
 	if err := decodeParams(req.Params, &p); err != nil {
@@ -55,7 +61,8 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 		wait = 10 * time.Second
 	}
 
-	status := s.currentTradingStatus()
+	auth, binding, bindingErr := s.authorizeBrokerWriteTransaction(p.Origin, false)
+	status := auth.Status
 	res := &rpc.PurgeExecuteResult{
 		Kind:                 "ibkr.purge_execute",
 		PurgeID:              strings.TrimSpace(p.PurgeID),
@@ -72,6 +79,15 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 	if res.PurgeID == "" {
 		res.PurgeID = "purge_" + s.orderNow().UTC().Format("20060102_150405")
 	}
+	blockers := s.purgeExecuteBlockers(status)
+	for _, blocker := range auth.Blockers {
+		blockers = appendTradingBlockerOnce(blockers, blocker)
+	}
+	if len(blockers) > 0 {
+		res.Blockers = blockers
+		res.Message = firstTradingBlockerMessage(blockers)
+		return res, nil
+	}
 	if !bypassPreview {
 		res.Blockers = append(res.Blockers, rpc.TradingBlocker{
 			Code:    "purge_preview_mode_unavailable",
@@ -81,13 +97,10 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 		res.Message = res.Blockers[0].Message
 		return res, nil
 	}
-	blockers := s.purgeExecuteBlockers(status)
-	for _, blocker := range liveOriginBlockers(status, p.Origin) {
-		blockers = appendTradingBlockerOnce(blockers, blocker)
-	}
-	if len(blockers) > 0 {
-		res.Blockers = blockers
-		res.Message = firstTradingBlockerMessage(blockers)
+	if bindingErr != nil {
+		res.Status = purgeExecuteStatusError
+		res.ErrorLegs = max(1, len(p.Legs))
+		res.Message = bindingErr.Error()
 		return res, nil
 	}
 
@@ -144,7 +157,7 @@ func (s *Server) executePurge(ctx context.Context, p rpc.PurgeExecuteParams) (*r
 			res.Message = err.Error()
 			return res, nil
 		}
-		s.executePurgeLeg(ctx, status, quotes, res, plan, p.Origin)
+		s.executePurgeLeg(ctx, binding, status, quotes, res, plan, p.Origin)
 	}
 
 	if res.SubmittedLegs > 0 && wait > 0 {
@@ -172,6 +185,7 @@ func (s *Server) currentTradingStatus() rpc.TradingStatus {
 
 func (s *Server) purgeExecuteBlockers(status rpc.TradingStatus) []rpc.TradingBlocker {
 	blockers := s.brokerWriteAuthorization(status).Blockers
+	blockers = appendTradingBlockerOnce(blockers, purgeSubmissionUnavailableBlocker)
 	add := func(code, message, action string) {
 		blockers = appendTradingBlockerOnce(blockers, rpc.TradingBlocker{Code: code, Message: message, Action: action})
 	}
@@ -450,7 +464,7 @@ func (s *Server) prefetchPurgeLegQuotes(ctx context.Context, plans []purgeLegPla
 	return out
 }
 
-func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, quotes map[string]purgeQuoteResult, res *rpc.PurgeExecuteResult, plan purgeLegPlan, origin string) {
+func (s *Server) executePurgeLeg(ctx context.Context, binding brokerWriteTransactionBinding, status rpc.TradingStatus, quotes map[string]purgeQuoteResult, res *rpc.PurgeExecuteResult, plan purgeLegPlan, origin string) {
 	leg := plan.leg
 	if plan.warning != "" {
 		res.Warnings = append(res.Warnings, plan.warning)
@@ -492,13 +506,17 @@ func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, 
 		OrderRef:   orderRef,
 		OpenClose:  "C",
 	}
-	orderID, err := s.reserveBrokerOrderID(ctx)
+	orderID, err := s.reserveBoundBrokerOrderID(ctx, binding)
 	if err != nil {
 		addPurgeError(res, leg, "reserve order id: "+err.Error())
 		return
 	}
 	attempt := purgeJournalEventForDraft(draft, status, res.PurgeID, leg.LegID, orderID, s.orderNow())
 	attempt.Origin = normalizedWriteOrigin(origin)
+	if err := s.requireBrokerWriteTransactionCurrent(binding); err != nil {
+		addPurgeError(res, leg, "broker write authority: "+err.Error())
+		return
+	}
 	if err := s.orderJournal.StagePreTransmit("", "", 0, orderID, corestore.ActionPurge, coreOrderOrigin(origin), []orderJournalEvent{attempt}); err != nil {
 		addPurgeError(res, leg, "append send journal: "+err.Error())
 		return
@@ -509,7 +527,7 @@ func (s *Server) executePurgeLeg(ctx context.Context, status rpc.TradingStatus, 
 	order.OrderID = orderID
 	order.ClientID = status.ClientID
 	order.Account = status.Account
-	if err := s.submitConfiguredOrder(ctx, status, brokerContract, order); err != nil {
+	if err := s.submitBoundConfiguredOrder(ctx, binding, status, brokerContract, order); err != nil {
 		ev := purgeJournalEventForDraft(draft, status, res.PurgeID, leg.LegID, orderID, s.orderNow())
 		ev.Type = orderJournalEventSendError
 		ev.SendState = orderSendStateUncertainSend

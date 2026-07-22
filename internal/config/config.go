@@ -119,9 +119,9 @@ type Daemon struct {
 type Trading struct {
 	// Mode selects the local order-entry state: "disabled" (default), "paper", or "live".
 	Mode string `toml:"mode"`
-	// MaxNotional caps risk-increasing (opening/adding/flipping) equity/ETF order notional before broker WhatIf; reduce-only orders are exempt, bounded by the position itself; default 10000 in account currency.
+	// MaxNotional caps every equity/ETF order before broker WhatIf; apparent close/reduce orders are not exempt because this client cannot prove that a manual TWS order has not already consumed the exit capacity. Default 10000 in account currency.
 	MaxNotional float64 `toml:"max_notional"`
-	// MaxOptionContracts caps risk-increasing single-leg option quantity; reduce-only orders are exempt, bounded by the position itself; default 5.
+	// MaxOptionContracts caps every single-leg option order; apparent close/reduce orders are not exempt because account-global working-order authority is incomplete. Default 5.
 	MaxOptionContracts int `toml:"max_option_contracts"`
 	// AllowStockShort permits stock short/opening flip previews when true. Default false.
 	AllowStockShort bool `toml:"allow_stock_short"`
@@ -129,6 +129,17 @@ type Trading struct {
 	AllowOptionSellToOpen bool `toml:"allow_option_sell_to_open"`
 	// PaperSmokeMaxAge is how long a paper trading smoke remains acceptable for live enablement. Defaults to 168h.
 	PaperSmokeMaxAge duration `toml:"paper_smoke_max_age"`
+}
+
+// Rulebook configures operator-owned evidence inputs for the advisory trading
+// rulebook. The import file is not read on snapshot paths: daemon startup
+// validates and transactionally publishes it into daemon.db, which remains the
+// live authority.
+type Rulebook struct {
+	// TerminalEvidenceFile points to an optional JSON document of reviewed,
+	// exact-contract terminal/non-reporting issuer evidence for rules 6-8. An
+	// empty path leaves the retained daemon.db authority unchanged.
+	TerminalEvidenceFile string `toml:"terminal_evidence_file"`
 }
 
 // AutoTrade configures advisory protection-proposal production and policy
@@ -410,6 +421,7 @@ type Config struct {
 	Gateway       Gateway         `toml:"gateway"`
 	Daemon        Daemon          `toml:"daemon"`
 	Trading       Trading         `toml:"trading"`
+	Rulebook      Rulebook        `toml:"rulebook"`
 	AutoTrade     AutoTrade       `toml:"auto_trade"`
 	Opportunities Opportunities   `toml:"opportunities"`
 	Flex          Flex            `toml:"flex"`
@@ -424,6 +436,7 @@ type Resolved struct {
 	Gateway       Gateway
 	Daemon        Daemon
 	Trading       Trading
+	Rulebook      Rulebook
 	AutoTrade     AutoTrade
 	Opportunities Opportunities
 	Flex          Flex
@@ -498,7 +511,7 @@ func Load(path string) (*Config, error) {
 				return nil, fmt.Errorf("config %s: key %s was removed: %s", path, keys[i], msg)
 			}
 		}
-		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [auto_trade], [opportunities], [flex], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
+		return nil, fmt.Errorf("config %s: unknown key(s): %s (see README §Configuration for the supported schema: [gateway], [daemon], [trading], [rulebook], [auto_trade], [opportunities], [flex], [spx], [scans.<name>])", path, strings.Join(keys, ", "))
 	}
 	return cfg, nil
 }
@@ -545,6 +558,7 @@ func (c *Config) Resolve() (*Resolved, error) {
 		Gateway:       c.Gateway,
 		Daemon:        dae,
 		Trading:       c.Trading.WithDefaults(),
+		Rulebook:      c.Rulebook,
 		AutoTrade:     c.AutoTrade.WithDefaults(),
 		Opportunities: c.Opportunities.WithDefaults(),
 		Flex:          c.Flex.WithDefaults(),

@@ -15,6 +15,9 @@ func TestParseOrderLifecycleEventOpenOrder(t *testing.T) {
 	if ev.Type != OrderLifecycleEventOpenOrder || ev.OrderID != 1001 || ev.PermID != 987654 {
 		t.Fatalf("open order IDs parsed wrong: %+v", ev)
 	}
+	if ev.ConID != 265598 || ev.ClientIDPresent {
+		t.Fatalf("legacy open-order identity provenance parsed wrong: %+v", ev)
+	}
 	if ev.Symbol != "AAPL" || ev.SecType != "STK" || ev.Action != "BUY" || ev.TotalQuantity != 10 || ev.LimitPrice != 190.5 || ev.TIF != "DAY" {
 		t.Fatalf("open order fields parsed wrong: %+v", ev)
 	}
@@ -25,7 +28,7 @@ func TestParseOrderLifecycleEventOpenOrder(t *testing.T) {
 
 func TestParseOrderLifecycleEventOrderStatus(t *testing.T) {
 	t.Parallel()
-	fields := []string{"3", "1", "1001", "Submitted", "2", "8", "190.25", "987654", "190.5", "31", "0", "", "0"}
+	fields := []string{"3", "1", "1001", "Submitted", "2", "8", "190.25", "987654", "190.5", "0", "0", "", "0"}
 	ev, ok := ParseOrderLifecycleEvent(fields)
 	if !ok {
 		t.Fatal("ParseOrderLifecycleEvent(orderStatus) ok=false")
@@ -33,7 +36,7 @@ func TestParseOrderLifecycleEventOrderStatus(t *testing.T) {
 	if ev.Type != OrderLifecycleEventStatus || ev.OrderID != 1001 || ev.Status != "Submitted" {
 		t.Fatalf("status identity parsed wrong: %+v", ev)
 	}
-	if ev.Filled != 2 || ev.Remaining != 8 || ev.AvgFillPrice != 190.25 || ev.LastFillPrice != 190.5 || ev.PermID != 987654 || ev.ClientID != 31 {
+	if ev.Filled != 2 || ev.Remaining != 8 || ev.AvgFillPrice != 190.25 || ev.LastFillPrice != 190.5 || ev.PermID != 987654 || ev.ClientID != 0 || !ev.ClientIDPresent {
 		t.Fatalf("status quantities parsed wrong: %+v", ev)
 	}
 }
@@ -69,7 +72,7 @@ func TestParseOrderLifecycleEventIgnoresMalformed(t *testing.T) {
 
 func TestConnectorOrderLifecycleHandlerReceivesBrokerStatus(t *testing.T) {
 	t.Parallel()
-	c := NewConnector(&ConnectorConfig{})
+	c := readyBrokerEvidenceTestConnector(t)
 	received := make(chan OrderLifecycleEvent, 1)
 	c.RegisterOrderLifecycleHandler(func(ev OrderLifecycleEvent) {
 		received <- ev
@@ -89,7 +92,7 @@ func TestConnectorOrderLifecycleHandlerReceivesBrokerStatus(t *testing.T) {
 
 func TestConnectorOrderLifecycleHandlerIgnoresWhatIfOpenOrder(t *testing.T) {
 	t.Parallel()
-	c := NewConnector(&ConnectorConfig{})
+	c := readyBrokerEvidenceTestConnector(t)
 	received := make(chan OrderLifecycleEvent, 1)
 	c.RegisterOrderLifecycleHandler(func(ev OrderLifecycleEvent) {
 		received <- ev

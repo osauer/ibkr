@@ -3339,11 +3339,6 @@ p {
   color: var(--blue);
 }
 
-.opportunity-exercise {
-  color: #fff;
-  background: #047857;
-}
-
 .opportunity-ignore {
   border: 1px solid var(--line);
   color: var(--ink-2);

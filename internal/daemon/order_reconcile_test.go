@@ -173,6 +173,84 @@ func TestReconcileClosesWedgedCancelRequestedRow(t *testing.T) {
 	}
 }
 
+func TestReconcileHeadCASRejectsLateJournalMutation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 15, 0, 0, 0, time.UTC)
+	srv := newOrderReconcileTestServer(t, now)
+	seedReconcileGhostRow(t, srv, "ghost-cas", 558, now.Add(-2*time.Hour))
+	srv.orderSnapshotFn = reconcileTestSnapshot(true)
+	srv.orderReconcileBeforeCommit = func() {
+		if err := srv.orderJournal.Append(orderJournalEvent{
+			At: now, Type: orderJournalEventStatusUpdated, OrderRef: "ghost-cas",
+			ReservedOrderID: 78, ClientID: 15, PermID: 558, Account: "DU1234567",
+			Endpoint: "127.0.0.1:4001", Mode: "paper", Status: "Submitted",
+			Remaining: 20, SendState: orderSendStateBrokerAcknowledged,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv.reconcileOrderJournalWithBroker(t.Context())
+
+	if view := loadSingleOrderView(t, srv, "ghost-cas"); !view.Open || view.LifecycleStatus == rpc.OrderLifecycleClosedReconciled {
+		t.Fatalf("stale reconciliation closed a later journal head: %+v", view)
+	}
+}
+
+func TestReconcileClearsPersistenceLatchOnlyAfterStableCompleteRefresh(t *testing.T) {
+	now := time.Date(2026, 7, 19, 15, 0, 0, 0, time.UTC)
+	srv := newOrderReconcileTestServer(t, now)
+	seedReconcileGhostRow(t, srv, "ghost-latch", 559, now.Add(-time.Minute))
+	srv.orderLifecyclePersistenceFailures.Store(1)
+	srv.orderLifecyclePersistenceUncertain.Store(true)
+	srv.orderSnapshotFn = reconcileTestSnapshot(true)
+
+	srv.reconcileOrderJournalWithBroker(t.Context())
+
+	if srv.orderLifecyclePersistenceUncertain.Load() {
+		t.Fatal("stable complete reconciliation did not clear lifecycle persistence latch")
+	}
+	if view := loadSingleOrderView(t, srv, "ghost-latch"); view.Open || view.LifecycleStatus != rpc.OrderLifecycleClosedReconciled {
+		t.Fatalf("latched reconciliation retained broker-absent row inside ordinary grace window: %+v", view)
+	}
+}
+
+func TestReconcileDoesNotClearPersistenceLatchAfterAnotherFailure(t *testing.T) {
+	now := time.Date(2026, 7, 19, 15, 0, 0, 0, time.UTC)
+	srv := newOrderReconcileTestServer(t, now)
+	seedReconcileGhostRow(t, srv, "present-latch", 560, now.Add(-time.Hour))
+	srv.orderLifecyclePersistenceFailures.Store(1)
+	srv.orderLifecyclePersistenceUncertain.Store(true)
+	srv.orderSnapshotFn = func(context.Context) (ibkrlib.OpenOrderSnapshot, error) {
+		srv.orderLifecyclePersistenceFailures.Add(1)
+		return reconcileTestSnapshot(true, 560)(context.Background())
+	}
+
+	srv.reconcileOrderJournalWithBroker(t.Context())
+
+	if !srv.orderLifecyclePersistenceUncertain.Load() {
+		t.Fatal("reconciliation cleared latch despite a failure during the refresh")
+	}
+}
+
+func TestReconcileDoesNotLoseFailureRacingFinalLatchClear(t *testing.T) {
+	now := time.Date(2026, 7, 19, 15, 0, 0, 0, time.UTC)
+	srv := newOrderReconcileTestServer(t, now)
+	seedReconcileGhostRow(t, srv, "present-final-window", 561, now.Add(-time.Hour))
+	srv.orderLifecyclePersistenceFailures.Store(1)
+	srv.orderLifecyclePersistenceUncertain.Store(true)
+	srv.orderSnapshotFn = reconcileTestSnapshot(true, 561)
+	srv.orderReconcileBeforeLatchClear = func() {
+		srv.orderLifecyclePersistenceFailures.Add(1)
+		srv.orderLifecyclePersistenceUncertain.Store(true)
+	}
+
+	srv.reconcileOrderJournalWithBroker(t.Context())
+
+	if !srv.orderLifecyclePersistenceUncertain.Load() {
+		t.Fatal("reconciliation lost a persistence failure racing the final latch clear")
+	}
+}
+
 func TestReconcileLeavesPresentYoungUnackedAndOffScopeRows(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 19, 15, 0, 0, 0, time.UTC)
@@ -251,23 +329,30 @@ func TestReconcileSkipsIncompleteSnapshotAndNonConcreteScope(t *testing.T) {
 func TestOpenOrderSnapshotContainsMatching(t *testing.T) {
 	t.Parallel()
 	snap := ibkrlib.OpenOrderSnapshot{Complete: true, Orders: []ibkrlib.OrderLifecycleEvent{
-		{Type: ibkrlib.OrderLifecycleEventOpenOrder, OrderID: 78, ClientID: 15, PermID: 555},
-		{Type: ibkrlib.OrderLifecycleEventOpenOrder, OrderID: 91, ClientID: 0, PermID: 0},
+		{Type: ibkrlib.OrderLifecycleEventOpenOrder, OrderID: 78, ClientID: 15, ClientIDPresent: true, PermID: 555},
+		{Type: ibkrlib.OrderLifecycleEventOpenOrder, OrderID: 91, ClientID: 0, ClientIDPresent: true},
+		{Type: ibkrlib.OrderLifecycleEventOpenOrder, OrderID: 92, ClientID: 0},
 	}}
 	if !openOrderSnapshotContains(snap, rpc.OrderView{PermID: 555}) {
 		t.Fatal("perm-id match failed")
 	}
-	if !openOrderSnapshotContains(snap, rpc.OrderView{ReservedOrderID: 78, ClientID: 15}) {
-		t.Fatal("order-id+client match failed")
+	if openOrderSnapshotContains(snap, rpc.OrderView{ReservedOrderID: 78, ClientID: 15}) {
+		t.Fatal("known snapshot perm-id must not fall back to order-id+client")
 	}
-	if !openOrderSnapshotContains(snap, rpc.OrderView{ReservedOrderID: 91}) {
-		t.Fatal("order-id match with unknown clients failed")
+	if !openOrderSnapshotContains(snap, rpc.OrderView{ReservedOrderID: 91, ClientID: 0}) {
+		t.Fatal("explicit client-0 order-id match failed")
+	}
+	if openOrderSnapshotContains(snap, rpc.OrderView{ReservedOrderID: 92, ClientID: 0}) {
+		t.Fatal("legacy callback without client provenance must fail closed")
 	}
 	if openOrderSnapshotContains(snap, rpc.OrderView{PermID: 999, ReservedOrderID: 12}) {
 		t.Fatal("absent order matched")
 	}
-	if openOrderSnapshotContains(snap, rpc.OrderView{ReservedOrderID: 78, ClientID: 16, PermID: 998}) {
-		t.Fatal("order-id match must respect disagreeing client ids")
+	if openOrderSnapshotContains(snap, rpc.OrderView{ReservedOrderID: 78, ClientID: 15, PermID: 998}) {
+		t.Fatal("same order id with disagreeing permanent ids matched")
+	}
+	if openOrderSnapshotContains(snap, rpc.OrderView{ReservedOrderID: 91, ClientID: 1}) {
+		t.Fatal("client 0 must not act as a wildcard")
 	}
 }
 
@@ -289,6 +374,18 @@ func TestAppendOrderLifecycleEventDropsUnmatchedBrokerCallbacks(t *testing.T) {
 	// Unmatched orderStatus: dropped.
 	srv.appendOrderLifecycleEvent(ibkrlib.OrderLifecycleEvent{
 		Type: ibkrlib.OrderLifecycleEventStatus, OrderID: 4242, PermID: 999,
+		Status: "Submitted", Remaining: 1,
+	})
+	// A colliding order ID must not override two known, disagreeing permanent
+	// identities. This callback belongs to another broker order and is dropped.
+	srv.appendOrderLifecycleEvent(ibkrlib.OrderLifecycleEvent{
+		Type: ibkrlib.OrderLifecycleEventStatus, OrderID: 78, ClientID: 15, ClientIDPresent: true, PermID: 999,
+		Status: "Submitted", Remaining: 1,
+	})
+	// A legacy callback without explicit client provenance cannot borrow the
+	// current route's client ID and fall back to a colliding local order ID.
+	srv.appendOrderLifecycleEvent(ibkrlib.OrderLifecycleEvent{
+		Type: ibkrlib.OrderLifecycleEventStatus, OrderID: 78,
 		Status: "Submitted", Remaining: 1,
 	})
 	events, err := srv.orderJournal.LoadEvents(0)

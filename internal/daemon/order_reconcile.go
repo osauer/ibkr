@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -62,11 +63,20 @@ func (s *Server) reconcileOrderJournalWithBroker(ctx context.Context) {
 		}
 		candidates = append(candidates, v)
 	}
-	if len(candidates) == 0 {
+	persistenceUncertain := s.orderLifecyclePersistenceUncertain.Load()
+	if len(candidates) == 0 && !persistenceUncertain {
 		return
 	}
 
-	snap, err := s.snapshotOpenOrders(ctx)
+	s.mu.Lock()
+	connector, connectorEpoch := s.connector, s.connectorEpoch
+	s.mu.Unlock()
+	initialSession := ibkrlib.ConnectorSessionBinding{}
+	if connector != nil {
+		initialSession, _ = connector.CaptureSession()
+	}
+	failureStart := s.orderLifecyclePersistenceFailures.Load()
+	snap, err := s.snapshotOpenOrdersFrom(ctx, connector)
 	if err != nil && !snap.Complete {
 		s.warnf("order reconcile: open-order snapshot unavailable: %v", err)
 		return
@@ -76,8 +86,24 @@ func (s *Server) reconcileOrderJournalWithBroker(ctx context.Context) {
 		return
 	}
 
+	// Snapshot callbacks are journaled synchronously before openOrderEnd. Reload
+	// the heads after completion, and bind a compare-and-append to the exact
+	// event frontier so a later local intent/modify cannot be closed from the
+	// pre-snapshot view.
+	currentViews, _, head, err := s.loadOrderViewsAtStableHead()
+	if err != nil {
+		s.warnf("order reconcile: reload current order heads: %v", err)
+		return
+	}
+	now = s.orderNow()
 	var events []orderJournalEvent
-	for _, v := range candidates {
+	for _, v := range currentViews {
+		if !v.Open || v.PermID == 0 || !orderViewMatchesBrokerScope(v, scope) {
+			continue
+		}
+		if !persistenceUncertain && (v.UpdatedAt.IsZero() || now.Sub(v.UpdatedAt) < orderReconcileGrace) {
+			continue
+		}
 		if openOrderSnapshotContains(snap, v) {
 			continue
 		}
@@ -92,25 +118,107 @@ func (s *Server) reconcileOrderJournalWithBroker(ctx context.Context) {
 		ev.Message = "broker open-order snapshot did not include this order; closed by reconciliation. Final broker state unknown (cancelled or filled outside daemon view) — confirm against broker statements."
 		events = append(events, ev)
 	}
-	if len(events) == 0 {
-		return
+	receiptSession := snap.Session
+	if s.orderSnapshotFn != nil && receiptSession == (ibkrlib.ConnectorSessionBinding{}) {
+		receiptSession = initialSession
 	}
-	if err := s.orderJournal.AppendAll(events); err != nil {
-		s.warnf("order reconcile: append reconciled-absent events: %v", err)
-		return
+	commit := func() error {
+		if len(events) > 0 {
+			if err := s.orderJournal.AppendAllAtHead(events, head); err != nil {
+				return err
+			}
+		} else {
+			currentHead, err := s.orderJournal.AuthorityHead()
+			if err != nil {
+				return err
+			}
+			if currentHead.LastEventSeq != head {
+				return fmt.Errorf("order journal head changed from %d to %d", head, currentHead.LastEventSeq)
+			}
+		}
+		if persistenceUncertain && s.orderLifecyclePersistenceFailures.Load() == failureStart {
+			if s.orderReconcileBeforeLatchClear != nil {
+				s.orderReconcileBeforeLatchClear()
+			}
+			s.orderLifecyclePersistenceUncertain.Store(false)
+			// A callback failure publishes generation first, then the latch. If
+			// it raced the clear above, the generation recheck restores the latch;
+			// if it starts afterward, its own Store(true) wins.
+			if s.orderLifecyclePersistenceFailures.Load() != failureStart {
+				s.orderLifecyclePersistenceUncertain.Store(true)
+			}
+		}
+		return nil
+	}
+	if s.orderReconcileBeforeCommit != nil {
+		s.orderReconcileBeforeCommit()
+	}
+	if connector != nil {
+		var brokerBinding ibkrlib.BrokerEvidenceBinding
+		if s.orderSnapshotFn != nil && s.stableBrokerEvidenceForTest != nil {
+			// Deterministic tests can model a complete receipt from the current
+			// publication without constructing pkg/ibkr's opaque socket token.
+			// Production never installs either seam and must capture the exact
+			// live Connector frontier below.
+			brokerBinding = ibkrlib.BrokerEvidenceBinding{
+				Session: receiptSession, OrderLifecycleGeneration: snap.Generation,
+			}
+		} else {
+			var ok bool
+			brokerBinding, ok = connector.CaptureBrokerEvidence()
+			if !ok || brokerBinding.Session != receiptSession || brokerBinding.OrderLifecycleGeneration != snap.Generation {
+				return
+			}
+		}
+		committed, commitErr := s.withStableBrokerEvidence(daemonBrokerEvidenceBinding{
+			scope: scope, connector: connector, connectorEpoch: connectorEpoch, broker: brokerBinding,
+		}, commit)
+		if commitErr != nil {
+			s.warnf("order reconcile: append reconciled-absent events: %v", commitErr)
+			return
+		}
+		if !committed {
+			return
+		}
+	} else {
+		// Test-only snapshot seams do not carry a live Connector barrier. Keep
+		// the production path strict while retaining deterministic store tests.
+		if s.orderSnapshotFn == nil || !sameBrokerScope(scope, s.currentBrokerStateScope()) {
+			return
+		}
+		if err := commit(); err != nil {
+			s.warnf("order reconcile: append reconciled-absent events: %v", err)
+			return
+		}
 	}
 	s.infof("order reconcile: closed %d journal row(s) absent from a complete broker open-order snapshot (%d snapshot orders, %d candidates)", len(events), len(snap.Orders), len(candidates))
 }
 
-// snapshotOpenOrders resolves the snapshot source: the orderSnapshotFn test
-// seam when set, else the live connector.
-func (s *Server) snapshotOpenOrders(ctx context.Context) (ibkrlib.OpenOrderSnapshot, error) {
+func (s *Server) loadOrderViewsAtStableHead() ([]rpc.OrderView, map[string][]rpc.OrderEvent, int64, error) {
+	for range 3 {
+		before, err := s.orderJournal.AuthorityHead()
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		views, eventsByKey, err := s.loadOrderViews()
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		after, err := s.orderJournal.AuthorityHead()
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if before.LastEventSeq == after.LastEventSeq {
+			return views, eventsByKey, after.LastEventSeq, nil
+		}
+	}
+	return nil, nil, 0, fmt.Errorf("order journal changed during reconciliation reload")
+}
+
+func (s *Server) snapshotOpenOrdersFrom(ctx context.Context, c *ibkrlib.Connector) (ibkrlib.OpenOrderSnapshot, error) {
 	if s.orderSnapshotFn != nil {
 		return s.orderSnapshotFn(ctx)
 	}
-	s.mu.Lock()
-	c := s.connector
-	s.mu.Unlock()
 	if c == nil || !c.IsConnected() {
 		return ibkrlib.OpenOrderSnapshot{}, ibkrlib.ErrIBKRUnavailable
 	}
@@ -120,20 +228,30 @@ func (s *Server) snapshotOpenOrders(ctx context.Context) (ibkrlib.OpenOrderSnaps
 }
 
 // openOrderSnapshotContains reports whether the snapshot still carries the
-// journal row's broker order: primary key PermID, fallback broker order id
-// (with client agreement when both sides know their client).
+// journal row's broker order. A known PermID is account-wide authority and
+// must match exactly; it can never fall back to a colliding client-local order
+// ID. Fallback is permitted only when neither side has a PermID and the
+// snapshot explicitly carried the exact client ID (including valid client 0).
 func openOrderSnapshotContains(snap ibkrlib.OpenOrderSnapshot, view rpc.OrderView) bool {
-	for _, o := range snap.Orders {
-		if view.PermID != 0 && o.PermID != 0 && o.PermID == view.PermID {
-			return true
-		}
-		if view.ReservedOrderID > 0 && o.OrderID == view.ReservedOrderID {
-			if o.ClientID == 0 || view.ClientID == 0 || o.ClientID == view.ClientID {
-				return true
-			}
+	_, _, ok := openOrderSnapshotMatch(snap, view)
+	return ok
+}
+
+func openOrderSnapshotMatch(snap ibkrlib.OpenOrderSnapshot, view rpc.OrderView) (int, ibkrlib.OrderLifecycleEvent, bool) {
+	for i, order := range snap.Orders {
+		if openOrderSnapshotEventMatches(order, view) {
+			return i, order, true
 		}
 	}
-	return false
+	return -1, ibkrlib.OrderLifecycleEvent{}, false
+}
+
+func openOrderSnapshotEventMatches(order ibkrlib.OrderLifecycleEvent, view rpc.OrderView) bool {
+	if view.PermID != 0 || order.PermID != 0 {
+		return view.PermID != 0 && order.PermID != 0 && order.PermID == view.PermID
+	}
+	return view.ReservedOrderID > 0 && order.OrderID == view.ReservedOrderID &&
+		order.ClientIDPresent && order.ClientID == view.ClientID
 }
 
 // runOrderReconcileLoop is the standing sweep, launched once per daemon

@@ -29,7 +29,6 @@ func (s *Server) attachProtectionCoverage(ctx context.Context, res *rpc.Position
 	views, _, err := s.loadOrderViews()
 	if err != nil {
 		res.ProtectionCoverage = buildProtectionCoverage(res, nil, false, err.Error(), now)
-		s.observeProtectionCoverageAlertShadow(ctx, res.ProtectionCoverage, symbolFilter, typeFilter, portfolioHealth)
 		return
 	}
 	scope := s.currentBrokerStateScope()
@@ -42,30 +41,19 @@ func (s *Server) attachProtectionCoverage(ctx context.Context, res *rpc.Position
 	}
 	reconcileFlatPositionProtectiveOrders(orders, res, now)
 	res.ProtectionCoverage = buildProtectionCoverage(res, orders, true, "", now)
-	s.observeProtectionCoverageAlertShadow(ctx, res.ProtectionCoverage, symbolFilter, typeFilter, portfolioHealth)
 }
 
+// observeProtectionCoverageAlertShadow intentionally does nothing. Ordinary
+// positions RPCs compose a useful local-journal UI ledger, but they do not own
+// a complete broker API-order snapshot and therefore cannot open, clear, or
+// recover Protection alert episodes. The dedicated heartbeat is the sole
+// producer authority.
 func (s *Server) observeProtectionCoverageAlertShadow(ctx context.Context, summary *rpc.ProtectionCoverageSummary, symbolFilter, typeFilter string, portfolioHealth ibkrlib.PortfolioStreamHealth) {
-	if s == nil || summary == nil || strings.TrimSpace(symbolFilter) != "" || strings.TrimSpace(typeFilter) != "" {
-		return
-	}
-	scope := s.currentBrokerStateScope()
-	shadowScope, err := newAlertShadowBrokerScope(scope)
-	if err != nil {
-		s.warnf("alert shadow: Protection observation skipped: %v", err)
-		return
-	}
-	evidenceAsOf := portfolioHealth.InitialCompletedAt.UTC()
-	if portfolioHealth.LastUpdateAt.After(evidenceAsOf) {
-		evidenceAsOf = portfolioHealth.LastUpdateAt.UTC()
-	}
-	status := classifyOrderIntegrityPortfolioHealth(scope, portfolioHealth, summary.AsOf.UTC())
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	s.observeProtectionAlertShadow(ctx, alertShadowProtectionInput{
-		AsOf: summary.AsOf.UTC(), EvidenceAsOf: evidenceAsOf, Status: status, Summary: *summary, Scope: shadowScope,
-	})
+	_ = ctx
+	_ = summary
+	_ = symbolFilter
+	_ = typeFilter
+	_ = portfolioHealth
 }
 
 func protectionCoverageOrderPassesFilter(view rpc.OrderView, symbolFilter, typeFilter string) bool {
@@ -282,6 +270,11 @@ func protectionCoverageOrderIsStopLike(order rpc.OrderView) bool {
 
 func protectionCoverageOrderCounts(order rpc.OrderView, row rpc.PositionView) bool {
 	if protectionCoverageOrderIsProblem(order) {
+		return false
+	}
+	switch order.LifecycleStatus {
+	case rpc.OrderLifecycleSubmitted, rpc.OrderLifecyclePreSubmitted:
+	default:
 		return false
 	}
 	return orderViewActionCanCloseQuantity(order, row.Quantity, orderViewRemainingQuantity(order))

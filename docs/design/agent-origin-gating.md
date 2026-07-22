@@ -51,9 +51,10 @@ Contract per `docs/templates/daemon-cli-trading-contract.md`.
    capability, gateway/account/client pins, journal availability, freeze state,
    preview tokens, and broker checks.
    **Cancel is freeze-exempt** (strictly risk-reducing); origin still
-   journaled. Trading-limit settings writes (`max_notional`,
-   `max_option_contracts`, `allow_stock_short`,
-   `allow_option_sell_to_open`) still refuse agent origin when mode is live.
+   journaled. `trading.freeze` and every trading-limit settings write
+   (`max_notional`, `max_option_contracts`, `allow_stock_short`,
+   `allow_option_sell_to_open`) require a human-terminal origin in disabled,
+   paper, and live modes; agent, missing, and paired-device origins are refused.
 4. **MCP**: `ibkr_order_preview` redacts the raw `preview_token` (returns
    `preview_token_id` only), aligning with the proposal surface's
    `sanitizeProposalPreview`. Closes the mint-over-MCP → redeem-over-Bash

@@ -75,12 +75,12 @@ V1 flags are reduce-only context and gates. They can annotate, prioritize, or bl
 The five V1 flags are:
 
 - `borrow_inventory_tight`: IBKR shortable-share inventory crossed the V1 tight/scarce thresholds. This strengthens buy-to-cover context for existing shorts and is observational for long holdings.
-- `borrow_fee_extreme`: IBKR short-stock availability reports an annualized fee rate of at least 50%. This is emitted only from observed fee-rate evidence, not inferred from low inventory.
+- `borrow_fee_extreme`: the current global IBKR short-stock availability file reports an annualized fee rate of at least 50%. This is emitted only from current, policy-eligible FTP evidence, never inferred from low inventory or emitted/cleared from stale data. If a due FTP refresh is unusable, the daemon can inspect exact currently held short-stock contracts through TWS historical `FEE_RATE`; those rows are explicitly portfolio-only, nullable, scale-unverified, and policy-ineligible until a controlled broker fixture commissions the numeric scale.
 - `reg_sho_threshold`: the symbol appears on the Nasdaq Reg SHO threshold list. V1 names the source scope explicitly; non-Nasdaq listing-exchange threshold feeds are outside coverage, so absence is not universal non-threshold proof.
 - `luld_pause`: a Nasdaq trade-halt reason indicates an active or recent LULD pause. Active LULD blocks proposal preview/submit; recent LULD is a warning requiring fresh quote context.
 - `halt_regulatory_or_news`: a regulatory/news halt is active or recent. Active halts are hard blockers; recent halts are warning tags.
 
-Unknown and null mean unavailable, not false or zero. Source health reports whether each feed is `ok`, `stale`, `unknown`, or `degraded`; stale/unknown source health must stay visible because it changes how much confidence absence of a flag deserves.
+Unknown and null mean unavailable, not false or zero. Source health reports whether each feed is `ok`, `partial`, `stale`, `unknown`, or `degraded`; stale/unknown source health must stay visible because it changes how much confidence absence of a flag deserves. `borrow_fee_coverage[]` additionally distinguishes global FTP coverage from exact-contract, held-short-only TWS context and names entitlement/scale/policy eligibility directly.
 
 Rule 201 / short-sale restriction is not a V1 protection driver. If added later, it should be context-only unless the order path is directly short-sale relevant.
 

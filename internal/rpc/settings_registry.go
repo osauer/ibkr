@@ -26,11 +26,12 @@ const (
 
 // Writability classes the daemon enforces beyond per-kind parsing.
 const (
-	// SettingsClassRuntime keys are always writable.
+	// SettingsClassRuntime keys are runtime-owned. Individual keys may add a
+	// stricter origin policy; trading.freeze is human-terminal-only in every mode.
 	SettingsClassRuntime = "runtime"
 	// SettingsClassTradingLimit keys are writable only while trading limits
-	// are writable (experimental trading build with paper/live mode); on live
-	// routes the daemon additionally rejects agent-origin writes.
+	// are writable (experimental trading build with paper/live mode), and every
+	// write requires a human-terminal origin in every mode.
 	SettingsClassTradingLimit = "trading-limit"
 )
 
@@ -53,7 +54,7 @@ func SettingsKeys() []SettingsKeySpec {
 	return []SettingsKeySpec{
 		{
 			Key: "features.purge_restore.enabled", Kind: SettingsKindBool, Class: SettingsClassRuntime,
-			Doc: "Allows the purge/restore workflow; false blocks purge/restore write actions across CLI, RPC, API, and SPA while purge status stays readable (default true).",
+			Doc: "Controls the purge/restore workflow/read surface while purge status stays readable; true does not authorize preview or broker submission, which remains unavailable until exact per-leg portfolio and account-global working-order authority exists (default true).",
 		},
 		{
 			Key: "features.stock_protection.enabled", Kind: SettingsKindBool, Class: SettingsClassRuntime,
@@ -73,11 +74,11 @@ func SettingsKeys() []SettingsKeySpec {
 		},
 		{
 			Key: "trading.limits.max_notional", Kind: SettingsKindFloat, Class: SettingsClassTradingLimit,
-			Doc: "Runtime override of [trading].max_notional, the opening-order notional cap; null falls back to the TOML value.",
+			Doc: "Runtime override of [trading].max_notional, the notional cap for every equity/ETF order including apparent exits; null falls back to the TOML value.",
 		},
 		{
 			Key: "trading.limits.max_option_contracts", Kind: SettingsKindInt, Class: SettingsClassTradingLimit,
-			Doc: "Runtime override of [trading].max_option_contracts, the opening option-quantity cap; null falls back to the TOML value.",
+			Doc: "Runtime override of [trading].max_option_contracts, the quantity cap for every single-leg option order including apparent exits; null falls back to the TOML value.",
 		},
 		{
 			Key: "trading.limits.allow_stock_short", Kind: SettingsKindBool, Class: SettingsClassTradingLimit,

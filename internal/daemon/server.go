@@ -164,7 +164,19 @@ type Server struct {
 	serverCancel context.CancelFunc
 
 	orderLifecycleHandlersMu sync.Mutex
-	orderLifecycleHandlers   map[*ibkrlib.Connector]struct{}
+	orderLifecycleHandlers   map[*ibkrlib.Connector]*orderLifecycleJournalBinding
+	// orderLifecycleRegisterAfterCapture is a deterministic test seam for a
+	// registration delayed across same-pointer Connector republication.
+	orderLifecycleRegisterAfterCapture func()
+	// orderLifecycleSessionCurrentForTest lets daemon tests isolate publication
+	// identity from pkg/ibkr's intentionally opaque socket receipt.
+	orderLifecycleSessionCurrentForTest func(*ibkrlib.Connector, ibkrlib.ConnectorSessionBinding) bool
+	// orderLifecyclePersistenceFailures advances whenever a broker lifecycle
+	// callback could not be committed to daemon authority. While uncertain is
+	// set, journal-derived Protection and Order Integrity negatives fail
+	// closed. Only a complete, stable broker reconciliation may clear it.
+	orderLifecyclePersistenceFailures  atomic.Uint64
+	orderLifecyclePersistenceUncertain atomic.Bool
 
 	idleTimer   *time.Timer
 	idleStop    chan struct{}
@@ -367,6 +379,20 @@ type Server struct {
 	// orderSnapshotFn is the open-order snapshot seam for the reconcile
 	// sweep; nil resolves to the live connector's SnapshotOpenOrders.
 	orderSnapshotFn func(context.Context) (ibkrlib.OpenOrderSnapshot, error)
+	// Test-only final-boundary seams. Production leaves these nil. They run
+	// after evidence assembly and immediately before the stable commit/CAS.
+	orderReconcileBeforeCommit     func()
+	orderReconcileBeforeLatchClear func()
+	protectionBeforeCommit         func()
+	orderIntegrityBeforeCommit     func()
+	stableBrokerEvidenceForTest    func(daemonBrokerEvidenceBinding, func() error) (bool, error)
+	// protectionOrderSnapshot* retains only a short-lived, complete broker
+	// inventory receipt for the 30-second Protection shadow heartbeat. The
+	// binding includes scope, connector epoch, and Connector order-lifecycle
+	// generation; any later broker order event makes the receipt ineligible.
+	protectionOrderSnapshotMu     sync.Mutex
+	protectionOrderSnapshotCache  protectionOrderSnapshotCache
+	protectionOrderSnapshotFlight *protectionOrderSnapshotFlight
 	// orderReconcileLoopStarted gates the standing reconcile sweep to one
 	// goroutine per Server lifetime across reconnect-driven
 	// postConnectSetup re-runs.
@@ -431,11 +457,26 @@ type Server struct {
 	// earnings backs the trading rulebook's catalyst rules (6-8); LKG cache,
 	// async refresh only — never fetched on a snapshot or preview path.
 	earnings *earningsCache
+	// earningsTerminal is exact-contract, provenance-bound terminal issuer
+	// evidence loaded from daemon.db. An optional operator file can update the
+	// SQLite authority at startup; symbol text alone never grants an exemption.
+	earningsTerminal *earningsTerminalStore
 	// lastRules memoizes the most recent rulebook evaluation for advisory
 	// preview causes (rulesPreviewTTL) and the transitions journal.
-	rulesMu     sync.Mutex
-	lastRules   *rpc.RulesResult
-	lastRulesAt time.Time
+	rulesEvaluationMu       sync.Mutex
+	rulesMu                 sync.Mutex
+	lastRules               *rpc.RulesResult
+	lastRulesAt             time.Time
+	lastRulesScope          brokerStateScope
+	lastRulesConnector      *ibkrlib.Connector
+	lastRulesConnectorEpoch uint64
+	lastRulesBroker         ibkrlib.BrokerEvidenceBinding
+	lastRulesBrokerCaptured bool
+	rulesRefreshWake        chan struct{}
+	// connectorEpoch changes whenever the daemon publishes or removes the
+	// primary connector. Rulebook cache/journal bindings use it to invalidate
+	// evidence across reconnects even when account/mode text is unchanged.
+	connectorEpoch uint64
 	// rulesRegimeStage latches the bucketed regime lifecycle stage for the
 	// rulebook's regime-conditional thresholds, persisted across restarts
 	// (rules-regime-stage.json) so a bounce mid-stress cannot reset
@@ -454,15 +495,24 @@ type Server struct {
 	// orderPreview* hooks let tests exercise the full preview gate/token path
 	// without a live gateway. Nil hooks use the production connector-backed
 	// implementations.
-	orderPreviewQuote          func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error)
-	orderPreviewPositionImpact func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error)
-	orderPreviewWhatIf         func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error)
-	purgeRefreshPositions      func() ([]*ibkrlib.RawPosition, error)
-	orderWritesEnabled         func() bool
-	gatewayReadyForTrading     func() bool
-	orderReserveBrokerID       func(context.Context) (int, error)
-	orderPlaceBroker           func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error
-	orderCancelBroker          func(context.Context, int) error
+	orderPreviewQuote            func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error)
+	orderPreviewPositionImpact   func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error)
+	orderRiskAuthorityForTest    func(context.Context, rpc.TradingStatus, rpc.ContractParams, string, int) (orderPositionAuthority, error)
+	orderContractResolverForTest func(context.Context, rpc.ContractParams, time.Duration) (rpc.ContractParams, error)
+	orderPreviewWhatIf           func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error)
+	purgeRefreshPositions        func() ([]*ibkrlib.RawPosition, error)
+	orderWritesEnabled           func() bool
+	gatewayReadyForTrading       func() bool
+	orderReserveBrokerID         func(context.Context) (int, error)
+	orderPlaceBroker             func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error
+	orderCancelBroker            func(context.Context, int) error
+	optionExerciseBroker         func(context.Context, ibkrlib.OptionExerciseRequest) error
+	// orderWriteBindingForTest and orderWriteBeforeBrokerSend are deterministic
+	// transaction-boundary seams for trading-tag tests. Production leaves both
+	// nil; broker writes then require a real ready Connector session.
+	orderWriteBindingForTest        func(rpc.TradingStatus) (*ibkrlib.Connector, uint64, ibkrlib.ConnectorSessionBinding, brokerStateScope)
+	orderWriteBeforeBrokerSend      func()
+	orderWriteOriginBlockersForTest func(rpc.TradingStatus, string) []rpc.TradingBlocker
 
 	// regimePrewarming is set while prewarmRegimeSymbols' fan-out is in
 	// flight. Surfaces via backgroundTasks() so the idle watcher defers
@@ -604,6 +654,7 @@ func New(opts Options) *Server {
 	s.installGammaZeroCache()
 	s.installFXRateCache()
 	s.installEarningsCache()
+	s.installEarningsTerminalStore()
 	return s
 }
 
@@ -633,6 +684,14 @@ func (s *Server) installEarningsCache() {
 		s.logger.Warnf("earnings cache: install IBKR WSH provider: %v", err)
 	}
 	s.earnings = cache
+}
+
+func (s *Server) installEarningsTerminalStore() {
+	path := ""
+	if s.cfg != nil {
+		path = s.cfg.Rulebook.TerminalEvidenceFile
+	}
+	s.earningsTerminal = newEarningsTerminalStore(path)
 }
 
 // installGammaZeroCache replaces the bootstrap in-memory gamma cache
@@ -1498,33 +1557,48 @@ func (s *Server) connectWithFailover(ctx context.Context, primary discover.Endpo
 		// production (buildAttempter returns *ibkrlib.Connector); test
 		// fakes skip the s.connector publish but the loop still drives
 		// the per-candidate handshake.
-		s.mu.Lock()
-		s.endpoint = cand
-		s.lastConnectError = ""
 		if real, ok := a.(*ibkrlib.Connector); ok {
-			s.connector = real
+			for {
+				s.mu.Lock()
+				expected := s.connector
+				s.mu.Unlock()
+				if s.withConnectorEvidencePublication(expected, real, func() {
+					s.endpoint = cand
+					s.lastConnectError = ""
+					s.connector = real
+					s.connectorEpoch++
+				}) {
+					break
+				}
+			}
 			s.registerOrderLifecycleJournal(real)
+		} else {
+			s.mu.Lock()
+			s.endpoint = cand
+			s.lastConnectError = ""
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 
 		if s.tryOneHandshake(ctx, a, cand) {
 			s.postConnectSetup(a, cand)
 			return
 		}
 
-		// This candidate failed. Stop it so its background goroutines
-		// don't leak into the next attempt. Clear s.connector iff it
-		// still points at this attempter (a concurrent reconnect could
-		// have moved on already, though connectInFlight gates that).
+		// This candidate failed. Unpublish it under the exclusive evidence
+		// boundary before Stop, so callbacks already in flight drain against the
+		// still-current identity and any callback in the unpublish-to-Stop window
+		// reaches the retained receipt handler and fails closed as stale.
+		if real, ok := a.(*ibkrlib.Connector); ok {
+			s.withConnectorEvidencePublication(real, nil, func() {
+				s.connector = nil
+				s.connectorEpoch++
+			})
+		}
 		if err := a.Stop(); err != nil {
 			s.logger.Warnf("Failover: stop failed candidate %s:%d: %v", cand.Host, cand.Port, err)
 		}
 		if real, ok := a.(*ibkrlib.Connector); ok {
-			s.mu.Lock()
-			if s.connector == real {
-				s.connector = nil
-			}
-			s.mu.Unlock()
+			s.forgetOrderLifecycleJournal(real)
 		}
 	}
 
@@ -2201,12 +2275,16 @@ func (s *Server) triggerReconnect() bool {
 func (s *Server) reconnectFlow(ctx context.Context) {
 	s.mu.Lock()
 	old := s.connector
-	s.connector = nil
 	s.mu.Unlock()
+	s.withConnectorEvidencePublication(old, nil, func() {
+		s.connector = nil
+		s.connectorEpoch++
+	})
 	if old != nil {
 		if err := old.Stop(); err != nil {
 			s.logger.Warnf("Reconnect: stop old connector: %v", err)
 		}
+		s.forgetOrderLifecycleJournal(old)
 	}
 
 	ep, derr := discover.Resolve(ctx, partialFromConfig(s.cfg.Gateway))
@@ -2283,14 +2361,18 @@ func (s *Server) noteReconnectOutcome(ctx context.Context, connected bool) {
 func (s *Server) stopConnector() {
 	s.mu.Lock()
 	c := s.connector
-	s.connector = nil
 	s.mu.Unlock()
+	s.withConnectorEvidencePublication(c, nil, func() {
+		s.connector = nil
+		s.connectorEpoch++
+	})
 	if c == nil {
 		return
 	}
 	if err := c.Stop(); err != nil {
 		s.logger.Warnf("Connector.Stop: %v", err)
 	}
+	s.forgetOrderLifecycleJournal(c)
 }
 
 // gatewayConnector returns the live IBKR connector if one is constructed

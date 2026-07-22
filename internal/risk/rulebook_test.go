@@ -296,6 +296,113 @@ func TestEarningsUnknownReasonIsDisclosed(t *testing.T) {
 	}
 }
 
+func TestTerminalNonReportingIsExplicitlyNotApplicable(t *testing.T) {
+	in := healthyInputs()
+	in.Names = []NameInput{{
+		Symbol: "ACMEQ", ExposureBase: 150000, ExposureBaseComplete: true,
+		Legs: []LegInput{
+			{Desc: "ACMEQ long", Right: "C", Strike: 12, Expiry: etDate(2026, 8, 21), DTE: 45,
+				Quantity: 1, Multiplier: 100, Underlying: new(10.0), MarketValueBase: 100},
+			{Desc: "ACMEQ short", Right: "C", Strike: 15, Expiry: etDate(2026, 8, 21), DTE: 45,
+				Quantity: -1, Multiplier: 100, Underlying: new(10.0), MarketValueBase: -50},
+		},
+	}}
+	in.Earnings = map[string]EarningsInput{"ACMEQ": {
+		TerminalNonReporting: true, Source: "verified_terminal", Reason: earningsTerminalClassForTest,
+	}}
+	ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+	for _, id := range []string{RuleCatalystCoverage, RuleOverwriteEarnings, RuleEarningsSizeFreeze} {
+		row := rowByID(t, ev, id)
+		if row.Status != RuleStatusNotEvaluated || row.Reason != EarningsReasonTerminalNonReporting {
+			t.Errorf("%s = %s/%s, want not_evaluated/terminal_non_reporting", id, row.Status, row.Reason)
+		}
+		if len(row.Exempt) != 1 || row.Exempt[0].Symbol != "ACMEQ" || !strings.Contains(row.Exempt[0].Note, "exact contract") {
+			t.Errorf("%s exemptions = %+v", id, row.Exempt)
+		}
+	}
+}
+
+func TestTerminalNonReportingStockOnlyIsExplicitlyNotApplicableForRulesSixAndSeven(t *testing.T) {
+	in := healthyInputs()
+	in.Names = []NameInput{{
+		Symbol: "ACMEQ", ExposureBase: 150000, ExposureBaseComplete: true,
+	}}
+	in.Earnings = map[string]EarningsInput{"ACMEQ": {
+		TerminalNonReporting: true, Source: "verified_terminal", Reason: earningsTerminalClassForTest,
+	}}
+	ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+	for _, id := range []string{RuleCatalystCoverage, RuleOverwriteEarnings} {
+		row := rowByID(t, ev, id)
+		if row.Status != RuleStatusNotEvaluated || row.Reason != EarningsReasonTerminalNonReporting {
+			t.Errorf("%s = %s/%s, want not_evaluated/terminal_non_reporting", id, row.Status, row.Reason)
+		}
+		if len(row.Exempt) != 1 || row.Exempt[0].Symbol != "ACMEQ" {
+			t.Errorf("%s exemptions = %+v", id, row.Exempt)
+		}
+	}
+}
+
+func TestUnresolvedTerminalAuthorityStockOnlyFailsClosedForEarningsRules(t *testing.T) {
+	cases := []struct {
+		name  string
+		input EarningsInput
+	}{
+		{name: "expired", input: EarningsInput{Source: "verified_terminal", Reason: "terminal_evidence_expired"}},
+		{name: "identity conflict", input: EarningsInput{Source: "verified_terminal", Reason: "terminal_identity_conflict"}},
+		{name: "date source conflict", input: EarningsInput{Source: "verified_terminal", Reason: "terminal_evidence_conflict"}},
+		{name: "stale accepted record", input: EarningsInput{TerminalNonReporting: true, Stale: true, Source: "verified_terminal", Reason: earningsTerminalClassForTest}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := healthyInputs()
+			in.Names = []NameInput{{Symbol: "ACMEQ", ExposureBase: 1000, ExposureBaseComplete: true}}
+			in.Earnings = map[string]EarningsInput{"ACMEQ": tc.input}
+			ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+			for _, id := range []string{RuleCatalystCoverage, RuleOverwriteEarnings, RuleEarningsSizeFreeze} {
+				row := rowByID(t, ev, id)
+				if row.Status != RuleStatusUnknown || row.Reason != "earnings_unknown" {
+					t.Errorf("%s = %s/%s, want unknown/earnings_unknown", id, row.Status, row.Reason)
+				}
+				if len(row.Exempt) != 0 || len(row.Offenders) != 1 || row.Offenders[0].Symbol != "ACMEQ" || !strings.Contains(row.Offenders[0].Note, "authority is unresolved") {
+					t.Errorf("%s unresolved evidence = offenders:%+v exempt:%+v", id, row.Offenders, row.Exempt)
+				}
+			}
+		})
+	}
+}
+
+func TestTerminalNonReportingStockOnlyDoesNotHideAssessedNames(t *testing.T) {
+	in := healthyInputs()
+	in.Names = []NameInput{
+		{Symbol: "ACMEQ", ExposureBase: 1000, ExposureBaseComplete: true},
+		{
+			Symbol: "OTHER", ExposureBase: 2000, ExposureBaseComplete: true,
+			Legs: []LegInput{
+				{Desc: "OTHER long", Right: "C", Strike: 12, Expiry: etDate(2026, 8, 21), DTE: 45,
+					Quantity: 1, Multiplier: 100, Underlying: new(10.0), MarketValueBase: 100},
+				{Desc: "OTHER short", Right: "C", Strike: 15, Expiry: etDate(2026, 7, 10), DTE: 3,
+					Quantity: -1, Multiplier: 100, Underlying: new(10.0), MarketValueBase: -50},
+			},
+		},
+	}
+	in.Earnings = map[string]EarningsInput{
+		"ACMEQ": {TerminalNonReporting: true, Source: "verified_terminal", Reason: earningsTerminalClassForTest},
+		"OTHER": {Known: true, Date: etDate(2026, 7, 22), TimeOfDay: "amc", SessionsUntil: new(11), Source: "fetched"},
+	}
+	ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+	for _, id := range []string{RuleCatalystCoverage, RuleOverwriteEarnings} {
+		row := rowByID(t, ev, id)
+		if row.Status != RuleStatusPass {
+			t.Errorf("%s = %s/%s, want assessed pass", id, row.Status, row.Reason)
+		}
+		if len(row.Exempt) != 1 || row.Exempt[0].Symbol != "ACMEQ" {
+			t.Errorf("%s exemptions = %+v", id, row.Exempt)
+		}
+	}
+}
+
+const earningsTerminalClassForTest = "equity_interests_cancelled"
+
 func TestHedgeExemptionSuppressedWhenOverHedged(t *testing.T) {
 	in := healthyInputs()
 	// Inflate the hedge so the band breaches high: short delta ~194k vs

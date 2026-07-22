@@ -11,26 +11,34 @@ import (
 
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 const (
-	orderHistoryDefaultLookback   = 7 * 24 * time.Hour
-	orderHistoryDefaultLimit      = 50
-	orderHistoryMaxLimit          = 500
-	orderHistoryDefaultEvents     = 20
-	orderHistoryMaxEvents         = 200
-	orderIntegrityPortfolioMaxAge = 5 * time.Minute
+	orderHistoryDefaultLookback  = 7 * 24 * time.Hour
+	orderHistoryDefaultLimit     = 50
+	orderHistoryMaxLimit         = 500
+	orderHistoryDefaultEvents    = 20
+	orderHistoryMaxEvents        = 200
+	portfolioStreamReceiptMaxAge = 5 * time.Minute
 )
 
 type orderIntegrityEvaluation struct {
-	AsOf         time.Time
-	Status       string
-	EvidenceAsOf time.Time
-	Scope        brokerStateScope
-	Orders       []rpc.OrderView
+	AsOf                  time.Time
+	Status                string
+	EvidenceAsOf          time.Time
+	Scope                 brokerStateScope
+	Orders                []rpc.OrderView
+	connector             *ibkrlib.Connector
+	connectorEpoch        uint64
+	brokerEvidence        ibkrlib.BrokerEvidenceBinding
+	orderJournal          *orderJournalStore
+	orderAuthorityHeadSeq int64
 }
+
+type orderIntegrityCachedPositionsRead func(context.Context) ([]*ibkrlib.RawPosition, ibkrlib.PortfolioStreamHealth, error)
 
 const (
 	orderIntegrityHealthCurrent     = "current"
@@ -375,42 +383,185 @@ func (s *Server) loadOrderViewsReconciled(ctx context.Context) ([]rpc.OrderView,
 }
 
 func (s *Server) loadOrderViewsReconciledWithHealth(ctx context.Context) ([]rpc.OrderView, map[string][]rpc.OrderEvent, orderIntegrityEvaluation, error) {
-	views, eventsByKey, err := s.loadOrderViews()
+	binding, bindingOK := s.captureOrderIntegrityEvidenceBinding()
+	views, eventsByKey, head, err := s.loadOrderViewsAtStableHead()
 	if err != nil {
 		return nil, nil, orderIntegrityEvaluation{}, err
 	}
-	now := s.orderNow().UTC()
-	scope := s.currentBrokerStateScope()
-	evaluation := orderIntegrityEvaluation{AsOf: now, Status: orderIntegrityHealthUnavailable, Scope: scope, Orders: []rpc.OrderView{}}
-	var health ibkrlib.PortfolioStreamHealth
-	pos, posErr := s.handlePositionsListCaptured(ctx, &rpc.Request{}, &health)
-	if posErr == nil {
-		reconcileFlatPositionProtectiveOrders(views, pos, now)
-		evidenceAt := health.InitialCompletedAt.UTC()
-		if health.LastUpdateAt.After(evidenceAt) {
-			evidenceAt = health.LastUpdateAt.UTC()
-		}
-		evaluation.EvidenceAsOf = evidenceAt
-		evaluation.Status = classifyOrderIntegrityPortfolioHealth(scope, health, now)
+	evaluation := s.reconcileOrderViewsFromCachedPositionsBound(ctx, views, s.readOrderIntegrityCachedPositions, binding, bindingOK)
+	if !bindingOK {
+		evaluation.Status = orderIntegrityHealthUnavailable
 	}
+	evaluation.orderJournal = s.orderJournal
+	evaluation.orderAuthorityHeadSeq = head
 	return views, eventsByKey, evaluation, nil
 }
 
+func (s *Server) captureOrderIntegrityEvidenceBinding() (daemonBrokerEvidenceBinding, bool) {
+	if s == nil {
+		return daemonBrokerEvidenceBinding{}, false
+	}
+	s.mu.Lock()
+	connector, connectorEpoch := s.connector, s.connectorEpoch
+	s.mu.Unlock()
+	scope := s.currentBrokerStateScope()
+	if connector == nil || !brokerScopeConcrete(scope) {
+		return daemonBrokerEvidenceBinding{}, false
+	}
+	broker, ok := connector.CaptureBrokerEvidence()
+	if !ok {
+		return daemonBrokerEvidenceBinding{}, false
+	}
+	return daemonBrokerEvidenceBinding{scope: scope, connector: connector, connectorEpoch: connectorEpoch, broker: broker}, true
+}
+
+// readOrderIntegrityCachedPositions is deliberately narrower than the
+// positions RPC. It reads the atomic portfolio cache and receipt only: no
+// quote/history/Greeks/FX/account/PnL enrichment belongs in the 30-second
+// integrity cadence.
+func (s *Server) readOrderIntegrityCachedPositions(ctx context.Context) ([]*ibkrlib.RawPosition, ibkrlib.PortfolioStreamHealth, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, ibkrlib.PortfolioStreamHealth{}, err
+	}
+	c := s.gatewayConnector()
+	if c == nil {
+		return nil, ibkrlib.PortfolioStreamHealth{}, s.gatewayUnavailableError()
+	}
+	return c.CachedPositionsWithHealth()
+}
+
+func (s *Server) reconcileOrderViewsFromCachedPositions(ctx context.Context, views []rpc.OrderView, read orderIntegrityCachedPositionsRead) orderIntegrityEvaluation {
+	binding, ok := s.captureOrderIntegrityEvidenceBinding()
+	return s.reconcileOrderViewsFromCachedPositionsBound(ctx, views, read, binding, ok)
+}
+
+func (s *Server) reconcileOrderViewsFromCachedPositionsBound(ctx context.Context, views []rpc.OrderView, read orderIntegrityCachedPositionsRead, binding daemonBrokerEvidenceBinding, bindingOK bool) orderIntegrityEvaluation {
+	scope := binding.scope
+	if !bindingOK {
+		scope = s.currentBrokerStateScope()
+	}
+	evaluation := orderIntegrityEvaluation{Status: orderIntegrityHealthUnavailable, Scope: scope, Orders: []rpc.OrderView{}}
+	if bindingOK {
+		evaluation.connector = binding.connector
+		evaluation.connectorEpoch = binding.connectorEpoch
+		evaluation.brokerEvidence = binding.broker
+	}
+	if ctx == nil || ctx.Err() != nil || read == nil || !brokerScopeConcrete(scope) {
+		evaluation.AsOf = s.orderNow().UTC()
+		return evaluation
+	}
+
+	raw, health, err := read(ctx)
+	completedAt := s.orderNow().UTC()
+	evaluation.AsOf = completedAt
+	if err != nil || ctx.Err() != nil || !sameBrokerScope(scope, s.currentBrokerStateScope()) {
+		return evaluation
+	}
+	evaluation.EvidenceAsOf = portfolioStreamEvidenceAsOf(health)
+	if bindingOK {
+		evaluation.brokerEvidence.PortfolioProjectionGeneration = health.ProjectionGeneration
+	}
+	positions, scoped := orderIntegrityPositionsFromCache(raw, scope, completedAt)
+	if !scoped {
+		return evaluation
+	}
+	reconcileFlatPositionProtectiveOrders(views, positions, completedAt)
+	evaluation.Status = classifyOrderIntegrityPortfolioHealth(scope, health, completedAt)
+	return evaluation
+}
+
+// orderIntegrityPositionsFromCache projects only the identity fields read by
+// positionViewMatchesOrderView plus quantity. Any non-zero row from another
+// account makes the atomic cache unusable for a scoped negative.
+func orderIntegrityPositionsFromCache(raw []*ibkrlib.RawPosition, scope brokerStateScope, asOf time.Time) (*rpc.PositionsResult, bool) {
+	result := &rpc.PositionsResult{AsOf: asOf.UTC(), Stocks: []rpc.PositionView{}, Options: []rpc.PositionView{}}
+	if !cachedPositionsMatchBrokerScope(raw, scope) {
+		return result, false
+	}
+	for _, position := range raw {
+		if position == nil || position.Position == 0 {
+			continue
+		}
+		view := rpc.PositionView{
+			Symbol: strings.ToUpper(strings.TrimSpace(position.Contract.Symbol)), SecType: positionSecType(position.Contract.SecType),
+			ConID: position.Contract.ConID, Exchange: position.Contract.Exchange, Currency: position.Contract.Currency,
+			LocalSymbol: position.Contract.LocalSymbol, TradingClass: position.Contract.TradingClass, Quantity: position.Position,
+		}
+		if strings.EqualFold(position.Contract.SecType, "OPT") {
+			view.Expiry, view.Right, view.Strike = position.Contract.Expiry, position.Contract.Right, position.Contract.Strike
+			result.Options = append(result.Options, view)
+		} else {
+			result.Stocks = append(result.Stocks, view)
+		}
+	}
+	return result, true
+}
+
+// cachedPositionsMatchBrokerScope is the shared fail-closed boundary for
+// unattended consumers of the streaming portfolio cache. The connector keeps
+// foreign rows as conflict evidence; a strict consumer must reject the whole
+// projection instead of filtering those rows into an apparently clean book.
+func cachedPositionsMatchBrokerScope(raw []*ibkrlib.RawPosition, scope brokerStateScope) bool {
+	if !brokerScopeConcrete(scope) {
+		return false
+	}
+	for _, position := range raw {
+		if position != nil && position.Position != 0 && !brokerScopedAccountMatches(position.Account, scope) {
+			return false
+		}
+	}
+	return true
+}
+
+func scopedPortfolioStreamHealth(raw []*ibkrlib.RawPosition, health ibkrlib.PortfolioStreamHealth, scope brokerStateScope, observedAt time.Time) (ibkrlib.PortfolioStreamHealth, bool) {
+	if cachedPositionsMatchBrokerScope(raw, scope) {
+		return health, true
+	}
+	health.ScopeConflictAt = observedAt.UTC()
+	return health, false
+}
+
 func classifyOrderIntegrityPortfolioHealth(scope brokerStateScope, health ibkrlib.PortfolioStreamHealth, now time.Time) string {
+	return classifyPortfolioStreamHealth(scope, health, now)
+}
+
+// classifyPortfolioStreamHealth is the shared trust boundary for any complete
+// portfolio projection whose empty result may clear an alert episode. Receipt
+// completion, broker-account match, freshness, and non-future time are all
+// required; cached rows alone are never proof of a current negative.
+func classifyPortfolioStreamHealth(scope brokerStateScope, health ibkrlib.PortfolioStreamHealth, now time.Time) string {
 	evidenceAt := health.InitialCompletedAt.UTC()
 	if health.LastUpdateAt.After(evidenceAt) {
 		evidenceAt = health.LastUpdateAt.UTC()
 	}
 	switch {
+	case !health.ScopeConflictAt.IsZero():
+		return orderIntegrityHealthUnavailable
+	case !health.InvalidPayloadAt.IsZero():
+		return orderIntegrityHealthUnavailable
 	case !brokerScopeConcrete(scope) || !brokerScopeAccountConcrete(health.Account) || !strings.EqualFold(health.Account, scope.Account) || health.InitialCompletedAt.IsZero():
 		return orderIntegrityHealthUnavailable
 	case evidenceAt.After(now.UTC()):
 		return orderIntegrityHealthUnavailable
-	case now.UTC().Sub(evidenceAt) > orderIntegrityPortfolioMaxAge:
+	case now.UTC().Sub(evidenceAt) > portfolioStreamReceiptMaxAge:
 		return orderIntegrityHealthStale
 	default:
 		return orderIntegrityHealthCurrent
 	}
+}
+
+func portfolioStreamEvidenceAsOf(health ibkrlib.PortfolioStreamHealth) time.Time {
+	evidenceAt := health.InitialCompletedAt.UTC()
+	if health.LastUpdateAt.After(evidenceAt) {
+		evidenceAt = health.LastUpdateAt.UTC()
+	}
+	if health.ScopeConflictAt.After(evidenceAt) {
+		evidenceAt = health.ScopeConflictAt.UTC()
+	}
+	if health.InvalidPayloadAt.After(evidenceAt) {
+		evidenceAt = health.InvalidPayloadAt.UTC()
+	}
+	return evidenceAt
 }
 
 func reconcileFlatPositionProtectiveOrders(views []rpc.OrderView, pos *rpc.PositionsResult, now time.Time) {
@@ -612,28 +763,235 @@ func dayOrderSessionDeadline(cal *marketcal.Calendar, view rpc.OrderView, placed
 
 func buildOrderViews(events []orderJournalEvent) []rpc.OrderView {
 	aliases := orderJournalKeyAliases(events)
-	viewsByKey := map[string]rpc.OrderView{}
-	lastEventsByKey := map[string]orderJournalEvent{}
+	foldsByKey := map[string]*orderViewFold{}
 	for _, ev := range events {
 		key := orderJournalCanonicalKey(ev, aliases)
 		if key == "" {
 			continue
 		}
-		view := viewsByKey[key]
-		mergeOrderJournalEventIntoView(&view, ev)
-		viewsByKey[key] = view
-		lastEventsByKey[key] = ev
+		fold := foldsByKey[key]
+		if fold == nil {
+			fold = &orderViewFold{attempts: make(map[string]*orderAttemptFold)}
+			foldsByKey[key] = fold
+		}
+		fold.merge(ev)
 	}
-	views := make([]rpc.OrderView, 0, len(viewsByKey))
-	for key, view := range viewsByKey {
-		view.LifecycleStatus = mapOrderViewLifecycleStatus(view, lastEventsByKey[key])
+	views := make([]rpc.OrderView, 0, len(foldsByKey))
+	for _, fold := range foldsByKey {
+		view, last, attemptUncertain := fold.finish()
+		view.LifecycleStatus = mapOrderViewLifecycleStatus(view, last, attemptUncertain)
 		view.Open = orderViewIsOpen(view)
 		view.ModifyEligible = orderViewModifyEligible(view)
-		view.CancelEligible = orderViewCancelEligible(view)
+		view.CancelEligible = orderViewCancelEligibleWithAttemptTruth(view, attemptUncertain)
 		views = append(views, view)
 	}
 	sortOrderViews(views)
 	return views
+}
+
+type orderAttemptFold struct {
+	action     corestore.ActionKind
+	intent     orderJournalEvent
+	before     rpc.OrderView
+	beforeLast orderJournalEvent
+	completed  bool
+	resolved   bool
+	uncertain  bool
+}
+
+type orderViewFold struct {
+	view     rpc.OrderView
+	last     orderJournalEvent
+	attempts map[string]*orderAttemptFold
+	terminal bool
+}
+
+func (f *orderViewFold) merge(ev orderJournalEvent) {
+	if f == nil {
+		return
+	}
+	if f.terminal && !orderJournalEventIsTerminal(ev) {
+		// Terminal broker evidence is sticky. A delayed local send return or a
+		// nonterminal status callback can add audit history, but cannot resurrect
+		// the product row.
+		return
+	}
+
+	if orderJournalEventStartsAttempt(ev) {
+		attempt := &orderAttemptFold{action: ev.ActionKind, intent: ev, before: f.view, beforeLast: f.last}
+		f.attempts[ev.AttemptID] = attempt
+		mergeOrderJournalEventIntoView(&f.view, ev)
+		f.last = ev
+		return
+	}
+
+	if ev.AttemptID != "" && (ev.Type == orderJournalEventSendCompleted || ev.Type == orderJournalEventSendError) {
+		attempt := f.attempts[ev.AttemptID]
+		if attempt == nil {
+			// A typed outcome without its staged half is corrupted/incomplete
+			// evidence. Keep it conservative instead of guessing an action.
+			attempt = &orderAttemptFold{action: ev.ActionKind, before: f.view, beforeLast: f.last, uncertain: true}
+			f.attempts[ev.AttemptID] = attempt
+		}
+		if attempt.action != ev.ActionKind {
+			attempt.uncertain = true
+		}
+		if attempt.resolved || f.terminal {
+			// A broker acknowledgement or terminal callback can race ahead of the
+			// local send return. That stronger evidence dominates late uncertainty.
+			return
+		}
+		if ev.Type == orderJournalEventSendCompleted {
+			attempt.completed = true
+			mergeOrderJournalEventIntoView(&f.view, ev)
+			f.last = ev
+			return
+		}
+		switch ev.SendDisposition {
+		case ibkrlib.SendDispositionDefinitelyUnsent:
+			attempt.resolved = true
+			if attempt.action == corestore.ActionPlace || attempt.action == corestore.ActionExercise {
+				mergeOrderJournalEventIntoView(&f.view, ev)
+				f.view.SendState = orderSendStateTerminal
+				f.last = ev
+				return
+			}
+			// A proven-unsent modify/cancel did not alter broker state. Restore
+			// exactly the working frontier that existed before this attempt.
+			lastMessage := ev.Message
+			f.view = attempt.before
+			f.last = attempt.beforeLast
+			if lastMessage != "" {
+				f.view.LastMessage = lastMessage
+			}
+			return
+		case ibkrlib.SendDispositionMayHaveWritten, ibkrlib.SendDispositionUnknown:
+			attempt.uncertain = true
+		default:
+			attempt.uncertain = true
+		}
+		mergeOrderJournalEventIntoView(&f.view, ev)
+		f.last = ev
+		return
+	}
+
+	mergeOrderJournalEventIntoView(&f.view, ev)
+	f.last = ev
+	if orderJournalEventIsTerminal(ev) {
+		f.terminal = true
+		for _, attempt := range f.attempts {
+			attempt.resolved = true
+		}
+		return
+	}
+	if ev.Type == orderJournalEventBrokerAcknowledged {
+		f.resolveAttempts(corestore.ActionPlace)
+		f.resolveMatchingModifyAttempt(ev)
+		return
+	}
+	if ev.Type == orderJournalEventStatusUpdated && strings.EqualFold(strings.TrimSpace(ev.Status), "PendingCancel") {
+		f.resolveAttempts(corestore.ActionCancel, corestore.ActionSmokeCleanup)
+	}
+}
+
+func (f *orderViewFold) resolveMatchingModifyAttempt(ack orderJournalEvent) {
+	for _, attempt := range f.attempts {
+		if attempt.action != corestore.ActionModify || attempt.resolved || !orderModifyAcknowledgementMatches(attempt.intent, ack) {
+			continue
+		}
+		attempt.resolved = true
+		attempt.uncertain = false
+	}
+}
+
+func orderModifyAcknowledgementMatches(intent, ack orderJournalEvent) bool {
+	if intent.Type != orderJournalEventModifyRequested || ack.Type != orderJournalEventBrokerAcknowledged {
+		return false
+	}
+	equalText := func(a, b string) bool {
+		return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+	}
+	return equalText(intent.Action, ack.Action) &&
+		equalText(intent.OrderType, ack.OrderType) &&
+		equalText(intent.TIF, ack.TIF) &&
+		intent.TriggerMethod == ack.TriggerMethod &&
+		intent.OutsideRTH == ack.OutsideRTH &&
+		math.Abs(intent.Quantity-ack.Quantity) <= 1e-9 &&
+		math.Abs(intent.LimitPrice-ack.LimitPrice) <= 1e-9 &&
+		orderModifyAcknowledgementTrailMatches(intent.Trail, ack.Trail)
+}
+
+func orderModifyAcknowledgementTrailMatches(intent, ack *rpc.OrderTrailSpec) bool {
+	if intent == nil || ack == nil {
+		return intent == nil && ack == nil
+	}
+	return strings.EqualFold(strings.TrimSpace(intent.Basis), strings.TrimSpace(ack.Basis)) &&
+		strings.EqualFold(strings.TrimSpace(intent.OffsetType), strings.TrimSpace(ack.OffsetType)) &&
+		trailSpecsEquivalent(intent, ack)
+}
+
+func (f *orderViewFold) resolveAttempts(actions ...corestore.ActionKind) {
+	wanted := make(map[corestore.ActionKind]bool, len(actions))
+	for _, action := range actions {
+		wanted[action] = true
+	}
+	for _, attempt := range f.attempts {
+		if wanted[attempt.action] {
+			attempt.resolved = true
+			attempt.uncertain = false
+		}
+	}
+}
+
+func (f *orderViewFold) finish() (rpc.OrderView, orderJournalEvent, bool) {
+	if f == nil {
+		return rpc.OrderView{}, orderJournalEvent{}, false
+	}
+	attemptUncertain := false
+	if !f.terminal {
+		for _, attempt := range f.attempts {
+			if attempt.resolved || (attempt.completed && !attempt.uncertain) {
+				continue
+			}
+			// A stage without a correlated local return means the process may have
+			// died on either side of the wire call. Explicit may-have/unknown errors
+			// are the same conservative product state.
+			f.view.SendState = orderSendStateUncertainSend
+			attemptUncertain = true
+			break
+		}
+	}
+	return f.view, f.last, attemptUncertain
+}
+
+func orderJournalEventStartsAttempt(ev orderJournalEvent) bool {
+	if ev.AttemptID == "" || ev.ActionKind == "" {
+		return false
+	}
+	switch ev.Type {
+	case orderJournalEventSendAttempted:
+		return ev.ActionKind == corestore.ActionPlace || ev.ActionKind == corestore.ActionExercise ||
+			ev.ActionKind == corestore.ActionPurge || ev.ActionKind == corestore.ActionRestore
+	case orderJournalEventModifyRequested:
+		return ev.ActionKind == corestore.ActionModify
+	case orderJournalEventCancelRequested:
+		return ev.ActionKind == corestore.ActionCancel || ev.ActionKind == corestore.ActionSmokeCleanup
+	default:
+		return false
+	}
+}
+
+func orderJournalEventIsTerminal(ev orderJournalEvent) bool {
+	if ev.Type == orderJournalEventReconciledAbsent {
+		return true
+	}
+	if ev.Type == orderJournalEventBrokerError {
+		return orderLifecycleStatusIsTerminal(mapBrokerErrorLifecycleStatus(ev.ErrorCode, ev.Status))
+	}
+	if ev.Type == orderJournalEventStatusUpdated || ev.Type == orderJournalEventBrokerAcknowledged {
+		return orderLifecycleStatusIsTerminal(mapOrderJournalLifecycleStatus(ev))
+	}
+	return ev.SendState == orderSendStateTerminal
 }
 
 func buildOrderEventsByKey(events []orderJournalEvent) map[string][]rpc.OrderEvent {
@@ -943,10 +1301,12 @@ func orderJournalEventFromLifecycle(ev ibkrlib.OrderLifecycleEvent, at time.Time
 		OrderRef:        ev.OrderRef,
 		ReservedOrderID: ev.OrderID,
 		ClientID:        ev.ClientID,
+		clientIDPresent: ev.ClientIDPresent,
 		PermID:          ev.PermID,
 		Account:         ev.Account,
 		Symbol:          ev.Symbol,
 		SecType:         ev.SecType,
+		ConID:           ev.ConID,
 		Exchange:        ev.Exchange,
 		Currency:        ev.Currency,
 		LocalSymbol:     ev.LocalSymbol,
@@ -1042,6 +1402,11 @@ func trailSpecFromLifecycle(ev ibkrlib.OrderLifecycleEvent) *rpc.OrderTrailSpec 
 }
 
 func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
+	if ev.Type == orderJournalEventSendError &&
+		ev.SendDisposition == ibkrlib.SendDispositionDefinitelyUnsent &&
+		(ev.ActionKind == corestore.ActionPlace || ev.ActionKind == corestore.ActionExercise) {
+		return rpc.OrderLifecycleRejected
+	}
 	if ev.Type == orderJournalEventBrokerError {
 		return mapBrokerErrorLifecycleStatus(ev.ErrorCode, ev.Status)
 	}
@@ -1053,6 +1418,15 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 		return rpc.OrderLifecyclePreviewed
 	case orderJournalEventSendAttempted:
 		return rpc.OrderLifecyclePendingSubmit
+	case orderJournalEventSendCompleted:
+		switch ev.ActionKind {
+		case corestore.ActionCancel, corestore.ActionSmokeCleanup:
+			return rpc.OrderLifecyclePendingCancel
+		case corestore.ActionModify:
+			return rpc.OrderLifecycleSubmitted
+		default:
+			return rpc.OrderLifecyclePendingSubmit
+		}
 	case orderJournalEventBrokerAcknowledged:
 		return rpc.OrderLifecycleSubmitted
 	case orderJournalEventModifyRequested:
@@ -1071,7 +1445,7 @@ func mapOrderJournalLifecycleStatus(ev orderJournalEvent) string {
 	}
 }
 
-func mapOrderViewLifecycleStatus(view rpc.OrderView, last orderJournalEvent) string {
+func mapOrderViewLifecycleStatus(view rpc.OrderView, last orderJournalEvent, attemptUncertain bool) string {
 	if last.Type == orderJournalEventReconciledAbsent {
 		// A complete broker open-order snapshot did not include this order:
 		// like the typed error-135 heal below, broker truth overrides any sticky
@@ -1100,6 +1474,18 @@ func mapOrderViewLifecycleStatus(view rpc.OrderView, last orderJournalEvent) str
 		}
 		return rpc.OrderLifecycleUnknownReconcileRequired
 	}
+	if last.Type == orderJournalEventSendError &&
+		last.SendDisposition == ibkrlib.SendDispositionDefinitelyUnsent &&
+		(last.ActionKind == corestore.ActionPlace || last.ActionKind == corestore.ActionExercise) {
+		return rpc.OrderLifecycleRejected
+	}
+	if attemptUncertain {
+		return rpc.OrderLifecycleUnknownReconcileRequired
+	}
+	if last.Type == orderJournalEventSendCompleted &&
+		(last.ActionKind == corestore.ActionCancel || last.ActionKind == corestore.ActionSmokeCleanup) {
+		return rpc.OrderLifecyclePendingCancel
+	}
 	if view.Status != "" {
 		return mapBrokerOrderLifecycleStatus(view.Status, view.Filled, view.Remaining)
 	}
@@ -1108,6 +1494,15 @@ func mapOrderViewLifecycleStatus(view rpc.OrderView, last orderJournalEvent) str
 		return rpc.OrderLifecyclePreviewed
 	case orderJournalEventSendAttempted:
 		return rpc.OrderLifecyclePendingSubmit
+	case orderJournalEventSendCompleted:
+		switch last.ActionKind {
+		case corestore.ActionCancel, corestore.ActionSmokeCleanup:
+			return rpc.OrderLifecyclePendingCancel
+		case corestore.ActionModify:
+			return rpc.OrderLifecycleSubmitted
+		default:
+			return rpc.OrderLifecyclePendingSubmit
+		}
 	case orderJournalEventBrokerAcknowledged:
 		return rpc.OrderLifecycleSubmitted
 	case orderJournalEventModifyRequested:
@@ -1254,10 +1649,19 @@ func orderViewModifyEligible(view rpc.OrderView) bool {
 }
 
 func orderViewCancelEligible(view rpc.OrderView) bool {
-	return view.Open &&
-		view.ReservedOrderID > 0 &&
-		orderViewBrokerConfirmedForWrite(view) &&
-		view.LifecycleStatus != rpc.OrderLifecyclePendingCancel
+	return orderViewCancelEligibleWithAttemptTruth(view, false)
+}
+
+func orderViewCancelEligibleWithAttemptTruth(view rpc.OrderView, attemptUncertain bool) bool {
+	if !view.Open || view.ReservedOrderID <= 0 || view.LifecycleStatus == rpc.OrderLifecyclePendingCancel {
+		return false
+	}
+	if attemptUncertain {
+		// An exact positive broker ID is enough to issue the one safe recovery
+		// instruction: cancel. It is deliberately not enough to modify.
+		return true
+	}
+	return orderViewBrokerConfirmedForWrite(view)
 }
 
 func orderViewBrokerConfirmedForWrite(view rpc.OrderView) bool {

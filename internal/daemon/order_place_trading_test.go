@@ -11,9 +11,50 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
+
+func installBrokerWriteConnectorSwapAfterStage(t *testing.T, srv *Server) func() bool {
+	t.Helper()
+	first := &ibkrlib.Connector{}
+	second := &ibkrlib.Connector{}
+	const firstEpoch uint64 = 41
+	srv.mu.Lock()
+	srv.connector = first
+	srv.connectorEpoch = firstEpoch
+	srv.mu.Unlock()
+	srv.orderWriteBindingForTest = func(status rpc.TradingStatus) (*ibkrlib.Connector, uint64, ibkrlib.ConnectorSessionBinding, brokerStateScope) {
+		return first, firstEpoch, ibkrlib.ConnectorSessionBinding{}, brokerStateScope{Account: status.Account, Mode: status.Mode}
+	}
+	swapped := false
+	srv.orderWriteBeforeBrokerSend = func() {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		if srv.connector != first || srv.connectorEpoch != firstEpoch {
+			t.Fatalf("pre-send connector = %p epoch=%d, want captured connector %p epoch=%d", srv.connector, srv.connectorEpoch, first, firstEpoch)
+		}
+		srv.connector = second
+		srv.connectorEpoch++
+		swapped = true
+	}
+	return func() bool { return swapped }
+}
+
+func journalContainsEventType(t *testing.T, srv *Server, eventType string) bool {
+	t.Helper()
+	events, err := srv.orderJournal.LoadEvents(0)
+	if err != nil {
+		t.Fatalf("LoadEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == eventType {
+			return true
+		}
+	}
+	return false
+}
 
 func TestOrderPlaceConsumesAcceptedTokenAndJournalsSendAttempt(t *testing.T) {
 	t.Parallel()
@@ -46,10 +87,11 @@ func TestOrderPlaceConsumesAcceptedTokenAndJournalsSendAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadEvents: %v", err)
 	}
-	if len(events) != 2 || events[0].Type != orderJournalEventTokenConfirmed || events[1].Type != orderJournalEventSendAttempted {
+	if len(events) != 3 || events[0].Type != orderJournalEventTokenConfirmed || events[1].Type != orderJournalEventSendAttempted || events[2].Type != orderJournalEventSendCompleted {
 		t.Fatalf("events = %+v", events)
 	}
-	if events[1].ReservedOrderID != 1001 || events[1].SendState != orderSendStateSendAttempted {
+	if events[1].ReservedOrderID != 1001 || events[1].SendState != orderSendStateSendAttempted || events[1].AttemptID == "" ||
+		events[2].AttemptID != events[1].AttemptID || events[2].ActionKind != corestore.ActionPlace {
 		t.Fatalf("send event = %+v", events[1])
 	}
 
@@ -89,6 +131,34 @@ func TestOrderPlacePersistenceFailureMakesZeroBrokerCalls(t *testing.T) {
 	}
 	if brokerCalls != 0 {
 		t.Fatalf("broker calls = %d, want zero when pre-transmit commit fails", brokerCalls)
+	}
+}
+
+func TestOrderPlaceConnectorSwapAfterStageMakesZeroBrokerCalls(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	reserveCalls := 0
+	srv.orderReserveBrokerID = func(context.Context) (int, error) {
+		reserveCalls++
+		return 1001, nil
+	}
+	brokerCalls := 0
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		brokerCalls++
+		return nil
+	}
+	swapped := installBrokerWriteConnectorSwapAfterStage(t, srv)
+	token := mintPreviewTokenForConfirmTest(t, srv, rpc.OrderWhatIfResult{Status: rpc.OrderWhatIfStatusAccepted, Available: true})
+
+	_, err := srv.placeOrder(context.Background(), rpc.OrderPlaceParams{PreviewToken: token})
+	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "connection authority changed") {
+		t.Fatalf("placeOrder swap err = %v, want transaction-binding refusal", err)
+	}
+	if !swapped() || reserveCalls != 1 || brokerCalls != 0 {
+		t.Fatalf("swapped=%v reserve_calls=%d broker_calls=%d, want true/1/0", swapped(), reserveCalls, brokerCalls)
+	}
+	if !journalContainsEventType(t, srv, orderJournalEventSendAttempted) {
+		t.Fatal("place swap did not reach the durable pre-transmit stage")
 	}
 }
 
@@ -173,14 +243,14 @@ func TestOrderPlaceOriginPolicy(t *testing.T) {
 	}
 }
 
-func TestSubmitConfiguredOrderRejectsBlockedLiveBeforeBrokerHook(t *testing.T) {
+func TestSubmitBoundConfiguredOrderRejectsBlockedLiveBeforeBrokerHook(t *testing.T) {
 	t.Parallel()
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
 		t.Fatal("blocked live mode must be rejected before broker hook")
 		return nil
 	}
-	err := srv.submitConfiguredOrder(context.Background(), rpc.TradingStatus{Mode: config.TradingModeLive,
+	status := rpc.TradingStatus{Mode: config.TradingModeLive,
 		Account:  "U1234567",
 		Endpoint: "127.0.0.1:4001",
 		ClientID: 31,
@@ -189,13 +259,17 @@ func TestSubmitConfiguredOrderRejectsBlockedLiveBeforeBrokerHook(t *testing.T) {
 			Message: "order submission requires a pinned gateway port",
 			Action:  "Set [gateway].port.",
 		}},
-	}, &ibkrlib.Contract{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"}, &ibkrlib.RawOrder{Action: rpc.OrderActionSell, TotalQty: 1, OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay})
+	}
+	binding := installBoundWriteTestRoute(srv, status)
+	err := srv.submitBoundConfiguredOrder(context.Background(), binding, status,
+		&ibkrlib.Contract{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		&ibkrlib.RawOrder{Action: rpc.OrderActionSell, TotalQty: 1, OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay})
 	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "pinned gateway port") {
-		t.Fatalf("submitConfiguredOrder err = %v, want live-readiness trading refusal", err)
+		t.Fatalf("submitBoundConfiguredOrder err = %v, want live-readiness trading refusal", err)
 	}
 }
 
-func TestSubmitConfiguredOrderRoutesAuthorizedLiveToBrokerHook(t *testing.T) {
+func TestSubmitBoundConfiguredOrderRoutesAuthorizedLiveToBrokerHook(t *testing.T) {
 	t.Parallel()
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
 	var sent bool
@@ -206,16 +280,38 @@ func TestSubmitConfiguredOrderRoutesAuthorizedLiveToBrokerHook(t *testing.T) {
 		}
 		return nil
 	}
-	err := srv.submitConfiguredOrder(context.Background(), rpc.TradingStatus{Mode: config.TradingModeLive,
+	status := rpc.TradingStatus{Mode: config.TradingModeLive,
 		Account:  "U1234567",
 		Endpoint: "127.0.0.1:4001",
 		ClientID: 31,
-	}, &ibkrlib.Contract{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"}, &ibkrlib.RawOrder{Action: rpc.OrderActionSell, TotalQty: 1, OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay, Account: "U1234567"})
+	}
+	binding := installBoundWriteTestRoute(srv, status)
+	err := srv.submitBoundConfiguredOrder(context.Background(), binding, status,
+		&ibkrlib.Contract{Symbol: "MSFT", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		&ibkrlib.RawOrder{Action: rpc.OrderActionSell, TotalQty: 1, OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay, Account: "U1234567"})
 	if err != nil {
-		t.Fatalf("submitConfiguredOrder err = %v", err)
+		t.Fatalf("submitBoundConfiguredOrder err = %v", err)
 	}
 	if !sent {
 		t.Fatal("broker hook was not called for authorized live route")
+	}
+}
+
+func installBoundWriteTestRoute(srv *Server, status rpc.TradingStatus) brokerWriteTransactionBinding {
+	port := 4002
+	if strings.EqualFold(status.Mode, config.TradingModeLive) {
+		port = 4001
+	}
+	srv.cfg.Gateway.Account = status.Account
+	srv.cfg.Gateway.Port = new(port)
+	srv.cfg.Trading.Mode = status.Mode
+	srv.endpoint.Port = port
+	srv.endpoint.Account = status.Account
+	srv.endpoint.ClientID = status.ClientID
+	return brokerWriteTransactionBinding{
+		connector: srv.connector, connectorEpoch: srv.connectorEpoch,
+		scope: srv.currentBrokerStateScope(), endpoint: status.Endpoint,
+		clientID: status.ClientID, testOnly: true,
 	}
 }
 
@@ -270,14 +366,14 @@ func TestOrderCancelAppendsPendingCancelWithoutTerminalState(t *testing.T) {
 		t.Fatalf("LoadEvents: %v", err)
 	}
 	last := events[len(events)-1]
-	if last.Type != orderJournalEventCancelRequested {
+	if last.Type != orderJournalEventSendCompleted || last.ActionKind != corestore.ActionCancel || last.AttemptID == "" {
 		t.Fatalf("last event = %+v", last)
 	}
-	if last.SendState != "" {
-		t.Fatalf("cancel event send_state = %q, want empty (merge keeps broker_acknowledged)", last.SendState)
+	if last.SendState != orderSendStateSendAttempted {
+		t.Fatalf("cancel completion send_state = %q, want send_attempted", last.SendState)
 	}
-	// Re-fold: with the sticky broker Status and preserved send_state the
-	// row stays cancel-RETRYABLE if no cancel confirmation ever arrives.
+	// Re-fold: a flushed cancel stays pending until broker lifecycle evidence;
+	// local wire success must not fabricate Cancelled or invite another retry.
 	views, _, err := srv.loadOrderViews()
 	if err != nil {
 		t.Fatalf("loadOrderViews: %v", err)
@@ -288,8 +384,8 @@ func TestOrderCancelAppendsPendingCancelWithoutTerminalState(t *testing.T) {
 			view = v
 		}
 	}
-	if view.SendState != orderSendStateBrokerAcknowledged || !view.Open || !view.CancelEligible {
-		t.Fatalf("re-folded view = open=%v send_state=%q cancel_eligible=%v, want open broker_acknowledged cancel-retryable", view.Open, view.SendState, view.CancelEligible)
+	if view.SendState != orderSendStateSendAttempted || !view.Open || view.CancelEligible || view.LifecycleStatus != rpc.OrderLifecyclePendingCancel {
+		t.Fatalf("re-folded view = %+v, want open pending cancel without retry eligibility", view)
 	}
 }
 
@@ -338,6 +434,40 @@ func TestOrderCancelPersistenceFailureMakesZeroBrokerCalls(t *testing.T) {
 	}
 }
 
+func TestOrderCancelConnectorSwapAfterStageMakesZeroBrokerCalls(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	now := time.Date(2026, 5, 28, 9, 0, 0, 0, time.UTC)
+	srv.now = func() time.Time { return now }
+	if err := srv.orderJournal.Append(orderJournalEvent{
+		At: now.Add(-time.Minute), Type: orderJournalEventBrokerAcknowledged,
+		OrderRef: "ord-cancel-swap", ReservedOrderID: 1001,
+		Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU1234567", Mode: "paper",
+		Symbol: "AAPL", SecType: "STK", Action: rpc.OrderActionBuy,
+		OrderType: rpc.OrderTypeLMT, TIF: rpc.OrderTIFDay, Quantity: 1, Remaining: 1,
+		Status: "Submitted", SendState: orderSendStateBrokerAcknowledged,
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+	brokerCalls := 0
+	srv.orderCancelBroker = func(context.Context, int) error {
+		brokerCalls++
+		return nil
+	}
+	swapped := installBrokerWriteConnectorSwapAfterStage(t, srv)
+
+	_, err := srv.cancelOrder(context.Background(), rpc.OrderCancelParams{ID: "ord-cancel-swap"})
+	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "connection authority changed") {
+		t.Fatalf("cancelOrder swap err = %v, want transaction-binding refusal", err)
+	}
+	if !swapped() || brokerCalls != 0 {
+		t.Fatalf("swapped=%v broker_calls=%d, want true/0", swapped(), brokerCalls)
+	}
+	if !journalContainsEventType(t, srv, orderJournalEventCancelRequested) {
+		t.Fatal("cancel swap did not reach the durable pre-transmit stage")
+	}
+}
+
 func TestOrderModifyRejectsSymbolChange(t *testing.T) {
 	t.Parallel()
 	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
@@ -355,6 +485,7 @@ func TestOrderModifyRejectsSymbolChange(t *testing.T) {
 		Mode:            "paper",
 		Symbol:          "MSFT",
 		SecType:         "STK",
+		ConID:           272093,
 		Action:          "BUY",
 		OrderType:       rpc.OrderTypeLMT,
 		TIF:             rpc.OrderTIFDay,
@@ -384,6 +515,7 @@ func TestOrderModifyRejectsSymbolChange(t *testing.T) {
 		Mode:            "paper",
 		Symbol:          "MSFT",
 		SecType:         "STK",
+		ConID:           272093,
 		Action:          "BUY",
 		OrderType:       rpc.OrderTypeLMT,
 		TIF:             rpc.OrderTIFDay,
@@ -428,6 +560,7 @@ func seedTrailGTCOrderJournal(t *testing.T, srv *Server, now time.Time) {
 		Mode:            "paper",
 		Symbol:          "DTE",
 		SecType:         "STK",
+		ConID:           123456,
 		Exchange:        "IBIS",
 		Currency:        "EUR",
 		Action:          rpc.OrderActionSell,
@@ -458,6 +591,7 @@ func trailGTCOrderViewForToken() rpc.OrderView {
 		Mode:            "paper",
 		Symbol:          "DTE",
 		SecType:         "STK",
+		ConID:           123456,
 		Exchange:        "IBIS",
 		Currency:        "EUR",
 		Action:          rpc.OrderActionSell,
@@ -480,7 +614,7 @@ func trailGTCOrderViewForToken() rpc.OrderView {
 func trailGTCModifyDraft() rpc.OrderDraft {
 	return rpc.OrderDraft{
 		Action:    rpc.OrderActionSell,
-		Contract:  rpc.ContractParams{Symbol: "DTE", SecType: "STK", Exchange: "IBIS", Currency: "EUR"},
+		Contract:  rpc.ContractParams{ConID: 123456, Symbol: "DTE", SecType: "STK", Exchange: "IBIS", Currency: "EUR"},
 		Quantity:  5,
 		OrderType: rpc.OrderTypeTRAIL,
 		TIF:       rpc.OrderTIFGTC,
@@ -528,8 +662,8 @@ func TestOrderModifyTrailGTCAmendsInPlace(t *testing.T) {
 		t.Fatalf("LoadEvents: %v", err)
 	}
 	last := events[len(events)-1]
-	if last.Type != orderJournalEventModifyRequested || last.OrderRef != "ord-trail" || last.ReservedOrderID != 1001 {
-		t.Fatalf("last event = %+v, want modify-requested on the original order", last)
+	if last.Type != orderJournalEventSendCompleted || last.ActionKind != corestore.ActionModify || last.AttemptID == "" || last.OrderRef != "ord-trail" || last.ReservedOrderID != 1001 {
+		t.Fatalf("last event = %+v, want correlated modify completion on the original order", last)
 	}
 	if last.Trail == nil || last.Trail.TrailingPercent == nil || *last.Trail.TrailingPercent != 2 {
 		t.Fatalf("modify event trail = %+v, want re-priced trail journaled", last.Trail)
@@ -570,6 +704,32 @@ func TestOrderModifyPersistenceFailureMakesZeroBrokerCalls(t *testing.T) {
 	}
 	if brokerCalls != 0 {
 		t.Fatalf("broker calls = %d, want zero when modify pre-transmit commit fails", brokerCalls)
+	}
+}
+
+func TestOrderModifyConnectorSwapAfterStageMakesZeroBrokerCalls(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
+	srv.now = func() time.Time { return now }
+	seedTrailGTCOrderJournal(t, srv, now)
+	token := mintModifyPreviewTokenForWriteTest(t, srv, trailGTCOrderViewForToken(), trailGTCModifyDraft())
+	brokerCalls := 0
+	srv.orderPlaceBroker = func(context.Context, *ibkrlib.Contract, *ibkrlib.RawOrder) error {
+		brokerCalls++
+		return nil
+	}
+	swapped := installBrokerWriteConnectorSwapAfterStage(t, srv)
+
+	_, err := srv.modifyOrder(context.Background(), rpc.OrderModifyParams{ID: "ord-trail", PreviewToken: token})
+	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "connection authority changed") {
+		t.Fatalf("modifyOrder swap err = %v, want transaction-binding refusal", err)
+	}
+	if !swapped() || brokerCalls != 0 {
+		t.Fatalf("swapped=%v broker_calls=%d, want true/0", swapped(), brokerCalls)
+	}
+	if !journalContainsEventType(t, srv, orderJournalEventModifyRequested) {
+		t.Fatal("modify swap did not reach the durable pre-transmit stage")
 	}
 }
 
@@ -652,7 +812,7 @@ func TestTradingFreezeBlocksPlaceAllowsCancel(t *testing.T) {
 		t.Fatalf("newPlatformSettingsStore: %v", err)
 	}
 	srv.platformSettings = store
-	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"freeze":true}}`)}); err != nil {
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"origin":"human-tty","trading":{"freeze":true}}`)}); err != nil {
 		t.Fatalf("engage freeze: %v", err)
 	}
 	if err := srv.orderJournal.Append(orderJournalEvent{

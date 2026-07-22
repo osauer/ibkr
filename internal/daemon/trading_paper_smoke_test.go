@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/config"
+	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
@@ -210,6 +211,25 @@ func TestPaperSmokeAckTimeoutFailsClosedAndStillCancels(t *testing.T) {
 	}
 	if cancelledID != 1001 {
 		t.Fatalf("cleanup cancel must still fire on ack timeout, got order %d", cancelledID)
+	}
+	events, loadErr := srv.orderJournal.LoadEvents(0)
+	if loadErr != nil {
+		t.Fatalf("load paper-smoke order events: %v", loadErr)
+	}
+	var cleanupAttempt, cleanupOutcome orderJournalEvent
+	for _, ev := range events {
+		if ev.ActionKind != corestore.ActionSmokeCleanup {
+			continue
+		}
+		switch ev.Type {
+		case orderJournalEventCancelRequested:
+			cleanupAttempt = ev
+		case orderJournalEventSendCompleted:
+			cleanupOutcome = ev
+		}
+	}
+	if cleanupAttempt.AttemptID == "" || cleanupOutcome.AttemptID != cleanupAttempt.AttemptID {
+		t.Fatalf("paper-smoke cleanup outcome is not correlated: attempt=%+v outcome=%+v", cleanupAttempt, cleanupOutcome)
 	}
 	check := srv.tradingReadiness.CheckPaperSmoke("U1234567", "127.0.0.1:4001", 31, "test-version", 168*time.Hour, srv.orderNow())
 	if check.Status != tradingPaperSmokeStatusFailed {

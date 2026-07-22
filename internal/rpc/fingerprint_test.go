@@ -148,6 +148,77 @@ func TestMarketEventsFingerprintTracksSemanticFlagsOnly(t *testing.T) {
 	}
 }
 
+func TestMarketEventsFingerprintTracksBorrowFeeCoverageSemantics(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 21, 16, 0, 0, 0, time.UTC)
+	fee := 82.5
+	base := MarketEventsResult{
+		Kind: MarketEventsKind, SchemaVersion: MarketEventsSchemaVersion, AsOf: now,
+		Symbols: []string{"XYZ"},
+		BorrowFeeCoverage: []MarketEventBorrowFeeCoverage{{
+			Symbol: "XYZ", ContractConID: 481516, ContractFingerprint: "sha256:contract-a",
+			CoverageScope: BorrowFeeCoveragePortfolioOnly, Status: BorrowFeeCoverageScaleUnknown,
+			Reason: "scale_not_commissioned", Source: BorrowFeeSourceTWSHistorical,
+			DataType: BorrowFeeDataTypeHistorical, AsOf: now.Add(-24 * time.Hour), ObservedAt: now,
+			FeeRate: &fee, Entitlement: BorrowFeeEntitlementObserved,
+			ScaleStatus: BorrowFeeScaleUnverified, PolicyEligible: false,
+			LastFailure: &SourceFailure{Code: SourceFailureNoData, Stage: SourceFailureStageHistoricalFeeDecode, FailedAt: now, Retryable: true},
+		}},
+	}
+	first := BuildMarketEventsFingerprint(&base)
+
+	churn := base
+	churn.AsOf = now.Add(time.Minute)
+	churn.BorrowFeeCoverage = slices.Clone(base.BorrowFeeCoverage)
+	changedFee := 999.0
+	churn.BorrowFeeCoverage[0].FeeRate = &changedFee
+	churn.BorrowFeeCoverage[0].ObservedAt = now.Add(time.Minute)
+	churn.BorrowFeeCoverage[0].AsOf = now.Add(-23 * time.Hour)
+	failure := *base.BorrowFeeCoverage[0].LastFailure
+	failure.FailedAt = now.Add(time.Minute)
+	failure.Retryable = false
+	churn.BorrowFeeCoverage[0].LastFailure = &failure
+	if got := BuildMarketEventsFingerprint(&churn); got != first {
+		t.Fatalf("coverage fingerprint changed on time/value/retry churn: %v != %v", got, first)
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*MarketEventBorrowFeeCoverage)
+	}{
+		{"contract", func(row *MarketEventBorrowFeeCoverage) { row.ContractConID++ }},
+		{"contract fingerprint", func(row *MarketEventBorrowFeeCoverage) { row.ContractFingerprint = "sha256:contract-b" }},
+		{"scope", func(row *MarketEventBorrowFeeCoverage) { row.CoverageScope = BorrowFeeCoverageGlobal }},
+		{"status", func(row *MarketEventBorrowFeeCoverage) { row.Status = BorrowFeeCoverageNotEntitled }},
+		{"reason", func(row *MarketEventBorrowFeeCoverage) { row.Reason = "not_entitled" }},
+		{"source", func(row *MarketEventBorrowFeeCoverage) { row.Source = BorrowFeeSourceBulkShortStock }},
+		{"data type", func(row *MarketEventBorrowFeeCoverage) { row.DataType = BorrowFeeDataTypeBulkFeeRate }},
+		{"entitlement", func(row *MarketEventBorrowFeeCoverage) { row.Entitlement = BorrowFeeEntitlementNotEntitled }},
+		{"scale", func(row *MarketEventBorrowFeeCoverage) { row.ScaleStatus = BorrowFeeScalePercentAnnualized }},
+		{"policy eligibility", func(row *MarketEventBorrowFeeCoverage) { row.PolicyEligible = true }},
+		{"failure code", func(row *MarketEventBorrowFeeCoverage) {
+			copy := *row.LastFailure
+			copy.Code = SourceFailurePacing
+			row.LastFailure = &copy
+		}},
+		{"failure stage", func(row *MarketEventBorrowFeeCoverage) {
+			copy := *row.LastFailure
+			copy.Stage = SourceFailureStageHistoricalFeeRequest
+			row.LastFailure = &copy
+		}},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			changed := base
+			changed.BorrowFeeCoverage = slices.Clone(base.BorrowFeeCoverage)
+			test.mutate(&changed.BorrowFeeCoverage[0])
+			if got := BuildMarketEventsFingerprint(&changed); got == first {
+				t.Fatalf("fingerprint did not change for %s", test.name)
+			}
+		})
+	}
+}
+
 // eligibleRedMeta is a red row whose evidence passed the confirmation gates
 // (depth + persistence + freshness) — the only kind of red that may confirm.
 func eligibleRedMeta() RegimeIndicatorMeta {

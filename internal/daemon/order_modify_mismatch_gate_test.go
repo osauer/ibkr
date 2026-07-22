@@ -31,6 +31,7 @@ func seedProtectiveTrailJournal(t *testing.T, srv *Server, now time.Time) {
 		OpenClose:       "C",
 		Symbol:          "AMD",
 		SecType:         "STK",
+		ConID:           4391,
 		Exchange:        "SMART",
 		Currency:        "USD",
 		Action:          rpc.OrderActionSell,
@@ -50,7 +51,7 @@ func protectiveReduceDraft(quantity int) rpc.OrderDraft {
 	amount := 8.5
 	return rpc.OrderDraft{
 		Action:    rpc.OrderActionSell,
-		Contract:  rpc.ContractParams{Symbol: "AMD", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Contract:  rpc.ContractParams{ConID: 4391, Symbol: "AMD", SecType: "STK", Exchange: "SMART", Currency: "USD"},
 		Quantity:  quantity,
 		OrderType: rpc.OrderTypeTRAIL,
 		TIF:       rpc.OrderTIFGTC,
@@ -74,6 +75,7 @@ func protectiveViewForToken(quantity float64) rpc.OrderView {
 		OpenClose:       "C",
 		Symbol:          "AMD",
 		SecType:         "STK",
+		ConID:           4391,
 		Exchange:        "SMART",
 		Currency:        "USD",
 		Action:          rpc.OrderActionSell,
@@ -90,7 +92,7 @@ func protectiveViewForToken(quantity float64) rpc.OrderView {
 
 func TestOrderModifyMismatchAcceptsExactReduceOnly(t *testing.T) {
 	t.Parallel()
-	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, AllowStockShort: true})
 	now := time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC)
 	srv.now = func() time.Time { return now }
 	seedProtectiveTrailJournal(t, srv, now)

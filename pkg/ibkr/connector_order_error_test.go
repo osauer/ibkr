@@ -29,7 +29,8 @@ func TestOrderBrokerErrorStatusUsesTypedCodeAllowlist(t *testing.T) {
 
 func TestOrderErrorLifecycleKeepsUnknownRejectTextNonterminal(t *testing.T) {
 	t.Parallel()
-	connector := &Connector{openOrders: map[string]*trackedOrder{"42": new(trackedOrder)}}
+	connector := readyBrokerEvidenceTestConnector(t)
+	connector.openOrders["42"] = new(trackedOrder)
 	var got OrderLifecycleEvent
 	connector.RegisterOrderLifecycleHandler(func(ev OrderLifecycleEvent) { got = ev })
 
@@ -45,8 +46,7 @@ func TestOrderErrorLifecycleKeepsUnknownRejectTextNonterminal(t *testing.T) {
 
 func TestSystemNotice321RequestIDCollisionDoesNotRejectOrder(t *testing.T) {
 	t.Parallel()
-	connector := NewConnector(&ConnectorConfig{})
-	defer connector.conn.rateLimiter.Stop()
+	connector := readyBrokerEvidenceTestConnector(t)
 	connector.orderMu.Lock()
 	connector.brokerOrderIndex["77"] = "ord-77"
 	connector.orderMu.Unlock()

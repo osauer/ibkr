@@ -172,6 +172,12 @@ func importPlatformSettingsState(ctx context.Context, core *corestore.Store, sou
 		markLastCutoverSourceInvalid(sources, fmt.Errorf("unsupported version %d", state.Version))
 		return false, fmt.Errorf("import platform settings: unsupported version %d", state.Version)
 	}
+	// Legacy settings predate the durable control generation. A carried freeze
+	// or limit is already material authority at cutover, so seed generation one
+	// rather than publishing it as the indistinguishable zero baseline.
+	if state.TradingControlGeneration == 0 && !sameTradingControls(platformTradingSettingsData{}, state.Trading) {
+		state.TradingControlGeneration = 1
+	}
 	return writeInitialState(ctx, core, stateKindPlatformSettings, state)
 }
 

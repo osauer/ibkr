@@ -16,6 +16,11 @@ import (
 // than fall back to stale data.
 var ErrIBKRUnavailable = errors.New("ibkr connection unavailable")
 
+// ErrAccountSummaryScopeConflict means a one-shot account-summary request
+// observed a blank, aggregate, or foreign account row. A mixed row set must
+// never be projected as one account's current state.
+var ErrAccountSummaryScopeConflict = errors.New("account summary account scope conflict")
+
 // RawAccountSummary is a point-in-time view of the account values returned by
 // IBKR. Currency-denominated top-level fields use the account's base-currency
 // row when IBKR supplied one. If a base row is absent, the parser selects a
@@ -45,6 +50,11 @@ type RawAccountSummary struct {
 	LookAheadAvailable   *float64
 	LookAheadExcess      *float64
 	Currency             string
+	// BaseCurrency and its provenance are intentionally distinct from
+	// Currency. Currency is the legacy deterministic fallback used for numeric
+	// rows; it must never be treated as proof of the account's base unit.
+	BaseCurrency           string
+	BaseCurrencyProvenance AccountBaseCurrencyProvenance
 	// CurrencyLedger holds the per-currency rollup the gateway emitted
 	// in response to the $LEDGER:ALL tag — one entry per non-BASE
 	// currency present in the portfolio. Empty for same-currency
@@ -56,6 +66,46 @@ type RawAccountSummary struct {
 	// (`<tag>` for BASE currency, `<tag>_<currency>` otherwise). Provided for
 	// diagnostic and forward-compatibility purposes.
 	Raw map[string]string
+}
+
+// AccountBaseCurrencyProvenance identifies the broker evidence used to prove
+// an account summary's base currency.
+type AccountBaseCurrencyProvenance string
+
+const (
+	// AccountBaseCurrencyUnknown means no eligible broker field proved the base currency.
+	AccountBaseCurrencyUnknown AccountBaseCurrencyProvenance = "unknown"
+	// AccountBaseCurrencyExplicitTag means the dedicated Currency field supplied the value.
+	AccountBaseCurrencyExplicitTag AccountBaseCurrencyProvenance = "explicit_currency_tag"
+	// AccountBaseCurrencyValueSuffix means an allowlisted aggregate value suffix supplied it.
+	AccountBaseCurrencyValueSuffix AccountBaseCurrencyProvenance = "account_value_suffix"
+	// AccountBaseCurrencyUnitExchangeRate remains for wire/read-model
+	// compatibility only. A unit exchange rate is not proof of the account's
+	// base currency and accountBaseCurrencyEvidence never emits it.
+	AccountBaseCurrencyUnitExchangeRate AccountBaseCurrencyProvenance = "unit_exchange_rate"
+)
+
+// accountBaseCurrencyValueTags is the closed allowlist of ordinary aggregate
+// account-summary values whose three-letter suffix may prove the account base
+// currency. Ledger-family keys are deliberately absent: $LEDGER:ALL rows
+// describe held currencies, not the account's base unit.
+var accountBaseCurrencyValueTags = []string{
+	"NetLiquidation",
+	"BuyingPower",
+	"AvailableFunds",
+	"ExcessLiquidity",
+	"TotalCashValue",
+	"MaintMarginReq",
+	"MaintenanceMarginReq",
+	"InitMarginReq",
+	"GrossPositionValue",
+	"UnrealizedPnL",
+	"RealizedPnL",
+	"Cushion",
+	"LookAheadInitMarginReq",
+	"LookAheadMaintMarginReq",
+	"LookAheadAvailableFunds",
+	"LookAheadExcessLiquidity",
 }
 
 // CurrencyLedger is one non-base-currency IBKR $LEDGER row. Monetary values
@@ -104,24 +154,60 @@ const (
 // an end marker without rows, it falls back to a defensive copy of the
 // streaming account-updates cache.
 func (c *Connector) RequestAccountSummary(ctx context.Context, timeout time.Duration) (*RawAccountSummary, error) {
+	summary, _, err := c.RequestAccountSummaryWithProvenance(ctx, timeout)
+	return summary, err
+}
+
+// AccountSummaryProvenance identifies whether a returned account snapshot was
+// completed by the one-shot request or reparsed from the unstamped streaming
+// cache. Callers that require current evidence must accept only Request.
+type AccountSummaryProvenance string
+
+const (
+	// AccountSummaryProvenanceRequest means the one-shot request supplied a
+	// complete row set and matching end marker.
+	AccountSummaryProvenanceRequest AccountSummaryProvenance = "request"
+	// AccountSummaryProvenanceCachedFallback means an unstamped streaming
+	// cache was reparsed after the one-shot request ended without rows.
+	AccountSummaryProvenanceCachedFallback AccountSummaryProvenance = "cached_fallback"
+)
+
+// RequestAccountSummaryWithProvenance preserves RequestAccountSummary's
+// fallback behavior while exposing whether the gateway actually supplied rows
+// for this request. CachedFallback has no trustworthy source receipt even
+// though parsing gives the caller-owned copy an AsOf timestamp.
+func (c *Connector) RequestAccountSummaryWithProvenance(ctx context.Context, timeout time.Duration) (*RawAccountSummary, AccountSummaryProvenance, error) {
 	if !c.isConnected() {
-		return nil, ErrIBKRUnavailable
+		return nil, "", ErrIBKRUnavailable
 	}
 	if timeout <= 0 {
 		timeout = defaultAccountSummaryTimeout
 	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil || !conn.IsConnected() {
+		return nil, "", ErrIBKRUnavailable
+	}
+	expectedAccount := strings.TrimSpace(conn.GetAccountCode())
+	if !accountCodeConcrete(expectedAccount) {
+		return nil, "", ErrAccountSummaryScopeConflict
+	}
+	reqID, err := conn.nextRequestIDForForwarding()
+	if err != nil {
+		return nil, "", err
+	}
+	defer conn.discardRequestIDReservation(reqID)
 
-	reqID := c.conn.GetNextRequestID()
-
-	if err := c.conn.RequestAccountSummary(reqID, accountSummaryTags); err != nil {
-		return nil, fmt.Errorf("request account summary: %w", err)
+	if err := conn.RequestAccountSummaryForAccount(reqID, accountSummaryTags, expectedAccount); err != nil {
+		return nil, "", fmt.Errorf("request account summary: %w", err)
 	}
 
 	// Always cancel the subscription on the way out: end-of-stream means IBKR
 	// has sent the snapshot, but the request remains active until cancelled.
 	defer func() {
-		if c.isConnected() {
-			if cancelErr := c.conn.CancelAccountSummary(reqID); cancelErr != nil {
+		if conn.IsConnected() {
+			if cancelErr := conn.CancelAccountSummary(reqID); cancelErr != nil {
 				connectorLogger.Debugf("CancelAccountSummary(reqID=%d) failed: %v", reqID, cancelErr)
 			}
 		}
@@ -133,7 +219,7 @@ func (c *Connector) RequestAccountSummary(ctx context.Context, timeout time.Dura
 	}
 	resCh := make(chan snapshotResult, 1)
 	go func() {
-		rows, err := c.conn.awaitAccountSummarySnapshot(reqID, timeout)
+		rows, err := conn.awaitAccountSummarySnapshot(reqID, timeout)
 		resCh <- snapshotResult{rows: rows, err: err}
 	}()
 
@@ -141,21 +227,30 @@ func (c *Connector) RequestAccountSummary(ctx context.Context, timeout time.Dura
 	select {
 	case res := <-resCh:
 		if res.err != nil {
-			return nil, fmt.Errorf("await account summary end: %w", res.err)
+			return nil, "", fmt.Errorf("await account summary end: %w", res.err)
 		}
 		raw = res.rows
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, "", ctx.Err()
 	}
 
 	// Keep normal reads isolated from concurrent streaming account updates. An
 	// end marker without rows falls back to the streaming cache so callers can
 	// still consume a previously observed snapshot.
+	var fallback map[string]string
 	if len(raw) == 0 {
-		raw = c.conn.GetAccountSummary()
+		fallback = conn.GetAccountSummary()
 	}
-	summary := parseAccountSummary(raw, c.conn.GetAccountCode())
-	return summary, nil
+	return accountSummaryFromRequestRows(raw, fallback, expectedAccount)
+}
+
+func accountSummaryFromRequestRows(raw, fallback map[string]string, accountID string) (*RawAccountSummary, AccountSummaryProvenance, error) {
+	provenance := AccountSummaryProvenanceRequest
+	if len(raw) == 0 {
+		raw = fallback
+		provenance = AccountSummaryProvenanceCachedFallback
+	}
+	return parseAccountSummary(raw, accountID), provenance, nil
 }
 
 // parseAccountSummary converts the IBKR-format key/value map (as returned by
@@ -228,8 +323,36 @@ func parseAccountSummary(raw map[string]string, accountID string) *RawAccountSum
 	}
 
 	summary.CurrencyLedger = extractCurrencyLedger(raw)
+	summary.BaseCurrency, summary.BaseCurrencyProvenance = accountBaseCurrencyEvidence(raw)
 
 	return summary
+}
+
+func accountBaseCurrencyEvidence(raw map[string]string) (string, AccountBaseCurrencyProvenance) {
+	if rawCurrency := strings.ToUpper(strings.TrimSpace(raw["Currency"])); len(rawCurrency) == 3 && rawCurrency != "BASE" {
+		return rawCurrency, AccountBaseCurrencyExplicitTag
+	}
+	valueSuffix := ""
+	for _, tag := range accountBaseCurrencyValueTags {
+		prefix := tag + "_"
+		for key := range raw {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			ccy := strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(key, prefix)))
+			if len(ccy) != 3 || ccy == "BASE" {
+				continue
+			}
+			if valueSuffix != "" && valueSuffix != ccy {
+				return "", AccountBaseCurrencyUnknown
+			}
+			valueSuffix = ccy
+		}
+	}
+	if valueSuffix != "" {
+		return valueSuffix, AccountBaseCurrencyValueSuffix
+	}
+	return "", AccountBaseCurrencyUnknown
 }
 
 // CurrencyLedgerSnapshot returns a caller-owned map derived from the

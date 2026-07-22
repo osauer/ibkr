@@ -246,14 +246,15 @@ func TestOrderLifecycleFillUpdatesPurgeLedgerFromJournalIdentity(t *testing.T) {
 	}
 
 	srv.appendOrderLifecycleEvent(ibkrlib.OrderLifecycleEvent{
-		Type:         ibkrlib.OrderLifecycleEventStatus,
-		OrderID:      1001,
-		PermID:       9001,
-		ClientID:     31,
-		Status:       "Filled",
-		Filled:       2,
-		Remaining:    0,
-		AvgFillPrice: 100,
+		Type:            ibkrlib.OrderLifecycleEventStatus,
+		OrderID:         1001,
+		PermID:          9001,
+		ClientID:        31,
+		ClientIDPresent: true,
+		Status:          "Filled",
+		Filled:          2,
+		Remaining:       0,
+		AvgFillPrice:    100,
 	})
 	rows, _, err = srv.purgeLedger.Snapshot(brokerStateScope{}, "")
 	if err != nil {
@@ -285,14 +286,15 @@ func TestOrderLifecycleFillUpdatesPurgeLedgerFromJournalIdentity(t *testing.T) {
 		t.Fatalf("append restore send: %v", err)
 	}
 	srv.appendOrderLifecycleEvent(ibkrlib.OrderLifecycleEvent{
-		Type:         ibkrlib.OrderLifecycleEventStatus,
-		OrderID:      1002,
-		PermID:       9002,
-		ClientID:     31,
-		Status:       "Filled",
-		Filled:       2,
-		Remaining:    0,
-		AvgFillPrice: 90,
+		Type:            ibkrlib.OrderLifecycleEventStatus,
+		OrderID:         1002,
+		PermID:          9002,
+		ClientID:        31,
+		ClientIDPresent: true,
+		Status:          "Filled",
+		Filled:          2,
+		Remaining:       0,
+		AvgFillPrice:    90,
 	})
 	rows, totals, err := srv.purgeLedger.Snapshot(brokerStateScope{}, "")
 	if err != nil {

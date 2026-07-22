@@ -192,9 +192,18 @@ func TestAccountSummaryWiresFirstDailyObservationToV3Reconciliation(t *testing.T
 		t.Fatal(err)
 	}
 	source := string(data)
-	start := strings.Index(source, "func (s *Server) buildAccountSummary")
-	if start < 0 {
+	wrapperStart := strings.Index(source, "func (s *Server) buildAccountSummary(ctx")
+	if wrapperStart < 0 {
 		t.Fatal("buildAccountSummary production hook is missing")
+	}
+	wrapperEnd := strings.Index(source[wrapperStart+1:], "\nfunc ")
+	if wrapperEnd < 0 || !strings.Contains(source[wrapperStart:wrapperStart+1+wrapperEnd], "s.buildAccountSummaryWithAuthority(ctx, observe)") {
+		t.Fatal("buildAccountSummary must delegate to the authority-preserving production path")
+	}
+
+	start := strings.Index(source, "func (s *Server) buildAccountSummaryWithAuthority")
+	if start < 0 {
+		t.Fatal("buildAccountSummaryWithAuthority production hook is missing")
 	}
 	end := strings.Index(source[start+1:], "\nfunc ")
 	if end < 0 {

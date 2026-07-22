@@ -1078,7 +1078,7 @@ func (s *Server) validateCutoverReview(ctx context.Context, now time.Time) (nudg
 	}
 	authority := s.currentNudgeAuthority(now)
 	if !authority.confirmedFlowEligible || !policyPinsReady(authority.report.Inventory) {
-		return nudgeAuthorityState{}, "", nil, cutoverValidationToken{}, errBadRequest("confirmed-flow cutover review requires current active fully approved v4 policy authority")
+		return nudgeAuthorityState{}, "", nil, cutoverValidationToken{}, errBadRequest("confirmed-flow cutover review requires current active v4 base-policy authority with matching sibling policy pins")
 	}
 	report, err := s.buildReconReportContext(ctx)
 	if err != nil {

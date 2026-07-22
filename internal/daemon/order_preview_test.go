@@ -37,6 +37,40 @@ func TestPreviewLimitPriceDefaultsPatientLimit(t *testing.T) {
 	}
 }
 
+func TestDecorateExactPreviewOptionUsesUSOptionsSessionAndQuality(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("load New York location: %v", err)
+	}
+	bid, ask := 5.00, 5.20
+	contract := rpc.ContractParams{ConID: 900001, Symbol: "SPY", SecType: "OPT", Currency: "USD"}
+	q := &rpc.Quote{
+		Symbol: contract.Symbol, Contract: contract, Bid: &bid, Ask: &ask,
+		DataType: rpc.MarketDataLive, AsOf: time.Date(2026, 5, 26, 8, 15, 0, 0, loc),
+	}
+	(&Server{}).decorateExactPreviewQuote(q, contract)
+	if q.SessionContext == nil {
+		t.Fatal("off-hours exact option quote lacks options-session context")
+	}
+	if q.QuoteQuality == "" || !q.Indicative {
+		t.Fatalf("exact option quality=%q indicative=%t, want decorated indicative state", q.QuoteQuality, q.Indicative)
+	}
+	if q.SpreadPct == nil || *q.SpreadPct <= 0 {
+		t.Fatalf("exact option spread=%v, want decorated positive spread", q.SpreadPct)
+	}
+	foundOffHours := false
+	for _, warning := range q.WarningDetails {
+		foundOffHours = foundOffHours || warning.Code == "off_hours_quote"
+	}
+	if !foundOffHours {
+		t.Fatalf("exact option warnings=%+v, want off_hours_quote", q.WarningDetails)
+	}
+	if err := requireFreshPreviewQuote(orderQuoteSnapshotFromQuote(q), "patient-limit"); err == nil || !strings.Contains(err.Error(), "open market session") {
+		t.Fatalf("off-hours exact option fresh-quote gate err=%v, want open-session refusal", err)
+	}
+}
+
 func TestPreviewLimitPatientLimitOptionBandRounding(t *testing.T) {
 	t.Parallel()
 	opt := rpc.ContractParams{SecType: "OPT", Symbol: "MSFT"}
@@ -494,7 +528,7 @@ func TestOrderPreviewTIFGate(t *testing.T) {
 	t.Parallel()
 	pct := 8.0
 	trail := &rpc.OrderTrailSpec{Basis: rpc.OrderTrailBasisInstrumentPrice, OffsetType: rpc.OrderTrailOffsetPercent, TrailingPercent: &pct}
-	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, AllowStockShort: true})
 	srv.orderPreviewQuote = fixedPreviewQuote(100, 101)
 	srv.orderPreviewPositionImpact = fixedPreviewPosition(10, 0, rpc.OrderPositionEffectClose)
 
@@ -658,6 +692,7 @@ func TestOrderPreviewReplaceMintsModifyScopedToken(t *testing.T) {
 		Mode:            "paper",
 		Symbol:          "AAPL",
 		SecType:         "STK",
+		ConID:           265598,
 		Exchange:        "SMART",
 		Currency:        "USD",
 		Action:          "BUY",
@@ -675,7 +710,7 @@ func TestOrderPreviewReplaceMintsModifyScopedToken(t *testing.T) {
 	limit := 99.5
 	res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
 		Action:     rpc.OrderActionBuy,
-		Contract:   rpc.ContractParams{Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		Contract:   rpc.ContractParams{ConID: 265598, Symbol: "AAPL", SecType: "STK", Exchange: "SMART", Currency: "USD"},
 		Quantity:   1,
 		OrderType:  rpc.OrderTypeLMT,
 		LimitPrice: &limit,
@@ -954,11 +989,10 @@ func TestOrderPreviewAllowsSingleLegOption(t *testing.T) {
 	}
 }
 
-// TestOrderPreviewExemptsRiskReducingFromCaps proves the size caps are
-// intent-aware: close/reduce orders are bounded by the position itself and
-// pass the [trading].max_notional / max_option_contracts gates regardless of
-// size, while the exempted preview stops echoing a cap that did not bind.
-func TestOrderPreviewExemptsRiskReducingFromCaps(t *testing.T) {
+// TestOrderPreviewAppliesControlsToApparentExits pins the fail-closed boundary:
+// this client cannot prove future manual-TWS orders, so position-only
+// close/reduce arithmetic never exempts a submission from ordinary controls.
+func TestOrderPreviewAppliesControlsToApparentExits(t *testing.T) {
 	t.Parallel()
 	tr := config.Trading{Mode: config.TradingModePaper, MaxNotional: 10_000}
 	limit := 480.0
@@ -968,20 +1002,14 @@ func TestOrderPreviewExemptsRiskReducingFromCaps(t *testing.T) {
 		srv := newOrderPreviewTestServer(t, tr)
 		srv.orderPreviewQuote = fixedPreviewQuote(479.90, 480.10)
 		srv.orderPreviewPositionImpact = fixedPreviewPosition(200, 50, rpc.OrderPositionEffectReduce)
-		res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		_, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
 			Action:     "sell",
 			Contract:   rpc.ContractParams{Symbol: "AMD", SecType: "STK"},
 			Quantity:   150,
 			LimitPrice: &limit,
 		})
-		if err != nil {
-			t.Fatalf("reduce preview above cap: %v", err)
-		}
-		if res.Notional != 72_000 || !res.TokenMinted {
-			t.Fatalf("reduce preview notional/token = %.2f %v, want 72000.00 with minted token", res.Notional, res.TokenMinted)
-		}
-		if res.MaxNotional != 0 {
-			t.Fatalf("exempt preview MaxNotional = %.2f, want 0 (cap did not bind)", res.MaxNotional)
+		if err == nil || !strings.Contains(err.Error(), "max_notional") {
+			t.Fatalf("reduce preview err = %v, want max_notional refusal", err)
 		}
 	})
 
@@ -990,17 +1018,14 @@ func TestOrderPreviewExemptsRiskReducingFromCaps(t *testing.T) {
 		srv := newOrderPreviewTestServer(t, tr)
 		srv.orderPreviewQuote = fixedPreviewQuote(479.90, 480.10)
 		srv.orderPreviewPositionImpact = fixedPreviewPosition(150, 0, rpc.OrderPositionEffectClose)
-		res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		_, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
 			Action:     "sell",
 			Contract:   rpc.ContractParams{Symbol: "AMD", SecType: "STK"},
 			Quantity:   150,
 			LimitPrice: &limit,
 		})
-		if err != nil {
-			t.Fatalf("close preview above cap: %v", err)
-		}
-		if res.Notional != 72_000 || res.MaxNotional != 0 {
-			t.Fatalf("close preview notional/MaxNotional = %.2f %.2f, want 72000.00 and 0", res.Notional, res.MaxNotional)
+		if err == nil || !strings.Contains(err.Error(), "max_notional") {
+			t.Fatalf("close preview err = %v, want max_notional refusal", err)
 		}
 	})
 
@@ -1010,7 +1035,7 @@ func TestOrderPreviewExemptsRiskReducingFromCaps(t *testing.T) {
 		srv.orderPreviewQuote = fixedPreviewQuote(3.95, 4.05)
 		srv.orderPreviewPositionImpact = fixedPreviewPosition(30, 0, rpc.OrderPositionEffectClose)
 		optLimit := 4.0
-		res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		_, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
 			Action: "sell",
 			Contract: rpc.ContractParams{
 				Symbol: "SPY", SecType: "OPT", Expiry: "20260619", Right: "C", Strike: 520, Multiplier: 100,
@@ -1018,11 +1043,8 @@ func TestOrderPreviewExemptsRiskReducingFromCaps(t *testing.T) {
 			Quantity:   30,
 			LimitPrice: &optLimit,
 		})
-		if err != nil {
-			t.Fatalf("option close preview qty 30: %v", err)
-		}
-		if res.Notional != 12_000 || res.Draft.OpenClose != "C" {
-			t.Fatalf("option close notional/open_close = %.2f %q, want 12000.00 C", res.Notional, res.Draft.OpenClose)
+		if err == nil || !strings.Contains(err.Error(), "max_option_contracts") {
+			t.Fatalf("option close err = %v, want max_option_contracts refusal", err)
 		}
 	})
 
@@ -1153,6 +1175,57 @@ func newOrderPreviewTestServer(t *testing.T, trading config.Trading) *Server {
 		orderTokens:            signer,
 		coreStore:              authority,
 		gatewayReadyForTrading: func() bool { return true },
+	}
+}
+
+func TestBindPreviewOrderRiskAuthorityRejectsBaseCurrencyDriftAtRedemption(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	impact := rpc.OrderPositionImpact{Before: 0, After: 1, Effect: rpc.OrderPositionEffectOpen}
+	srv.orderRiskAuthorityForTest = func(context.Context, rpc.TradingStatus, rpc.ContractParams, string, int) (orderPositionAuthority, error) {
+		return orderPositionAuthority{
+			Impact: impact, Generation: 7, TestOnly: true,
+			Health:                 ibkrlib.PortfolioStreamHealth{Account: "DU1234567", ProjectionGeneration: 7},
+			BaseCurrency:           "EUR",
+			BaseCurrencyProvenance: ibkrlib.AccountBaseCurrencyValueSuffix,
+		}, nil
+	}
+	binding := brokerWriteTransactionBinding{testOnly: true}
+	payload := orderPreviewTokenPayload{
+		Position: impact, PortfolioGeneration: 7, PortfolioAccount: "DU1234567",
+		BaseCurrency: "USD", BaseCurrencyProvenance: ibkrlib.AccountBaseCurrencyExplicitTag,
+		Notional: 100,
+	}
+	draft := rpc.OrderDraft{
+		Action: rpc.OrderActionBuy, Quantity: 1,
+		Contract: rpc.ContractParams{ConID: 1, Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+	}
+	err := srv.bindPreviewOrderRiskAuthority(context.Background(), &binding, rpc.TradingStatus{Account: "DU1234567", Mode: rpc.AccountModePaper}, payload, draft)
+	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "risk authority changed") {
+		t.Fatalf("bindPreviewOrderRiskAuthority err = %v, want base-currency drift refusal", err)
+	}
+	if binding.riskBound {
+		t.Fatal("base-currency drift unexpectedly produced a redeemed risk binding")
+	}
+}
+
+func TestCaptureWireOrderPositionAuthorityUsesRedeemedSessionBaseCurrency(t *testing.T) {
+	t.Parallel()
+	srv := &Server{}
+	binding := brokerWriteTransactionBinding{
+		testOnly:                   true,
+		riskPosition:               rpc.OrderPositionImpact{Before: 1, After: 0, Effect: rpc.OrderPositionEffectClose},
+		riskPortfolioGeneration:    9,
+		riskPortfolioAccount:       "DU1234567",
+		riskBaseCurrency:           "EUR",
+		riskBaseCurrencyProvenance: ibkrlib.AccountBaseCurrencyValueSuffix,
+	}
+	got, err := srv.captureWireOrderPositionAuthority(binding, rpc.TradingStatus{Account: "DU1234567"}, rpc.OrderDraft{})
+	if err != nil {
+		t.Fatalf("captureWireOrderPositionAuthority: %v", err)
+	}
+	if got.BaseCurrency != "EUR" || got.BaseCurrencyProvenance != ibkrlib.AccountBaseCurrencyValueSuffix {
+		t.Fatalf("wire base authority = %q/%q, want redeemed EUR/value-suffix binding", got.BaseCurrency, got.BaseCurrencyProvenance)
 	}
 }
 

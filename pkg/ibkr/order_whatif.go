@@ -73,21 +73,37 @@ type OrderWhatIfResult struct {
 // result with Status [OrderWhatIfStatusUnavailable] and a nil error. Accepted
 // and rejected results reflect callback classification, not order finality.
 func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (OrderWhatIfResult, error) {
+	return c.previewOrderWhatIfForEpoch(ctx, order, nil)
+}
+
+func (c *Connection) previewOrderWhatIfForEpoch(ctx context.Context, order *IBKROrder, expectedEpoch *uint64) (OrderWhatIfResult, error) {
 	if order == nil {
 		return OrderWhatIfResult{}, fmt.Errorf("order is nil")
 	}
 	if !c.IsConnected() {
 		return orderWhatIfUnavailableResult("not connected to IBKR"), nil
 	}
-	if err := preparePlaceOrder(order, c); err != nil {
+	epoch, err := preparePlaceOrder(order, c, expectedEpoch)
+	if err != nil {
 		return OrderWhatIfResult{}, err
 	}
 	order.WhatIf = true
 	order.Transmit = true
 	c.markWhatIfOrderID(order.OrderID)
+	defer c.clearWhatIfOrderID(order.OrderID)
 
 	resultCh := make(chan OrderWhatIfResult, 1)
-	errorHandlerID := c.RegisterHandler(msgErrMsg, func(fields []string) {
+	register := func(msgID int, handler func([]string)) uint64 {
+		if expectedEpoch == nil {
+			return c.RegisterHandler(msgID, handler)
+		}
+		return c.RegisterHandlerAtEpoch(msgID, func(fields []string, receiptEpoch uint64) {
+			if receiptEpoch == *expectedEpoch {
+				handler(fields)
+			}
+		})
+	}
+	errorHandlerID := register(msgErrMsg, func(fields []string) {
 		reqID, code, msg, ok := parseOrderWhatIfError(fields)
 		if !ok || reqID != order.OrderID || orderWhatIfInformationalError(code) {
 			return
@@ -99,7 +115,7 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 			Message:      orderWhatIfErrorMessage(code, msg, ""),
 		})
 	})
-	systemNoticeHandlerID := c.RegisterHandler(msgSystemNotification, func(fields []string) {
+	systemNoticeHandlerID := register(msgSystemNotification, func(fields []string) {
 		reqID, code, msg, advancedRejectJSON, ok := parseOrderWhatIfSystemNotice(fields)
 		if !ok || reqID != order.OrderID || orderWhatIfInformationalError(code) {
 			return
@@ -112,7 +128,7 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 			AdvancedRejectJSON: advancedRejectJSON,
 		})
 	})
-	openOrderHandlerID := c.RegisterHandler(msgOpenOrder, func(fields []string) {
+	openOrderHandlerID := register(msgOpenOrder, func(fields []string) {
 		result, ok := parseOrderWhatIfOpenOrder(fields, order.OrderID, c.serverVersion)
 		if ok {
 			sendOrderWhatIfResult(resultCh, result)
@@ -122,7 +138,7 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 	defer c.UnregisterHandler(msgSystemNotification, systemNoticeHandlerID)
 	defer c.UnregisterHandler(msgOpenOrder, openOrderHandlerID)
 
-	if err := c.sendPlaceOrderFrame(order); err != nil {
+	if err := c.sendPlaceOrderFrameGuarded(ctx, order, epoch, nil); err != nil {
 		return orderWhatIfUnavailableResult(fmt.Sprintf("send broker WhatIf: %v", err)), nil
 	}
 
@@ -130,6 +146,9 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 	case <-ctx.Done():
 		return orderWhatIfUnavailableResult("timeout waiting for broker WhatIf response"), nil
 	case result := <-resultCh:
+		if expectedEpoch != nil && c.BrokerSessionEpoch() != *expectedEpoch {
+			return orderWhatIfUnavailableResult("broker session changed while waiting for WhatIf response"), nil
+		}
 		return result, nil
 	}
 }
@@ -139,7 +158,13 @@ func (c *Connection) PreviewOrderWhatIf(ctx context.Context, order *IBKROrder) (
 // add to Connector.openOrders because no working order should exist. Status and
 // error behavior match [Connection.PreviewOrderWhatIf].
 func (c *Connector) PreviewOrderWhatIf(ctx context.Context, contract *Contract, order *RawOrder) (OrderWhatIfResult, error) {
-	return c.previewOrderWhatIf(ctx, contract, order, 0)
+	return c.previewOrderWhatIf(ctx, contract, order, 0, nil)
+}
+
+// PreviewOrderWhatIfForSession is PreviewOrderWhatIf constrained to the exact
+// connector socket generation captured by binding.
+func (c *Connector) PreviewOrderWhatIfForSession(ctx context.Context, binding ConnectorSessionBinding, contract *Contract, order *RawOrder) (OrderWhatIfResult, error) {
+	return c.previewOrderWhatIf(ctx, contract, order, 0, &binding)
 }
 
 // PreviewOrderWhatIfWithOrderID sends a broker WhatIf preview using a positive,
@@ -150,10 +175,20 @@ func (c *Connector) PreviewOrderWhatIfWithOrderID(ctx context.Context, contract 
 	if orderID <= 0 {
 		return OrderWhatIfResult{}, fmt.Errorf("order ID must be positive")
 	}
-	return c.previewOrderWhatIf(ctx, contract, order, orderID)
+	return c.previewOrderWhatIf(ctx, contract, order, orderID, nil)
 }
 
-func (c *Connector) previewOrderWhatIf(ctx context.Context, contract *Contract, order *RawOrder, orderID int) (OrderWhatIfResult, error) {
+// PreviewOrderWhatIfWithOrderIDForSession is
+// PreviewOrderWhatIfWithOrderID constrained to the exact connector socket
+// generation captured by binding.
+func (c *Connector) PreviewOrderWhatIfWithOrderIDForSession(ctx context.Context, binding ConnectorSessionBinding, contract *Contract, order *RawOrder, orderID int) (OrderWhatIfResult, error) {
+	if orderID <= 0 {
+		return OrderWhatIfResult{}, fmt.Errorf("order ID must be positive")
+	}
+	return c.previewOrderWhatIf(ctx, contract, order, orderID, &binding)
+}
+
+func (c *Connector) previewOrderWhatIf(ctx context.Context, contract *Contract, order *RawOrder, orderID int, binding *ConnectorSessionBinding) (OrderWhatIfResult, error) {
 	if contract == nil {
 		return OrderWhatIfResult{}, fmt.Errorf("contract is nil")
 	}
@@ -167,6 +202,12 @@ func (c *Connector) previewOrderWhatIf(ctx context.Context, contract *Contract, 
 	c.mu.RLock()
 	conn := c.conn
 	c.mu.RUnlock()
+	if binding != nil {
+		if !c.SessionCurrent(*binding) {
+			return orderWhatIfUnavailableResult("broker session changed before WhatIf request"), nil
+		}
+		conn = binding.connection
+	}
 	if conn == nil {
 		return orderWhatIfUnavailableResult("no active connection"), nil
 	}
@@ -211,12 +252,56 @@ func (c *Connector) previewOrderWhatIf(ctx context.Context, contract *Contract, 
 	if orderID > 0 {
 		ibkrOrder.OrderID = orderID
 	}
-	return conn.PreviewOrderWhatIf(ctx, ibkrOrder)
+	if c.whatIfBeforeBrokerIDClaim != nil {
+		c.whatIfBeforeBrokerIDClaim()
+	}
+	var claimEpoch uint64
+	c.brokerIDNamespaceMu.Lock()
+	if ibkrOrder.OrderID <= 0 {
+		var err error
+		if binding != nil {
+			ibkrOrder.OrderID, claimEpoch, err = c.nextDisjointOrderIDLockedForSession(*binding)
+		} else {
+			ibkrOrder.OrderID, claimEpoch, err = c.nextDisjointOrderIDLocked(conn)
+		}
+		if err != nil {
+			c.brokerIDNamespaceMu.Unlock()
+			return OrderWhatIfResult{}, err
+		}
+	} else {
+		if c.feeRequestOwnsID(ibkrOrder.OrderID) {
+			c.brokerIDNamespaceMu.Unlock()
+			return OrderWhatIfResult{}, fmt.Errorf("%w: explicit WhatIf order ID is owned by an active read-only request", ErrBrokerIDNamespaceConflict)
+		}
+		owned := c.isKnownBrokerOrderID(ibkrOrder.OrderID)
+		var err error
+		if binding != nil {
+			claimEpoch, err = conn.claimOrderIDForForwardingAtEpoch(ibkrOrder.OrderID, owned, &binding.epoch)
+		} else {
+			claimEpoch, err = conn.claimOrderIDForForwarding(ibkrOrder.OrderID, owned)
+		}
+		if err != nil {
+			c.brokerIDNamespaceMu.Unlock()
+			return OrderWhatIfResult{}, err
+		}
+	}
+	defer conn.discardOrderIDReservation(ibkrOrder.OrderID)
+	c.orderIDHighWater = max(c.orderIDHighWater, ibkrOrder.OrderID)
+	// Mark under the shared boundary so a FEE allocation cannot race the
+	// interval before Connection.PreviewOrderWhatIf installs its handlers.
+	conn.markWhatIfOrderID(ibkrOrder.OrderID)
+	defer conn.clearWhatIfOrderID(ibkrOrder.OrderID)
+	c.brokerIDNamespaceMu.Unlock()
+	result, err := conn.previewOrderWhatIfForEpoch(ctx, ibkrOrder, &claimEpoch)
+	if err == nil && binding != nil && !c.SessionCurrent(*binding) {
+		return orderWhatIfUnavailableResult("broker session changed during WhatIf request"), nil
+	}
+	return result, err
 }
 
-func preparePlaceOrder(order *IBKROrder, c *Connection) error {
+func preparePlaceOrder(order *IBKROrder, c *Connection, expectedEpoch *uint64) (uint64, error) {
 	if err := ValidateOrder(order); err != nil {
-		return err
+		return 0, err
 	}
 
 	stringFields := []struct {
@@ -237,12 +322,30 @@ func preparePlaceOrder(order *IBKROrder, c *Connection) error {
 	}
 	for _, field := range stringFields {
 		if err := ensureASCII(field.name, field.value); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
+	claimEpoch := expectedEpoch
 	if order.OrderID == 0 {
-		order.OrderID = c.GetNextOrderID()
+		id, epoch, err := c.reserveNextOrderID()
+		if err != nil {
+			return 0, err
+		}
+		order.OrderID = id
+		claimEpoch = &epoch
+	}
+	var (
+		epoch uint64
+		err   error
+	)
+	if claimEpoch != nil {
+		epoch, err = c.claimOrderIDForEpoch(order.OrderID, c.orderIDOwned(order.OrderID), *claimEpoch)
+	} else {
+		epoch, err = c.claimOrderIDCurrentEpoch(order.OrderID, c.orderIDOwned(order.OrderID))
+	}
+	if err != nil {
+		return 0, err
 	}
 	if order.ClientID == 0 {
 		order.ClientID = c.config.ClientID
@@ -256,19 +359,19 @@ func preparePlaceOrder(order *IBKROrder, c *Connection) error {
 	if order.OpenClose == "" {
 		order.OpenClose = "O"
 	}
-	return nil
+	return epoch, nil
 }
 
-func (c *Connection) sendPlaceOrderFrame(order *IBKROrder) error {
+func (c *Connection) sendPlaceOrderFrameGuarded(ctx context.Context, order *IBKROrder, epoch uint64, guard func() error) error {
 	if c.serverVersion >= minServerVerProtoBufPlaceOrder {
 		msg, err := encodePlaceOrderProtoFrame(order)
 		if err != nil {
-			return err
+			return definitelyUnsent(err)
 		}
-		return c.sendMessageWithType(msg, RequestTypeOrder)
+		return c.sendMessageWithTypeContextForEpochGuarded(ctx, msg, RequestTypeOrder, epoch, true, guard)
 	}
 	if order.LmtPriceOffset != 0 {
-		return fmt.Errorf("legacy placeOrder encoder does not support lmtPriceOffset")
+		return definitelyUnsent(fmt.Errorf("legacy placeOrder encoder does not support lmtPriceOffset"))
 	}
 
 	fields := clonePlaceOrderFields()
@@ -281,7 +384,7 @@ func (c *Connection) sendPlaceOrderFrame(order *IBKROrder) error {
 	}
 
 	msg := c.encodeMsg(interfaces...)
-	return c.sendMessageWithType(msg, RequestTypeOrder)
+	return c.sendMessageWithTypeContextForEpochGuarded(ctx, msg, RequestTypeOrder, epoch, true, guard)
 }
 
 func orderWhatIfUnavailableResult(message string) OrderWhatIfResult {

@@ -8,6 +8,8 @@ function currentSettings() {
 }
 
 function purgeRestoreSettingEnabled() {
+  // This setting controls the workflow/read surface only. It is never broker-write
+  // authority; the daemon keeps purge/restore preview and submission disabled.
   const setting = currentSettings().features?.purge_restore?.enabled;
   return setting?.value !== false;
 }

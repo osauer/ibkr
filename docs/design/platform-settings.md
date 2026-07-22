@@ -14,6 +14,13 @@ preferences owned by `ibkr` belong in this document: feature toggles, the
 forward-collection switches, and optional experimental trading-limit
 overrides.
 
+Reviewed exact-contract terminal earnings evidence is not a preference and is
+not writable through `settings.update`. Its optional
+`[rulebook].terminal_evidence_file` is a private startup import into a separate
+typed daemon.db state document; rule snapshots serve only the committed SQLite
+revision. Ownership, validation, revocation, and expiry semantics live in
+`docs/design/trading-rulebook.md`.
+
 This document owns semantics and ownership, not the key list. The writable
 keys, types, and per-key descriptions are enumerated in the generated
 [configuration reference](../reference/config.md) (single source: the settings
@@ -40,14 +47,24 @@ Every returned setting field carries:
 fields and read-only writes return 400. `null` clears a runtime override and
 reveals the underlying default/config value again.
 
-An accepted update commits the SQLite state document before the daemon
-publishes the new in-memory/settings-event view. Revision conflicts or critical
-database errors fail the update; no legacy-file write or fallback follows.
+An accepted semantic update commits the SQLite state document and its typed
+`platform_settings_update` audit event in one compare-and-swap transaction
+before the daemon publishes the new in-memory/settings-event view. The audit
+payload carries sorted changed keys, canonical before/after values, expected
+and new revisions, old/new trading-control generations, and the normalized
+write origin. A semantic no-op advances neither the revision nor the audit
+stream. Revision conflicts, duplicate audit identities, or critical database
+errors roll back both records; no legacy-file write or fallback follows.
 
 ## Policy
 
-Purge/restore is enabled by default. Disabling it blocks purge/restore write
-actions across CLI, RPC, API, and SPA, while `purge.status` remains readable.
+The purge/restore workflow/read surface is enabled by default. Disabling
+`features.purge_restore.enabled` disables its workflow controls while
+`purge.status` remains readable. Enabling it is not broker-write authority:
+purge, restore preview, and restore submission remain unconditionally
+unavailable until exact per-leg portfolio and account-global working-order
+authority exist. Use TWS for a manual exit/restore, then refresh and reconcile
+the daemon.
 
 Stock/ETF protection proposals are enabled by default. Disabling
 `features.stock_protection.enabled` blocks stock/ETF protection proposal actions
@@ -65,8 +82,9 @@ unmentioned symbols survive.
 
 `trading.freeze` is the runtime trading brake: `true` blocks every new broker
 write while cancels stay allowed. Freeze and trading-limit changes are
-human-only policy: the patch origin is stamped and audited, and on live routes
-the daemon hard-rejects agent-origin trading patches.
+human-only policy in disabled, paper, and live modes: missing, agent, or paired
+device origins are rejected, and accepted human-terminal origins are stamped
+in the atomic audit event.
 
 `regime.journal.enabled` retains its public name but controls forward
 collection of typed regime-decision events in `daemon.db`. It does not enable

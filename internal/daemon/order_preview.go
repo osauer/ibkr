@@ -23,8 +23,8 @@ import (
 )
 
 const (
-	orderPreviewTokenVersion = 2
-	orderPreviewTokenPrefix  = "ibkrp2"
+	orderPreviewTokenVersion = 3
+	orderPreviewTokenPrefix  = "ibkrp3"
 	orderPreviewTokenTTL     = 10 * time.Minute
 	orderPreviewKeyBytes     = 32
 	orderPreviewDefaultWait  = 5 * time.Second
@@ -32,24 +32,30 @@ const (
 )
 
 type orderPreviewTokenPayload struct {
-	Version          int                       `json:"version"`
-	AuthorityEpoch   string                    `json:"authority_epoch"`
-	SignerGeneration int64                     `json:"signer_generation"`
-	TokenID          string                    `json:"token_id"`
-	Scope            string                    `json:"scope"`
-	IssuedAt         time.Time                 `json:"issued_at"`
-	ExpiresAt        time.Time                 `json:"expires_at"`
-	Mode             string                    `json:"mode"`
-	Account          string                    `json:"account"`
-	Endpoint         string                    `json:"endpoint"`
-	ClientID         int                       `json:"client_id"`
-	Draft            rpc.OrderDraft            `json:"draft"`
-	Quote            rpc.OrderQuoteSnapshot    `json:"quote"`
-	Position         rpc.OrderPositionImpact   `json:"position"`
-	Notional         float64                   `json:"notional"`
-	WhatIf           rpc.OrderWhatIfResult     `json:"what_if"`
-	WhatIfStatus     string                    `json:"what_if_status,omitempty"`
-	Replace          orderPreviewReplaceTarget `json:"replace"`
+	Version                  int                                   `json:"version"`
+	AuthorityEpoch           string                                `json:"authority_epoch"`
+	SignerGeneration         int64                                 `json:"signer_generation"`
+	TokenID                  string                                `json:"token_id"`
+	Scope                    string                                `json:"scope"`
+	IssuedAt                 time.Time                             `json:"issued_at"`
+	ExpiresAt                time.Time                             `json:"expires_at"`
+	Mode                     string                                `json:"mode"`
+	Account                  string                                `json:"account"`
+	Endpoint                 string                                `json:"endpoint"`
+	ClientID                 int                                   `json:"client_id"`
+	Draft                    rpc.OrderDraft                        `json:"draft"`
+	Quote                    rpc.OrderQuoteSnapshot                `json:"quote"`
+	Position                 rpc.OrderPositionImpact               `json:"position"`
+	PortfolioGeneration      uint64                                `json:"portfolio_generation"`
+	PortfolioAccount         string                                `json:"portfolio_account"`
+	PortfolioEvidenceAt      time.Time                             `json:"portfolio_evidence_at"`
+	BaseCurrency             string                                `json:"base_currency"`
+	BaseCurrencyProvenance   ibkrlib.AccountBaseCurrencyProvenance `json:"base_currency_provenance"`
+	TradingControlGeneration uint64                                `json:"trading_control_generation"`
+	Notional                 float64                               `json:"notional"`
+	WhatIf                   rpc.OrderWhatIfResult                 `json:"what_if"`
+	WhatIfStatus             string                                `json:"what_if_status,omitempty"`
+	Replace                  orderPreviewReplaceTarget             `json:"replace"`
 }
 
 type orderPreviewReplaceTarget struct {
@@ -62,6 +68,18 @@ type orderPreviewReplaceTarget struct {
 	Mode            string              `json:"mode,omitempty"`
 	Status          string              `json:"status,omitempty"`
 	LifecycleStatus string              `json:"lifecycle_status,omitempty"`
+	ConID           int                 `json:"con_id,omitempty"`
+	Symbol          string              `json:"symbol,omitempty"`
+	SecType         string              `json:"sec_type,omitempty"`
+	Exchange        string              `json:"exchange,omitempty"`
+	PrimaryExch     string              `json:"primary_exchange,omitempty"`
+	Currency        string              `json:"currency,omitempty"`
+	LocalSymbol     string              `json:"local_symbol,omitempty"`
+	TradingClass    string              `json:"trading_class,omitempty"`
+	Expiry          string              `json:"expiry,omitempty"`
+	Strike          float64             `json:"strike,omitempty"`
+	Right           string              `json:"right,omitempty"`
+	Multiplier      int                 `json:"multiplier,omitempty"`
 	OrderType       string              `json:"order_type,omitempty"`
 	TIF             string              `json:"tif,omitempty"`
 	TriggerMethod   int                 `json:"trigger_method,omitempty"`
@@ -299,11 +317,14 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		if !view.ModifyEligible {
 			return nil, errBadRequest("replacement preview target is not modify-eligible")
 		}
+		if view.ConID <= 0 {
+			return nil, errBadRequest("replacement preview target has no exact positive contract identity")
+		}
 		scope = rpc.OrderTokenScopeModify
 		replaceView = view
 	}
 
-	cfg := s.effectiveTradingConfig()
+	cfg, tradingControlGeneration := s.effectiveTradingControlSnapshot()
 	action, err := normalizeOrderAction(p.Action)
 	if err != nil {
 		return nil, err
@@ -312,24 +333,41 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	if err != nil {
 		return nil, err
 	}
-	if contract.MinTick <= 0 {
-		contract.MinTick = s.resolveContractMinTick(ctx, contract, previewMinTickTimeout)
-	}
 	if p.Quantity <= 0 {
 		return nil, errBadRequest("quantity must be positive")
 	}
-	// Position impact resolves before the size caps because the caps are
-	// intent-aware: they bind risk-increasing orders only. A failed
-	// position read fails the preview right here, so the exemption below
-	// never runs on unknown intent (fail closed).
-	position, err := s.fetchPreviewPositionImpact(ctx, contract, action, p.Quantity)
+	if scope == rpc.OrderTokenScopeModify {
+		contract = modifyContractForView(replaceView, contract)
+	}
+	timeout := orderPreviewTimeout(p.TimeoutMs)
+	previewAuthority, err := s.captureOrderPreviewBrokerAuthority()
 	if err != nil {
 		return nil, err
 	}
-	riskReducing := isRiskReducing(position.Effect)
-	if !riskReducing && contract.SecType == "OPT" && p.Quantity > cfg.MaxOptionContracts {
-		return nil, errBadRequest(fmt.Sprintf("option quantity %d exceeds [trading].max_option_contracts %d", p.Quantity, cfg.MaxOptionContracts))
+	contract, err = s.resolvePreviewOrderContract(ctx, previewAuthority, contract, min(timeout, previewMinTickTimeout))
+	if err != nil {
+		return nil, err
 	}
+	if contract.MinTick <= 0 && previewAuthority == nil {
+		// Socket-free unit seams retain the historical helper. Production uses
+		// the min tick returned by the exact session-bound resolver and lets
+		// pricing's static grid handle an explicitly omitted broker MinTick.
+		contract.MinTick = s.resolveContractMinTick(ctx, contract, previewMinTickTimeout)
+	}
+	// Position impact resolves before the size caps so sell-side apparent exits
+	// can also pass the worst-case short/STO gates. Every order remains subject
+	// to the ordinary notional/quantity caps: this client cannot prove that a
+	// manual TWS order has not already consumed the apparent exit capacity.
+	var positionAuthority orderPositionAuthority
+	if previewAuthority != nil {
+		positionAuthority, err = s.captureBoundOrderPositionAuthority(ctx, previewAuthority.connector, previewAuthority.session, status, contract, action, p.Quantity)
+	} else {
+		positionAuthority, err = s.capturePreviewOrderPositionAuthority(ctx, status, contract, action, p.Quantity)
+	}
+	if err != nil {
+		return nil, err
+	}
+	position := positionAuthority.Impact
 	orderType := strings.ToUpper(strings.TrimSpace(p.OrderType))
 	if orderType == "" {
 		orderType = rpc.OrderTypeLMT
@@ -357,8 +395,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		triggerMethod = replaceView.TriggerMethod
 	}
 
-	timeout := orderPreviewTimeout(p.TimeoutMs)
-	quote, err := s.fetchPreviewQuote(ctx, contract, timeout)
+	quote, err := s.fetchPreviewQuoteBound(ctx, contract, timeout, previewAuthority)
 	if err != nil {
 		return nil, err
 	}
@@ -367,15 +404,6 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		return nil, err
 	}
 	notional := float64(p.Quantity) * notionalPrice * float64(contractMultiplier(contract))
-	if !riskReducing && notional > cfg.MaxNotional {
-		return nil, errBadRequest(fmt.Sprintf("order notional %.2f exceeds [trading].max_notional %.2f", notional, cfg.MaxNotional))
-	}
-	switch {
-	case contract.SecType == "STK" && stockShortOrFlip(position.Effect) && !cfg.AllowStockShort:
-		return nil, errBadRequest("stock short/flip previews require [trading].allow_stock_short = true")
-	case contract.SecType == "OPT" && optionSellToOpen(action, position.Effect) && !cfg.AllowOptionSellToOpen:
-		return nil, errBadRequest("option sell-to-open previews require [trading].allow_option_sell_to_open = true")
-	}
 
 	now := time.Now().UTC()
 	if s.now != nil {
@@ -406,30 +434,44 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		if err := validateProtectiveModifyQuantity(replaceView, draft, position.Before); err != nil {
 			return nil, err
 		}
-		draft.Contract = modifyContractForView(replaceView, draft.Contract)
+	}
+	if err := validateOrderRiskAuthority(cfg, draft, position, notional, positionAuthority.BaseCurrency); err != nil {
+		return nil, errBadRequest(err.Error())
 	}
 	var whatIf rpc.OrderWhatIfResult
 	if scope == rpc.OrderTokenScopeModify {
-		whatIf, err = s.fetchModifyPreviewWhatIf(ctx, status, replaceView, draft, timeout)
+		whatIf, err = s.fetchModifyPreviewWhatIfBound(ctx, status, replaceView, draft, timeout, previewAuthority)
 	} else {
-		whatIf, err = s.fetchPreviewWhatIf(ctx, status, draft, timeout)
+		whatIf, err = s.fetchPreviewWhatIfBound(ctx, status, draft, timeout, previewAuthority)
 	}
 	if err != nil {
 		return nil, err
 	}
+	if previewAuthority != nil && !s.orderPreviewBrokerAuthorityCurrent(previewAuthority) {
+		return nil, fmt.Errorf("%w: broker session changed before preview token mint", ErrTradingDisabled)
+	}
+	if _, currentControlGeneration := s.effectiveTradingControlSnapshot(); currentControlGeneration != tradingControlGeneration {
+		return nil, fmt.Errorf("%w: trading controls changed during preview; refresh and retry", ErrTradingDisabled)
+	}
 	token, tokenID, expiresAt, err := s.orderTokens.mint(orderPreviewTokenPayload{
-		Scope:        scope,
-		Mode:         status.Mode,
-		Account:      status.Account,
-		Endpoint:     status.Endpoint,
-		ClientID:     status.ClientID,
-		Draft:        draft,
-		Quote:        quote,
-		Position:     position,
-		Notional:     notional,
-		WhatIf:       whatIf,
-		WhatIfStatus: whatIf.Status,
-		Replace:      replaceTargetFromView(replaceView),
+		Scope:                    scope,
+		Mode:                     status.Mode,
+		Account:                  status.Account,
+		Endpoint:                 status.Endpoint,
+		ClientID:                 status.ClientID,
+		Draft:                    draft,
+		Quote:                    quote,
+		Position:                 position,
+		PortfolioGeneration:      positionAuthority.Generation,
+		PortfolioAccount:         positionAuthority.Health.Account,
+		PortfolioEvidenceAt:      positionAuthority.EvidenceAt,
+		BaseCurrency:             positionAuthority.BaseCurrency,
+		BaseCurrencyProvenance:   positionAuthority.BaseCurrencyProvenance,
+		TradingControlGeneration: tradingControlGeneration,
+		Notional:                 notional,
+		WhatIf:                   whatIf,
+		WhatIfStatus:             whatIf.Status,
+		Replace:                  replaceTargetFromView(replaceView),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTradingDisabled, err)
@@ -485,12 +527,6 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 	submitEligible := tokenMinted && whatIf.Status == rpc.OrderWhatIfStatusAccepted && !whatIf.RequiredForSubmit
 
 	maxNotional := cfg.MaxNotional
-	if riskReducing {
-		// A reduce-only preview was not checked against the cap; echoing
-		// the configured value would claim a gate that did not bind.
-		// omitempty drops the zero from the wire result.
-		maxNotional = 0
-	}
 	return &rpc.OrderPreviewResult{
 		PreviewToken:          token,
 		PreviewTokenID:        tokenID,
@@ -515,17 +551,17 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 }
 
 func (s *Server) fetchPreviewQuote(ctx context.Context, contract rpc.ContractParams, timeout time.Duration) (rpc.OrderQuoteSnapshot, error) {
+	return s.fetchPreviewQuoteBound(ctx, contract, timeout, nil)
+}
+
+func (s *Server) fetchPreviewQuoteBound(ctx context.Context, contract rpc.ContractParams, timeout time.Duration, authority *orderPreviewBrokerAuthority) (rpc.OrderQuoteSnapshot, error) {
 	if s.orderPreviewQuote != nil {
 		return s.orderPreviewQuote(ctx, contract, timeout)
 	}
-	return s.previewQuote(ctx, contract, timeout)
-}
-
-func (s *Server) fetchPreviewPositionImpact(ctx context.Context, contract rpc.ContractParams, action string, qty int) (rpc.OrderPositionImpact, error) {
-	if s.orderPreviewPositionImpact != nil {
-		return s.orderPreviewPositionImpact(ctx, contract, action, qty)
+	if authority != nil {
+		return s.previewExactSessionQuote(ctx, authority, contract, timeout)
 	}
-	return s.previewPositionImpact(ctx, contract, action, qty)
+	return s.previewQuote(ctx, contract, timeout)
 }
 
 func orderPreviewTimeout(timeoutMs int) time.Duration {
@@ -537,35 +573,67 @@ func orderPreviewTimeout(timeoutMs int) time.Duration {
 }
 
 func (s *Server) fetchPreviewWhatIf(ctx context.Context, status rpc.TradingStatus, draft rpc.OrderDraft, timeout time.Duration) (rpc.OrderWhatIfResult, error) {
+	return s.fetchPreviewWhatIfBound(ctx, status, draft, timeout, nil)
+}
+
+func (s *Server) fetchPreviewWhatIfBound(ctx context.Context, status rpc.TradingStatus, draft rpc.OrderDraft, timeout time.Duration, authority *orderPreviewBrokerAuthority) (rpc.OrderWhatIfResult, error) {
 	whatIfCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if s.orderPreviewWhatIf != nil {
 		return s.orderPreviewWhatIf(whatIfCtx, draft)
 	}
-	c := s.gatewayConnector()
+	var c *ibkrlib.Connector
+	if authority != nil {
+		c = authority.connector
+	} else {
+		c = s.gatewayConnector()
+	}
 	if c == nil {
 		return previewWhatIfUnavailableWithMessage("Broker WhatIf unavailable: gateway connector is not ready."), nil
 	}
-	result, err := c.PreviewOrderWhatIf(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrderForStatus(draft, status))
+	var result ibkrlib.OrderWhatIfResult
+	var err error
+	if authority != nil {
+		result, err = c.PreviewOrderWhatIfForSession(whatIfCtx, authority.session, previewIBKRContract(draft.Contract), previewIBKROrderForStatus(draft, status))
+	} else {
+		result, err = c.PreviewOrderWhatIf(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrderForStatus(draft, status))
+	}
 	if err != nil {
 		return rpc.OrderWhatIfResult{}, err
+	}
+	if authority != nil && !s.orderPreviewBrokerAuthorityCurrent(authority) {
+		return previewWhatIfUnavailableWithMessage("Broker WhatIf unavailable: broker session changed during preview."), nil
 	}
 	return rpcWhatIfResultFromBroker(result), nil
 }
 
-func (s *Server) fetchModifyPreviewWhatIf(ctx context.Context, status rpc.TradingStatus, view rpc.OrderView, draft rpc.OrderDraft, timeout time.Duration) (rpc.OrderWhatIfResult, error) {
+func (s *Server) fetchModifyPreviewWhatIfBound(ctx context.Context, status rpc.TradingStatus, view rpc.OrderView, draft rpc.OrderDraft, timeout time.Duration, authority *orderPreviewBrokerAuthority) (rpc.OrderWhatIfResult, error) {
 	whatIfCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if s.orderPreviewWhatIf != nil {
 		return s.orderPreviewWhatIf(whatIfCtx, draft)
 	}
-	c := s.gatewayConnector()
+	var c *ibkrlib.Connector
+	if authority != nil {
+		c = authority.connector
+	} else {
+		c = s.gatewayConnector()
+	}
 	if c == nil {
 		return previewWhatIfUnavailableWithMessage("Broker WhatIf unavailable: gateway connector is not ready."), nil
 	}
-	result, err := c.PreviewOrderWhatIfWithOrderID(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrderForStatus(draft, status), view.ReservedOrderID)
+	var result ibkrlib.OrderWhatIfResult
+	var err error
+	if authority != nil {
+		result, err = c.PreviewOrderWhatIfWithOrderIDForSession(whatIfCtx, authority.session, previewIBKRContract(draft.Contract), previewIBKROrderForStatus(draft, status), view.ReservedOrderID)
+	} else {
+		result, err = c.PreviewOrderWhatIfWithOrderID(whatIfCtx, previewIBKRContract(draft.Contract), previewIBKROrderForStatus(draft, status), view.ReservedOrderID)
+	}
 	if err != nil {
 		return rpc.OrderWhatIfResult{}, err
+	}
+	if authority != nil && !s.orderPreviewBrokerAuthorityCurrent(authority) {
+		return previewWhatIfUnavailableWithMessage("Broker WhatIf unavailable: broker session changed during preview."), nil
 	}
 	return rpcWhatIfResultFromBroker(result), nil
 }
@@ -996,6 +1064,13 @@ func (s *Server) previewQuote(ctx context.Context, contract rpc.ContractParams, 
 	if q == nil {
 		return rpc.OrderQuoteSnapshot{}, errBadRequest("quote snapshot unavailable")
 	}
+	return orderQuoteSnapshotFromQuote(q), nil
+}
+
+func orderQuoteSnapshotFromQuote(q *rpc.Quote) rpc.OrderQuoteSnapshot {
+	if q == nil {
+		return rpc.OrderQuoteSnapshot{}
+	}
 	out := rpc.OrderQuoteSnapshot{
 		Symbol:         q.Symbol,
 		Bid:            q.Bid,
@@ -1017,7 +1092,49 @@ func (s *Server) previewQuote(ctx context.Context, contract rpc.ContractParams, 
 		mid := (*q.Bid + *q.Ask) / 2
 		out.Midpoint = &mid
 	}
-	return out, nil
+	return out
+}
+
+func (s *Server) previewExactSessionQuote(ctx context.Context, authority *orderPreviewBrokerAuthority, contract rpc.ContractParams, timeout time.Duration) (rpc.OrderQuoteSnapshot, error) {
+	if authority == nil || authority.connector == nil || contract.ConID <= 0 || !s.orderPreviewBrokerAuthorityCurrent(authority) {
+		return rpc.OrderQuoteSnapshot{}, fmt.Errorf("%w: exact broker quote authority is unavailable", ErrTradingDisabled)
+	}
+	quoteCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	key, err := authority.connector.SubscribeMarketDataWithContractForSession(quoteCtx, authority.session, *previewIBKRContract(contract), defaultGenericTicks)
+	if err != nil {
+		return rpc.OrderQuoteSnapshot{}, fmt.Errorf("%w: exact contract quote request failed: %v", ErrTradingDisabled, err)
+	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
+		defer cleanupCancel()
+		_ = authority.connector.UnsubscribeMarketDataForSession(cleanupCtx, authority.session, key)
+	}()
+	q := &rpc.Quote{Symbol: contract.Symbol, Contract: contract, IVStatus: "unavailable", AsOf: s.orderNow()}
+	started := time.Now()
+	if err := pollMarketData(quoteCtx, authority.connector, key, started.Add(timeout), func(data *ibkrlib.MarketData) bool {
+		fillQuoteMarketData(q, data)
+		ready := q.Bid != nil || q.Ask != nil || q.Last != nil || q.Mark != nil
+		if ready {
+			q.DataType = quoteDataTypeName(authority.connector.MarketDataTypeForSymbol(key), true, false)
+		}
+		return ready
+	}); err != nil {
+		return rpc.OrderQuoteSnapshot{}, fmt.Errorf("%w: exact contract quote unavailable: %v", ErrTradingDisabled, err)
+	}
+	if !s.orderPreviewBrokerAuthorityCurrent(authority) {
+		return rpc.OrderQuoteSnapshot{}, fmt.Errorf("%w: broker session changed during exact quote", ErrTradingDisabled)
+	}
+	q.AsOf = s.orderNow()
+	s.decorateExactPreviewQuote(q, contract)
+	return orderQuoteSnapshotFromQuote(q), nil
+}
+
+func (s *Server) decorateExactPreviewQuote(q *rpc.Quote, contract rpc.ContractParams) {
+	if market, ok := quoteSessionMarketForContract(contract); ok {
+		s.attachQuoteSessionContext(q, market)
+		s.decorateQuote(q, market)
+	}
 }
 
 func previewLimitPrice(action, strategy string, explicit *float64, contract rpc.ContractParams, quote rpc.OrderQuoteSnapshot) (float64, error) {
@@ -1200,29 +1317,6 @@ func contractMultiplier(contract rpc.ContractParams) int {
 	}
 }
 
-func (s *Server) previewPositionImpact(ctx context.Context, contract rpc.ContractParams, action string, qty int) (rpc.OrderPositionImpact, error) {
-	c := s.gatewayConnector()
-	if c == nil {
-		return rpc.OrderPositionImpact{}, s.gatewayUnavailableError()
-	}
-	positions, err := c.CachedPositions()
-	if err != nil {
-		return rpc.OrderPositionImpact{}, err
-	}
-	_ = ctx
-	before := positionQuantityForContract(positions, contract)
-	delta := float64(qty)
-	if action == rpc.OrderActionSell {
-		delta = -delta
-	}
-	after := before + delta
-	return rpc.OrderPositionImpact{
-		Before: before,
-		After:  after,
-		Effect: classifyPositionEffect(before, after),
-	}, nil
-}
-
 func positionQuantityForContract(positions []*ibkrlib.RawPosition, contract rpc.ContractParams) float64 {
 	if strings.EqualFold(contract.SecType, "OPT") {
 		return optionPositionQuantity(positions, contract)
@@ -1363,13 +1457,10 @@ func stockShortOrFlip(effect string) bool {
 	return effect == rpc.OrderPositionEffectFlip || effect == rpc.OrderPositionEffectOpenShort
 }
 
-// isRiskReducing reports whether the previewed order only closes or reduces
-// existing exposure. The [trading].max_notional and max_option_contracts caps
-// bind risk-increasing orders only: a close/reduce order is bounded by the
-// position itself, and capping it would block the daemon's own protection
-// proposals (e.g. a full-position protective trail above the notional cap).
-// Flip is deliberately not in the allowlist — its through-zero portion opens
-// new exposure — so flips and every unrecognized effect stay capped.
+// isRiskReducing describes the arithmetic effect against the current position.
+// It does not itself grant a control exemption: open-order visibility is not
+// account-global for this daemon, so pre-trade enforcement evaluates apparent
+// exits conservatively in validateOrderRiskAuthority.
 func isRiskReducing(effect string) bool {
 	return effect == rpc.OrderPositionEffectClose || effect == rpc.OrderPositionEffectReduce
 }
@@ -1468,6 +1559,18 @@ func replaceTargetFromView(view rpc.OrderView) orderPreviewReplaceTarget {
 		Mode:            view.Mode,
 		Status:          view.Status,
 		LifecycleStatus: view.LifecycleStatus,
+		ConID:           view.ConID,
+		Symbol:          view.Symbol,
+		SecType:         view.SecType,
+		Exchange:        view.Exchange,
+		PrimaryExch:     view.PrimaryExch,
+		Currency:        view.Currency,
+		LocalSymbol:     view.LocalSymbol,
+		TradingClass:    view.TradingClass,
+		Expiry:          view.Expiry,
+		Strike:          view.Strike,
+		Right:           view.Right,
+		Multiplier:      view.Multiplier,
 		OrderType:       view.OrderType,
 		TIF:             view.TIF,
 		TriggerMethod:   view.TriggerMethod,

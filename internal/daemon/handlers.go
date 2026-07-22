@@ -35,22 +35,46 @@ func (s *Server) handleAccountSummary(ctx context.Context) (*rpc.AccountResult, 
 	return s.buildAccountSummary(ctx, true)
 }
 
+type accountSummaryAuthority struct {
+	Provenance              ibkrlib.AccountSummaryProvenance
+	AsOf                    time.Time
+	NetLiquidationAvailable bool
+	TotalCashAvailable      bool
+	BaseCurrencyAvailable   bool
+}
+
 // buildAccountSummary shares the account wire builder with read-only daemon
 // compositions. observe=false suppresses the risk-capital observation write;
 // the returned typed account result is otherwise identical.
 func (s *Server) buildAccountSummary(ctx context.Context, observe bool) (*rpc.AccountResult, error) {
+	result, _, err := s.buildAccountSummaryWithAuthority(ctx, observe)
+	return result, err
+}
+
+// buildAccountSummaryWithAuthority preserves the public account fallback but
+// also returns the typed availability and source provenance strict consumers
+// need. A cached fallback is usable display context, never fresh Rulebook
+// evidence.
+func (s *Server) buildAccountSummaryWithAuthority(ctx context.Context, observe bool) (*rpc.AccountResult, accountSummaryAuthority, error) {
 	c := s.gatewayConnector()
 	if c == nil {
-		return nil, s.gatewayUnavailableError()
+		return nil, accountSummaryAuthority{}, s.gatewayUnavailableError()
 	}
-	raw, err := c.RequestAccountSummary(ctx, 8*time.Second)
+	raw, provenance, err := c.RequestAccountSummaryWithProvenance(ctx, 8*time.Second)
 	if err != nil {
 		if cached := c.CachedAccountSummary(); cached != nil {
 			s.logger.Debugf("account summary one-shot failed; using cached account update snapshot: %v", err)
 			raw = cached
+			provenance = ibkrlib.AccountSummaryProvenanceCachedFallback
 		} else {
-			return nil, err
+			return nil, accountSummaryAuthority{}, err
 		}
+	}
+	authority := accountSummaryAuthority{
+		Provenance: provenance, AsOf: raw.AsOf.UTC(),
+		NetLiquidationAvailable: raw.NetLiquidation != nil,
+		TotalCashAvailable:      raw.TotalCashValue != nil,
+		BaseCurrencyAvailable:   strings.TrimSpace(raw.Currency) != "",
 	}
 	res := &rpc.AccountResult{
 		AccountID:    raw.AccountID,
@@ -169,7 +193,7 @@ func (s *Server) buildAccountSummary(ctx context.Context, observe bool) (*rpc.Ac
 			}
 		}
 	}
-	return res, nil
+	return res, authority, nil
 }
 
 type accountDailyPnLReader interface {
@@ -239,6 +263,10 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 }
 
 func (s *Server) handlePositionsListCaptured(ctx context.Context, req *rpc.Request, portfolioHealth *ibkrlib.PortfolioStreamHealth) (*rpc.PositionsResult, error) {
+	return s.handlePositionsListCapturedForScope(ctx, req, portfolioHealth, brokerStateScope{})
+}
+
+func (s *Server) handlePositionsListCapturedForScope(ctx context.Context, req *rpc.Request, portfolioHealth *ibkrlib.PortfolioStreamHealth, expectedScope brokerStateScope) (*rpc.PositionsResult, error) {
 	var p rpc.PositionsListParams
 	if err := decodeParams(req.Params, &p); err != nil {
 		return nil, err
@@ -249,6 +277,14 @@ func (s *Server) handlePositionsListCaptured(ctx context.Context, req *rpc.Reque
 	}
 	var positions []*ibkrlib.RawPosition
 	positions, health, err := c.CachedPositionsWithHealth()
+	if portfolioHealth != nil && brokerScopeConcrete(expectedScope) {
+		var scoped bool
+		health, scoped = scopedPortfolioStreamHealth(positions, health, expectedScope, time.Now())
+		if !scoped {
+			*portfolioHealth = health
+			return nil, errors.New("portfolio stream account scope conflict")
+		}
+	}
 	if portfolioHealth != nil {
 		*portfolioHealth = health
 	}
@@ -2066,6 +2102,9 @@ func quoteMarketForStockContract(c rpc.ContractParams) marketcal.Market {
 }
 
 func quoteSessionMarketForContract(c rpc.ContractParams) (marketcal.Market, bool) {
+	if strings.EqualFold(strings.TrimSpace(c.SecType), "OPT") {
+		return marketcal.MarketUSOptions, true
+	}
 	if !quoteHasRegularSessionCalendar(c) {
 		return "", false
 	}
@@ -3593,6 +3632,13 @@ func (s *Server) handleScanList() *rpc.ScanListResult {
 // status` invocation instead of having to restart the daemon.
 func (s *Server) handleStatusHealth() *rpc.HealthResult {
 	s.triggerReconnect()
+	return s.statusHealthSnapshot()
+}
+
+// statusHealthSnapshot composes only daemon-owned cached state. Alert
+// heartbeats use it so observation cannot trigger discovery, reconnect, or any
+// broker request. User-invoked status retains self-heal in handleStatusHealth.
+func (s *Server) statusHealthSnapshot() *rpc.HealthResult {
 	s.mu.Lock()
 	ep := s.endpoint
 	c := s.connector
@@ -3627,9 +3673,8 @@ func (s *Server) handleStatusHealth() *rpc.HealthResult {
 		// data verb to succeed. Reporting IsConnected here while every
 		// other verb gates on IsReady made `status` lie when the connector
 		// got stuck in the {ready=false, conn=true} state (overnight TWS
-		// hiccups, market-data farm reconnects). triggerReconnect (above)
-		// already fired by the time we're here, so the next call sees the
-		// recovered state.
+		// hiccups, market-data farm reconnects). User-invoked status triggers
+		// recovery before entering this pure projection; heartbeats do not.
 		//
 		// AND gated on postConnectSetupDone: c.ready is flipped by the
 		// connection read-loop goroutine in pkg/ibkr independently of

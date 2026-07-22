@@ -23,7 +23,7 @@ func TestPlaceOrderDoesNotSendDoubleMaxSentinels(t *testing.T) {
 	defer conn.rateLimiter.Stop()
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
-	conn.nextOrderID = 1
+	conn.observeNextValidOrderID(1)
 
 	var buf bytes.Buffer
 	conn.writer = bufio.NewWriter(&buf)

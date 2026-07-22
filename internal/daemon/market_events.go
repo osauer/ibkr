@@ -97,16 +97,27 @@ func marketEventsNoRedirect(*http.Request, []*http.Request) error {
 var fetchIBKRBorrowFees = fetchIBKRBorrowFeesFTP
 
 type marketEventCache struct {
-	mu                    sync.Mutex
-	borrowFeesRefreshMu   sync.Mutex
-	regSHO                marketEventRegSHOEntry
-	halts                 marketEventHaltsEntry
-	borrowFees            marketEventBorrowFeeEntry
-	borrowFeesLastAttempt *marketEventBorrowFeeAttempt
-	borrowFeesRevision    int64
-	regSHOFreshFor        time.Duration
-	haltsFreshFor         time.Duration
-	now                   func() time.Time
+	mu                        sync.Mutex
+	borrowFeesRefreshMu       sync.Mutex
+	borrowFeeFallbackMu       sync.Mutex
+	regSHO                    marketEventRegSHOEntry
+	halts                     marketEventHaltsEntry
+	borrowFees                marketEventBorrowFeeEntry
+	borrowFeesLastAttempt     *marketEventBorrowFeeAttempt
+	borrowFeesRevision        int64
+	borrowFeeFallback         marketEventFeeRateState
+	borrowFeeFallbackRevision int64
+	borrowFeeFallbackLoadedAt time.Time
+	// borrowFeeFallbackCurrent binds runtime-only entitlement/failure reuse to
+	// the exact connector socket session that observed it. A reconnect leaves
+	// only the persisted 15-second identical-wire boundary in force.
+	borrowFeeFallbackCurrent  map[string]ibkrlib.HistoricalSessionBinding
+	fetchHistoricalFeeRates   func(context.Context, ibkrlib.Contract, int, time.Duration) ([]ibkrlib.HistoricalBar, error)
+	resolveHistoricalFeeRoute func(context.Context, ibkrlib.Contract, time.Duration) (ibkrlib.Contract, error)
+	readCachedPositions       func() ([]*ibkrlib.RawPosition, ibkrlib.PortfolioStreamHealth, error)
+	regSHOFreshFor            time.Duration
+	haltsFreshFor             time.Duration
+	now                       func() time.Time
 
 	// shortableAbsent remembers symbols whose shortable tick (236) did
 	// not arrive within a full poll budget. Non-US listings never
@@ -247,10 +258,10 @@ func (s *Server) marketEventsForSymbols(ctx context.Context, symbols []string) r
 	if s.marketEvents == nil {
 		s.installMarketEventCache()
 	}
-	return s.marketEvents.snapshot(ctx, symbols, s.subs, s.gatewayConnector())
+	return s.marketEvents.snapshot(ctx, symbols, s.subs, s.gatewayConnector(), s.currentBrokerStateScope)
 }
 
-func (c *marketEventCache) snapshot(ctx context.Context, symbols []string, subs *subManager, connector *ibkrlib.Connector) rpc.MarketEventsResult {
+func (c *marketEventCache) snapshot(ctx context.Context, symbols []string, subs *subManager, connector *ibkrlib.Connector, scopeProviders ...func() brokerStateScope) rpc.MarketEventsResult {
 	now := c.now().UTC()
 	symbols = normalizeMarketEventSymbols(symbols)
 	res := rpc.MarketEventsResult{
@@ -304,13 +315,23 @@ func (c *marketEventCache) snapshot(ctx context.Context, symbols []string, subs 
 	borrowHealth := c.borrowInventory(ctx, symbols, subs, connector, now, &res)
 	res.SourceHealth = append(res.SourceHealth, borrowHealth)
 	borrowFees, borrowFeeHealth, err := c.loadBorrowFees(ctx, now)
-	res.SourceHealth = append(res.SourceHealth, borrowFeeHealth)
 	if err != nil {
 		res.WarningDetails = append(res.WarningDetails, marketEventSourceWarning("borrow_fee", err))
-	} else {
-		for _, sym := range symbols {
-			if rec, ok := borrowFees.Symbols[sym]; ok {
-				if flag, ok := marketEventBorrowFeeFlag(sym, rec, borrowFees, now); ok {
+	}
+	var scopeProvider func() brokerStateScope
+	if len(scopeProviders) > 0 {
+		scopeProvider = scopeProviders[0]
+	}
+	bulkBorrowFeeUsable := borrowFeeFTPPolicyUsable(borrowFeeHealth)
+	res.BorrowFeeCoverage, borrowFeeHealth = c.borrowFeeCoverage(ctx, symbols, connector, scopeProvider, now, borrowFees, borrowFeeHealth)
+	res.SourceHealth = append(res.SourceHealth, borrowFeeHealth)
+	if bulkBorrowFeeUsable {
+		for _, row := range res.BorrowFeeCoverage {
+			if !row.PolicyEligible || row.Source != rpc.BorrowFeeSourceBulkShortStock {
+				continue
+			}
+			if rec, ok := borrowFees.Symbols[row.Symbol]; ok {
+				if flag, ok := marketEventBorrowFeeFlag(row.Symbol, rec, borrowFees, now); ok {
 					res.Flags = append(res.Flags, flag)
 				}
 			}
@@ -332,6 +353,11 @@ func (c *marketEventCache) snapshot(ctx context.Context, symbols []string, subs 
 	if len(res.BySymbol) == 0 {
 		res.BySymbol = nil
 	}
+	// Snapshot authority is the completion boundary, not request start. Broker
+	// fallbacks can spend seconds in bounded reads and stamp attempts on
+	// completion; keeping the earlier start time would make source evidence
+	// appear to come from the future and produce negative ages.
+	res.AsOf = c.now().UTC()
 	res.Fingerprint = rpc.BuildMarketEventsFingerprint(&res)
 	return res
 }

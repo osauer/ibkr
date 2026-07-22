@@ -197,6 +197,7 @@ func trailSpecsEquivalent(a, b *rpc.OrderTrailSpec) bool {
 }
 
 func modifyContractForView(view rpc.OrderView, contract rpc.ContractParams) rpc.ContractParams {
+	contract.ConID = view.ConID
 	contract.Symbol = view.Symbol
 	contract.SecType = view.SecType
 	contract.Exchange = view.Exchange

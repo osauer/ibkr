@@ -64,7 +64,10 @@ func (c *Connector) RunScannerSubscription(ctx context.Context, sub ScannerSubsc
 		instrument = "STK"
 	}
 
-	reqID := c.conn.GetNextRequestID()
+	reqID, err := c.conn.nextRequestID()
+	if err != nil {
+		return nil, err
+	}
 	session := &scannerSession{reqID: reqID, done: make(chan struct{})}
 
 	dataHandlerID := c.conn.RegisterHandler(msgScannerData, func(fields []string) {

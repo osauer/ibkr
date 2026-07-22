@@ -140,22 +140,27 @@ const (
 	SourceFailureAuthorityWriteFailed   = "authority_write_failed"
 	SourceFailureNotEntitled            = "not_entitled"
 	SourceFailureGatewayUnavailable     = "gateway_unavailable"
+	SourceFailureNoData                 = "no_data"
+	SourceFailurePacing                 = "pacing"
+	SourceFailureContractUnavailable    = "contract_unavailable"
 
-	SourceFailureStageFTPControlConnect   = "ftp_control_connect"
-	SourceFailureStageFTPGreeting         = "ftp_greeting"
-	SourceFailureStageFTPAuthenticate     = "ftp_authenticate"
-	SourceFailureStageFTPPassiveNegotiate = "ftp_passive_negotiate"
-	SourceFailureStageFTPPassiveConnect   = "ftp_passive_connect"
-	SourceFailureStageFTPRetrieve         = "ftp_retrieve"
-	SourceFailureStageBorrowParse         = "borrow_parse"
-	SourceFailureStageNasdaqRequest       = "nasdaq_request"
-	SourceFailureStageNasdaqDecode        = "nasdaq_decode"
-	SourceFailureStageNasdaqSchema        = "nasdaq_schema"
-	SourceFailureStageWSHContractResolve  = "wsh_contract_resolve"
-	SourceFailureStageWSHMetadata         = "wsh_metadata"
-	SourceFailureStageWSHEvent            = "wsh_event"
-	SourceFailureStageWSHDecode           = "wsh_decode"
-	SourceFailureStageAuthorityPersist    = "authority_persist"
+	SourceFailureStageFTPControlConnect    = "ftp_control_connect"
+	SourceFailureStageFTPGreeting          = "ftp_greeting"
+	SourceFailureStageFTPAuthenticate      = "ftp_authenticate"
+	SourceFailureStageFTPPassiveNegotiate  = "ftp_passive_negotiate"
+	SourceFailureStageFTPPassiveConnect    = "ftp_passive_connect"
+	SourceFailureStageFTPRetrieve          = "ftp_retrieve"
+	SourceFailureStageBorrowParse          = "borrow_parse"
+	SourceFailureStageNasdaqRequest        = "nasdaq_request"
+	SourceFailureStageNasdaqDecode         = "nasdaq_decode"
+	SourceFailureStageNasdaqSchema         = "nasdaq_schema"
+	SourceFailureStageWSHContractResolve   = "wsh_contract_resolve"
+	SourceFailureStageWSHMetadata          = "wsh_metadata"
+	SourceFailureStageWSHEvent             = "wsh_event"
+	SourceFailureStageWSHDecode            = "wsh_decode"
+	SourceFailureStageHistoricalFeeRequest = "historical_fee_request"
+	SourceFailureStageHistoricalFeeDecode  = "historical_fee_decode"
+	SourceFailureStageAuthorityPersist     = "authority_persist"
 )
 
 // ValidSourceFailure enforces the shared allowlist. Persistence and adapters
@@ -171,7 +176,8 @@ func ValidSourceFailure(f *SourceFailure) bool {
 		SourceFailureTransportFailed, SourceFailureProtocolRejected,
 		SourceFailureAuthenticationRejected, SourceFailureInvalidPayload,
 		SourceFailureAuthorityWriteFailed, SourceFailureNotEntitled,
-		SourceFailureGatewayUnavailable:
+		SourceFailureGatewayUnavailable, SourceFailureNoData,
+		SourceFailurePacing, SourceFailureContractUnavailable:
 		validCode = true
 	}
 	if !validCode {
@@ -185,6 +191,7 @@ func ValidSourceFailure(f *SourceFailure) bool {
 		SourceFailureStageNasdaqDecode, SourceFailureStageNasdaqSchema,
 		SourceFailureStageWSHContractResolve, SourceFailureStageWSHMetadata,
 		SourceFailureStageWSHEvent, SourceFailureStageWSHDecode,
+		SourceFailureStageHistoricalFeeRequest, SourceFailureStageHistoricalFeeDecode,
 		SourceFailureStageAuthorityPersist:
 		return true
 	default:

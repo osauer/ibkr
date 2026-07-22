@@ -59,7 +59,27 @@ func (s *Server) executePurgeRestore(ctx context.Context, p rpc.PurgeRestorePara
 	if res.Status != purgeRestoreStatusPreview {
 		return res, nil
 	}
-	status := s.currentTradingStatus()
+	auth, binding, bindingErr := s.authorizeBrokerWriteTransaction(p.Origin, false)
+	if !auth.Allowed {
+		res.Status = purgeRestoreStatusBlocked
+		res.Blockers = append([]rpc.TradingBlocker(nil), auth.Blockers...)
+		res.Message = firstTradingBlockerMessage(res.Blockers)
+		return res, nil
+	}
+	if bindingErr != nil {
+		res.Status = purgeRestoreStatusError
+		res.ErrorLegs = max(1, len(res.Legs))
+		res.Message = bindingErr.Error()
+		return res, nil
+	}
+	status := auth.Status
+	if !strings.EqualFold(res.Mode, status.Mode) || !strings.EqualFold(res.Account, status.Account) ||
+		res.Endpoint != status.Endpoint || res.ClientID != status.ClientID {
+		res.Status = purgeRestoreStatusError
+		res.ErrorLegs = max(1, len(res.Legs))
+		res.Message = brokerWriteTransactionDriftError().Error()
+		return res, nil
+	}
 	wait := time.Duration(p.WaitMs) * time.Millisecond
 	if wait <= 0 {
 		wait = 2 * time.Second
@@ -71,7 +91,7 @@ func (s *Server) executePurgeRestore(ctx context.Context, p rpc.PurgeRestorePara
 	attempts := make([]orderJournalEvent, 0, len(res.Legs))
 	maxOrderID := 0
 	for _, leg := range res.Legs {
-		orderID, err := s.reserveBrokerOrderID(ctx)
+		orderID, err := s.reserveBoundBrokerOrderID(ctx, binding)
 		if err != nil {
 			res.Status = purgeRestoreStatusError
 			res.ErrorLegs++
@@ -95,6 +115,12 @@ func (s *Server) executePurgeRestore(ctx context.Context, p rpc.PurgeRestorePara
 		attempts = append(attempts, attempt)
 		maxOrderID = max(maxOrderID, orderID)
 	}
+	if err := s.requireBrokerWriteTransactionCurrent(binding); err != nil {
+		res.Status = purgeRestoreStatusError
+		res.ErrorLegs = len(submissions)
+		res.Message = err.Error()
+		return res, nil
+	}
 	if err := s.orderJournal.StagePreTransmit("", "", 0, maxOrderID, corestore.ActionRestore, coreOrderOrigin(p.Origin), attempts); err != nil {
 		res.Status = purgeRestoreStatusError
 		res.ErrorLegs = len(submissions)
@@ -107,7 +133,7 @@ func (s *Server) executePurgeRestore(ctx context.Context, p rpc.PurgeRestorePara
 		order.OrderID = submission.orderID
 		order.ClientID = status.ClientID
 		order.Account = status.Account
-		if err := s.submitConfiguredOrder(ctx, status, brokerContract, order); err != nil {
+		if err := s.submitBoundConfiguredOrder(ctx, binding, status, brokerContract, order); err != nil {
 			ev := restoreJournalEventForDraft(submission.draft, status, res.PurgeID, submission.leg.LegID, submission.orderID, s.orderNow())
 			ev.Type = orderJournalEventSendError
 			ev.SendState = orderSendStateUncertainSend
@@ -268,7 +294,7 @@ func (s *Server) buildPurgeRestore(ctx context.Context, p rpc.PurgeRestoreParams
 }
 
 func (s *Server) purgeRestorePreviewBlockers(status rpc.TradingStatus) []rpc.TradingBlocker {
-	var blockers []rpc.TradingBlocker
+	blockers := []rpc.TradingBlocker{purgeSubmissionUnavailableBlocker}
 	if status.Mode == config.TradingModeDisabled {
 		blockers = append(blockers, rpc.TradingBlocker{
 			Code:    "trading_disabled",

@@ -100,14 +100,20 @@ func TestAppJSTradingStateUsesSnapshotCanWrite(t *testing.T) {
 	}
 	for _, name := range []string{
 		"tradingStatusSettingsLabel",
-		"canWriteUnderlyings",
-		"underlyingWriteReason",
 		"orderModifyGate",
 	} {
 		body := jsFunctionBlock(t, js, name)
 		if !strings.Contains(body, "can_write") {
 			t.Fatalf("%s must use can_write", name)
 		}
+	}
+	canWriteUnderlyings := jsFunctionBlock(t, js, "canWriteUnderlyings")
+	if strings.Contains(canWriteUnderlyings, "can_write") || !strings.Contains(canWriteUnderlyings, "return false") {
+		t.Fatal("typed-disabled purge/restore must not inherit generic trading.can_write authority")
+	}
+	underlyingWriteReason := jsFunctionBlock(t, js, "underlyingWriteReason")
+	if !strings.Contains(underlyingWriteReason, "Purge/restore submission is unavailable") {
+		t.Fatal("underlying purge/restore copy must disclose the unconditional capability blocker")
 	}
 	cancelGate := jsFunctionBlock(t, js, "orderCancelGate")
 	if strings.Contains(cancelGate, "can_write") {
@@ -377,11 +383,10 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		"function applyOpportunitySnapshot(opportunities = {})",
 		`fetch("/api/opportunities", { credentials: "include", cache: "no-store" })`,
 		`fetch("/api/opportunities/preview-exercise"`,
-		`fetch("/api/opportunities/exercise"`,
 		`fetch("/api/opportunities/ignore"`,
 		`fetch("/api/opportunities/refresh"`,
-		"Exercise blocked",
-		"Preview is not submit eligible",
+		"Exercise submission unavailable",
+		"exact option-to-underlying risk policy and durable one-shot authority are not approved",
 		"function protectionPreviewGate(proposal = {})",
 		"function protectionPreviewSubmitGate(proposal = {}, previewResult = null)",
 		"function protectionWriteUnavailableReason(trading = {})",
@@ -560,11 +565,13 @@ func TestAppMobileDashboardContracts(t *testing.T) {
 		".opportunity-row__metric--gain",
 		".opportunity-row__metric--risk",
 		".opportunity-preview",
-		".opportunity-exercise",
 	} {
 		if !strings.Contains(css, want) {
 			t.Fatalf("styles.css missing mobile dashboard contract %q", want)
 		}
+	}
+	if strings.Contains(js, `fetch("/api/opportunities/exercise"`) {
+		t.Fatal("Canary must not expose the typed-disabled option-exercise submit transport")
 	}
 	if strings.Contains(css, ".bottom-tabs {\n  position: fixed;") {
 		t.Fatalf("bottom tabs must be pinned by shell layout, not fixed to the browser viewport")
@@ -606,11 +613,10 @@ func TestAppJSLiveWritesCarryNoTypedConfirmation(t *testing.T) {
 			t.Fatalf("app.js must not reference removed live-confirmation surface %q", banned)
 		}
 	}
-	// The purge typed prompt is the one deliberate window.prompt that stays:
-	// purge bypasses the preview-token gate, so it keeps its own
-	// destructive-action confirm. No other prompt may exist.
-	if got := strings.Count(js, "window.prompt"); got != 1 {
-		t.Fatalf("app.js window.prompt count = %d, want exactly 1 (the purge confirm)", got)
+	// Purge/restore and exercise submission are typed-disabled, so Canary has
+	// no broker-write prompt for either capability. No other prompt may exist.
+	if got := strings.Count(js, "window.prompt"); got != 0 {
+		t.Fatalf("app.js window.prompt count = %d, want zero", got)
 	}
 	if strings.Contains(js, "window.confirm") {
 		t.Fatalf("app.js must not use window.confirm; broker writes confirm via single-click buttons")

@@ -17,6 +17,7 @@ import (
 
 	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 const (
@@ -25,6 +26,7 @@ const (
 	orderJournalEventPreviewed          = "previewed"
 	orderJournalEventTokenConfirmed     = "token-confirmed"
 	orderJournalEventSendAttempted      = "send-attempted"
+	orderJournalEventSendCompleted      = "send-completed"
 	orderJournalEventSendError          = "send-error"
 	orderJournalEventBrokerError        = "broker-error"
 	orderJournalEventBrokerAcknowledged = "broker-acknowledged"
@@ -44,61 +46,70 @@ const (
 var errOrderPreviewTokenAlreadyUsed = errors.New("preview token already used")
 
 type orderJournalStore struct {
-	Path      string
-	mu        sync.RWMutex
-	authority *corestore.Store
+	Path string
+	mu   sync.RWMutex
+	// evidenceMu linearizes Order Integrity and Protection shadow commits
+	// against every local mutation of the authoritative order-event frontier.
+	// Broker-derived commits take the write side only after taking the broker
+	// evidence barrier; ordinary journal writers take the read side.
+	evidenceMu sync.RWMutex
+	authority  *corestore.Store
 }
 
 type orderJournalEvent struct {
-	Version         int                 `json:"version"`
-	At              time.Time           `json:"at"`
-	Type            string              `json:"type"`
-	OrderRef        string              `json:"order_ref,omitempty"`
-	PreviewTokenID  string              `json:"preview_token_id,omitempty"`
-	ReservedOrderID int                 `json:"reserved_order_id,omitempty"`
-	ClientID        int                 `json:"client_id,omitempty"`
-	PermID          int                 `json:"perm_id,omitempty"`
-	Account         string              `json:"account,omitempty"`
-	Endpoint        string              `json:"endpoint,omitempty"`
-	Mode            string              `json:"mode,omitempty"`
-	Source          string              `json:"source,omitempty"`
-	Origin          string              `json:"origin,omitempty"`
-	PurgeID         string              `json:"purge_id,omitempty"`
-	LegID           string              `json:"leg_id,omitempty"`
-	BypassPreview   bool                `json:"bypass_preview,omitempty"`
-	Symbol          string              `json:"symbol,omitempty"`
-	SecType         string              `json:"sec_type,omitempty"`
-	ConID           int                 `json:"con_id,omitempty"`
-	Exchange        string              `json:"exchange,omitempty"`
-	PrimaryExch     string              `json:"primary_exch,omitempty"`
-	Currency        string              `json:"currency,omitempty"`
-	LocalSymbol     string              `json:"local_symbol,omitempty"`
-	TradingClass    string              `json:"trading_class,omitempty"`
-	Expiry          string              `json:"expiry,omitempty"`
-	Strike          float64             `json:"strike,omitempty"`
-	Right           string              `json:"right,omitempty"`
-	Multiplier      int                 `json:"multiplier,omitempty"`
-	Action          string              `json:"action,omitempty"`
-	OrderType       string              `json:"order_type,omitempty"`
-	TIF             string              `json:"tif,omitempty"`
-	TriggerMethod   int                 `json:"trigger_method,omitempty"`
-	OutsideRTH      bool                `json:"outside_rth,omitempty"`
-	Quantity        float64             `json:"quantity,omitempty"`
-	LimitPrice      float64             `json:"limit_price,omitempty"`
-	Trail           *rpc.OrderTrailSpec `json:"trail,omitempty"`
-	OpenClose       string              `json:"open_close,omitempty"`
-	Status          string              `json:"status,omitempty"`
-	Filled          float64             `json:"filled,omitempty"`
-	Remaining       float64             `json:"remaining,omitempty"`
-	AvgFillPrice    float64             `json:"avg_fill_price,omitempty"`
-	LastFillPrice   float64             `json:"last_fill_price,omitempty"`
-	WhyHeld         string              `json:"why_held,omitempty"`
-	MktCapPrice     float64             `json:"mkt_cap_price,omitempty"`
-	ExecID          string              `json:"exec_id,omitempty"`
-	ExecTime        string              `json:"exec_time,omitempty"`
-	ErrorCode       int                 `json:"error_code,omitempty"`
-	SendState       string              `json:"send_state,omitempty"`
-	Message         string              `json:"message,omitempty"`
+	Version         int                      `json:"version"`
+	At              time.Time                `json:"at"`
+	Type            string                   `json:"type"`
+	OrderRef        string                   `json:"order_ref,omitempty"`
+	PreviewTokenID  string                   `json:"preview_token_id,omitempty"`
+	ReservedOrderID int                      `json:"reserved_order_id,omitempty"`
+	ClientID        int                      `json:"client_id,omitempty"`
+	PermID          int                      `json:"perm_id,omitempty"`
+	Account         string                   `json:"account,omitempty"`
+	Endpoint        string                   `json:"endpoint,omitempty"`
+	Mode            string                   `json:"mode,omitempty"`
+	Source          string                   `json:"source,omitempty"`
+	Origin          string                   `json:"origin,omitempty"`
+	PurgeID         string                   `json:"purge_id,omitempty"`
+	LegID           string                   `json:"leg_id,omitempty"`
+	BypassPreview   bool                     `json:"bypass_preview,omitempty"`
+	Symbol          string                   `json:"symbol,omitempty"`
+	SecType         string                   `json:"sec_type,omitempty"`
+	ConID           int                      `json:"con_id,omitempty"`
+	Exchange        string                   `json:"exchange,omitempty"`
+	PrimaryExch     string                   `json:"primary_exch,omitempty"`
+	Currency        string                   `json:"currency,omitempty"`
+	LocalSymbol     string                   `json:"local_symbol,omitempty"`
+	TradingClass    string                   `json:"trading_class,omitempty"`
+	Expiry          string                   `json:"expiry,omitempty"`
+	Strike          float64                  `json:"strike,omitempty"`
+	Right           string                   `json:"right,omitempty"`
+	Multiplier      int                      `json:"multiplier,omitempty"`
+	Action          string                   `json:"action,omitempty"`
+	OrderType       string                   `json:"order_type,omitempty"`
+	TIF             string                   `json:"tif,omitempty"`
+	TriggerMethod   int                      `json:"trigger_method,omitempty"`
+	OutsideRTH      bool                     `json:"outside_rth,omitempty"`
+	Quantity        float64                  `json:"quantity,omitempty"`
+	LimitPrice      float64                  `json:"limit_price,omitempty"`
+	Trail           *rpc.OrderTrailSpec      `json:"trail,omitempty"`
+	OpenClose       string                   `json:"open_close,omitempty"`
+	Status          string                   `json:"status,omitempty"`
+	Filled          float64                  `json:"filled,omitempty"`
+	Remaining       float64                  `json:"remaining,omitempty"`
+	AvgFillPrice    float64                  `json:"avg_fill_price,omitempty"`
+	LastFillPrice   float64                  `json:"last_fill_price,omitempty"`
+	WhyHeld         string                   `json:"why_held,omitempty"`
+	MktCapPrice     float64                  `json:"mkt_cap_price,omitempty"`
+	ExecID          string                   `json:"exec_id,omitempty"`
+	ExecTime        string                   `json:"exec_time,omitempty"`
+	ErrorCode       int                      `json:"error_code,omitempty"`
+	SendState       string                   `json:"send_state,omitempty"`
+	AttemptID       string                   `json:"attempt_id,omitempty"`
+	ActionKind      corestore.ActionKind     `json:"action_kind,omitempty"`
+	TransmitOrigin  corestore.TransmitOrigin `json:"transmit_origin,omitempty"`
+	SendDisposition ibkrlib.SendDisposition  `json:"send_disposition,omitempty"`
+	Message         string                   `json:"message,omitempty"`
 
 	// clientIDPresent records whether a decoded legacy JSON object actually
 	// carried client_id. Zero is a valid IBKR client ID, so the numeric Go
@@ -209,9 +220,11 @@ func (s *orderJournalStore) UseCoreStore(store *corestore.Store) error {
 	if !store.Health().Ready {
 		return fmt.Errorf("order journal authority is blocked")
 	}
+	s.evidenceMu.RLock()
 	s.mu.Lock()
 	s.authority = store
 	s.mu.Unlock()
+	s.evidenceMu.RUnlock()
 	return nil
 }
 
@@ -259,9 +272,26 @@ func (s *orderJournalStore) Append(ev orderJournalEvent) error {
 }
 
 func (s *orderJournalStore) AppendAll(events []orderJournalEvent) error {
+	return s.appendAllAtHead(events, -1)
+}
+
+func (s *orderJournalStore) AppendAllAtHead(events []orderJournalEvent, expectedLastEventSeq int64) error {
+	if expectedLastEventSeq < 0 {
+		return fmt.Errorf("expected order event head must not be negative")
+	}
+	return s.appendAllAtHead(events, expectedLastEventSeq)
+}
+
+func (s *orderJournalStore) appendAllAtHead(events []orderJournalEvent, expectedLastEventSeq int64) error {
 	if len(events) == 0 {
 		return nil
 	}
+	return s.withEvidenceMutation(func() error {
+		return s.appendAllAtHeadLocked(events, expectedLastEventSeq)
+	})
+}
+
+func (s *orderJournalStore) appendAllAtHeadLocked(events []orderJournalEvent, expectedLastEventSeq int64) error {
 	store, err := s.coreStore()
 	if err != nil {
 		return err
@@ -274,10 +304,24 @@ func (s *orderJournalStore) AppendAll(events []orderJournalEvent) error {
 		}
 		records = append(records, record)
 	}
-	if _, err := store.AppendOrderEvents(context.Background(), records); err != nil {
-		return fmt.Errorf("append authoritative order event: %w", err)
+	var appendErr error
+	if expectedLastEventSeq >= 0 {
+		_, appendErr = store.AppendOrderEventsAtHead(context.Background(), expectedLastEventSeq, records)
+	} else {
+		_, appendErr = store.AppendOrderEvents(context.Background(), records)
+	}
+	if appendErr != nil {
+		return fmt.Errorf("append authoritative order event: %w", appendErr)
 	}
 	return nil
+}
+
+func (s *orderJournalStore) AuthorityHead() (corestore.AuthorityHead, error) {
+	store, err := s.coreStore()
+	if err != nil {
+		return corestore.AuthorityHead{}, err
+	}
+	return store.AuthorityHead(context.Background())
 }
 
 func (s *orderJournalStore) LoadEvents(limit int) ([]orderJournalEvent, error) {
@@ -316,12 +360,39 @@ func (s *orderJournalStore) LoadEvents(limit int) ([]orderJournalEvent, error) {
 // present), binds the complete route, advances global and scoped floors, and
 // appends every ordered intent event before the caller may touch the broker.
 func (s *orderJournalStore) StagePreTransmit(tokenID, authorityEpoch string, signerGeneration int64, requestedFloor int, action corestore.ActionKind, origin corestore.TransmitOrigin, events []orderJournalEvent) error {
+	return s.withEvidenceMutation(func() error {
+		_, err := s.stagePreTransmitLocked(tokenID, authorityEpoch, signerGeneration, requestedFloor, action, origin, events, nil)
+		return err
+	})
+}
+
+// StageModifyPreTransmit atomically requires the exact per-order frontier that
+// validation observed and returns the modify event's durable sequence. The
+// caller carries that sequence to the first-byte guard; any cancel or broker
+// lifecycle event committed in between invalidates the pending modify.
+func (s *orderJournalStore) StageModifyPreTransmit(tokenID, authorityEpoch string, signerGeneration int64, requestedFloor int, origin corestore.TransmitOrigin, expectedOrderEventSeq int64, events []orderJournalEvent) (int64, error) {
+	if s == nil {
+		return 0, fmt.Errorf("order journal evidence mutation is unavailable")
+	}
+	s.evidenceMu.RLock()
+	defer s.evidenceMu.RUnlock()
+	result, err := s.stagePreTransmitLocked(tokenID, authorityEpoch, signerGeneration, requestedFloor, corestore.ActionModify, origin, events, &expectedOrderEventSeq)
+	if err != nil {
+		return 0, err
+	}
+	if len(result.EventSeqs) == 0 {
+		return 0, fmt.Errorf("modify pre-transmit stage returned no durable event sequence")
+	}
+	return result.EventSeqs[len(result.EventSeqs)-1], nil
+}
+
+func (s *orderJournalStore) stagePreTransmitLocked(tokenID, authorityEpoch string, signerGeneration int64, requestedFloor int, action corestore.ActionKind, origin corestore.TransmitOrigin, events []orderJournalEvent, expectedOrderEventSeq *int64) (corestore.PreTransmitResult, error) {
 	store, err := s.coreStore()
 	if err != nil {
-		return err
+		return corestore.PreTransmitResult{}, err
 	}
 	if len(events) == 0 {
-		return fmt.Errorf("pre-transmit order events are required")
+		return corestore.PreTransmitResult{}, fmt.Errorf("pre-transmit order events are required")
 	}
 	records := make([]corestore.OrderEventRecord, 0, len(events))
 	var scope corestore.BrokerScope
@@ -329,12 +400,12 @@ func (s *orderJournalStore) StagePreTransmit(tokenID, authorityEpoch string, sig
 	for _, ev := range events {
 		record, normalized, err := coreOrderEventRecord(ev, action, origin)
 		if err != nil {
-			return err
+			return corestore.PreTransmitResult{}, err
 		}
 		if scope == (corestore.BrokerScope{}) {
 			scope = record.Scope
 		} else if record.Scope != scope {
-			return corestore.ErrBrokerScopeCollision
+			return corestore.PreTransmitResult{}, corestore.ErrBrokerScopeCollision
 		}
 		if normalized.ReservedOrderID > reserved {
 			reserved = normalized.ReservedOrderID
@@ -344,18 +415,62 @@ func (s *orderJournalStore) StagePreTransmit(tokenID, authorityEpoch string, sig
 	request := corestore.PreTransmitRequest{
 		Scope: scope, AuthorityEpoch: authorityEpoch, SignerGeneration: signerGeneration,
 		RequestedOrderIDFloor: int64(requestedFloor), ReservedOrderID: int64(reserved),
-		Action: action, Origin: origin, Events: records,
+		ExpectedOrderEventSeq: expectedOrderEventSeq, Action: action, Origin: origin, Events: records,
 	}
 	if tokenID != "" {
 		request.TokenDigest = corestore.HashPreviewTokenID(tokenID)
 	}
-	if _, err := store.StagePreTransmit(context.Background(), request); err != nil {
+	result, err := store.StagePreTransmit(context.Background(), request)
+	if err != nil {
 		if errors.Is(err, corestore.ErrPreviewTokenConsumed) {
-			return fmt.Errorf("%w: %s was already consumed", errOrderPreviewTokenAlreadyUsed, tokenID)
+			return corestore.PreTransmitResult{}, fmt.Errorf("%w: %s was already consumed", errOrderPreviewTokenAlreadyUsed, tokenID)
 		}
-		return fmt.Errorf("stage authoritative pre-transmit intent: %w", err)
+		return corestore.PreTransmitResult{}, fmt.Errorf("stage authoritative pre-transmit intent: %w", err)
 	}
-	return nil
+	return result, nil
+}
+
+func (s *orderJournalStore) LatestOrderEventSeq(ev orderJournalEvent) (int64, error) {
+	store, err := s.coreStore()
+	if err != nil {
+		return 0, err
+	}
+	scope, err := coreBrokerScopeFromEvent(ev)
+	if err != nil {
+		return 0, err
+	}
+	return store.LatestOrderEventSeq(context.Background(), scope, int64(ev.ReservedOrderID))
+}
+
+func (s *orderJournalStore) withEvidenceMutation(mutate func() error) error {
+	if s == nil || mutate == nil {
+		return fmt.Errorf("order journal evidence mutation is unavailable")
+	}
+	s.evidenceMu.RLock()
+	defer s.evidenceMu.RUnlock()
+	return mutate()
+}
+
+// WithStableAuthorityHead executes commit while all local order-journal
+// mutations are excluded. False with nil error means a journal event landed
+// after the caller's stable read, so commit was not called.
+func (s *orderJournalStore) WithStableAuthorityHead(expectedLastEventSeq int64, commit func() error) (bool, error) {
+	if s == nil || expectedLastEventSeq < 0 || commit == nil {
+		return false, nil
+	}
+	s.evidenceMu.Lock()
+	defer s.evidenceMu.Unlock()
+	head, err := s.AuthorityHead()
+	if err != nil {
+		return false, err
+	}
+	if head.LastEventSeq != expectedLastEventSeq {
+		return false, nil
+	}
+	if err := commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func coreOrderEventRecord(ev orderJournalEvent, action corestore.ActionKind, origin corestore.TransmitOrigin) (corestore.OrderEventRecord, orderJournalEvent, error) {
@@ -378,11 +493,28 @@ func coreOrderEventRecord(ev orderJournalEvent, action corestore.ActionKind, ori
 		return corestore.OrderEventRecord{}, orderJournalEvent{}, err
 	}
 	if action == "" {
+		action = ev.ActionKind
+	}
+	if action == "" {
 		action = coreOrderActionForEvent(ev)
+	}
+	if action == "" {
+		return corestore.OrderEventRecord{}, orderJournalEvent{}, fmt.Errorf("order event %q requires an explicit broker action kind", ev.Type)
+	}
+	if ev.ActionKind != "" && ev.ActionKind != action {
+		return corestore.OrderEventRecord{}, orderJournalEvent{}, fmt.Errorf("order event action %q does not match durable action %q", ev.ActionKind, action)
+	}
+	ev.ActionKind = action
+	if origin == "" {
+		origin = ev.TransmitOrigin
 	}
 	if origin == "" {
 		origin = coreOrderOrigin(ev.Origin)
 	}
+	if ev.TransmitOrigin != "" && ev.TransmitOrigin != origin {
+		return corestore.OrderEventRecord{}, orderJournalEvent{}, fmt.Errorf("order event origin %q does not match durable origin %q", ev.TransmitOrigin, origin)
+	}
+	ev.TransmitOrigin = origin
 	raw, err := json.Marshal(ev)
 	if err != nil {
 		return corestore.OrderEventRecord{}, orderJournalEvent{}, fmt.Errorf("marshal order event: %w", err)
@@ -415,6 +547,9 @@ func coreBrokerScopeFromEvent(ev orderJournalEvent) (corestore.BrokerScope, erro
 }
 
 func coreOrderActionForEvent(ev orderJournalEvent) corestore.ActionKind {
+	if ev.ActionKind != "" {
+		return ev.ActionKind
+	}
 	switch ev.Source {
 	case purgeExecuteSource:
 		return corestore.ActionPurge
@@ -428,6 +563,11 @@ func coreOrderActionForEvent(ev orderJournalEvent) corestore.ActionKind {
 		return corestore.ActionModify
 	case orderJournalEventCancelRequested:
 		return corestore.ActionCancel
+	case orderJournalEventSendCompleted, orderJournalEventSendError:
+		// A local send outcome is meaningless without its exact staged action.
+		// Legacy import supplies its historical place-only interpretation at the
+		// importer boundary; normal append must never infer it here.
+		return ""
 	default:
 		return corestore.ActionPlace
 	}
@@ -455,6 +595,21 @@ func decodeCoreOrderEvent(record corestore.OrderEventRecord) (orderJournalEvent,
 	want, err := coreBrokerScopeFromEvent(ev)
 	if err != nil {
 		return orderJournalEvent{}, fmt.Errorf("validate authoritative order event seq %d: %w", record.EventSeq, err)
+	}
+	if ev.ActionKind == "" {
+		// Rows written before per-attempt payload provenance still have immutable
+		// event_log.action_kind. Hydrate only that legacy omission; typed rows must
+		// match exactly below.
+		ev.ActionKind = record.Action
+	} else if ev.ActionKind != record.Action {
+		return orderJournalEvent{}, fmt.Errorf("authoritative order event seq %d action projection does not match payload", record.EventSeq)
+	}
+	if ev.TransmitOrigin == "" {
+		// Rows written before payload provenance carried the immutable event-log
+		// origin only. Hydrate that legacy omission; typed rows must match exactly.
+		ev.TransmitOrigin = record.Origin
+	} else if ev.TransmitOrigin != record.Origin {
+		return orderJournalEvent{}, fmt.Errorf("authoritative order event seq %d origin projection does not match payload", record.EventSeq)
 	}
 	if want != record.Scope || ev.Type != record.Type || ev.OrderRef != record.OrderRef || ev.PreviewTokenID != record.PreviewTokenID || int64(ev.ReservedOrderID) != record.ReservedOrderID || int64(ev.PermID) != record.PermID || ev.Status != record.Status {
 		return orderJournalEvent{}, fmt.Errorf("authoritative order event seq %d projection does not match payload", record.EventSeq)
@@ -493,6 +648,9 @@ func decodeOrderJournalLine(raw []byte) (orderJournalEvent, error) {
 	}
 	if ev.Version != orderJournalFileVersion {
 		return orderJournalEvent{}, fmt.Errorf("unsupported order journal version %d", ev.Version)
+	}
+	if err := validateOrderJournalEvent(ev); err != nil {
+		return orderJournalEvent{}, err
 	}
 	return ev, nil
 }
@@ -666,7 +824,13 @@ func importSelectedLegacyOrderAuthority(ctx context.Context, store *corestore.St
 		if ev.At.IsZero() {
 			return parity, fmt.Errorf("retained legacy order event %q has no event time", orderJournalEventLabel(ev))
 		}
-		record, normalized, err := coreOrderEventRecord(ev, "", "")
+		action := coreOrderActionForEvent(ev)
+		if action == "" && ev.Type == orderJournalEventSendError && ev.AttemptID == "" && ev.SendDisposition == "" {
+			// Historical JSONL only emitted generic send-error after place. This is
+			// a one-time import compatibility rule, not runtime action inference.
+			action = corestore.ActionPlace
+		}
+		record, normalized, err := coreOrderEventRecord(ev, action, "")
 		if err != nil {
 			return parity, fmt.Errorf("prepare retained legacy order event: %w", err)
 		}
@@ -847,13 +1011,65 @@ func validateOrderJournalEvent(ev orderJournalEvent) error {
 	if ev.Version != orderJournalFileVersion {
 		return fmt.Errorf("unsupported order journal version %d", ev.Version)
 	}
+	if len(ev.AttemptID) > 128 || strings.TrimSpace(ev.AttemptID) != ev.AttemptID {
+		return fmt.Errorf("order journal attempt id is invalid")
+	}
+	if ev.ActionKind != "" && !validOrderActionKind(ev.ActionKind) {
+		return fmt.Errorf("order journal action kind %q is invalid", ev.ActionKind)
+	}
+	if ev.TransmitOrigin != "" && !validOrderTransmitOrigin(ev.TransmitOrigin) {
+		return fmt.Errorf("order journal transmit origin %q is invalid", ev.TransmitOrigin)
+	}
+	if ev.AttemptID != "" && ev.ActionKind == "" {
+		return fmt.Errorf("order journal attempt %q requires an action kind", ev.AttemptID)
+	}
+	if ev.SendDisposition != "" {
+		if ev.Type != orderJournalEventSendError || ev.AttemptID == "" || !validOrderSendDisposition(ev.SendDisposition) {
+			return fmt.Errorf("order journal send disposition is invalid")
+		}
+	}
+	if (ev.Type == orderJournalEventSendCompleted || ev.Type == orderJournalEventSendError) && ev.AttemptID != "" && ev.ActionKind == "" {
+		return fmt.Errorf("typed order send outcome requires an action kind")
+	}
 	return nil
+}
+
+func validOrderActionKind(action corestore.ActionKind) bool {
+	switch action {
+	case corestore.ActionPlace, corestore.ActionModify, corestore.ActionCancel,
+		corestore.ActionPurge, corestore.ActionRestore, corestore.ActionExercise,
+		corestore.ActionSmokeCleanup:
+		return true
+	default:
+		return false
+	}
+}
+
+func validOrderTransmitOrigin(origin corestore.TransmitOrigin) bool {
+	switch origin {
+	case corestore.OriginAgentCLI, corestore.OriginHumanCLI, corestore.OriginDaemon:
+		return true
+	default:
+		return false
+	}
+}
+
+func validOrderSendDisposition(disposition ibkrlib.SendDisposition) bool {
+	switch disposition {
+	case ibkrlib.SendDispositionDefinitelyUnsent,
+		ibkrlib.SendDispositionMayHaveWritten,
+		ibkrlib.SendDispositionUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 func orderJournalEventConsumesPreviewToken(ev orderJournalEvent) bool {
 	switch ev.Type {
 	case orderJournalEventTokenConfirmed,
 		orderJournalEventSendAttempted,
+		orderJournalEventSendCompleted,
 		orderJournalEventSendError,
 		orderJournalEventBrokerAcknowledged,
 		orderJournalEventModifyRequested,

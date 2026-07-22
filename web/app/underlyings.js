@@ -1,7 +1,6 @@
 import { heldStressEvidence, heldStressItems, humanList, marketQuoteErrorLabel, quoteBySymbol, quoteChange, quoteChangePct, quotePrevClose, quotePrice, quoteTime } from "./canary.js";
 import { marketEventFlagsForSymbol, marketFlagRow, renderMarketFlagRail, underlyingHeroMarketFlags } from "./market-events.js";
-import { refreshOpenOrders } from "./orders.js";
-import { $, cleanDetail, compactMoney, displayMoney, firstNumber, hasNumericValue, labelize, mergeCurrency, normalizeCurrency, normalizeSymbol, pct, privacyMask, protectionWriteUnavailableReason, purgeRestoreSettingEnabled, quoteTimestamp, readJSONOrText, renderFreshnessTimestamp, renderSensitiveAccountId, renderSensitiveSignedMoney, renderSensitiveText, riskMoney, sensitiveDisplayMoney, sensitiveMoneyHidden, signedClass, signedDisplayMoney, signedPct } from "./shared.js";
+import { $, cleanDetail, compactMoney, displayMoney, firstNumber, hasNumericValue, labelize, mergeCurrency, normalizeCurrency, normalizeSymbol, pct, privacyMask, purgeRestoreSettingEnabled, quoteTimestamp, renderFreshnessTimestamp, renderSensitiveAccountId, renderSensitiveSignedMoney, renderSensitiveText, riskMoney, sensitiveDisplayMoney, sensitiveMoneyHidden, signedClass, signedDisplayMoney, signedPct } from "./shared.js";
 import { state } from "./state.js";
 
 function renderAccountPanel(account = {}, positions = {}, canary = {}) {
@@ -187,9 +186,9 @@ function renderUnderlyingBulkActions(rows) {
   const heldCount = rows.filter((row) => !row.virtual).length;
   const virtualCount = rows.length - heldCount;
   const trading = state.snapshot?.trading || {};
-  setUnderlyingActionButtonState("buildAllUnderlyingsButton", virtualCount > 0 && !state.underlyingBusy, virtualCount > 0 ? "Build a non-executing restore draft for all purged rows" : "No purged rows to build");
-  setUnderlyingActionButtonState("purgeAllUnderlyingsButton", heldCount > 0 && canWriteUnderlyings(trading) && !state.underlyingBusy, underlyingWriteReason("Purge all held underlyings", heldCount > 0, trading));
-  setUnderlyingActionButtonState("restoreAllUnderlyingsButton", virtualCount > 0 && canWriteUnderlyings(trading) && !state.underlyingBusy, underlyingWriteReason("Restore all purged rows", virtualCount > 0, trading));
+  setUnderlyingActionButtonState("buildAllUnderlyingsButton", false, underlyingWriteReason("Review restore", virtualCount > 0, trading));
+  setUnderlyingActionButtonState("purgeAllUnderlyingsButton", false, underlyingWriteReason("Purge all held underlyings", heldCount > 0, trading));
+  setUnderlyingActionButtonState("restoreAllUnderlyingsButton", false, underlyingWriteReason("Restore all purged rows", virtualCount > 0, trading));
   // Tooltips are invisible on touch; when every bulk action is disabled, say
   // why in one muted line instead of presenting three dead buttons.
   const bulkNote = $("underlyingBulkNote");
@@ -292,17 +291,16 @@ function renderUnderlyingExpansion() {
 }
 
 function canWriteUnderlyings(trading = {}) {
-  return Boolean(purgeRestoreSettingEnabled() && trading.mode && trading.mode !== "disabled" && trading.can_write && trading.account);
+	void trading;
+	return false;
 }
 
 function underlyingWriteReason(action, hasRows, trading = {}) {
+	void action;
+	void trading;
   if (!hasRows) return "No matching underlying rows";
-  if (!purgeRestoreSettingEnabled()) return "Purge/restore is disabled in Settings";
-  if (!trading.mode || trading.mode === "disabled") return "Trading is disabled";
-  if (!trading.can_write) return protectionWriteUnavailableReason(trading);
-  if (!trading.account) return "Broker-write account unavailable";
-  if (!trading.mode) return "Trading mode unavailable";
-  return `${action} after confirming ${trading.mode}/${trading.account}`;
+  if (!purgeRestoreSettingEnabled()) return "Purge/restore workflow is hidden in Settings";
+  return "Purge/restore submission is unavailable; use TWS, then refresh and reconcile Canary";
 }
 
 function underlyingBookRows(positions, baseCurrency, marketEvents = {}) {
@@ -811,14 +809,14 @@ function underlyingActionButton(label, enabled, row, action) {
   button.textContent = label;
   const trading = state.snapshot?.trading || {};
   const writeAction = action === "purge" || action === "restore";
-  const available = enabled && !state.underlyingBusy && (!writeAction || canWriteUnderlyings(trading));
+  const available = false;
   button.disabled = !available;
   const disabledReason = row.virtual
     ? "Already in the purge book; restore or build is available."
     : "Available after this underlying has been purged.";
   button.title = available
     ? underlyingActionTitle(label, row, action)
-    : writeAction ? underlyingWriteReason(`${label} ${row.symbol}`, enabled, trading) : disabledReason;
+    : underlyingWriteReason(`${label} ${row.symbol}`, enabled, trading) || disabledReason;
   button.setAttribute("aria-label", `${label} ${row.symbol}`);
   if (available) {
     button.addEventListener("click", () => {
@@ -829,8 +827,10 @@ function underlyingActionButton(label, enabled, row, action) {
 }
 
 function underlyingActionTitle(label, row, action) {
-  if (action === "build") return `Build a non-executing restore draft for ${row.symbol}`;
-  return `${label} ${row.symbol} after account/mode confirmation`;
+	void label;
+	void row;
+	void action;
+	return "Purge/restore submission is unavailable; use TWS, then refresh and reconcile Canary";
 }
 
 function quoteSourceLabel(quote, fallback) {
@@ -926,38 +926,8 @@ async function runUnderlyingAction(action, target = {}) {
   const all = Boolean(target.all);
   const symbols = (target.symbols || []).map(normalizeSymbol).filter(Boolean);
   const label = underlyingActionLabel(action, all, symbols);
-  const body = { all, symbols };
-  const writeAction = action === "purge" || action === "restore";
-  if (writeAction) {
-    const confirmation = underlyingWriteConfirmation(action, label);
-    if (!confirmation) return;
-    body.confirm_account = confirmation.account;
-    body.confirm_mode = confirmation.mode;
-  }
-
-  state.underlyingBusy = action;
-  state.underlyingNotice = `${label}: running.`;
-  renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
-  try {
-    const res = await fetch(underlyingActionEndpoint(action), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify(body),
-    });
-    const result = await readJSONOrText(res);
-    if (!res.ok) throw new Error(result.error || result.message || String(result));
-    state.underlyingNotice = `${label}: ${purgeResultSummary(result)}`;
-    renderUnderlyingActionResult(result);
-    await refreshPurgeStatus();
-    await refreshOpenOrders();
-  } catch (err) {
-    state.underlyingNotice = `${label}: ${err.message}`;
-    renderUnderlyingActionResult({ status: "error", message: err.message });
-  } finally {
-    state.underlyingBusy = "";
-    renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
-  }
+	state.underlyingNotice = `${label}: purge/restore submission is unavailable; use TWS, then refresh and reconcile Canary.`;
+	renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
 }
 
 function underlyingActionEndpoint(action) {
@@ -974,24 +944,11 @@ function underlyingActionLabel(action, all, symbols) {
 }
 
 function underlyingWriteConfirmation(action, label) {
+	void action;
   const trading = state.snapshot?.trading || {};
-  if (!canWriteUnderlyings(trading)) {
-    state.underlyingNotice = underlyingWriteReason(label, true, trading);
-    renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
-    return null;
-  }
-  const expected = `${trading.mode}/${trading.account}`;
-  const verb = action === "restore" ? "restore purged rows" : "purge held positions";
-  const got = window.prompt([
-    `${label} is a broker-write action.`,
-    `Type ${expected} to ${verb}.`,
-  ].join("\n"));
-  if (got !== expected) {
-    state.underlyingNotice = `${label}: confirmation cancelled.`;
-    renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
-    return null;
-  }
-  return { account: trading.account, mode: trading.mode };
+  state.underlyingNotice = underlyingWriteReason(label, true, trading);
+  renderUnderlyings(state.snapshot?.positions || {}, state.snapshot?.account || {});
+  return null;
 }
 
 function purgeResultSummary(result = {}) {

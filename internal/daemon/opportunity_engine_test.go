@@ -6,8 +6,32 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osauer/ibkr/v2/internal/config"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
+
+func TestOptionExercisePreviewTypedDisableNeverMintsOrAdvertisesSubmit(t *testing.T) {
+	t.Parallel()
+	now := opportunityTestRTH()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper})
+	e := &opportunityEngine{server: srv, now: func() time.Time { return now }}
+	opp := rpc.Opportunity{
+		Key:         "option_exercise:test",
+		Revision:    "sha256:test",
+		Quantity:    1,
+		MaxQuantity: 1,
+	}
+
+	res := e.previewRevalidatedOpportunity(rpc.OpportunityExercisePreviewParams{
+		Key: opp.Key, Revision: opp.Revision, Quantity: 1, Origin: rpc.OrderOriginHumanTTY,
+	}, opp, nil, now)
+	if res.Accepted || res.SubmitEligible || res.TokenMinted || res.PreviewTokenID != "" || !res.PreviewTokenExpiresAt.IsZero() {
+		t.Fatalf("preview advertised exercise authority: %+v", res)
+	}
+	if !hasBlocker(res.Blockers, exerciseSubmissionUnavailableBlocker.Code) {
+		t.Fatalf("blockers=%+v, want %q", res.Blockers, exerciseSubmissionUnavailableBlocker.Code)
+	}
+}
 
 func TestOptionExerciseOpportunityCallUsesExecutableClose(t *testing.T) {
 	t.Parallel()

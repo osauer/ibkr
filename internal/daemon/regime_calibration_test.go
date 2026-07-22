@@ -259,6 +259,10 @@ func TestStreakStoreEligibilityLatch(t *testing.T) {
 func TestPopulateStreaksExitHysteresisHoldsRed(t *testing.T) {
 	t.Parallel()
 	s := &Server{streaks: NewStreakStore(t.TempDir())}
+	// Pin a regular-session time when both VIX and VIX3M can legitimately be
+	// live. Using time.Now made the assertion change after VIX3M's daily
+	// dissemination window, when the same live-labelled fixture is correctly
+	// classified overdue and the copy describes prior-session awareness.
 	asOf := time.Date(2026, time.June, 5, 14, 0, 0, 0, time.UTC)
 	mk := func(ratio float64) *rpc.RegimeSnapshotResult {
 		r := &rpc.RegimeSnapshotResult{AsOf: asOf}

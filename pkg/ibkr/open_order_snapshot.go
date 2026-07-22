@@ -2,34 +2,59 @@ package ibkr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 )
+
+const defaultOpenOrderSnapshotProtocolTimeout = 15 * time.Second
+
+// ErrOpenOrderSnapshotPoisoned means a reqAllOpenOrders request was sent but
+// its uncorrelated openOrderEnd terminator was not proven on the same socket.
+// No second request is safe on that socket generation because late callbacks
+// could otherwise complete the wrong snapshot.
+var ErrOpenOrderSnapshotPoisoned = errors.New("open-order snapshot socket generation poisoned")
 
 // OpenOrderSnapshot is a one-shot read of the API-created open orders the
 // gateway reports across client IDs. It does not bind or include manual TWS
 // orders merely because Complete is true; those require the separate client-0
 // open-order binding flow, which this request does not perform.
 //
-// Complete is true only when openOrderEnd arrived. When Complete is false,
-// Orders may contain callbacks collected before the context ended, but that
-// proves nothing about absent orders. A request failure returns no collected
-// orders.
-// AsOf is the local UTC completion or failure time, not a broker timestamp.
+// Complete is true only when openOrderEnd arrived on the exact Connection
+// socket epoch that sent reqAllOpenOrders. When Complete is false, Orders may
+// contain callbacks collected before the caller or protocol deadline ended,
+// but that proves nothing about absent orders. A request failure returns no
+// collected orders. AsOf is the local UTC completion or failure time, not a
+// broker timestamp. Session is the opaque Connection socket generation that
+// sent the request, and Generation is the Connector order-lifecycle
+// frontier at the exact same-epoch openOrderEnd; a change to either invalidates
+// this receipt.
 type OpenOrderSnapshot struct {
-	Complete bool                  // Complete reports whether openOrderEnd arrived.
-	Orders   []OrderLifecycleEvent // Orders contains collected openOrder events and may be empty.
-	AsOf     time.Time             // AsOf is the local UTC time at which the method returned.
+	Complete   bool                    // Complete reports whether same-epoch openOrderEnd arrived.
+	Orders     []OrderLifecycleEvent   // Orders contains collected openOrder events and may be empty.
+	AsOf       time.Time               // AsOf is the local UTC time at which the evidence completed.
+	Session    ConnectorSessionBinding // Session identifies the exact Connection socket generation.
+	Generation uint64                  // Generation is the order-event frontier captured at completion.
 }
 
-// openOrderSnapshotCollector accumulates openOrder callbacks between a
-// reqAllOpenOrders request and its openOrderEnd terminator.
+type openOrderSnapshotBinding struct {
+	conn  *Connection
+	epoch uint64
+}
+
+func sameOpenOrderSnapshotBinding(a, b openOrderSnapshotBinding) bool {
+	return a.conn != nil && a.conn == b.conn && a.epoch == b.epoch
+}
+
+// openOrderSnapshotCollector accumulates openOrder callbacks between one
+// reqAllOpenOrders request and its same-epoch openOrderEnd terminator.
 type openOrderSnapshotCollector struct {
-	mu     sync.Mutex
-	orders []OrderLifecycleEvent
-	done   chan struct{}
-	closed bool
+	mu         sync.Mutex
+	orders     []OrderLifecycleEvent
+	end        chan struct{}
+	closed     bool
+	generation uint64
 }
 
 func (col *openOrderSnapshotCollector) add(ev OrderLifecycleEvent) {
@@ -41,20 +66,29 @@ func (col *openOrderSnapshotCollector) add(ev OrderLifecycleEvent) {
 	col.orders = append(col.orders, ev)
 }
 
-func (col *openOrderSnapshotCollector) finish() {
+func (col *openOrderSnapshotCollector) finish(generation uint64) {
 	col.mu.Lock()
 	defer col.mu.Unlock()
 	if col.closed {
 		return
 	}
 	col.closed = true
-	close(col.done)
+	col.generation = generation
+	close(col.end)
 }
 
-func (col *openOrderSnapshotCollector) snapshot() []OrderLifecycleEvent {
+func (col *openOrderSnapshotCollector) snapshot() ([]OrderLifecycleEvent, uint64) {
 	col.mu.Lock()
 	defer col.mu.Unlock()
-	return append([]OrderLifecycleEvent{}, col.orders...)
+	return append([]OrderLifecycleEvent{}, col.orders...), col.generation
+}
+
+type openOrderSnapshotFlight struct {
+	binding   openOrderSnapshotBinding
+	collector *openOrderSnapshotCollector
+	done      chan struct{}
+	result    OpenOrderSnapshot
+	err       error
 }
 
 // RequestAllOpenOrders sends reqAllOpenOrders to the gateway. Results arrive
@@ -65,79 +99,186 @@ func (c *Connection) RequestAllOpenOrders() error {
 	if !c.IsConnected() {
 		return fmt.Errorf("not connected to IBKR")
 	}
-	msg := c.encodeMsg(reqAllOpenOrders, "1")
-	return c.sendMessageWithType(msg, RequestTypeOrder)
-}
-
-func (c *Connector) requestAllOpenOrdersDefault() error {
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-	if conn == nil {
-		return fmt.Errorf("no active connection")
+	epoch, err := c.captureBrokerInstructionEpoch()
+	if err != nil {
+		return err
 	}
-	return conn.RequestAllOpenOrders()
+	return c.requestAllOpenOrdersForEpoch(epoch)
 }
 
-// SnapshotOpenOrders performs a one-shot broker open-order snapshot and waits
-// for openOrderEnd or ctx completion. Concurrent calls are serialized, and a
-// call waiting for another snapshot does not observe ctx until it acquires the
-// serialization lock. WhatIf preview echoes are excluded.
+func (c *Connection) requestAllOpenOrdersForEpoch(epoch uint64) error {
+	if !c.IsConnected() {
+		return fmt.Errorf("not connected to IBKR")
+	}
+	msg := c.encodeMsg(reqAllOpenOrders, "1")
+	return c.sendMessageWithTypeContextForEpoch(context.Background(), msg, RequestTypeOrder, epoch, true)
+}
+
+// SnapshotOpenOrders joins or starts one epoch-bound reqAllOpenOrders flight.
+// Caller cancellation only stops that waiter; after the wire request begins,
+// the collector remains installed until same-epoch openOrderEnd or the
+// internal protocol deadline. This is required because the protocol has no
+// request ID and a late terminator could otherwise bless a later flight.
 //
-// On openOrderEnd it returns Complete=true and a nil error. On ctx completion it
-// returns Complete=false, callbacks collected so far, a local UTC AsOf, and
-// ctx.Err(). A request failure returns Complete=false, no collected orders, a
-// local UTC AsOf, and the request error. An incomplete or empty snapshot must
-// not be used to infer that an order is absent or final.
+// A canceled waiter issues no late request. A protocol timeout or uncertain
+// send poisons only the exact Connection epoch; callers fail closed until a
+// reconnect advances that epoch.
 func (c *Connector) SnapshotOpenOrders(ctx context.Context) (OpenOrderSnapshot, error) {
 	if c == nil {
 		return OpenOrderSnapshot{}, fmt.Errorf("connector is nil")
 	}
-	c.openOrderSnapshotFlightMu.Lock()
-	defer c.openOrderSnapshotFlightMu.Unlock()
-
-	collector := &openOrderSnapshotCollector{done: make(chan struct{})}
-	c.openOrderSnapshotMu.Lock()
-	c.openOrderSnapshot = collector
-	c.openOrderSnapshotMu.Unlock()
-	defer func() {
-		c.openOrderSnapshotMu.Lock()
-		c.openOrderSnapshot = nil
-		c.openOrderSnapshotMu.Unlock()
-	}()
-
-	request := c.requestAllOpenOrders
-	if request == nil {
-		request = c.requestAllOpenOrdersDefault
+	if ctx == nil {
+		return OpenOrderSnapshot{}, fmt.Errorf("context is nil")
 	}
-	if err := request(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return OpenOrderSnapshot{AsOf: time.Now().UTC()}, err
 	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return OpenOrderSnapshot{}, fmt.Errorf("no active connection")
+	}
+	binding := openOrderSnapshotBinding{conn: conn, epoch: conn.BrokerSessionEpoch()}
+
+	c.openOrderSnapshotMu.Lock()
+	if sameOpenOrderSnapshotBinding(c.openOrderSnapshotPoison, binding) {
+		c.openOrderSnapshotMu.Unlock()
+		return OpenOrderSnapshot{AsOf: time.Now().UTC(), Session: ConnectorSessionBinding{connector: c, connection: binding.conn, epoch: binding.epoch}}, ErrOpenOrderSnapshotPoisoned
+	}
+	flight := c.openOrderSnapshot
+	if flight == nil || !sameOpenOrderSnapshotBinding(flight.binding, binding) {
+		flight = &openOrderSnapshotFlight{
+			binding:   binding,
+			collector: &openOrderSnapshotCollector{end: make(chan struct{})},
+			done:      make(chan struct{}),
+		}
+		c.openOrderSnapshot = flight
+		go c.runOpenOrderSnapshotFlight(flight)
+	}
+	c.openOrderSnapshotMu.Unlock()
 
 	select {
-	case <-collector.done:
-		return OpenOrderSnapshot{Complete: true, Orders: collector.snapshot(), AsOf: time.Now().UTC()}, nil
+	case <-flight.done:
+		return cloneOpenOrderSnapshot(flight.result), flight.err
 	case <-ctx.Done():
-		return OpenOrderSnapshot{Complete: false, Orders: collector.snapshot(), AsOf: time.Now().UTC()}, ctx.Err()
+		orders, generation := flight.collector.snapshot()
+		return OpenOrderSnapshot{
+			Complete:   false,
+			Orders:     orders,
+			AsOf:       time.Now().UTC(),
+			Session:    ConnectorSessionBinding{connector: c, connection: flight.binding.conn, epoch: flight.binding.epoch},
+			Generation: generation,
+		}, ctx.Err()
 	}
 }
 
-func (c *Connector) collectOpenOrderSnapshot(ev OrderLifecycleEvent) {
-	c.openOrderSnapshotMu.Lock()
-	collector := c.openOrderSnapshot
-	c.openOrderSnapshotMu.Unlock()
-	if collector == nil {
+func (c *Connector) runOpenOrderSnapshotFlight(flight *openOrderSnapshotFlight) {
+	if beforeSend := c.openOrderSnapshotBeforeSend; beforeSend != nil {
+		beforeSend()
+	}
+	request := c.requestAllOpenOrders
+	if request == nil {
+		request = func() error { return flight.binding.conn.requestAllOpenOrdersForEpoch(flight.binding.epoch) }
+	}
+	if err := request(); err != nil {
+		c.completeOpenOrderSnapshotFlight(flight, OpenOrderSnapshot{AsOf: time.Now().UTC(), Session: ConnectorSessionBinding{connector: c, connection: flight.binding.conn, epoch: flight.binding.epoch}}, err, brokerSendMayHaveBeenWritten(err))
 		return
 	}
+	timeout := c.openOrderSnapshotTimeout
+	if timeout <= 0 {
+		timeout = defaultOpenOrderSnapshotProtocolTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-flight.collector.end:
+		orders, generation := flight.collector.snapshot()
+		c.completeOpenOrderSnapshotFlight(flight, OpenOrderSnapshot{
+			Complete:   true,
+			Orders:     orders,
+			AsOf:       time.Now().UTC(),
+			Session:    ConnectorSessionBinding{connector: c, connection: flight.binding.conn, epoch: flight.binding.epoch},
+			Generation: generation,
+		}, nil, false)
+	case <-timer.C:
+		err := fmt.Errorf("%w: no same-epoch openOrderEnd before protocol deadline", ErrOpenOrderSnapshotPoisoned)
+		orders, generation := flight.collector.snapshot()
+		c.completeOpenOrderSnapshotFlight(flight, OpenOrderSnapshot{
+			Complete:   false,
+			Orders:     orders,
+			AsOf:       time.Now().UTC(),
+			Session:    ConnectorSessionBinding{connector: c, connection: flight.binding.conn, epoch: flight.binding.epoch},
+			Generation: generation,
+		}, err, true)
+	}
+}
+
+func (c *Connector) completeOpenOrderSnapshotFlight(flight *openOrderSnapshotFlight, result OpenOrderSnapshot, err error, poison bool) {
+	flight.result = cloneOpenOrderSnapshot(result)
+	flight.err = err
+	c.openOrderSnapshotMu.Lock()
+	if poison {
+		c.openOrderSnapshotPoison = flight.binding
+	}
+	if c.openOrderSnapshot == flight {
+		c.openOrderSnapshot = nil
+	}
+	close(flight.done)
+	c.openOrderSnapshotMu.Unlock()
+}
+
+func cloneOpenOrderSnapshot(in OpenOrderSnapshot) OpenOrderSnapshot {
+	out := in
+	out.Orders = append([]OrderLifecycleEvent{}, in.Orders...)
+	return out
+}
+
+func (c *Connector) collectOpenOrderSnapshotFrom(conn *Connection, epoch uint64, ev OrderLifecycleEvent) {
+	c.openOrderSnapshotMu.Lock()
+	flight := c.openOrderSnapshot
+	if flight == nil || !sameOpenOrderSnapshotBinding(flight.binding, openOrderSnapshotBinding{conn: conn, epoch: epoch}) {
+		c.openOrderSnapshotMu.Unlock()
+		return
+	}
+	collector := flight.collector
+	c.openOrderSnapshotMu.Unlock()
 	collector.add(ev)
+}
+
+func (c *Connector) finishOpenOrderSnapshotFrom(conn *Connection, epoch uint64) {
+	c.openOrderSnapshotMu.Lock()
+	flight := c.openOrderSnapshot
+	if flight == nil || !sameOpenOrderSnapshotBinding(flight.binding, openOrderSnapshotBinding{conn: conn, epoch: epoch}) {
+		c.openOrderSnapshotMu.Unlock()
+		return
+	}
+	collector := flight.collector
+	c.openOrderSnapshotMu.Unlock()
+	collector.finish(c.OrderLifecycleGeneration())
+}
+
+// collectOpenOrderSnapshotFields and finishOpenOrderSnapshot are synchronous
+// test-seam helpers. Production callbacks carry the exact Connection epoch
+// through Connection's open-order observer.
+func (c *Connector) collectOpenOrderSnapshotFields(fields []string) {
+	ev, ok := ParseOrderLifecycleEvent(fields)
+	if !ok || ev.WhatIf || ev.Type != OrderLifecycleEventOpenOrder {
+		return
+	}
+	c.openOrderSnapshotMu.Lock()
+	flight := c.openOrderSnapshot
+	c.openOrderSnapshotMu.Unlock()
+	if flight != nil {
+		c.collectOpenOrderSnapshotFrom(flight.binding.conn, flight.binding.epoch, ev)
+	}
 }
 
 func (c *Connector) finishOpenOrderSnapshot() {
 	c.openOrderSnapshotMu.Lock()
-	collector := c.openOrderSnapshot
+	flight := c.openOrderSnapshot
 	c.openOrderSnapshotMu.Unlock()
-	if collector == nil {
-		return
+	if flight != nil {
+		c.finishOpenOrderSnapshotFrom(flight.binding.conn, flight.binding.epoch)
 	}
-	collector.finish()
 }

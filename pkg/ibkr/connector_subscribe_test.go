@@ -153,7 +153,7 @@ func TestSubscribeMarketDataWithContractHydratesCachedRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubscribeMarketDataWithContract: %v", err)
 	}
-	wantKey := "MBG|STK|SMART|IBIS|EUR|MBG|MBG"
+	wantKey := "MBG|STK|SMART|IBIS|EUR|MBG|MBG|CONID:29622935"
 	if key != wantKey {
 		t.Fatalf("key = %q, want hydrated key %q", key, wantKey)
 	}
@@ -342,8 +342,9 @@ func TestUnsubscribeMarketData_CancelsUnobservedToReleaseSlot(t *testing.T) {
 	}
 }
 
-// Simulate an IBKR error 200 on a subscription and ensure the connector attempts a refresh
-func TestHandleIBKRError_RefreshOn200(t *testing.T) {
+// A socket callback never launches an unbound resubscribe. The next ordinary
+// poller may refresh current-session state after the callback has drained.
+func TestHandleIBKRError_DoesNotRefreshOn200FromCallback(t *testing.T) {
 	c := NewConnector(&ConnectorConfig{})
 	// Prepare a connected fake connection with writer buffer
 	var out safeBuffer
@@ -375,11 +376,8 @@ func TestHandleIBKRError_RefreshOn200(t *testing.T) {
 	// Fields: [msgID=4, version=2, reqID=101, code=200, msg=...]
 	c.handleIBKRError([]string{"4", "2", "101", "200", "The destination or exchange selected is Invalid."})
 
-	// Give time for async refresh
-	time.Sleep(100 * time.Millisecond)
-
-	if out.Len() == 0 {
-		t.Fatalf("expected a re-subscribe request to be written")
+	if out.Len() != 0 {
+		t.Fatalf("error callback wrote %d unbound resubscribe bytes", out.Len())
 	}
 }
 

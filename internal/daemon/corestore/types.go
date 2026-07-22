@@ -17,6 +17,7 @@ var (
 	ErrRollback               = errors.New("corestore: authority rollback detected")
 	ErrBlocked                = errors.New("corestore: health is blocked")
 	ErrOrderIDFloor           = errors.New("corestore: reserved order id does not advance global floor")
+	ErrOrderNotModifiable     = errors.New("corestore: order durable frontier is not modifiable")
 	ErrCheckpointBusy         = errors.New("corestore: WAL checkpoint is busy")
 	ErrLegacyImportConflict   = errors.New("corestore: legacy authority was already imported from a different source")
 	ErrFreshAuthorityConflict = errors.New("corestore: fresh trading authority requires empty order and purge state")
@@ -322,6 +323,9 @@ type PreTransmitRequest struct {
 	SignerGeneration      int64
 	RequestedOrderIDFloor int64
 	ReservedOrderID       int64
+	// ExpectedOrderEventSeq binds a modify to the exact durable per-order
+	// frontier it validated. Nil leaves place/cancel/other actions unconditional.
+	ExpectedOrderEventSeq *int64
 	Action                ActionKind
 	Origin                TransmitOrigin
 	Events                []OrderEventRecord

@@ -47,6 +47,29 @@ version = "risk-policy-v1"
 `
 }
 
+func validRiskPolicyV3WithPinsTOML() string {
+	return validRiskPolicyV3TOML() + `
+
+[inventory.rulebook]
+id = "rulebook-v2"
+version = "2"
+
+[inventory.protection]
+id = "protection-mvp"
+version = "1"
+
+[inventory.canary]
+id = "active-v1"
+version = "risk-policy-v1"
+`
+}
+
+func incompleteCadenceRiskPolicyV4TOML() string {
+	v4 := validRiskPolicyV4TOML()
+	v4 = strings.Replace(v4, "reconcile_warning_days = 2\n", "", 1)
+	return strings.Replace(v4, "day_of_month = 1\n", "", 1)
+}
+
 func newV4NudgeTestServer(t *testing.T, now time.Time) *Server {
 	t.Helper()
 	return newNudgeAuthorityTestServer(t, now, validRiskPolicyV4TOML())
@@ -87,6 +110,189 @@ func primeNudgeBlockEpisode(s *Server, now time.Time, consumedKnown bool) {
 	s.riskCapital.state.LatchedAt = now.Add(-2 * time.Hour)
 	s.riskCapital.state.LatchEpisodeSeq = 1
 	s.riskCapital.mu.Unlock()
+}
+
+func primeIndependentNudgeFacts(t *testing.T, s *Server, now time.Time, withReconciliation bool) {
+	t.Helper()
+	primeNudgeBlockEpisode(s, now, true)
+	stockBuy := rpc.OrderDraft{Action: "BUY", Contract: rpc.ContractParams{Symbol: "MSFT", SecType: "STK"}}
+	if warnings := s.riskPolicyPreviewWarnings(stockBuy, rpc.OrderPositionImpact{Effect: "open"}); len(warnings) != 1 {
+		t.Fatalf("prime shadow preview warnings=%+v", warnings)
+	}
+	s.protectionPolicies.mu.Lock()
+	s.protectionPolicies.status.PolicyVersion++
+	s.protectionPolicies.mu.Unlock()
+	if withReconciliation {
+		day := now.Format("20060102")
+		writeFlexFixture(t, "independent-nudge-exception.xml", now.Format("20060102")+";090000", day, day,
+			cashLine("independent-nudge-exception", "Unknown Broker Instruction", 12, day))
+	}
+}
+
+func assertNudgeKinds(t *testing.T, candidates []rpc.NudgeCandidate, present, absent []string) {
+	t.Helper()
+	for _, kind := range present {
+		if !candidateKindPresent(candidates, kind) {
+			t.Fatalf("candidates=%+v, missing %s", candidates, kind)
+		}
+	}
+	for _, kind := range absent {
+		if candidateKindPresent(candidates, kind) {
+			t.Fatalf("candidates=%+v, unexpected %s", candidates, kind)
+		}
+	}
+}
+
+func TestNudgeIndependentFactsSurviveV3AndIncompleteV4(t *testing.T) {
+	now := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name                string
+		policyTOML          string
+		wantCadenceStatus   string
+		wantConfirmedStatus string
+		wantAggregate       string
+		observeCutover      bool
+	}{
+		{
+			name: "valid current v3", policyTOML: validRiskPolicyV3WithPinsTOML(),
+			wantCadenceStatus: rpc.NudgeInputStatusInactive, wantConfirmedStatus: rpc.NudgeInputStatusInactive,
+			wantAggregate: rpc.NudgeAggregateReady,
+		},
+		{
+			name: "incomplete v4 cadence", policyTOML: incompleteCadenceRiskPolicyV4TOML(),
+			wantCadenceStatus: rpc.NudgeInputStatusUnapproved, wantConfirmedStatus: rpc.NudgeInputStatusUnapproved,
+			wantAggregate:  rpc.NudgeAggregateDegraded,
+			observeCutover: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newNudgeAuthorityTestServer(t, now, tt.policyTOML)
+			primeIndependentNudgeFacts(t, s, now, true)
+			if tt.observeCutover {
+				report := s.buildReconReport()
+				s.observeConfirmedFlows(nudgeConfirmedFlowSnapshot{
+					PolicyVersion: 4, PolicyIdentity: nudgePolicyIdentity(s.riskPolicies.snapshot().policy),
+					ReportStatus: report.Status, ReportIdentity: opaqueIdentity("recon-report", report.ReportID),
+					StatementAsOf: report.StatementAsOf, StatementsHealthy: true,
+				})
+				if coverage, _, ok := s.nudges.confirmedSnapshot(nil); !ok || coverage == nil || !coverage.PreCutoverFlowsUnreviewed {
+					t.Fatalf("incomplete cadence suppressed event-driven cutover coverage: coverage=%+v ok=%v", coverage, ok)
+				}
+			}
+
+			beforeTree := stateTree(t, os.Getenv("XDG_STATE_HOME"))
+			beforeContents := stateContents(t, os.Getenv("XDG_STATE_HOME"))
+			s.nudges.mu.Lock()
+			beforeShadowCount := s.nudges.state.Shadow.Count
+			s.nudges.mu.Unlock()
+			var first *rpc.NudgesSnapshotResult
+			for range 2 {
+				result, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertNudgeKinds(t, result.Candidates,
+					[]string{rpc.NudgeKindPolicyDrift, rpc.NudgeKindDrawdownLatched, rpc.NudgeKindShadowWouldBlock, rpc.NudgeKindReconcileException},
+					[]string{rpc.NudgeKindReconcileDue, rpc.NudgeKindMonthlyPulse, rpc.NudgeKindConfirmedFlow})
+				if result.SourceHealth.Policy.Status != rpc.NudgeInputStatusOK || result.SourceHealth.Cadence.Status != tt.wantCadenceStatus ||
+					result.SourceHealth.ConfirmedFlow.Status != tt.wantConfirmedStatus || result.SourceHealth.Aggregate != tt.wantAggregate {
+					t.Fatalf("dependency-isolated source health=%+v", result.SourceHealth)
+				}
+				if first == nil {
+					first = result
+				} else if !reflect.DeepEqual(first, result) {
+					t.Fatalf("repeated snapshot changed: first=%+v second=%+v", first, result)
+				}
+			}
+			if afterTree := stateTree(t, os.Getenv("XDG_STATE_HOME")); !slices.Equal(beforeTree, afterTree) {
+				t.Fatalf("repeated snapshot changed state tree: before=%v after=%v", beforeTree, afterTree)
+			}
+			if afterContents := stateContents(t, os.Getenv("XDG_STATE_HOME")); !maps.Equal(beforeContents, afterContents) {
+				t.Fatalf("repeated snapshot changed state contents: before=%v after=%v", beforeContents, afterContents)
+			}
+			s.nudges.mu.Lock()
+			afterShadowCount := s.nudges.state.Shadow.Count
+			s.nudges.mu.Unlock()
+			if beforeShadowCount != 1 || afterShadowCount != beforeShadowCount {
+				t.Fatalf("snapshot advanced shadow bookkeeping: before=%d after=%d", beforeShadowCount, afterShadowCount)
+			}
+		})
+	}
+}
+
+func TestNudgeSourceOutagesOnlySuppressDependentFacts(t *testing.T) {
+	now := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+	t.Run("reconciliation unavailable", func(t *testing.T) {
+		s := newNudgeAuthorityTestServer(t, now, validRiskPolicyV4TOML())
+		primeIndependentNudgeFacts(t, s, now, false)
+		result, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNudgeKinds(t, result.Candidates,
+			[]string{rpc.NudgeKindPolicyDrift, rpc.NudgeKindDrawdownLatched, rpc.NudgeKindShadowWouldBlock},
+			[]string{rpc.NudgeKindReconcileException})
+		if result.SourceHealth.Reconciliation.Status != rpc.NudgeInputStatusUnavailable || result.SourceHealth.Aggregate != rpc.NudgeAggregateDegraded {
+			t.Fatalf("reconciliation outage health=%+v", result.SourceHealth)
+		}
+	})
+
+	t.Run("nudge store unavailable", func(t *testing.T) {
+		s := newNudgeAuthorityTestServer(t, now, validRiskPolicyV4TOML())
+		primeIndependentNudgeFacts(t, s, now, true)
+		s.nudges.mu.Lock()
+		s.nudges.fault = true
+		s.nudges.mu.Unlock()
+		result, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNudgeKinds(t, result.Candidates,
+			[]string{rpc.NudgeKindPolicyDrift, rpc.NudgeKindDrawdownLatched, rpc.NudgeKindReconcileException},
+			[]string{rpc.NudgeKindShadowWouldBlock, rpc.NudgeKindConfirmedFlow})
+		if result.SourceHealth.ConfirmedFlow.Status != rpc.NudgeInputStatusError || result.SourceHealth.Aggregate != rpc.NudgeAggregateDegraded {
+			t.Fatalf("nudge-store outage health=%+v", result.SourceHealth)
+		}
+	})
+
+	t.Run("current capital magnitude unavailable", func(t *testing.T) {
+		s := newNudgeAuthorityTestServer(t, now, validRiskPolicyV4TOML())
+		primeIndependentNudgeFacts(t, s, now, true)
+		s.riskCapital.mu.Lock()
+		s.riskCapital.state.LastEquityBase = 0
+		s.riskCapital.state.LastEquityAsOf = time.Time{}
+		s.riskCapital.mu.Unlock()
+		result, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNudgeKinds(t, result.Candidates,
+			[]string{rpc.NudgeKindPolicyDrift, rpc.NudgeKindDrawdownLatched, rpc.NudgeKindShadowWouldBlock, rpc.NudgeKindReconcileException}, nil)
+		if result.SourceHealth.Capital.Status != rpc.NudgeInputStatusUnavailable || result.Context == nil || result.Context.Drawdown == nil || result.Context.Drawdown.ConsumedPct != nil {
+			t.Fatalf("unavailable capital magnitude hid durable facts: health=%+v context=%+v", result.SourceHealth, result.Context)
+		}
+	})
+}
+
+func TestConfirmedFlowCutoverIsIndependentOfIncompleteTimedCadence(t *testing.T) {
+	now := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	s, _ := newCutoverReviewTestServerWithPolicy(t, now, incompleteCadenceRiskPolicyV4TOML())
+	authority := s.currentNudgeAuthority(now)
+	if !authority.eligible || !authority.confirmedFlowEligible || authority.cadenceEligible {
+		t.Fatalf("dependency split authority=%+v", authority)
+	}
+	result, err := s.handleNudgesCutoverReview(context.Background(), cutoverReviewRequest(t))
+	if err != nil || result == nil || !result.OK {
+		t.Fatalf("event-driven cutover was gated by timed cadence: result=%+v err=%v", result, err)
+	}
+	snapshot, err := s.handleNudgesSnapshot(context.Background(), &rpc.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.SourceHealth.Cadence.Status != rpc.NudgeInputStatusUnapproved || snapshot.SourceHealth.ConfirmedFlow.Status != rpc.NudgeInputStatusOK {
+		t.Fatalf("cutover/cadence source isolation=%+v", snapshot.SourceHealth)
+	}
 }
 
 func TestGovernanceAuthorityGatesCandidatesShadowAndMonthly(t *testing.T) {
@@ -816,7 +1022,12 @@ func TestConfirmedFlowLegacyCoverageMigratesMissingCurrentRowsPresence(t *testin
 
 func newCutoverReviewTestServer(t *testing.T, now time.Time) (*Server, string) {
 	t.Helper()
-	s := newV4NudgeTestServer(t, now)
+	return newCutoverReviewTestServerWithPolicy(t, now, validRiskPolicyV4TOML())
+}
+
+func newCutoverReviewTestServerWithPolicy(t *testing.T, now time.Time, policyTOML string) (*Server, string) {
+	t.Helper()
+	s := newNudgeAuthorityTestServer(t, now, policyTOML)
 	day := now.Format("20060102")
 	name := "flex-cutover-review.xml"
 	writeFlexFixture(t, name, now.Format("20060102")+";090000", day, day,

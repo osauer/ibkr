@@ -90,7 +90,7 @@ func TestPlatformSettingsRejectsUnknownAndReadOnlyWrites(t *testing.T) {
 	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"mode":"paper"}}`)}); err == nil {
 		t.Fatal("read-only trading.mode write succeeded")
 	}
-	_, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"limits":{"max_notional":5000}}}`)})
+	_, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"origin":"human-tty","trading":{"limits":{"max_notional":5000}}}`)})
 	if err == nil {
 		t.Fatal("trading limit write succeeded while trading disabled")
 	}
@@ -99,30 +99,47 @@ func TestPlatformSettingsRejectsUnknownAndReadOnlyWrites(t *testing.T) {
 	}
 }
 
-func TestPlatformSettingsLiveTradingPatchRefusesAgentOrigin(t *testing.T) {
+func TestPlatformSettingsTradingPatchOriginMatrix(t *testing.T) {
 	t.Parallel()
-	srv := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModeLive})
-
-	// Agent origin (explicit or missing) may not touch trading settings on a
-	// live route, regardless of which trading key is inside the patch.
-	for _, params := range []string{
-		`{"trading":{"limits":{"max_notional":50000}},"origin":"agent"}`,
-		`{"trading":{"limits":{"max_notional":50000}}}`,
-	} {
-		_, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(params)})
-		if err == nil || !strings.Contains(err.Error(), "agent-origin") {
-			t.Fatalf("live agent trading patch (%s) err = %v, want agent-origin refusal", params, err)
+	modes := []string{config.TradingModeDisabled, config.TradingModePaper, config.TradingModeLive}
+	origins := []struct {
+		name    string
+		field   string
+		allowed bool
+	}{
+		{name: "missing"},
+		{name: "agent", field: `,"origin":"agent"`},
+		{name: "human tty", field: `,"origin":"human-tty"`, allowed: true},
+		{name: "paired device", field: `,"origin":"human-paired-device"`},
+	}
+	for _, mode := range modes {
+		for _, origin := range origins {
+			t.Run(mode+"/"+origin.name, func(t *testing.T) {
+				srv := newPlatformSettingsTestServer(t, config.Trading{Mode: mode})
+				params := `{"trading":{"freeze":true}` + origin.field + `}`
+				_, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(params)})
+				if !origin.allowed {
+					if err == nil || !strings.Contains(err.Error(), "terminal-only") {
+						t.Fatalf("trading patch err=%v, want terminal-only refusal", err)
+					}
+					if srv.tradingFrozen() || srv.platformSettings.tradingControlGeneration() != 0 {
+						t.Fatal("refused origin mutated trading controls")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("human trading patch: %v", err)
+				}
+				if !srv.tradingFrozen() || srv.platformSettings.tradingControlGeneration() != 1 {
+					t.Fatal("human trading patch did not publish one control generation")
+				}
+			})
 		}
 	}
 
-	// A human origin passes the origin gate; whatever error remains must be
-	// about limit writability, not origin.
-	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"limits":{"max_notional":50000}},"origin":"human-tty"}`)}); err != nil && strings.Contains(err.Error(), "agent-origin") {
-		t.Fatalf("live human trading patch err = %v, want no origin refusal", err)
-	}
-
-	// Feature toggles stay origin-free even on live: they cannot loosen
-	// broker-write limits.
+	// Feature toggles remain origin-free because they cannot relax the five
+	// broker-write controls protected by the human-only boundary.
+	srv := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModeLive})
 	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"features":{"stock_protection":{"enabled":true}},"origin":"agent"}`)}); err != nil {
 		t.Fatalf("live agent feature patch err = %v, want success", err)
 	}
@@ -208,7 +225,7 @@ func TestPlatformSettingsTradingFreezeBlocksWritesAllowsCancels(t *testing.T) {
 		t.Fatalf("freeze setting = %+v, want writable runtime false", got.Trading.Freeze)
 	}
 
-	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"freeze":true}}`)}); err != nil {
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"origin":"human-tty","trading":{"freeze":true}}`)}); err != nil {
 		t.Fatalf("engage freeze: %v", err)
 	}
 	if !srv.tradingFrozen() {
@@ -221,27 +238,27 @@ func TestPlatformSettingsTradingFreezeBlocksWritesAllowsCancels(t *testing.T) {
 		t.Fatalf("frozen write authorization = %+v, want trading_frozen blocker", auth)
 	}
 	cancelAuth := auth.forCancel()
-	if !cancelAuth.Allowed || hasBlocker(cancelAuth.Blockers, tradingFrozenBlockerCode) {
-		t.Fatalf("frozen cancel authorization = %+v, want allowed", cancelAuth)
+	if hasBlocker(cancelAuth.Blockers, tradingFrozenBlockerCode) {
+		t.Fatalf("frozen cancel authorization retained trading_frozen: %+v", cancelAuth)
 	}
 	if !hasBlocker(srv.purgeExecuteBlockers(status), tradingFrozenBlockerCode) {
 		t.Fatal("purge execute blockers missing trading_frozen while frozen")
 	}
 
-	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"freeze":null}}`)}); err != nil {
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"origin":"human-tty","trading":{"freeze":null}}`)}); err != nil {
 		t.Fatalf("reset freeze: %v", err)
 	}
 	if srv.tradingFrozen() {
 		t.Fatal("tradingFrozen after freeze=null reset = true, want false")
 	}
-	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"freeze":"yes"}}`)}); err == nil {
+	if _, err := srv.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"origin":"human-tty","trading":{"freeze":"yes"}}`)}); err == nil {
 		t.Fatal("non-boolean trading.freeze accepted")
 	}
 
 	// The brake is deliberately not gated on tradingLimitWritability: it
 	// must engage even while order entry is disabled or misconfigured.
 	disabled := newPlatformSettingsTestServer(t, config.Trading{Mode: config.TradingModeDisabled})
-	if _, err := disabled.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"trading":{"freeze":true}}`)}); err != nil {
+	if _, err := disabled.handleSettingsUpdate(context.Background(), &rpc.Request{Params: []byte(`{"origin":"human-tty","trading":{"freeze":true}}`)}); err != nil {
 		t.Fatalf("freeze while trading disabled: %v", err)
 	}
 	if !disabled.tradingFrozen() {

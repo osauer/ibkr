@@ -102,7 +102,37 @@ const (
 	alertShadowDataHealthSilenceHorizon = time.Minute
 	alertShadowHotPollRefreshInterval   = 30 * time.Second
 	alertShadowReasonProducerSilent     = "producer_silent"
+	protectionOrderUniverseJournaledAPI = string(rpc.AlertAuthorityUniverseJournaledAPIOrders)
+	protectionOrderSnapshotMaxAge       = time.Minute
 )
+
+var alertShadowCanonicalRulebookRows = [...]struct {
+	ID     string
+	Number int
+}{
+	{risk.RuleSingleNameExposure, 1},
+	{risk.RuleOptionLinePremium, 2},
+	{risk.RuleCashSellOnly, 3},
+	{risk.RuleExtrinsicBudget, 4},
+	{risk.RuleExpiryRunway, 5},
+	{risk.RuleCatalystCoverage, 6},
+	{risk.RuleOverwriteEarnings, 7},
+	{risk.RuleEarningsSizeFreeze, 8},
+	{risk.RuleRedOnGreen, 9},
+	{risk.RuleWinnerTrim, 10},
+	{risk.RuleGreenDayAction, 11},
+	{risk.RuleHedgeIntegrity, 12},
+	{risk.RuleExitDiscipline, 13},
+	{risk.RuleFXExposure, 14},
+}
+
+var alertShadowCanonicalRulebookHealth = [...]string{
+	"account",
+	"positions",
+	"earnings",
+	"regime_stage",
+	"tape",
+}
 
 // alertShadowComposer is a record-only producer boundary. It has no sender,
 // pageability, cooldown, dwell, or threshold policy. Producers submit already
@@ -159,11 +189,16 @@ type alertShadowNudgeInput struct {
 // General partial or unprotected rows are context only under the approved v1
 // shadow policy; only orphaned and reconciliation-required facts are active.
 type alertShadowProtectionInput struct {
-	AsOf         time.Time
-	EvidenceAsOf time.Time
-	Status       string
-	Summary      rpc.ProtectionCoverageSummary
-	Scope        alertShadowBrokerScope
+	AsOf                  time.Time
+	EvidenceAsOf          time.Time
+	Status                string
+	Summary               rpc.ProtectionCoverageSummary
+	Scope                 alertShadowBrokerScope
+	OrderSnapshotAsOf     time.Time
+	OrderSnapshotComplete bool
+	OrderUniverse         string
+	orderJournal          *orderJournalStore
+	orderAuthorityHeadSeq int64
 }
 
 type alertShadowGatewayPhase string
@@ -190,6 +225,7 @@ type alertShadowSourceBatch struct {
 	Source                      rpc.AlertSource
 	Status                      string
 	Reason                      string
+	AuthorityUniverse           rpc.AlertAuthorityUniverse
 	InputAsOf                   time.Time
 	ObservedAt                  time.Time
 	EvidenceAsOf                time.Time
@@ -222,14 +258,15 @@ type alertShadowStatusReport struct {
 }
 
 type alertShadowSourceStatus struct {
-	Source       rpc.AlertSource          `json:"source"`
-	Status       string                   `json:"status"`
-	Reason       string                   `json:"reason"`
-	InputAsOf    time.Time                `json:"input_as_of,omitzero"`
-	ObservedAt   time.Time                `json:"observed_at,omitzero"`
-	Covered      bool                     `json:"covered"`
-	Active       int                      `json:"active_candidates"`
-	Measurements alertShadowSourceMetrics `json:"measurements"`
+	Source            rpc.AlertSource            `json:"source"`
+	Status            string                     `json:"status"`
+	Reason            string                     `json:"reason"`
+	AuthorityUniverse rpc.AlertAuthorityUniverse `json:"authority_universe,omitempty"`
+	InputAsOf         time.Time                  `json:"input_as_of,omitzero"`
+	ObservedAt        time.Time                  `json:"observed_at,omitzero"`
+	Covered           bool                       `json:"covered"`
+	Active            int                        `json:"active_candidates"`
+	Measurements      alertShadowSourceMetrics   `json:"measurements"`
 }
 
 type alertShadowSourceMetrics struct {
@@ -263,6 +300,9 @@ func defaultAlertShadowSources(scope alertShadowBrokerScope) map[rpc.AlertSource
 		batch := alertShadowSourceBatch{
 			Source: source, Status: alertShadowStatusNotObserved, Reason: alertShadowReasonNotObserved,
 			EvidenceHealth: rpc.AlertEvidenceUnavailable, Scope: scope, Observations: []alertEpisodeObservation{},
+		}
+		if source == rpc.AlertSourceProtection {
+			batch.AuthorityUniverse = rpc.AlertAuthorityUniverseJournaledAPIOrders
 		}
 		out[source] = batch
 	}
@@ -733,7 +773,7 @@ func (c *alertShadowComposer) Status(scope alertShadowBrokerScope) alertShadowSt
 			batch.Status, batch.Reason = alertShadowStatusError, alertShadowReasonSourceTimeInvalid
 		}
 		report.Sources = append(report.Sources, alertShadowSourceStatus{
-			Source: source, Status: batch.Status, Reason: batch.Reason, InputAsOf: batch.InputAsOf,
+			Source: source, Status: batch.Status, Reason: batch.Reason, AuthorityUniverse: batch.AuthorityUniverse, InputAsOf: batch.InputAsOf,
 			ObservedAt: batch.ObservedAt, Covered: covered, Active: activeBySource[source], Measurements: metricsBySource[source],
 		})
 	}
@@ -903,10 +943,17 @@ func (c *alertShadowComposer) observationTimeLocked(sourceAsOf time.Time) (time.
 
 func (c *alertShadowComposer) applyLocked(ctx context.Context, state *alertShadowScopeState, evaluationAt time.Time, opportunitySources []rpc.AlertSource, cursorKind string, cursor alertShadowInputCursor) (rpc.AlertCandidateSnapshot, error) {
 	evaluationAt = evaluationAt.UTC()
-	if durable, ok, err := c.registry.scopeState(state.scope.authority); err != nil {
+	durable, durableOK, err := c.registry.scopeState(state.scope.authority)
+	if err != nil {
 		return rpc.AlertCandidateSnapshot{}, err
-	} else if ok && evaluationAt.Before(durable.AsOf) {
+	} else if durableOK && evaluationAt.Before(durable.AsOf) {
 		return rpc.AlertCandidateSnapshot{}, errors.New("alert shadow authority clock is behind durable scoped state")
+	}
+	durablePolicyByEpisode := make(map[string]string, len(durable.Episodes))
+	if durableOK {
+		for _, record := range durable.Episodes {
+			durablePolicyByEpisode[record.EpisodeKey] = record.PolicyFingerprint
+		}
 	}
 	updated := make(map[rpc.AlertSource]struct{}, len(opportunitySources))
 	for _, source := range opportunitySources {
@@ -946,6 +993,13 @@ func (c *alertShadowComposer) applyLocked(ctx context.Context, state *alertShado
 			}
 			batch := state.sources[candidate.Source]
 			if !batch.NegativeReady || !alertShadowCandidateMatchesScope(candidate, batch.Scope) {
+				continue
+			}
+			// The retired Protection classifier cannot be recovered by a successor
+			// authority universe merely because the new classifier omitted it. Other
+			// sources use stable episode identities across legitimate policy changes,
+			// so their current negative is the authoritative recovery evidence.
+			if policy := durablePolicyByEpisode[candidate.EpisodeKey]; !alertShadowPolicyMayRecover(candidate.Source, policy, batch.PolicyFingerprint) {
 				continue
 			}
 			reason := alertShadowDecisionClassifiedNegativeUntrusted
@@ -1001,6 +1055,16 @@ func (c *alertShadowComposer) applyLocked(ctx context.Context, state *alertShado
 	state.pendingApplyFailures = 0
 	state.applied = true
 	return snapshot, nil
+}
+
+func alertShadowPolicyMayRecover(source rpc.AlertSource, durablePolicy, currentPolicy string) bool {
+	if durablePolicy == "" || currentPolicy == "" {
+		return false
+	}
+	if source == rpc.AlertSourceProtection {
+		return durablePolicy == currentPolicy
+	}
+	return true
 }
 
 func alertShadowRegistrySourceState(batch alertShadowSourceBatch) alertEpisodeRegistrySourceState {
@@ -1309,14 +1373,15 @@ type alertShadowProtectionFact struct {
 }
 
 func alertShadowMapProtection(input alertShadowProtectionInput, observedAt time.Time) alertShadowSourceBatch {
-	policyFingerprint := opaqueIdentity("alert-shadow-protection-policy", "orphan-reconcile-v1")
+	policyFingerprint := opaqueIdentity("alert-shadow-protection-policy", "api-order-orphan-reconcile-v2")
 	evidenceAsOf := input.EvidenceAsOf.UTC()
 	if evidenceAsOf.IsZero() {
 		evidenceAsOf = input.AsOf.UTC()
 	}
 	batch := alertShadowSourceBatch{
 		Source: rpc.AlertSourceProtection, Status: alertShadowStatusUnavailable, Reason: alertShadowReasonPortfolioEvidenceUnavailable,
-		InputAsOf: input.AsOf.UTC(), ObservedAt: observedAt.UTC(), EvidenceAsOf: evidenceAsOf,
+		AuthorityUniverse: rpc.AlertAuthorityUniverseJournaledAPIOrders,
+		InputAsOf:         input.AsOf.UTC(), ObservedAt: observedAt.UTC(), EvidenceAsOf: evidenceAsOf,
 		EvidenceHealth: rpc.AlertEvidenceUnavailable, FreshUntil: observedAt.UTC().Add(alertShadowProtectionSilenceHorizon),
 		PolicyFingerprint: policyFingerprint, NegativeSeverity: rpc.AlertSeverityWatch,
 		NegativeDestination: rpc.AlertDestinationAlerts, Scope: input.Scope, Observations: []alertEpisodeObservation{},
@@ -1334,6 +1399,19 @@ func alertShadowMapProtection(input alertShadowProtectionInput, observedAt time.
 	default:
 		batch.Status, batch.Reason, batch.EvidenceHealth = alertShadowStatusError, alertShadowReasonSnapshotInvalid, rpc.AlertEvidenceError
 		return batch
+	}
+	if input.OrderUniverse != protectionOrderUniverseJournaledAPI || !input.OrderSnapshotComplete {
+		batch.Status, batch.Reason, batch.EvidenceHealth = alertShadowStatusUnavailable, alertShadowReasonSourceHealthUnavailable, rpc.AlertEvidenceUnavailable
+		return batch
+	}
+	orderAsOf := input.OrderSnapshotAsOf.UTC()
+	if orderAsOf.IsZero() || orderAsOf.After(input.AsOf.UTC()) || input.AsOf.UTC().Sub(orderAsOf) > protectionOrderSnapshotMaxAge {
+		batch.Status, batch.Reason, batch.EvidenceHealth = alertShadowStatusStale, alertShadowReasonSourceHealthStale, rpc.AlertEvidenceStale
+		return batch
+	}
+	if evidenceAsOf.IsZero() || orderAsOf.Before(evidenceAsOf) {
+		evidenceAsOf = orderAsOf
+		batch.EvidenceAsOf = evidenceAsOf
 	}
 	if input.EvidenceAsOf.IsZero() || input.EvidenceAsOf.After(input.AsOf) || input.Summary.AsOf.IsZero() || input.Summary.AsOf.After(input.AsOf) {
 		batch.Status, batch.Reason, batch.EvidenceHealth = alertShadowStatusError, alertShadowReasonSourceTimeInvalid, rpc.AlertEvidenceError
@@ -2039,11 +2117,14 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 	if result.Status == "degraded" {
 		covered, worst, reason = false, rpc.AlertEvidencePartial, alertShadowReasonSourceHealthIncomplete
 	}
-	required := map[string]bool{"positions": false, "account": false}
+	required := make(map[string]bool, len(alertShadowCanonicalRulebookHealth))
+	for _, source := range alertShadowCanonicalRulebookHealth {
+		required[source] = false
+	}
 	seenHealth := make(map[string]struct{}, len(result.InputHealth))
 	for _, health := range result.InputHealth {
 		name := strings.TrimSpace(health.Source)
-		if name == "" {
+		if name == "" || name != health.Source {
 			covered, worst, reason = false, rpc.AlertEvidenceError, alertShadowReasonSourceHealthError
 			continue
 		}
@@ -2052,9 +2133,11 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 			continue
 		}
 		seenHealth[name] = struct{}{}
-		if _, ok := required[name]; ok {
-			required[name] = true
+		if _, ok := required[name]; !ok {
+			covered, worst, reason = false, rpc.AlertEvidenceError, alertShadowReasonSourceHealthError
+			continue
 		}
+		required[name] = true
 		switch strings.ToLower(strings.TrimSpace(health.Status)) {
 		case rpc.SourceStatusOK:
 			if health.AsOf.IsZero() || health.AsOf.After(result.AsOf) {
@@ -2090,7 +2173,8 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 	seenRules := make(map[string]struct{}, len(result.Rules))
 	for _, row := range result.Rules {
 		id := strings.TrimSpace(row.ID)
-		if id == "" {
+		number, canonical := alertShadowCanonicalRulebookRow(id)
+		if id == "" || id != row.ID || !canonical || row.Number != number {
 			covered, worst, reason = false, rpc.AlertEvidenceError, alertShadowReasonCandidateInvalid
 			continue
 		}
@@ -2111,7 +2195,12 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 				worst, reason = rpc.AlertEvidencePartial, alertShadowReasonSourceHealthIncomplete
 			}
 			continue
-		case risk.RuleStatusPass, risk.RuleStatusInfo, risk.RuleStatusNotEvaluated:
+		case risk.RuleStatusPass, risk.RuleStatusInfo:
+			continue
+		case risk.RuleStatusNotEvaluated:
+			if !alertShadowRulebookSafeNotEvaluated(row) {
+				covered, worst, reason = false, rpc.AlertEvidenceError, alertShadowReasonCandidateInvalid
+			}
 			continue
 		default:
 			covered, worst, reason = false, rpc.AlertEvidenceError, alertShadowReasonCandidateInvalid
@@ -2138,6 +2227,12 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 			ProducerDecisionReason: alertShadowDecisionRulebookActive,
 		})
 	}
+	if len(seenRules) != len(alertShadowCanonicalRulebookRows) {
+		covered = false
+		if alertShadowEvidenceRank(rpc.AlertEvidencePartial) > alertShadowEvidenceRank(worst) {
+			worst, reason = rpc.AlertEvidencePartial, alertShadowReasonSourceHealthIncomplete
+		}
+	}
 	batch.Covered, batch.EvidenceHealth, batch.Reason = covered && worst == rpc.AlertEvidenceCurrent, worst, reason
 	batch.Status = alertShadowStatusForEvidence(worst)
 	if batch.Covered {
@@ -2148,6 +2243,28 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 	}
 	sort.Slice(batch.Observations, func(i, j int) bool { return batch.Observations[i].EpisodeKey < batch.Observations[j].EpisodeKey })
 	return batch
+}
+
+func alertShadowCanonicalRulebookRow(id string) (int, bool) {
+	for _, row := range alertShadowCanonicalRulebookRows {
+		if row.ID == id {
+			return row.Number, true
+		}
+	}
+	return 0, false
+}
+
+func alertShadowRulebookSafeNotEvaluated(row risk.RuleRow) bool {
+	switch row.ID {
+	case risk.RuleCatalystCoverage, risk.RuleOverwriteEarnings, risk.RuleEarningsSizeFreeze:
+		return row.Reason == risk.EarningsReasonTerminalNonReporting
+	case risk.RuleRedOnGreen, risk.RuleWinnerTrim:
+		return row.Reason == risk.RuleReasonOffSession
+	case risk.RuleHedgeIntegrity:
+		return row.Reason == risk.RuleReasonNoLongBook
+	default:
+		return false
+	}
 }
 
 func alertShadowMapOrderIntegrity(scope alertShadowBrokerScope, input orderIntegrityEvaluation, observedAt time.Time, previous map[string]struct{}) (alertShadowSourceBatch, map[string]struct{}) {
@@ -2307,11 +2424,12 @@ func alertShadowMapNudges(input alertShadowNudgeInput, observedAt time.Time) (ma
 		}
 		batches[source] = batch
 	}
-	if !validSnapshot || !policyValid || !storeValid {
+	if !validSnapshot || !policyValid {
 		return batches, duplicates, nil
 	}
 
 	seen := make(map[string]alertEpisodeObservation)
+	invalidSources := make(map[rpc.AlertSource]bool, len(alertShadowNudgeSources))
 	for _, wireCandidate := range result.Candidates {
 		canonical, err := risk.CanonicalizeNudgeCandidate(risk.NudgeCandidate{
 			Fingerprint: wireCandidate.Fingerprint, Kind: wireCandidate.Kind, State: wireCandidate.State,
@@ -2327,6 +2445,7 @@ func alertShadowMapNudges(input alertShadowNudgeInput, observedAt time.Time) (ma
 				batch.Reason = alertShadowReasonCandidateInvalid
 				batch.EvidenceHealth = rpc.AlertEvidenceError
 				batches[source] = batch
+				invalidSources[source] = true
 			}
 			continue
 		}
@@ -2339,6 +2458,7 @@ func alertShadowMapNudges(input alertShadowNudgeInput, observedAt time.Time) (ma
 				batch.Reason = alertShadowReasonCandidateInvalid
 				batch.EvidenceHealth = rpc.AlertEvidenceError
 				batches[owner] = batch
+				invalidSources[owner] = true
 			}
 			continue
 		}
@@ -2351,8 +2471,10 @@ func alertShadowMapNudges(input alertShadowNudgeInput, observedAt time.Time) (ma
 			batch.Reason = alertShadowReasonCandidateInvalid
 			batch.EvidenceHealth = rpc.AlertEvidenceError
 			batches[source] = batch
+			invalidSources[source] = true
 			continue
 		}
+		_, candidateEvidenceHealth, _, _ := alertShadowNudgeCandidateHealth(canonical.Kind, result.AsOf, health, input.StoreHealth)
 		episodeKey, err := rpc.BuildAlertEpisodeKey(
 			source, kind, input.Scope.account, input.Scope.mode, canonical.Fingerprint,
 		)
@@ -2363,7 +2485,7 @@ func alertShadowMapNudges(input alertShadowNudgeInput, observedAt time.Time) (ma
 		observation := alertEpisodeObservation{
 			EpisodeKey: episodeKey, Source: source, Kind: kind, Active: true, Severity: severity,
 			DeliveryPreference: rpc.AlertDeliveryUnapproved, EvidenceFingerprint: canonical.Fingerprint,
-			EvidenceHealth: batch.EvidenceHealth, Destination: destination, EvidenceAsOf: canonical.OccurredAt.UTC(),
+			EvidenceHealth: candidateEvidenceHealth, Destination: destination, EvidenceAsOf: canonical.OccurredAt.UTC(),
 			ObservedAt: observedAt.UTC(), PolicyFingerprint: policyFingerprint.Key,
 			ProducerDecisionReason: alertShadowDecisionNudgeActive,
 		}
@@ -2380,7 +2502,7 @@ func alertShadowMapNudges(input alertShadowNudgeInput, observedAt time.Time) (ma
 	}
 	for _, source := range alertShadowNudgeSources {
 		batch := batches[source]
-		if batch.Status == alertShadowStatusError {
+		if invalidSources[source] {
 			batch.Covered = false
 			for i := range batch.Observations {
 				batch.Observations[i].EvidenceHealth = rpc.AlertEvidenceError
@@ -2395,7 +2517,33 @@ func alertShadowMapNudges(input alertShadowNudgeInput, observedAt time.Time) (ma
 }
 
 func alertShadowNudgeHealth(source rpc.AlertSource, asOf time.Time, health rpc.NudgeSourceHealth, storeHealth rpc.NudgeInputHealth) (bool, rpc.AlertEvidenceHealth, string, time.Time) {
-	inputs := alertShadowNudgeRequiredHealth(source, health, storeHealth)
+	return alertShadowNudgeHealthInputs(asOf, alertShadowNudgeRequiredHealth(source, health, storeHealth))
+}
+
+func alertShadowNudgeCandidateHealth(kind string, asOf time.Time, health rpc.NudgeSourceHealth, storeHealth rpc.NudgeInputHealth) (bool, rpc.AlertEvidenceHealth, string, time.Time) {
+	var inputs []rpc.NudgeInputHealth
+	switch kind {
+	case rpc.NudgeKindPolicyDrift:
+		inputs = []rpc.NudgeInputHealth{health.Policy, health.Pins}
+	case rpc.NudgeKindDrawdownLatched:
+		inputs = []rpc.NudgeInputHealth{health.Policy, health.Capital}
+	case rpc.NudgeKindShadowWouldBlock:
+		inputs = []rpc.NudgeInputHealth{health.Policy, health.Capital, storeHealth}
+	case rpc.NudgeKindReconcileException:
+		inputs = []rpc.NudgeInputHealth{health.Policy, health.Reconciliation}
+	case rpc.NudgeKindReconcileDue:
+		inputs = []rpc.NudgeInputHealth{health.Policy, health.Capital, health.Cadence}
+	case rpc.NudgeKindConfirmedFlow:
+		inputs = []rpc.NudgeInputHealth{health.Policy, health.Reconciliation, health.ConfirmedFlow, storeHealth}
+	case rpc.NudgeKindMonthlyPulse:
+		inputs = []rpc.NudgeInputHealth{health.Policy, health.Pins, health.Cadence, storeHealth, health.Reconciliation}
+	default:
+		inputs = []rpc.NudgeInputHealth{{Status: rpc.NudgeInputStatusError, Reason: rpc.NudgeHealthReasonInvalid}}
+	}
+	return alertShadowNudgeHealthInputs(asOf, inputs)
+}
+
+func alertShadowNudgeHealthInputs(asOf time.Time, inputs []rpc.NudgeInputHealth) (bool, rpc.AlertEvidenceHealth, string, time.Time) {
 	oldest := time.Time{}
 	worst := rpc.AlertEvidenceCurrent
 	reason := alertShadowReasonCurrent
@@ -2424,7 +2572,7 @@ func alertShadowNudgeRequiredHealth(source rpc.AlertSource, health rpc.NudgeSour
 	case rpc.AlertSourceReconciliation:
 		return []rpc.NudgeInputHealth{health.Policy, health.Reconciliation, health.Capital, health.Cadence, health.ConfirmedFlow, storeHealth}
 	case rpc.AlertSourceGovernance:
-		return []rpc.NudgeInputHealth{health.Policy, health.Pins, health.Cadence, storeHealth}
+		return []rpc.NudgeInputHealth{health.Policy, health.Pins, health.Cadence, storeHealth, health.Reconciliation}
 	default:
 		return []rpc.NudgeInputHealth{{Status: rpc.NudgeInputStatusError, Reason: rpc.NudgeHealthReasonInvalid}}
 	}
@@ -2664,14 +2812,21 @@ func alertShadowProtectionInputFingerprint(input alertShadowProtectionInput) (st
 	})
 	facts, valid := alertShadowProtectionFacts(input.Summary)
 	return alertShadowFingerprint(struct {
-		Account       string                      `json:"account"`
-		Mode          string                      `json:"mode"`
-		Status        string                      `json:"status"`
-		SummaryStatus string                      `json:"summary_status"`
-		Rows          []rowState                  `json:"rows"`
-		Facts         []alertShadowProtectionFact `json:"facts"`
-		Valid         bool                        `json:"valid"`
-	}{input.Scope.account, input.Scope.mode, input.Status, input.Summary.Status, rows, facts, valid})
+		Account               string                      `json:"account"`
+		Mode                  string                      `json:"mode"`
+		Status                string                      `json:"status"`
+		SummaryStatus         string                      `json:"summary_status"`
+		EvidenceAsOf          time.Time                   `json:"evidence_as_of"`
+		OrderSnapshotAsOf     time.Time                   `json:"order_snapshot_as_of"`
+		SummaryAsOf           time.Time                   `json:"summary_as_of"`
+		OrderUniverse         string                      `json:"order_universe"`
+		OrderSnapshotComplete bool                        `json:"order_snapshot_complete"`
+		Rows                  []rowState                  `json:"rows"`
+		Facts                 []alertShadowProtectionFact `json:"facts"`
+		Valid                 bool                        `json:"valid"`
+	}{input.Scope.account, input.Scope.mode, input.Status, input.Summary.Status,
+		input.EvidenceAsOf.UTC(), input.OrderSnapshotAsOf.UTC(), input.Summary.AsOf.UTC(), input.OrderUniverse,
+		input.OrderSnapshotComplete, rows, facts, valid})
 }
 
 func alertShadowDataHealthInputFingerprint(input alertShadowDataHealthInput) (string, error) {

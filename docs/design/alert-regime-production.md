@@ -8,7 +8,7 @@ shadow/advisory only
 **Owner:** osauer
 
 **Shadow-producer policy approval:** 2026-07-21, desk-owner approval for
-`market-stress-v1`, `orphan-reconcile-v1`, and `root-source-v1`
+`market-stress-v1`, `api-order-orphan-reconcile-v2`, and `root-source-v1`
 
 ## Decision
 
@@ -176,12 +176,31 @@ The commissioned producer boundary is explicit:
   existing episode.
 - Protection consumes only the complete, unfiltered positions coverage ledger
   backed by a current, account-matched portfolio-stream receipt. Under
-  `orphan-reconcile-v1`, orphaned protective orders and
-  reconciliation-required rows open watch episodes in Alerts. Partial or
-  unprotected holdings remain context and are negative for this deliberately
-  narrow producer; the policy does not assert that every holding must have a
-  stop. Unknown or stale positions/order evidence retains an episode and
-  cannot clear it.
+  `api-order-orphan-reconcile-v2`, its exact authority universe is
+  daemon-journaled API orders checked against a complete all-client API
+  open-order inventory. The final observation is bound to one socket session,
+  order-lifecycle generation, structural portfolio generation, and local
+  SQLite order-event head. Orphaned protective orders and
+  reconciliation-required rows inside that universe open watch episodes in
+  Alerts. Partial or unprotected holdings remain context and are negative for
+  this deliberately narrow producer; the policy does not assert that every
+  holding must have a stop. A broker API order outside the daemon journal, an
+  open journaled order absent from the broker inventory, ambiguous identity, a
+  lifecycle-persistence gap, or stale/unknown evidence makes the observation
+  uncovered and cannot open or recover an episode. Manual TWS orders and
+  unmatched non-journaled API orders are explicitly outside v2 authority; the
+  all-client inventory detects their presence but does not adopt them into the
+  journal or claim them as covered. The producer remains shadow-only with
+  `delivery_preference=unapproved`.
+
+The retired `orphan-reconcile-v1` policy has no cross-policy automatic recovery
+authority. Any durable v1 episode remains retained as legacy shadow evidence
+and must not be cleared by a v2 negative, deleted from `daemon.db`, or treated
+as a current page. Before a later Protection delivery cutover, the desk owner
+must inspect whether such an episode exists and approve an exception-specific,
+one-time migration or retirement disposition with replay evidence. If no v1
+episode exists, the check records that fact and no migration is needed. This is
+an upgrade exception, not a recurring operator attestation.
 - Data Health consumes the complete typed `status.health` projection under
   `root-source-v1`. It opens one watch episode per failing root in the v1
   allowlist: Gateway connectivity, SQLite storage, enabled proposal/opportunity
@@ -236,7 +255,12 @@ state, never `early_warning`. The external IBKR borrow-fee file is attempted dur
 U.S. equity regular session; outside that window it is `not_due`, while an actual
 failed attempt and its bounded retry backoff are exposed separately. A last-good
 file from the latest completed equity session is expected overnight; an older
-file remains stale rather than being quieted as merely not due.
+file remains stale rather than being quieted as merely not due. `not_due` never
+triggers a TWS fallback. When a due FTP read is unusable, the daemon may inspect
+historical `FEE_RATE` only for exact currently held short-stock contracts under
+a complete, fresh, same-account portfolio receipt. Those observations are
+portfolio-only and scale-unverified, so they improve diagnosis but remain
+policy-ineligible and cannot emit or clear the extreme-fee condition.
 
 Candidate lifecycle has three externally meaningful states: open, qualifying
 escalation, and recovered. The producer decides whether a fact is active and

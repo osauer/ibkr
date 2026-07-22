@@ -40,15 +40,28 @@ type AlertShadowStatusResult struct {
 // AlertShadowSourceStatus reports coverage and calibration health for one
 // allowlisted source without exposing candidate or account identities.
 type AlertShadowSourceStatus struct {
-	Source       AlertSource             `json:"source"`
-	Status       string                  `json:"status"`
-	Reason       string                  `json:"reason"`
-	InputAsOf    time.Time               `json:"input_as_of,omitzero"`
-	ObservedAt   time.Time               `json:"observed_at,omitzero"`
-	Covered      bool                    `json:"covered"`
-	Active       int                     `json:"active_candidates"`
-	Measurements AlertShadowMeasurements `json:"measurements"`
+	Source            AlertSource             `json:"source"`
+	Status            string                  `json:"status"`
+	Reason            string                  `json:"reason"`
+	AuthorityUniverse AlertAuthorityUniverse  `json:"authority_universe,omitempty"`
+	InputAsOf         time.Time               `json:"input_as_of,omitzero"`
+	ObservedAt        time.Time               `json:"observed_at,omitzero"`
+	Covered           bool                    `json:"covered"`
+	Active            int                     `json:"active_candidates"`
+	Measurements      AlertShadowMeasurements `json:"measurements"`
 }
+
+// AlertAuthorityUniverse names the exact evidence population over which a
+// source may claim coverage. An empty value means the source does not expose a
+// narrower population than its source contract.
+type AlertAuthorityUniverse string
+
+const (
+	// AlertAuthorityUniverseJournaledAPIOrders limits Protection coverage to
+	// daemon-journaled API orders checked against the all-client broker
+	// inventory. It does not claim coverage over manual or unjournaled orders.
+	AlertAuthorityUniverseJournaledAPIOrders AlertAuthorityUniverse = "daemon_journaled_api_orders_checked_against_all_client_inventory"
+)
 
 // AlertShadowMeasurements contains cumulative, redacted commissioning counts.
 // Zero values mean no recorded observation, not successful coverage.

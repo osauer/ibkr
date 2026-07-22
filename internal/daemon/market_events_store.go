@@ -13,6 +13,7 @@ import (
 
 	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
 	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 const marketEventStateVersion = 1
@@ -118,6 +119,11 @@ func (c *marketEventCache) UseCoreStore(store *corestore.Store) error {
 	if err != nil {
 		return err
 	}
+	loadedAt := c.now().UTC()
+	feeRates, feeRateRevision, err := loadMarketEventFeeRateState(store, loadedAt)
+	if err != nil {
+		return err
+	}
 	c.mu.Lock()
 	c.authority = store
 	c.regSHO = regSHO
@@ -125,6 +131,10 @@ func (c *marketEventCache) UseCoreStore(store *corestore.Store) error {
 	c.borrowFees = marketEventBorrowFeeLastGood(borrowFees)
 	c.borrowFeesLastAttempt = cloneBorrowFeeAttempt(borrowFees.LastAttempt)
 	c.borrowFeesRevision = borrowFeesRevision
+	c.borrowFeeFallback = feeRates
+	c.borrowFeeFallbackRevision = feeRateRevision
+	c.borrowFeeFallbackLoadedAt = loadedAt
+	c.borrowFeeFallbackCurrent = map[string]ibkrlib.HistoricalSessionBinding{}
 	c.shortableAbsent = nil
 	c.regSHOFailedAt = time.Time{}
 	c.haltsFailedAt = time.Time{}

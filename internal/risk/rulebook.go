@@ -19,6 +19,15 @@ const (
 	RuleStatusNotEvaluated = "not_evaluated"
 )
 
+// These are the closed, policy-owned reasons that can make one canonical
+// Rulebook row not applicable. Alert recovery accepts no free-form or future
+// reason without an explicit policy change.
+const (
+	EarningsReasonTerminalNonReporting = "terminal_non_reporting"
+	RuleReasonOffSession               = "off_session"
+	RuleReasonNoLongBook               = "no_long_book"
+)
+
 // RuleSingleNameExposure and the related constants identify rules in stable
 // display order.
 const (
@@ -78,16 +87,23 @@ type RuleRow struct {
 
 // EarningsInput is the per-name earnings context mapped by the daemon.
 type EarningsInput struct {
-	Known     bool
-	Date      time.Time // ET calendar date (midnight ET)
-	TimeOfDay string    // "amc" | "bmo" | "" (unspecified)
-	Estimated bool
-	Stale     bool
+	Known bool
+	// TerminalNonReporting marks reviewed exact-contract evidence that no
+	// future issuer earnings event applies. It is neither a known date nor an
+	// unknown: rules 6-8 disclose an exemption for the relevant name.
+	TerminalNonReporting bool
+	Date                 time.Time // ET calendar date (midnight ET)
+	TimeOfDay            string    // "amc" | "bmo" | "" (unspecified)
+	Estimated            bool
+	Stale                bool
 	// SessionsUntil is the number of US equity sessions from today (ET) to
 	// the earnings date inclusive, computed by the daemon via marketcal.
 	// nil when unknown.
 	SessionsUntil *int
-	Source        string
+	// Source is the daemon's closed provenance vocabulary. verified_terminal
+	// means exact-contract authority was present; TerminalNonReporting is true
+	// only when that authority is current, identity-matched, and conflict-free.
+	Source string
 	// Reason is a stable typed explanation for unknown/stale evidence. It is
 	// disclosure only and never turns absence into a pass.
 	Reason string
@@ -132,6 +148,11 @@ type LegInput struct {
 // canary's concentration check reads.
 type NameInput struct {
 	Symbol string
+	// StockConID and StockSecType preserve the held underlying stock's broker
+	// identity for exact-contract classifications. Zero means no stock leg or
+	// no broker identity; symbol alone never activates such a classification.
+	StockConID   int
+	StockSecType string
 	// ExposureBase = stock + Σ delta×contracts×multiplier×spot, base ccy.
 	ExposureBase float64
 	// ExposureBaseComplete reports whether ExposureBase covers every leg the
@@ -699,17 +720,70 @@ func (c *ruleContext) earningsFor(sym string) (EarningsInput, bool) {
 	return e, true
 }
 
+func (c *ruleContext) terminalEarningsFor(sym string) (EarningsInput, bool) {
+	e, found := c.in.Earnings[sym]
+	if !found || !e.TerminalNonReporting || e.Stale {
+		return e, false
+	}
+	return e, true
+}
+
+// unresolvedTerminalEarningsFor identifies exact-contract terminal authority
+// that was present but could not grant the exemption (expired, stale, identity
+// conflict, or date-source conflict). The daemon's Source vocabulary is the
+// typed boundary; these states must fail closed before option-side or size
+// relevance can turn absence into a pass.
+func (c *ruleContext) unresolvedTerminalEarningsFor(sym string) (EarningsInput, bool) {
+	e, found := c.in.Earnings[sym]
+	if !found || e.Source != "verified_terminal" {
+		return e, false
+	}
+	if _, accepted := c.terminalEarningsFor(sym); accepted {
+		return e, false
+	}
+	return e, true
+}
+
+func unresolvedTerminalEarningsOffender(sym string) RuleOffender {
+	return RuleOffender{Symbol: sym, Note: "exact-contract terminal authority is unresolved; no date or exemption is usable"}
+}
+
+func terminalEarningsExemption(sym string) RuleOffender {
+	return RuleOffender{Symbol: sym, Note: "exact contract is verified terminal/non-reporting; no future issuer earnings event applies"}
+}
+
 func (c *ruleContext) catalystCoverage() RuleRow {
 	row := RuleRow{ID: RuleCatalystCoverage, Number: 6, Title: "Option outlives its catalyst"}
 	if g := c.portfolioGate(row.ID, row.Number, row.Title); g != nil {
 		return *g
 	}
-	var offenders, unknowns []RuleOffender
+	var offenders, unknowns, exempt []RuleOffender
 	earningsDrove := false
+	assessed := 0
 	for _, n := range c.in.Names {
 		if c.earningsExempt(n.Symbol) {
 			continue
 		}
+		if _, terminal := c.terminalEarningsFor(n.Symbol); terminal {
+			exempt = append(exempt, terminalEarningsExemption(n.Symbol))
+			continue
+		}
+		if _, unresolved := c.unresolvedTerminalEarningsFor(n.Symbol); unresolved {
+			earningsDrove = true
+			unknowns = append(unknowns, unresolvedTerminalEarningsOffender(n.Symbol))
+			continue
+		}
+		hasLong := false
+		for _, l := range n.Legs {
+			if l.Quantity > 0 {
+				hasLong = true
+				break
+			}
+		}
+		if !hasLong {
+			continue
+		}
+		assessed++
 		var otmLegs []LegInput
 		unassessable := 0
 		for _, l := range n.Legs {
@@ -752,6 +826,7 @@ func (c *ruleContext) catalystCoverage() RuleRow {
 	}
 	sortOffenders(offenders)
 	row.Offenders = offenders
+	row.Exempt = exempt
 	for _, o := range offenders {
 		row.ImpactBase += o.ImpactBase
 	}
@@ -768,6 +843,10 @@ func (c *ruleContext) catalystCoverage() RuleRow {
 		}
 		row.Offenders = unknowns
 		row.Evidence = fmt.Sprintf("%d name(s) with long options not assessable (missing earnings date or underlying).", len(unknowns))
+	case assessed == 0 && len(exempt) > 0:
+		row.Status = RuleStatusNotEvaluated
+		row.Reason = EarningsReasonTerminalNonReporting
+		row.Evidence = fmt.Sprintf("%d exact terminal/non-reporting contract(s) have no future issuer earnings catalyst.", len(exempt))
 	default:
 		row.Status = RuleStatusPass
 		row.Evidence = "Every OTM long option outlives its name's next earnings (or no OTM longs held)."
@@ -780,11 +859,31 @@ func (c *ruleContext) overwriteEarnings() RuleRow {
 	if g := c.portfolioGate(row.ID, row.Number, row.Title); g != nil {
 		return *g
 	}
-	var actOffenders, watchOffenders, unknowns []RuleOffender
+	var actOffenders, watchOffenders, unknowns, exempt []RuleOffender
+	assessed := 0
 	for _, n := range c.in.Names {
 		if c.earningsExempt(n.Symbol) {
 			continue
 		}
+		if _, terminal := c.terminalEarningsFor(n.Symbol); terminal {
+			exempt = append(exempt, terminalEarningsExemption(n.Symbol))
+			continue
+		}
+		if _, unresolved := c.unresolvedTerminalEarningsFor(n.Symbol); unresolved {
+			unknowns = append(unknowns, unresolvedTerminalEarningsOffender(n.Symbol))
+			continue
+		}
+		hasShort := false
+		for _, l := range n.Legs {
+			if l.Quantity < 0 {
+				hasShort = true
+				break
+			}
+		}
+		if !hasShort {
+			continue
+		}
+		assessed++
 		var shortCalls, shortPuts []LegInput
 		for _, l := range n.Legs {
 			switch {
@@ -859,6 +958,7 @@ func (c *ruleContext) overwriteEarnings() RuleRow {
 	sortOffenders(watchOffenders)
 	offenders := append(actOffenders, watchOffenders...)
 	row.Offenders = offenders
+	row.Exempt = exempt
 	for _, o := range offenders {
 		row.ImpactBase += o.ImpactBase
 	}
@@ -876,6 +976,10 @@ func (c *ruleContext) overwriteEarnings() RuleRow {
 		row.Reason = "earnings_unknown"
 		row.Offenders = unknowns
 		row.Evidence = fmt.Sprintf("%d name(s) with short options have no usable earnings date.", len(unknowns))
+	case assessed == 0 && len(exempt) > 0:
+		row.Status = RuleStatusNotEvaluated
+		row.Reason = EarningsReasonTerminalNonReporting
+		row.Evidence = fmt.Sprintf("%d exact terminal/non-reporting contract(s) have no future issuer earnings print.", len(exempt))
 	default:
 		row.Status = RuleStatusPass
 		row.Evidence = "No short option spans a known earnings print."
@@ -890,11 +994,21 @@ func (c *ruleContext) earningsSizeFreeze() RuleRow {
 	}
 	freeze := c.pol.EarningsFreezeSessions
 	row.Threshold = new(float64(freeze))
-	var offenders, unknowns []RuleOffender
+	var offenders, unknowns, exempt []RuleOffender
+	assessed := 0
 	for _, n := range c.in.Names {
 		if c.earningsExempt(n.Symbol) {
 			continue
 		}
+		if _, terminal := c.terminalEarningsFor(n.Symbol); terminal {
+			exempt = append(exempt, terminalEarningsExemption(n.Symbol))
+			continue
+		}
+		if _, unresolved := c.unresolvedTerminalEarningsFor(n.Symbol); unresolved {
+			unknowns = append(unknowns, unresolvedTerminalEarningsOffender(n.Symbol))
+			continue
+		}
+		assessed++
 		if c.greeksGapMaterial(n) {
 			// Exposure not assessable — the freeze cannot be ruled out
 			// unless earnings are provably beyond the window. A silent skip
@@ -929,6 +1043,7 @@ func (c *ruleContext) earningsSizeFreeze() RuleRow {
 	}
 	sortOffenders(offenders)
 	row.Offenders = offenders
+	row.Exempt = exempt
 	for _, o := range offenders {
 		row.ImpactBase += o.ImpactBase
 	}
@@ -942,6 +1057,10 @@ func (c *ruleContext) earningsSizeFreeze() RuleRow {
 		row.Reason = "earnings_unknown"
 		row.Offenders = unknowns
 		row.Evidence = fmt.Sprintf("%d oversized name(s) have no usable earnings date to check against.", len(unknowns))
+	case assessed == 0 && len(exempt) > 0:
+		row.Status = RuleStatusNotEvaluated
+		row.Reason = EarningsReasonTerminalNonReporting
+		row.Evidence = fmt.Sprintf("%d exact terminal/non-reporting contract(s) have no pre-earnings freeze window.", len(exempt))
 	default:
 		row.Status = RuleStatusPass
 		row.Evidence = "No oversized name inside the pre-earnings freeze window."
@@ -953,7 +1072,7 @@ func (c *ruleContext) redOnGreen() RuleRow {
 	row := RuleRow{ID: RuleRedOnGreen, Number: 9, Title: "Relative weakness on a green tape", Unit: "% day"}
 	if !c.in.SessionOpen {
 		row.Status = RuleStatusNotEvaluated
-		row.Reason = "off_session"
+		row.Reason = RuleReasonOffSession
 		row.Evidence = "Tape rules evaluate during the US regular session only."
 		return row
 	}
@@ -1010,7 +1129,7 @@ func (c *ruleContext) winnerTrim() RuleRow {
 	row := RuleRow{ID: RuleWinnerTrim, Number: 10, Title: "Trim winners into strength", Unit: "% day"}
 	if !c.in.SessionOpen {
 		row.Status = RuleStatusNotEvaluated
-		row.Reason = "off_session"
+		row.Reason = RuleReasonOffSession
 		row.Evidence = "Tape rules evaluate during the US regular session only."
 		return row
 	}
@@ -1122,7 +1241,7 @@ func (c *ruleContext) hedgeIntegrity() RuleRow {
 	}
 	if grossLong <= 0 {
 		row.Status = RuleStatusNotEvaluated
-		row.Reason = "no_long_book"
+		row.Reason = RuleReasonNoLongBook
 		row.Evidence = "No net-long exposure to hedge."
 		return row
 	}

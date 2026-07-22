@@ -242,7 +242,7 @@ MCP side is JSON-RPC 2.0.</p>
 <tr>
 <td>TWS / IB Gateway API socket</td>
 <td>TWS wire protocol over TCP/TLS</td>
-<td>Account, positions, quotes, option chains/Greeks/OI, historical bars, scanners, order lifecycle, shortable-share observations, subscription-gated Wall Street Horizon earnings events, and broker WhatIf/eligibility.</td>
+<td>Account, positions, quotes, option chains/Greeks/OI, historical bars, scanners, order lifecycle, shortable-share observations, subscription-gated Wall Street Horizon earnings events, and broker WhatIf/eligibility. This includes an exact-contract historical <code>FEE_RATE</code> context fallback for currently held short stocks when the due FTP source is unusable; its scale is uncommissioned and policy-ineligible.</td>
 </tr>
 <tr>
 <td>IBKR Flex Web Service</td>
@@ -252,7 +252,7 @@ MCP side is JSON-RPC 2.0.</p>
 <tr>
 <td>IBKR short-stock availability</td>
 <td>FTP</td>
-<td>Borrow availability and fee-rate evidence.</td>
+<td>Primary global borrow availability and annualized fee-rate evidence; only current/session-valid rows can drive the extreme-fee flag.</td>
 </tr>
 <tr>
 <td>Nasdaq</td>
@@ -278,10 +278,29 @@ MCP side is JSON-RPC 2.0.</p>
 </table>
 </div>
 <p>Market-event, earnings-provider, contract-resolution, and membership
-projections plus retained observations live in <code>daemon.db</code>. Borrow-fee and
-earnings attempts retain typed failure and retry state there so a restart
-cannot erase a failed source read. Other refreshable views stay in memory or
-use disposable scratch only.</p>
+projections plus retained observations live in <code>daemon.db</code>. The primary FTP
+borrow-fee state and the exact-contract TWS fallback use separate documents, so
+a portfolio-only result can never replace the global last-good. TWS keys combine
+an opaque account-scope fingerprint with the complete exact contract identity;
+observations remain decision-ineligible while the scale is uncommissioned.
+Persisted fallback attempts are dated context and never suppress a fresh
+post-restart entitlement/data read. Earnings and FTP borrow-fee attempts retain
+typed failure and retry state there so a restart cannot erase a failed source
+read. Other refreshable views stay in memory or use disposable scratch only.</p>
+<p>Reviewed terminal/non-reporting earnings evidence is also daemon-owned typed
+state. An optional private <code>[rulebook].terminal_evidence_file</code> is read only at
+startup as a validated import/update; rule snapshots serve the committed
+exact-contract SQLite revision and never fall back to the file or ticker text.
+Explicit removal retains a per-ConID revocation watermark in that SQLite
+document; reactivation requires record verification strictly later than the
+watermark, so bumping only the import wrapper cannot resurrect old evidence.
+Every initialize/import/update/revoke revision atomically appends a typed,
+prose-free authority-change observation with the old/new catalog fingerprints,
+review times, and per-contract dispositions. Rule-transition event payloads
+link any accepted terminal classification back to that chain with the exact
+contract ConID, authority revision and record fingerprint, review and validity
+times, and classification. They emit an explicit empty linkage list otherwise
+and exclude issuer/symbol text, CIK, source URLs, and evidence prose.</p>
 <h2 id="data-and-persistence"><span class="secno" aria-hidden="true">06</span>Data and Persistence</h2>
 <p><a href="diagrams/data-and-persistence.svg"><img src="diagrams/data-and-persistence.svg" alt="ibkr canary state ownership and lifecycle"></a></p>
 <p><a href="diagrams/data-and-persistence.png">PNG fallback</a> ·
@@ -308,7 +327,7 @@ current recovery limits.</p>
 <tr>
 <td>Operator configuration</td>
 <td><code>$XDG_CONFIG_HOME/ibkr/config.toml</code>, falling back to <code>~/.config/ibkr/config.toml</code>; policy defaults under <code>~/.config/ibkr/policies/</code></td>
-<td>Gateway/account/client pins, daemon/trading settings, protection/opportunity policy, the operator-authored <code>risk-policy.toml</code>, and the separate <code>flex-token</code> secret. The risk policy has no embedded default: missing approval stays unapproved.</td>
+<td>Gateway/account/client pins, daemon/trading settings, protection/opportunity policy, the operator-authored <code>risk-policy.toml</code>, the optional private terminal-evidence import path, and the separate <code>flex-token</code> secret. The risk policy has no embedded default: missing approval stays unapproved.</td>
 </tr>
 <tr>
 <td>Daemon durable authority</td>
@@ -506,7 +525,12 @@ daemon-owned sources and never recreate risk or trading verdicts.</p>
 <p>Market-event flags are daemon-owned observed context. Adapters render or
 filter the typed <code>market_events.snapshot</code>; they do not refetch Reg SHO, halt,
 borrow-inventory, borrow-fee, or earnings sources, and they do not duplicate
-proposal-blocking policy.</p>
+proposal-blocking policy. The daemon also owns the <code>borrow_fee_coverage</code>
+projection: FTP is global authority, while historical <code>FEE_RATE</code> is bounded by
+the atomic portfolio rows/receipt, exact ConID and route, and a same-scope check
+before persistence. Restart discards runtime entitlement, failure, and backoff
+state; only an exact identical-wire 15-second retry boundary survives so a
+bounce cannot duplicate the same broker request immediately.</p>
 <p>For operator and builder reference, use <a href="policies.html">Trading Policy</a> for the
 human decision and system-control model, and <a href="database.html">Storage</a> for state,
 evidence, SQLite relationships, query boundaries, durability, and recovery.

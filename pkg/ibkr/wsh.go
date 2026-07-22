@@ -327,7 +327,10 @@ func fetchWSHJSON(ctx context.Context, conn *Connection, phase wshPhase) (string
 	if conn == nil {
 		return "", &WSHError{Kind: WSHErrorTransport, Operation: phase.operation}
 	}
-	reqID := conn.GetNextRequestID()
+	reqID, err := conn.nextRequestID()
+	if err != nil {
+		return "", &WSHError{Kind: WSHErrorTransport, Operation: phase.operation}
+	}
 	resultCh := make(chan wshPhaseResult, 1)
 	deliver := func(result wshPhaseResult) {
 		select {

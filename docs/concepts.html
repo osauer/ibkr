@@ -78,12 +78,12 @@
 <p>The five V1 flags are:</p>
 <ul>
 <li><code>borrow_inventory_tight</code>: IBKR shortable-share inventory crossed the V1 tight/scarce thresholds. This strengthens buy-to-cover context for existing shorts and is observational for long holdings.</li>
-<li><code>borrow_fee_extreme</code>: IBKR short-stock availability reports an annualized fee rate of at least 50%. This is emitted only from observed fee-rate evidence, not inferred from low inventory.</li>
+<li><code>borrow_fee_extreme</code>: the current global IBKR short-stock availability file reports an annualized fee rate of at least 50%. This is emitted only from current, policy-eligible FTP evidence, never inferred from low inventory or emitted/cleared from stale data. If a due FTP refresh is unusable, the daemon can inspect exact currently held short-stock contracts through TWS historical <code>FEE_RATE</code>; those rows are explicitly portfolio-only, nullable, scale-unverified, and policy-ineligible until a controlled broker fixture commissions the numeric scale.</li>
 <li><code>reg_sho_threshold</code>: the symbol appears on the Nasdaq Reg SHO threshold list. V1 names the source scope explicitly; non-Nasdaq listing-exchange threshold feeds are outside coverage, so absence is not universal non-threshold proof.</li>
 <li><code>luld_pause</code>: a Nasdaq trade-halt reason indicates an active or recent LULD pause. Active LULD blocks proposal preview/submit; recent LULD is a warning requiring fresh quote context.</li>
 <li><code>halt_regulatory_or_news</code>: a regulatory/news halt is active or recent. Active halts are hard blockers; recent halts are warning tags.</li>
 </ul>
-<p>Unknown and null mean unavailable, not false or zero. Source health reports whether each feed is <code>ok</code>, <code>stale</code>, <code>unknown</code>, or <code>degraded</code>; stale/unknown source health must stay visible because it changes how much confidence absence of a flag deserves.</p>
+<p>Unknown and null mean unavailable, not false or zero. Source health reports whether each feed is <code>ok</code>, <code>partial</code>, <code>stale</code>, <code>unknown</code>, or <code>degraded</code>; stale/unknown source health must stay visible because it changes how much confidence absence of a flag deserves. <code>borrow_fee_coverage[]</code> additionally distinguishes global FTP coverage from exact-contract, held-short-only TWS context and names entitlement/scale/policy eligibility directly.</p>
 <p>Rule 201 / short-sale restriction is not a V1 protection driver. If added later, it should be context-only unless the order path is directly short-sale relevant.</p>
 <p><code>ibkr market-events --symbol GME --json</code> evaluates explicit symbols. Omitting symbols evaluates held stock/ETF underlyings, which requires a usable positions snapshot from the daemon/gateway.</p>
 <hr>

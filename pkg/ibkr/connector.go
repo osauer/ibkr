@@ -7,10 +7,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/osauer/ibkr/v2/pkg/ibkr/internal/logging"
@@ -34,6 +36,12 @@ var ErrSymbolInactive = errors.New("symbol marked inactive")
 // receive its end marker before the caller's timeout. A returned result slice
 // may still contain details received before the timeout.
 var ErrContractDetailsTimeout = errors.New("timeout waiting for contract details")
+
+// ErrBrokerIDNamespaceConflict reports that an explicit broker order/WhatIf
+// ID is still owned by an open read-only request. The broker-adjacent
+// operation is refused before local indexing or wire send and may be retried
+// with a newly reserved ID.
+var ErrBrokerIDNamespaceConflict = errors.New("broker id namespace conflict")
 
 // Connector owns one broker connection together with its subscriptions and
 // in-memory market, contract, account, and order caches. Construct a Connector
@@ -64,23 +72,55 @@ type Connector struct {
 	subscriptions map[string]*Subscription
 	reqIDMap      map[int]string // Maps request IDs to symbols or routed subscription keys
 	subMu         sync.RWMutex
+	exactQuoteSeq atomic.Uint64
 
 	// Order management
 	openOrders       map[string]*trackedOrder
 	brokerOrderIndex map[string]string // IB order ID -> internal order ID
+	// orderIDHighWater is a bounded monotonic reservation frontier. Request
+	// allocation jumps past it, avoiding an ever-growing set of consumed IDs.
+	orderIDHighWater int
 	orderMu          sync.RWMutex
 	orderLifecycleMu sync.RWMutex
-	orderLifecycle   []func(OrderLifecycleEvent)
+	orderLifecycle   []orderLifecycleHandlerEntry
+	// handlerRegistration guards the one-time base-handler installation on a
+	// concrete Connection. Installation happens before Connect starts the wire
+	// reader, so lifecycle frames never need a lossy/reordering startup queue.
+	handlerRegistrationMu sync.Mutex
+	handlerRegistrations  map[*Connection]struct{}
+	// orderLifecycleGeneration advances for every non-WhatIf order lifecycle
+	// callback accepted by this Connector. Cached all-client inventory receipts
+	// bind to this frontier so any later openOrder/orderStatus/exec/error event
+	// invalidates the receipt before it can authorize a negative.
+	orderLifecycleGeneration atomic.Uint64
+	// evidenceBarrier linearizes socket/order callbacks and structural
+	// portfolio publications against daemon commits that may clear an alert.
+	// The owned Connection shares this exact lock.
+	evidenceBarrier sync.RWMutex
+	// publicationBarrier linearizes daemon connector publication against the
+	// final transport section of a protected broker operation. It is separate
+	// from evidenceBarrier and its read side is acquired only after pacing and
+	// transport admission, so a paused sender cannot deadlock unpublication.
+	publicationBarrier sync.RWMutex
+	// brokerIDNamespaceMu makes Connector-level FEE request registration and
+	// order/WhatIf reservation atomic around Connection's shared monotonic ID
+	// frontier. Connection.reqIDMu remains the authority for allocation.
+	brokerIDNamespaceMu sync.Mutex
+	// whatIfBeforeBrokerIDClaim is a deterministic rollover seam. Production
+	// leaves it nil; tests pause after the exact-session check and before the
+	// allocator/claim boundary.
+	whatIfBeforeBrokerIDClaim func()
 
-	// Open-order snapshot plumbing (SnapshotOpenOrders). The flight mutex
-	// serializes callers; the snapshot mutex guards the active collector
-	// pointer read on every openOrder callback. requestAllOpenOrders is a
-	// test seam (same pattern as fetchContractDetails): production resolves
-	// to requestAllOpenOrdersDefault over the live connection.
-	requestAllOpenOrders      func() error
-	openOrderSnapshotFlightMu sync.Mutex
-	openOrderSnapshotMu       sync.Mutex
-	openOrderSnapshot         *openOrderSnapshotCollector
+	// Open-order snapshot plumbing is an epoch-bound single-flight because
+	// reqAllOpenOrders has no request ID. A timed-out wire flight remains
+	// authoritative until its same-socket terminator arrives; otherwise the
+	// socket generation is poisoned rather than admitting ambiguous evidence.
+	requestAllOpenOrders        func() error // test seam; nil uses the bound Connection
+	openOrderSnapshotMu         sync.Mutex
+	openOrderSnapshot           *openOrderSnapshotFlight
+	openOrderSnapshotPoison     openOrderSnapshotBinding
+	openOrderSnapshotTimeout    time.Duration
+	openOrderSnapshotBeforeSend func()
 
 	// orderStatusLogSig dedupes the high-frequency order-status log line.
 	// IBKR re-sends orderStatus frames for unchanged working orders many
@@ -139,9 +179,12 @@ type Connector struct {
 	optUnderlyingPx map[string]float64 // model-computation underlying price per option key
 
 	// Historical data requests (HMDS)
-	historicalMu      sync.Mutex
-	historicalReqs    map[int]*historicalRequest
-	historicalBackoff map[string]int
+	historicalMu           sync.Mutex
+	historicalReqs         map[int]*historicalRequest
+	historicalBackoff      map[string]int
+	historicalExactFlights map[string]*historicalExactFlight
+	historicalRouteReqs    map[int]chan error
+	historicalNow          func() time.Time
 
 	// dataFarms records the latest IBKR data-farm notice per farm. The
 	// status endpoint surfaces only unhealthy entries, but keeping the
@@ -206,6 +249,10 @@ type ConnectorConfig struct {
 // LastTime is the local time of the most recently observed tick.
 type Subscription struct {
 	Symbol string
+	// SessionEpoch is set for exact-session subscriptions. Zero identifies a
+	// legacy/shared subscription that cannot satisfy broker-write preview
+	// evidence.
+	SessionEpoch uint64
 	// Right is the normalized option right ("C" or "P") for option-leg
 	// subscriptions. It is empty for non-option subscriptions.
 	Right     string
@@ -463,9 +510,62 @@ type historicalResult struct {
 }
 
 type historicalRequest struct {
-	symbol string
-	result chan historicalResult
+	symbol                     string
+	result                     chan historicalResult
+	strictDaily                bool
+	waitForEnd                 bool
+	requestOwnsNoticeCollision bool
+	connection                 *Connection
+	epoch                      uint64
+	requireEpoch               bool
+	bufferedBars               []HistoricalBar
+	bufferedErr                error
 }
+
+type historicalExactFlight struct {
+	done        chan struct{}
+	connection  *Connection
+	epoch       uint64
+	completedAt time.Time
+	expiresAt   time.Time
+	bars        []HistoricalBar
+	route       Contract
+	err         error
+}
+
+const (
+	historicalIdenticalRequestCooldown = 15 * time.Second
+	historicalFeeRateBackendTimeout    = 45 * time.Second
+	historicalExactRouteBackendTimeout = 5 * time.Second
+	historicalExactRouteSuccessTTL     = 30 * time.Minute
+)
+
+// ConnectorSessionBinding is an opaque, process-local identity for the
+// Connector's current Connection object and socket generation. Callers may
+// retain it and ask the originating Connector whether it is still current,
+// but cannot manufacture broker authority from its contents.
+type ConnectorSessionBinding struct {
+	connector  *Connector
+	connection *Connection
+	epoch      uint64
+}
+
+// HistoricalSessionBinding preserves the historical-data API name while all
+// broker-adjacent cached receipts share the same socket-session identity.
+type HistoricalSessionBinding = ConnectorSessionBinding
+
+// Historical failure categories are connector-authored classifications. They
+// intentionally contain no broker prose and let daemon callers map failures
+// onto their typed cross-surface contract without stringifying an error.
+const (
+	HistoricalFailureNotEntitled         = "not_entitled"
+	HistoricalFailureNoData              = "no_data"
+	HistoricalFailurePacing              = "pacing"
+	HistoricalFailureGatewayUnavailable  = "gateway_unavailable"
+	HistoricalFailureContractUnavailable = "contract_unavailable"
+	HistoricalFailureProtocolRejected    = "protocol_rejected"
+	HistoricalFailureInvalidPayload      = "invalid_payload"
+)
 
 // HistoricalRequestError reports a broker error from a historical-data
 // request. RetryAfter is zero when the connector has no retry delay to suggest,
@@ -474,6 +574,7 @@ type HistoricalRequestError struct {
 	Code       int
 	Message    string
 	RetryAfter time.Duration
+	Category   string
 }
 
 // Error returns the broker message when present, otherwise a code-based
@@ -482,7 +583,25 @@ func (e *HistoricalRequestError) Error() string {
 	if e.Message != "" {
 		return e.Message
 	}
+	if e.Category != "" {
+		return "historical data " + e.Category
+	}
 	return fmt.Sprintf("historical data error %d", e.Code)
+}
+
+// HistoricalDataValidationError reports a connector-authored validation
+// failure. Reason is an allowlisted token and never includes broker payload.
+type HistoricalDataValidationError struct {
+	Reason string
+}
+
+// Error returns a fixed connector-authored description and the allowlisted
+// reason token; it never returns raw broker payload text.
+func (e *HistoricalDataValidationError) Error() string {
+	if e == nil || e.Reason == "" {
+		return "historical data validation failed"
+	}
+	return "historical data validation failed: " + e.Reason
 }
 
 // NewConnector constructs a stopped Connector for one broker connection. It
@@ -527,28 +646,31 @@ func NewConnector(config *ConnectorConfig) *Connector {
 	connCfg.ClientID = config.PreferredClientID
 
 	c := &Connector{
-		name:              "IBKRConnector",
-		config:            config,
-		conn:              NewConnection(&connCfg),
-		subscriptions:     make(map[string]*Subscription),
-		reqIDMap:          make(map[int]string),
-		openOrders:        make(map[string]*trackedOrder),
-		brokerOrderIndex:  make(map[string]string),
-		orderStatusLogSig: make(map[string]string),
-		contractCache:     make(map[string]ContractDetailsLite),
-		optIV:             make(map[string]float64),
-		optReqIDs:         make(map[int]string),
-		optQuoteBid:       make(map[string]float64),
-		optQuoteAsk:       make(map[string]float64),
-		optPrevClose:      make(map[string]float64),
-		optGreeks:         make(map[string]Greeks),
-		optUnderlyingPx:   make(map[string]float64),
-		historicalReqs:    make(map[int]*historicalRequest),
-		historicalBackoff: make(map[string]int),
-		pnl:               newPnLCache(),
+		name:                   "IBKRConnector",
+		config:                 config,
+		conn:                   NewConnection(&connCfg),
+		subscriptions:          make(map[string]*Subscription),
+		reqIDMap:               make(map[int]string),
+		openOrders:             make(map[string]*trackedOrder),
+		brokerOrderIndex:       make(map[string]string),
+		orderStatusLogSig:      make(map[string]string),
+		contractCache:          make(map[string]ContractDetailsLite),
+		optIV:                  make(map[string]float64),
+		optReqIDs:              make(map[int]string),
+		optQuoteBid:            make(map[string]float64),
+		optQuoteAsk:            make(map[string]float64),
+		optPrevClose:           make(map[string]float64),
+		optGreeks:              make(map[string]Greeks),
+		optUnderlyingPx:        make(map[string]float64),
+		historicalReqs:         make(map[int]*historicalRequest),
+		historicalBackoff:      make(map[string]int),
+		historicalExactFlights: make(map[string]*historicalExactFlight),
+		historicalRouteReqs:    make(map[int]chan error),
+		pnl:                    newPnLCache(),
 	}
+	c.conn.evidenceBarrier = &c.evidenceBarrier
+	c.conn.publicationBarrier = &c.publicationBarrier
 	c.fetchContractDetails = c.FetchContractDetails
-	c.requestAllOpenOrders = c.requestAllOpenOrdersDefault
 	c.resolveWSHContract = c.resolveWSHStockContract
 	c.wshGate = make(chan struct{}, 1)
 	c.wshGate <- struct{}{}
@@ -653,9 +775,34 @@ const (
 	inactiveCandidateWindow = 10 * time.Minute
 )
 
+func joinPostActions(first, second func()) func() {
+	switch {
+	case first == nil:
+		return second
+	case second == nil:
+		return first
+	default:
+		return func() {
+			first()
+			second()
+		}
+	}
+}
+
 func (c *Connector) registerInactiveCandidate(symbol, reason string) bool {
+	marked, post := c.registerInactiveCandidatePostAction(symbol, reason)
+	if post != nil {
+		post()
+	}
+	return marked
+}
+
+// registerInactiveCandidatePostAction performs only local state mutation and
+// returns any broker-side subscription cleanup to its caller. Socket readers
+// run the action after releasing inbound/publication/evidence leases.
+func (c *Connector) registerInactiveCandidatePostAction(symbol, reason string) (bool, func()) {
 	if symbol == "" {
-		return false
+		return false, nil
 	}
 	// Choke-point farm guard: both write paths (subscription notices AND
 	// historical failures) converge here. While any tracked farm is
@@ -663,7 +810,7 @@ func (c *Connector) registerInactiveCandidate(symbol, reason string) bool {
 	// a contract verdict — counting them is how a nightly-reset wedge
 	// marked held AMD/BB/IBM and VIX inactive (2026-07-08).
 	if c.marketDataFarmImpaired() {
-		return false
+		return false, nil
 	}
 	symbol = strings.ToUpper(symbol)
 
@@ -674,7 +821,7 @@ func (c *Connector) registerInactiveCandidate(symbol, reason string) bool {
 	// threshold below — they no longer mark on first sight.
 	if c.hasActiveContract(symbol) && !definitionDead {
 		c.clearInactiveCandidate(symbol)
-		return false
+		return false, nil
 	}
 
 	reason = strings.TrimSpace(reason)
@@ -683,7 +830,7 @@ func (c *Connector) registerInactiveCandidate(symbol, reason string) bool {
 	if c.inactiveSymbols != nil {
 		if _, exists := c.inactiveSymbols[symbol]; exists {
 			c.inactiveMu.Unlock()
-			return true
+			return true, nil
 		}
 	}
 	if c.inactiveCandidates == nil {
@@ -707,15 +854,20 @@ func (c *Connector) registerInactiveCandidate(symbol, reason string) bool {
 	c.inactiveMu.Unlock()
 
 	if shouldMark {
-		c.markSymbolInactive(symbol, reason)
-		return true
+		return true, c.markSymbolInactivePostAction(symbol, reason)
 	}
-	return false
+	return false, nil
 }
 
 func (c *Connector) markSymbolInactive(symbol, reason string) {
+	if post := c.markSymbolInactivePostAction(symbol, reason); post != nil {
+		post()
+	}
+}
+
+func (c *Connector) markSymbolInactivePostAction(symbol, reason string) func() {
 	if symbol == "" {
-		return
+		return nil
 	}
 	symbol = strings.ToUpper(symbol)
 	reason = strings.TrimSpace(reason)
@@ -732,7 +884,7 @@ func (c *Connector) markSymbolInactive(symbol, reason string) {
 	}
 	if _, exists := c.inactiveSymbols[symbol]; exists {
 		c.inactiveMu.Unlock()
-		return
+		return nil
 	}
 	state := inactiveSymbolState{
 		reason:   reason,
@@ -741,63 +893,146 @@ func (c *Connector) markSymbolInactive(symbol, reason string) {
 	c.inactiveSymbols[symbol] = state
 	c.inactiveMu.Unlock()
 
-	c.dropSubscription(symbol)
+	post := c.detachSubscription(symbol)
 	c.logInfo("Suppressing market data for %s (inactive: %s)", symbol, reason)
+	return post
 }
 
 func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotification) {
-	if note == nil {
-		return
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	binding := ConnectorSessionBinding{connector: c, connection: conn}
+	if conn != nil {
+		binding.epoch = conn.BrokerSessionEpoch()
 	}
-	if note.tickerID > 0 {
-		c.notifyOrderErrorLifecycle(int(note.tickerID), note.code, note.message, note.advancedOrderRejectJSON)
+	if post := c.processSystemNoticeFrom(binding, alias, note); post != nil {
+		post()
 	}
-	c.recordDataFarmNotice(note.code, note.message, note.timestamp)
-	// msg-204 delivers order errors and request errors through the same id
-	// field, and TWS order IDs (nextValidId) are independent from
-	// reqIDSeq with no disjointness. When the id names an order this
-	// connector owns, notifyOrderErrorLifecycle above owns the notice:
-	// request-scoped recovery and inactive-candidate marking must not act
-	// on an innocent historical request or live subscription that happens
-	// to share the integer.
-	if note.tickerID > 0 && c.isKnownBrokerOrderID(int(note.tickerID)) {
-		return
-	}
-	// Request-scoped recovery must run before the alias-based inactive
-	// logic below: historical reqIDs never register an alias, so the
-	// inactiveKey early-return would skip them entirely. This is the only
-	// live error path on current gateways — TWS API server ≥203 delivers
-	// request errors as system notifications (msg 204), not msgErrMsg
-	// frames, so handleIBKRError/handleErrorMessage never see them
-	// (observed 2026-06-11: 779 system notices, zero msgErrMsg errors).
-	c.recoverFromSystemNotice(alias, note)
+}
 
-	upperMsg := strings.ToUpper(note.message)
-	definitionDead := false
-	switch note.code {
-	case 200:
-		definitionDead = strings.Contains(upperMsg, "NO SECURITY DEFINITION")
-	case 162:
-		definitionDead = strings.Contains(upperMsg, "NO DATA")
-	case 366:
-		definitionDead = true
+func (c *Connector) processSystemNoticeFrom(origin ConnectorSessionBinding, alias reqAliasEntry, note *systemNotification) (postBarrier func()) {
+	if note == nil {
+		return nil
 	}
-	if !definitionDead {
-		return
+	func() {
+		c.publicationBarrier.RLock()
+		defer c.publicationBarrier.RUnlock()
+		c.evidenceBarrier.RLock()
+		defer c.evidenceBarrier.RUnlock()
+		if !c.SessionReceiptCurrent(origin) {
+			if note.tickerID > 0 {
+				c.notifyOrderErrorLifecycleUnderBarrier(origin, int(note.tickerID), note.code, note.message, note.advancedOrderRejectJSON)
+			}
+			return
+		}
+		// Legacy sessions and already-consumed IDs may still surface delayed broker
+		// errors, so active exact-historical ownership wins before any durable order
+		// lifecycle callback. New allocations use one monotonic disjoint namespace.
+		if note.tickerID > 0 && c.failPendingExactHistoricalRoute(int(note.tickerID), note.code, note.message) {
+			c.recordDataFarmNotice(note.code, note.message, note.timestamp)
+			return
+		}
+		if note.tickerID > 0 && c.isKnownBrokerOrderID(int(note.tickerID)) &&
+			c.failNoticeCollisionHistorical(int(note.tickerID), note.code, note.message) {
+			c.recordDataFarmNotice(note.code, note.message, note.timestamp)
+			return
+		}
+		if note.tickerID > 0 {
+			c.notifyOrderErrorLifecycleUnderBarrier(origin, int(note.tickerID), note.code, note.message, note.advancedOrderRejectJSON)
+		}
+		c.recordDataFarmNotice(note.code, note.message, note.timestamp)
+		// msg-204 delivers order errors and request errors through the same id
+		// field. When the id names an order this connector owns,
+		// notifyOrderErrorLifecycle above owns the notice:
+		// request-scoped recovery and inactive-candidate marking must not act
+		// on an innocent historical request or live subscription that happens
+		// to share the integer.
+		if note.tickerID > 0 && c.isKnownBrokerOrderID(int(note.tickerID)) {
+			return
+		}
+		// Request-scoped recovery must run before the alias-based inactive
+		// logic below: historical reqIDs never register an alias, so the
+		// inactiveKey early-return would skip them entirely. This is the only
+		// live error path on current gateways — TWS API server ≥203 delivers
+		// request errors as system notifications (msg 204), not msgErrMsg
+		// frames, so handleIBKRError/handleErrorMessage never see them
+		// (observed 2026-06-11: 779 system notices, zero msgErrMsg errors).
+		postBarrier = c.recoverFromSystemNotice(origin, alias, note)
+
+		upperMsg := strings.ToUpper(note.message)
+		definitionDead := false
+		switch note.code {
+		case 200:
+			definitionDead = strings.Contains(upperMsg, "NO SECURITY DEFINITION")
+		case 162:
+			definitionDead = strings.Contains(upperMsg, "NO DATA")
+		case 366:
+			definitionDead = true
+		}
+		if !definitionDead {
+			return
+		}
+		// Record the inactive candidate under the connector's own subscription
+		// key — exactly what SubscribeMarketData / SubscribeMarketDataWithContract
+		// check before re-requesting. The former alias-derived route key embedded
+		// gateway-hydrated localSymbol/tradingClass/primaryExch fields that no
+		// check-time key contains, so marks never suppressed anything.
+		key := c.subscriptionKeyForNotice(int(note.tickerID), alias)
+		if key == "" {
+			c.logDebug("Ignoring definition error code %d for unowned or derivative request %s (%s): %s", note.code, alias.symbol, alias.localSymbol, note.message)
+			return
+		}
+		_, inactivePost := c.registerInactiveCandidatePostAction(key, note.message)
+		postBarrier = joinPostActions(postBarrier, inactivePost)
+	}()
+	return postBarrier
+}
+
+// historicalNoticeOwnsIDCollision is a closed code allowlist, never a broker
+// prose classifier. Explicit order-lifecycle codes remain order-owned; these
+// codes describe historical/market-data request rejection or validation and
+// therefore belong to an already-open historical request on numeric overlap.
+func historicalNoticeOwnsIDCollision(code int) bool {
+	switch code {
+	case 162, 200, 321, 354, 366,
+		502, 504, 1100, 1300,
+		10089, 10090, 10091, 10186, 10187:
+		return true
+	default:
+		return false
 	}
-	// Record the inactive candidate under the connector's own subscription
-	// key — exactly what SubscribeMarketData / SubscribeMarketDataWithContract
-	// check before re-requesting. The former alias-derived route key embedded
-	// gateway-hydrated localSymbol/tradingClass/primaryExch fields that no
-	// check-time key contains, so marks never suppressed anything (observed
-	// 2026-06-11: HGENQ re-marked every reconnect under
-	// HGENQ|STK|SMART|DOLLR4LOT|USD|HGENQ|HGENQ).
-	key := c.subscriptionKeyForNotice(int(note.tickerID), alias)
-	if key == "" {
-		c.logDebug("Ignoring definition error code %d for unowned or derivative request %s (%s): %s", note.code, alias.symbol, alias.localSymbol, note.message)
-		return
+}
+
+func (c *Connector) failNoticeCollisionHistorical(reqID, code int, message string) bool {
+	if !historicalNoticeOwnsIDCollision(code) {
+		return false
 	}
-	c.registerInactiveCandidate(key, note.message)
+	c.historicalMu.Lock()
+	request := c.historicalReqs[reqID]
+	requestOwns := request != nil && request.requestOwnsNoticeCollision
+	c.historicalMu.Unlock()
+	if !requestOwns {
+		return false
+	}
+	return c.failPendingHistorical(reqID, code, message)
+}
+
+func (c *Connector) failPendingExactHistoricalRoute(reqID, code int, message string) bool {
+	if !historicalNoticeOwnsIDCollision(code) {
+		return false
+	}
+	c.historicalMu.Lock()
+	failureCh := c.historicalRouteReqs[reqID]
+	if failureCh != nil {
+		delete(c.historicalRouteReqs, reqID)
+	}
+	c.historicalMu.Unlock()
+	if failureCh == nil {
+		return false
+	}
+	failureCh <- &HistoricalRequestError{Code: code, Message: message}
+	return true
 }
 
 // recoverFromSystemNotice drives the request-scoped recovery that the
@@ -822,15 +1057,15 @@ func (c *Connector) processSystemNotice(alias reqAliasEntry, note *systemNotific
 // a terminally rejected subscription is exactly the churn loop this
 // recovery exists to stop, and recovery-after-the-window is owned by the
 // absence TTL.
-func (c *Connector) recoverFromSystemNotice(alias reqAliasEntry, note *systemNotification) {
+func (c *Connector) recoverFromSystemNotice(origin ConnectorSessionBinding, alias reqAliasEntry, note *systemNotification) (postBarrier func()) {
 	if note.tickerID <= 0 {
-		return
+		return nil
 	}
 	reqID := int(note.tickerID)
 	code := note.code
 
 	if c.failPendingHistorical(reqID, code, note.message) {
-		return
+		return nil
 	}
 
 	c.pushSubscriptionRejection(reqID, code, note.message)
@@ -838,24 +1073,25 @@ func (c *Connector) recoverFromSystemNotice(alias reqAliasEntry, note *systemNot
 	switch code {
 	case 200, 354:
 		c.markSubscriptionRejected(reqID)
-		c.mu.RLock()
-		conn := c.conn
-		c.mu.RUnlock()
-		if conn != nil {
-			conn.releaseMarketDataSlot(reqID)
+		if origin.connection != nil {
+			origin.connection.releaseMarketDataSlot(reqID)
 		}
 	case 10197:
-		c.mu.RLock()
-		conn := c.conn
-		c.mu.RUnlock()
-		if conn != nil {
-			conn.handleCompetingLiveSession(strconv.Itoa(reqID), note.message)
+		if origin.connection != nil && origin.connection.markCompetingLiveSession(strconv.Itoa(reqID)) {
+			postBarrier = func() {
+				if err := origin.connection.setMarketDataTypeAtEpoch(3, origin.epoch); err != nil {
+					ibkrLogger.Errorf("[cid=%d] Failed to request delayed market data after 10197: %v", origin.connection.config.ClientID, err)
+				} else {
+					ibkrLogger.Warnf("[cid=%d] Forced delayed market data after 10197 (%s)", origin.connection.config.ClientID, note.message)
+				}
+			}
 		}
 	}
 
 	if code == 354 {
 		c.maybeRememberAbsenceForReqID(reqID, alias, code, note.message)
 	}
+	return postBarrier
 }
 
 // failPendingHistorical fails the historical request owning reqID, if
@@ -1059,9 +1295,30 @@ func dataFarmKey(farmType, name string) string {
 	return strings.ToLower(strings.TrimSpace(farmType)) + "\x00" + strings.ToLower(strings.TrimSpace(name))
 }
 
-func (c *Connector) dropSubscription(symbol string) {
-	if symbol == "" {
+type retiredMarketDataSubscription struct {
+	connection *Connection
+	epoch      uint64
+	reqID      int
+	cancel     bool
+}
+
+func (retired retiredMarketDataSubscription) run() {
+	if retired.connection == nil || retired.reqID <= 0 {
 		return
+	}
+	if retired.cancel {
+		// Epoch-bound cancellation either writes on the originating socket or
+		// returns a definite stale refusal. It always releases only that epoch's
+		// slot, never a successor's reused reqID.
+		_ = retired.connection.cancelMarketDataForEpoch(context.Background(), retired.reqID, retired.epoch)
+		return
+	}
+	retired.connection.releaseMarketDataSlotAtEpoch(retired.reqID, retired.epoch)
+}
+
+func (c *Connector) detachSubscription(symbol string) func() {
+	if symbol == "" {
+		return nil
 	}
 	upper := strings.ToUpper(symbol)
 
@@ -1072,7 +1329,9 @@ func (c *Connector) dropSubscription(symbol string) {
 	// MarketDataSnapshot, scan enrichment) blocks on subMu.
 	c.subMu.Lock()
 	var cancelReqID, releaseReqID int
+	var subscriptionEpoch uint64
 	if sub, ok := c.subscriptions[upper]; ok {
+		subscriptionEpoch = sub.SessionEpoch
 		// Same wire-cancel exception as UnsubscribeMarketData: a reqID
 		// the gateway already reported dead only draws error 300 on
 		// cancel — release its slot instead (idempotent).
@@ -1089,14 +1348,14 @@ func (c *Connector) dropSubscription(symbol string) {
 		}
 	}
 	conn := c.conn
+	epoch := uint64(0)
+	if conn != nil {
+		epoch = conn.BrokerSessionEpoch()
+	}
+	if subscriptionEpoch != 0 {
+		epoch = subscriptionEpoch
+	}
 	c.subMu.Unlock()
-
-	if cancelReqID != 0 && conn != nil && conn.IsConnected() {
-		_ = conn.CancelMarketData(cancelReqID)
-	}
-	if releaseReqID != 0 && conn != nil {
-		conn.releaseMarketDataSlot(releaseReqID)
-	}
 
 	c.optMu.Lock()
 	for reqID, sym := range c.optReqIDs {
@@ -1105,6 +1364,17 @@ func (c *Connector) dropSubscription(symbol string) {
 		}
 	}
 	c.optMu.Unlock()
+
+	retired := retiredMarketDataSubscription{connection: conn, epoch: epoch}
+	switch {
+	case cancelReqID != 0:
+		retired.reqID, retired.cancel = cancelReqID, true
+	case releaseReqID != 0:
+		retired.reqID = releaseReqID
+	default:
+		return nil
+	}
+	return retired.run
 }
 
 // SetMarketDataType requests the market-data mode for subsequent requests:
@@ -1183,6 +1453,7 @@ func (c *Connector) LastError() string {
 }
 
 func (c *Connector) attachConnectionHooks(conn *Connection) {
+	c.ensureHandlersRegistered(conn)
 	conn.SetOnConnect(func() {
 		c.onConnectionEstablished(conn)
 	})
@@ -1191,8 +1462,8 @@ func (c *Connector) attachConnectionHooks(conn *Connection) {
 	})
 
 	// If the connection is already established (e.g., reused after a hot
-	// reconfigure), ensure handlers are registered immediately so the
-	// connector is ready.
+	// reconfigure), publish it ready immediately. The handlers were installed
+	// above before this publication.
 	if conn.IsConnected() {
 		c.onConnectionEstablished(conn)
 	}
@@ -1200,30 +1471,29 @@ func (c *Connector) attachConnectionHooks(conn *Connection) {
 
 func (c *Connector) onConnectionEstablished(conn *Connection) {
 	c.resetWSHMetadataReadiness()
-	// Ensure the connector references the active connection while handlers register.
+	c.evidenceBarrier.RLock()
+	c.invalidateUnstampedConnectorObservations(conn)
 	c.mu.Lock()
 	c.conn = conn
-	c.ready = false
+	c.ready = true
 	c.lastError = nil
 	c.mu.Unlock()
-
-	c.registerHandlers(conn)
-
-	c.mu.Lock()
-	c.ready = true
-	c.mu.Unlock()
+	c.evidenceBarrier.RUnlock()
 }
 
 func (c *Connector) onConnectionLost(conn *Connection) {
 	c.resetWSHMetadataReadiness()
-	if conn != nil {
-		conn.SetSystemNoticeHandler(nil)
-	}
+	c.evidenceBarrier.RLock()
 	c.mu.Lock()
 	if c.conn == conn {
 		c.ready = false
 	}
 	c.mu.Unlock()
+	c.invalidateUnstampedConnectorObservations(conn)
+	c.evidenceBarrier.RUnlock()
+	// Keep every epoch-aware inbound hook on the retired Connection. Stop has
+	// a bounded drain, so a decoded late frame must still reach exact-session
+	// rejection (and order-lifecycle uncertainty) instead of being dropped.
 	// Forget the PnL reqIDs — they belong to a now-dead Connection. The
 	// daemon's post-connect setup callback re-subscribes once the next
 	// handshake completes; per-position subscriptions resume lazily on
@@ -1238,6 +1508,75 @@ func (c *Connector) onConnectionLost(conn *Connection) {
 		c.pnl.positionSnapshot = make(map[int]PositionDailyPnL)
 		c.pnl.mu.Unlock()
 	}
+}
+
+// invalidateUnstampedConnectorObservations drops in-memory broker facts whose
+// public identity does not carry a socket epoch. It intentionally retains the
+// order lifecycle/journal correlation maps so late retired-session receipts
+// can still latch uncertainty; market, contract, farm, entitlement, and
+// account-derived caches must be repopulated by the successor session.
+func (c *Connector) invalidateUnstampedConnectorObservations(conn *Connection) {
+	if c == nil || conn == nil {
+		return
+	}
+	c.mu.RLock()
+	owned := c.conn == conn
+	c.mu.RUnlock()
+	if !owned {
+		return
+	}
+	c.subMu.Lock()
+	clear(c.subscriptions)
+	clear(c.reqIDMap)
+	c.subMu.Unlock()
+	c.contractMu.Lock()
+	clear(c.contractCache)
+	c.contractMu.Unlock()
+	c.inactiveMu.Lock()
+	clear(c.inactiveSymbols)
+	clear(c.inactiveCandidates)
+	c.inactiveMu.Unlock()
+	c.absenceMu.Lock()
+	clear(c.mktDataAbsent)
+	c.absenceMu.Unlock()
+	c.optMu.Lock()
+	clear(c.optIV)
+	clear(c.optReqIDs)
+	clear(c.optQuoteBid)
+	clear(c.optQuoteAsk)
+	clear(c.optPrevClose)
+	clear(c.optGreeks)
+	clear(c.optUnderlyingPx)
+	c.optMu.Unlock()
+	c.dataFarmMu.Lock()
+	clear(c.dataFarms)
+	c.dataFarmMu.Unlock()
+	c.acctUpdatesMu.Lock()
+	c.acctUpdatesLastAt = time.Time{}
+	c.acctUpdatesMu.Unlock()
+	c.pnlResubMu.Lock()
+	c.pnlResubLastAt = time.Time{}
+	c.pnlResubMu.Unlock()
+}
+
+func (c *Connector) ensureHandlersRegistered(conn *Connection) {
+	if c == nil || conn == nil {
+		return
+	}
+	c.handlerRegistrationMu.Lock()
+	if c.handlerRegistrations == nil {
+		c.handlerRegistrations = make(map[*Connection]struct{})
+	}
+	if _, ok := c.handlerRegistrations[conn]; ok {
+		c.handlerRegistrationMu.Unlock()
+		return
+	}
+	// Keep the install mutex through the full fixed handler set. A concurrent
+	// attach must not observe the Connection as registered and start its reader
+	// while only a prefix of lifecycle handlers exists.
+	c.handlerRegistrations[conn] = struct{}{}
+	c.registerHandlers(conn)
+	c.handlerRegistrationMu.Unlock()
 }
 
 // MarketDataTypeForSymbol returns the latest gateway data-type notice for the
@@ -1271,15 +1610,230 @@ type ContractDetailsLite struct {
 	Right        string
 	Exchange     string
 	PrimaryExch  string
+	Currency     string
 	ConID        int
 	LocalSymbol  string
 	TradingClass string
+	Multiplier   int
 	TimeZoneID   string
 	TradingHours string
 	LiquidHours  string
 	// MinTick is the venue's minimum price increment for the contract.
 	// Zero means the gateway did not report one.
 	MinTick float64
+}
+
+// ResolvedOrderContract is an unambiguous broker contract-details identity
+// captured on one exact Connector session. Contract always has a positive
+// ConID; MinTick is zero only when the broker omitted it.
+type ResolvedOrderContract struct {
+	Contract Contract
+	MinTick  float64
+}
+
+// ResolveOrderContractForSession resolves a symbol/option description to one
+// exact positive-ConID identity. Epoch-aware handlers and an epoch-bound
+// request prevent a callback from a retired socket completing a new preview.
+func (c *Connector) ResolveOrderContractForSession(ctx context.Context, binding ConnectorSessionBinding, contract Contract, timeout time.Duration) (ResolvedOrderContract, error) {
+	if c == nil || !c.SessionCurrent(binding) {
+		return ResolvedOrderContract{}, fmt.Errorf("broker session changed before contract resolution")
+	}
+	contract = normalizeMarketDataContract(contract)
+	contract.Symbol = strings.ToUpper(strings.TrimSpace(contract.Symbol))
+	contract.SecType = strings.ToUpper(strings.TrimSpace(contract.SecType))
+	contract.Currency = strings.ToUpper(strings.TrimSpace(contract.Currency))
+	if contract.SecType == "ETF" {
+		// ETF is a daemon/user classification. IBKR contract-details and order
+		// wire identity use STK for exchange-traded funds.
+		contract.SecType = "STK"
+	}
+	if contract.Symbol == "" || contract.SecType == "" || contract.Currency == "" {
+		return ResolvedOrderContract{}, fmt.Errorf("contract symbol, secType, and currency are required")
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	resolveCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn := binding.connection
+	reqID, err := conn.reserveRequestID(nil)
+	if err != nil {
+		return ResolvedOrderContract{}, err
+	}
+	defer conn.discardRequestIDReservation(reqID)
+
+	detailsCh := make(chan ContractDetailsLite, 64)
+	doneCh := make(chan struct{}, 1)
+	overflowCh := make(chan struct{}, 1)
+	serverVersion := conn.serverVersion
+	dataHandlerID := conn.RegisterHandlerAtEpoch(msgContractData, func(fields []string, receiptEpoch uint64) {
+		if receiptEpoch != binding.epoch {
+			return
+		}
+		if detail, ok := parseContractDetailsLite(fields, reqID, serverVersion); ok {
+			select {
+			case detailsCh <- *detail:
+			default:
+				select {
+				case overflowCh <- struct{}{}:
+				default:
+				}
+			}
+		}
+	})
+	endHandlerID := conn.RegisterHandlerAtEpoch(msgContractDataEnd, func(fields []string, receiptEpoch uint64) {
+		if receiptEpoch != binding.epoch || len(fields) < 3 {
+			return
+		}
+		id, _ := strconv.Atoi(strings.TrimSpace(fields[2]))
+		if id == reqID {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		}
+	})
+	defer conn.UnregisterHandler(msgContractData, dataHandlerID)
+	defer conn.UnregisterHandler(msgContractDataEnd, endHandlerID)
+
+	if err := conn.sendContractDetailsRequestForEpoch(resolveCtx, contract, reqID, binding.epoch); err != nil {
+		return ResolvedOrderContract{}, err
+	}
+	details := make([]ContractDetailsLite, 0, 2)
+	for {
+		select {
+		case detail := <-detailsCh:
+			details = append(details, detail)
+		case <-overflowCh:
+			return ResolvedOrderContract{}, fmt.Errorf("contract details overflow")
+		case <-doneCh:
+			for {
+				select {
+				case detail := <-detailsCh:
+					details = append(details, detail)
+				case <-overflowCh:
+					return ResolvedOrderContract{}, fmt.Errorf("contract details overflow")
+				default:
+					resolved, err := exactOrderContract(contract, details)
+					if err != nil {
+						return ResolvedOrderContract{}, err
+					}
+					if !c.SessionCurrent(binding) {
+						return ResolvedOrderContract{}, fmt.Errorf("broker session changed during contract resolution")
+					}
+					return resolved, nil
+				}
+			}
+		case <-resolveCtx.Done():
+			return ResolvedOrderContract{}, resolveCtx.Err()
+		}
+	}
+}
+
+func exactOrderContract(request Contract, details []ContractDetailsLite) (ResolvedOrderContract, error) {
+	request.Symbol = strings.ToUpper(strings.TrimSpace(request.Symbol))
+	request.SecType = strings.ToUpper(strings.TrimSpace(request.SecType))
+	request.Currency = strings.ToUpper(strings.TrimSpace(request.Currency))
+	request.Exchange = strings.ToUpper(strings.TrimSpace(request.Exchange))
+	request.PrimaryExch = strings.ToUpper(strings.TrimSpace(request.PrimaryExch))
+	request.LocalSymbol = strings.TrimSpace(request.LocalSymbol)
+	request.TradingClass = strings.TrimSpace(request.TradingClass)
+	var selected *ContractDetailsLite
+	for i := range details {
+		detail := details[i]
+		detail.Symbol = strings.ToUpper(strings.TrimSpace(detail.Symbol))
+		detail.SecType = strings.ToUpper(strings.TrimSpace(detail.SecType))
+		detail.Currency = strings.ToUpper(strings.TrimSpace(detail.Currency))
+		detail.Exchange = strings.ToUpper(strings.TrimSpace(detail.Exchange))
+		detail.PrimaryExch = strings.ToUpper(strings.TrimSpace(detail.PrimaryExch))
+		detail.LocalSymbol = strings.TrimSpace(detail.LocalSymbol)
+		detail.TradingClass = strings.TrimSpace(detail.TradingClass)
+		detail.Expiry = strings.TrimSpace(detail.Expiry)
+		detail.Right = strings.ToUpper(strings.TrimSpace(detail.Right))
+		if detail.ConID <= 0 || detail.Symbol != request.Symbol || detail.Currency != request.Currency ||
+			(request.ConID > 0 && detail.ConID != request.ConID) || !orderContractSecTypeMatches(request.SecType, detail.SecType) ||
+			!exactOrderContractRouteMatches(request, detail) {
+			continue
+		}
+		if request.SecType == "OPT" && (detail.Expiry != strings.TrimSpace(request.Expiry) || detail.Right != strings.ToUpper(strings.TrimSpace(request.Right)) ||
+			!sameResolvedStrike(detail.Strike, request.Strike) || detail.Multiplier <= 0 || (request.Multiplier > 0 && detail.Multiplier != request.Multiplier)) {
+			continue
+		}
+		if request.LocalSymbol != "" && !strings.EqualFold(request.LocalSymbol, detail.LocalSymbol) {
+			continue
+		}
+		if request.TradingClass != "" && !strings.EqualFold(request.TradingClass, detail.TradingClass) {
+			continue
+		}
+		if selected != nil {
+			if selected.ConID != detail.ConID || !strings.EqualFold(selected.Exchange, detail.Exchange) ||
+				!strings.EqualFold(selected.PrimaryExch, detail.PrimaryExch) || !strings.EqualFold(selected.LocalSymbol, detail.LocalSymbol) ||
+				!strings.EqualFold(selected.TradingClass, detail.TradingClass) {
+				return ResolvedOrderContract{}, fmt.Errorf("contract details are ambiguous")
+			}
+			continue
+		}
+		copy := detail
+		selected = &copy
+	}
+	if selected == nil {
+		return ResolvedOrderContract{}, fmt.Errorf("no exact positive-ConID contract match")
+	}
+	resolved := request
+	resolved.ConID = selected.ConID
+	// Preserve the caller's execution route. Contract-details Exchange is an
+	// identity filter above, not authority to silently reroute a SMART/direct
+	// order. Only fill it when the request truly omitted one.
+	if resolved.Exchange == "" && selected.Exchange != "" {
+		resolved.Exchange = selected.Exchange
+	}
+	// For options PrimaryExch is an underlying discovery hint and is commonly
+	// absent from option details; preserve the requested hint. Stock/ETF
+	// listing identity was strictly filtered and can be enriched here.
+	if resolved.PrimaryExch == "" && selected.PrimaryExch != "" {
+		resolved.PrimaryExch = selected.PrimaryExch
+	}
+	resolved.SecType = selected.SecType
+	if selected.Multiplier > 0 {
+		resolved.Multiplier = selected.Multiplier
+	}
+	if selected.LocalSymbol != "" {
+		resolved.LocalSymbol = selected.LocalSymbol
+	}
+	if selected.TradingClass != "" {
+		resolved.TradingClass = selected.TradingClass
+	}
+	return ResolvedOrderContract{Contract: resolved, MinTick: selected.MinTick}, nil
+}
+
+// exactOrderContractRouteMatches applies caller-supplied routing as an
+// identity filter. SMART is an order-routing instruction, not a listing, so it
+// does not by itself narrow contract-details rows. A concrete exchange or
+// primary exchange must match one of the broker's route identity fields; this
+// covers both SMART+PrimaryExch and direct-exchange responses. If both caller
+// fields are concrete, both constraints must hold.
+func exactOrderContractRouteMatches(request Contract, detail ContractDetailsLite) bool {
+	reqExchange := strings.ToUpper(strings.TrimSpace(request.Exchange))
+	reqPrimary := strings.ToUpper(strings.TrimSpace(request.PrimaryExch))
+	detailExchange := strings.ToUpper(strings.TrimSpace(detail.Exchange))
+	detailPrimary := strings.ToUpper(strings.TrimSpace(detail.PrimaryExch))
+	if reqExchange != "" && reqExchange != "SMART" && reqExchange != detailExchange {
+		return false
+	}
+	if orderContractSecTypeMatches("STK", request.SecType) && reqPrimary != "" && reqPrimary != "SMART" && reqPrimary != detailPrimary {
+		return false
+	}
+	return true
+}
+
+func orderContractSecTypeMatches(request, broker string) bool {
+	request = strings.ToUpper(strings.TrimSpace(request))
+	broker = strings.ToUpper(strings.TrimSpace(broker))
+	return request == broker || (request == "ETF" && broker == "STK") || (request == "STK" && broker == "ETF")
+}
+
+func sameResolvedStrike(a, b float64) bool {
+	return math.Abs(a-b) < 1e-9
 }
 
 // ContractDetailsFirst returns the first contract-details row the gateway
@@ -1311,6 +1865,9 @@ func mergeContractDetailsLite(base, incoming ContractDetailsLite) ContractDetail
 	}
 	if base.PrimaryExch == "" && incoming.PrimaryExch != "" {
 		base.PrimaryExch = incoming.PrimaryExch
+	}
+	if base.Currency == "" && incoming.Currency != "" {
+		base.Currency = incoming.Currency
 	}
 	if base.LocalSymbol == "" && incoming.LocalSymbol != "" {
 		base.LocalSymbol = incoming.LocalSymbol
@@ -1346,9 +1903,10 @@ type inactiveCandidateState struct {
 
 // MarketDataKeyForContract returns the normalized cache and subscription key
 // for an explicitly routed market-data contract. An unrouted stock uses its
-// upper-case symbol; routed contracts join symbol, security type, exchange,
-// primary exchange, currency, local symbol, and trading class with "|". It
-// returns an empty string when Symbol is empty.
+// upper-case symbol only when it has no positive ConID; routed or exact
+// contracts join symbol, security type, exchange, primary exchange, currency,
+// local symbol, and trading class with "|", followed by CONID for exact
+// identities. It returns an empty string when Symbol is empty.
 func MarketDataKeyForContract(contract Contract) string {
 	symbol := strings.ToUpper(strings.TrimSpace(contract.Symbol))
 	if symbol == "" {
@@ -1364,6 +1922,7 @@ func MarketDataKeyForContract(contract Contract) string {
 	localSymbol := strings.ToUpper(strings.TrimSpace(contract.LocalSymbol))
 	tradingClass := strings.ToUpper(strings.TrimSpace(contract.TradingClass))
 	if secType == "STK" &&
+		contract.ConID <= 0 &&
 		exchange == "" &&
 		primary == "" &&
 		currency == "" &&
@@ -1371,7 +1930,11 @@ func MarketDataKeyForContract(contract Contract) string {
 		tradingClass == "" {
 		return symbol
 	}
-	return strings.Join([]string{symbol, secType, exchange, primary, currency, localSymbol, tradingClass}, "|")
+	parts := []string{symbol, secType, exchange, primary, currency, localSymbol, tradingClass}
+	if contract.ConID > 0 {
+		parts = append(parts, "CONID:"+strconv.Itoa(contract.ConID))
+	}
+	return strings.Join(parts, "|")
 }
 
 // DefaultMarketDataKeyForSymbol returns the same normalized route key used by
@@ -1624,7 +2187,10 @@ func (c *Connector) FetchContractDetails(symbol string, timeout time.Duration) (
 	detailsCh := make(chan ContractDetailsLite, 10)
 	doneCh := make(chan struct{})
 	serverVersion := c.conn.serverVersion
-	reqID := c.conn.GetNextRequestID()
+	reqID, err := c.conn.nextRequestID()
+	if err != nil {
+		return nil, err
+	}
 
 	c.logDebug("Contract details fetch start reqID=%d symbol=%s secType=%s exch=%s primary=%s currency=%s", reqID, symbol, contract.SecType, contract.Exchange, contract.PrimaryExch, contract.Currency)
 
@@ -1719,7 +2285,10 @@ func (c *Connector) fetchContractDetailsForContract(contract Contract, timeout t
 	detailsCh := make(chan ContractDetailsLite, 10)
 	doneCh := make(chan struct{})
 	serverVersion := c.conn.serverVersion
-	reqID := c.conn.GetNextRequestID()
+	reqID, err := c.conn.nextRequestID()
+	if err != nil {
+		return nil, err
+	}
 
 	c.logDebug("Routed contract details fetch start reqID=%d key=%s secType=%s exch=%s primary=%s currency=%s",
 		reqID, key, lookup.SecType, lookup.Exchange, lookup.PrimaryExch, lookup.Currency)
@@ -1997,9 +2566,8 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 
 	exchange := strings.TrimSpace(safeGet(fields, idx))
 	idx++
-	currency := safeGet(fields, idx)
+	currency := strings.TrimSpace(safeGet(fields, idx))
 	idx++
-	_ = currency
 
 	localSymbol := strings.TrimSpace(safeGet(fields, idx))
 	idx++
@@ -2020,7 +2588,7 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 		idx++ // md size multiplier (deprecated)
 	}
 
-	_ = safeGet(fields, idx) // multiplier
+	multiplier := parseIntSafe(safeGet(fields, idx))
 	idx++
 	_ = safeGet(fields, idx) // order types
 	idx++
@@ -2063,9 +2631,11 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 		Right:        right,
 		Exchange:     exchange,
 		PrimaryExch:  primaryExch,
+		Currency:     currency,
 		ConID:        conID,
 		LocalSymbol:  localSymbol,
 		TradingClass: tradingClass,
+		Multiplier:   multiplier,
 		TimeZoneID:   timeZoneID,
 		TradingHours: tradingHours,
 		LiquidHours:  liquidHours,
@@ -2280,6 +2850,79 @@ func (c *Connector) SubscribeMarketDataWithContract(ctx context.Context, contrac
 
 	marketDataLogger.Debugf("%s: Subscribed to routed market data for %s (ReqID: %d)", c.name, key, reqID)
 	return key, nil
+}
+
+// SubscribeMarketDataWithContractForSession creates a short-lived,
+// non-sharing subscription for one exact positive-ConID contract on binding's
+// physical socket. The unique key prevents a symbol/route cache entry from a
+// different contract or socket satisfying a broker-write preview.
+func (c *Connector) SubscribeMarketDataWithContractForSession(ctx context.Context, binding ConnectorSessionBinding, contract Contract, fields []string) (string, error) {
+	if c == nil || !c.SessionCurrent(binding) {
+		return "", fmt.Errorf("broker session changed before exact quote request")
+	}
+	contract = normalizeMarketDataContract(contract)
+	if contract.ConID <= 0 {
+		return "", fmt.Errorf("exact quote contract requires positive ConID")
+	}
+	baseKey := MarketDataKeyForContract(contract)
+	if baseKey == "" {
+		return "", fmt.Errorf("contract symbol is required for market data")
+	}
+	key := baseKey + "|EXACT:" + strconv.FormatUint(c.exactQuoteSeq.Add(1), 10)
+	conn := binding.connection
+	cleanupPrepared := func(reqID int) {
+		c.subMu.Lock()
+		if sub := c.subscriptions[key]; sub != nil && sub.ReqID == reqID && sub.SessionEpoch == binding.epoch {
+			delete(c.subscriptions, key)
+		}
+		if c.reqIDMap[reqID] == key {
+			delete(c.reqIDMap, reqID)
+		}
+		c.subMu.Unlock()
+	}
+	wireContract := contract
+	normalizeResolvedOptionMarketDataContract(&wireContract)
+	reqID, err := conn.requestMarketDataWithContractForEpoch(ctx, wireContract, OptionSubscriptionGenericTicks+",165,221,233,236", false, false, binding.epoch, func(reqID int) func() {
+		c.subMu.Lock()
+		c.reqIDMap[reqID] = key
+		c.subscriptions[key] = &Subscription{
+			Symbol: key, ReqID: reqID, Fields: fields, LastTime: time.Now(), SessionEpoch: binding.epoch,
+			RejectCh: make(chan SubscriptionRejection, 1),
+		}
+		c.subMu.Unlock()
+		return func() { cleanupPrepared(reqID) }
+	})
+	if err != nil {
+		return "", err
+	}
+	if !c.SessionCurrent(binding) {
+		cleanupPrepared(reqID)
+		binding.connection.releaseMarketDataSlotAtEpoch(reqID, binding.epoch)
+		return "", fmt.Errorf("broker session changed during exact quote request")
+	}
+	return key, nil
+}
+
+// UnsubscribeMarketDataForSession removes only the exact subscription created
+// on binding and emits a cancel solely when that physical socket is still
+// current. A retired cleanup can never cancel a successor subscription.
+func (c *Connector) UnsubscribeMarketDataForSession(ctx context.Context, binding ConnectorSessionBinding, key string) error {
+	c.subMu.Lock()
+	sub := c.subscriptions[key]
+	if sub == nil || sub.SessionEpoch != binding.epoch {
+		c.subMu.Unlock()
+		return nil
+	}
+	delete(c.subscriptions, key)
+	if c.reqIDMap[sub.ReqID] == key {
+		delete(c.reqIDMap, sub.ReqID)
+	}
+	c.subMu.Unlock()
+	if !c.SessionCurrent(binding) {
+		binding.connection.releaseMarketDataSlotAtEpoch(sub.ReqID, binding.epoch)
+		return nil
+	}
+	return binding.connection.cancelMarketDataForEpoch(ctx, sub.ReqID, binding.epoch)
 }
 
 func (c *Connector) hydrateExplicitMarketDataContract(contract Contract) Contract {
@@ -2532,9 +3175,31 @@ type RawOrder struct {
 // the frame was sent, not that the broker accepted or filled the order.
 func (c *Connector) SubmitOrder(contract *Contract, order *RawOrder) error {
 	if !tradingEnabled {
-		return ErrTradingDisabled
+		return definitelyUnsent(ErrTradingDisabled)
 	}
-	return c.submitOrder(contract, order, nil)
+	binding, ok := c.CaptureSession()
+	if !ok {
+		return definitelyUnsent(fmt.Errorf("not connected to IBKR"))
+	}
+	return c.SubmitOrderForSession(binding, contract, order)
+}
+
+// SubmitOrderForSession sends an unrestricted order only on the exact
+// Connector socket generation named by binding. The binding must have been
+// captured from this Connector; reconnect or disconnect drift is rejected at
+// allocator claim and again at the transport boundary before any wire write.
+func (c *Connector) SubmitOrderForSession(binding ConnectorSessionBinding, contract *Contract, order *RawOrder) error {
+	return c.SubmitOrderForSessionGuarded(context.Background(), binding, contract, order, nil)
+}
+
+// SubmitOrderForSessionGuarded carries caller cancellation and a final
+// authority guard to the exact socket write. guard runs under the connection
+// transport lock after pacing and epoch checks, immediately before any byte.
+func (c *Connector) SubmitOrderForSessionGuarded(ctx context.Context, binding ConnectorSessionBinding, contract *Contract, order *RawOrder, guard func() error) error {
+	if !tradingEnabled {
+		return definitelyUnsent(ErrTradingDisabled)
+	}
+	return c.submitOrderForSession(ctx, binding, contract, order, nil, guard)
 }
 
 // SubmitPaperOrder validates gate against the configured connection and sends
@@ -2542,25 +3207,48 @@ func (c *Connector) SubmitOrder(contract *Contract, order *RawOrder) error {
 // enabling [Connector.SubmitOrder]. A successful return means the frame was
 // sent, not that the broker accepted or filled the order.
 func (c *Connector) SubmitPaperOrder(gate PaperOrderGate, contract *Contract, order *RawOrder) error {
-	if err := gate.validate(); err != nil {
-		return err
+	binding, ok := c.CaptureSession()
+	if !ok {
+		return definitelyUnsent(fmt.Errorf("not connected to IBKR"))
 	}
-	return c.submitOrder(contract, order, &gate)
+	return c.SubmitPaperOrderForSession(binding, gate, contract, order)
 }
 
-func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *PaperOrderGate) error {
-	if !c.isConnected() {
-		return fmt.Errorf("not connected to IBKR")
-	}
+// SubmitPaperOrderForSession validates gate and sends a paper order only on
+// the exact Connector socket generation named by binding.
+func (c *Connector) SubmitPaperOrderForSession(binding ConnectorSessionBinding, gate PaperOrderGate, contract *Contract, order *RawOrder) error {
+	return c.SubmitPaperOrderForSessionGuarded(context.Background(), binding, gate, contract, order, nil)
+}
 
-	// Get connection from pool
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-
-	if conn == nil {
-		return fmt.Errorf("no active connection")
+// SubmitPaperOrderForSessionGuarded is the paper-gated counterpart to
+// SubmitOrderForSessionGuarded.
+func (c *Connector) SubmitPaperOrderForSessionGuarded(ctx context.Context, binding ConnectorSessionBinding, gate PaperOrderGate, contract *Contract, order *RawOrder, guard func() error) error {
+	if err := gate.validate(); err != nil {
+		return definitelyUnsent(err)
 	}
+	return c.submitOrderForSession(ctx, binding, contract, order, &gate, guard)
+}
+
+func (c *Connector) submitOrderForSession(ctx context.Context, binding ConnectorSessionBinding, contract *Contract, order *RawOrder, paperGate *PaperOrderGate, guard func() error) error {
+	if c == nil {
+		return definitelyUnsent(fmt.Errorf("broker Connector is nil"))
+	}
+	if ctx == nil {
+		return definitelyUnsent(fmt.Errorf("broker order context is nil"))
+	}
+	if err := ctx.Err(); err != nil {
+		return definitelyUnsent(err)
+	}
+	if contract == nil {
+		return definitelyUnsent(fmt.Errorf("broker order contract is nil"))
+	}
+	if order == nil {
+		return definitelyUnsent(fmt.Errorf("broker order is nil"))
+	}
+	if !c.SessionCurrent(binding) {
+		return definitelyUnsent(fmt.Errorf("broker session binding is not current for this Connector"))
+	}
+	conn := binding.connection
 
 	// Convert to IBKROrder for the connection
 	ibkrOrder := &IBKROrder{
@@ -2600,6 +3288,34 @@ func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *
 		ibkrOrder.OpenClose = "O"
 	}
 
+	// Bind the order id under the same coordination boundary used by the exact
+	// historical request. Read-only requests keep their IDs; a colliding or
+	// stale caller-supplied order is refused before local indexing or wire send.
+	var claimEpoch uint64
+	c.brokerIDNamespaceMu.Lock()
+	if ibkrOrder.OrderID <= 0 {
+		var err error
+		ibkrOrder.OrderID, claimEpoch, err = c.nextDisjointOrderIDLockedForSession(binding)
+		if err != nil {
+			c.brokerIDNamespaceMu.Unlock()
+			return definitelyUnsent(err)
+		}
+	} else {
+		if c.feeRequestOwnsID(ibkrOrder.OrderID) {
+			c.brokerIDNamespaceMu.Unlock()
+			return definitelyUnsent(fmt.Errorf("%w: explicit order ID is owned by an active read-only request", ErrBrokerIDNamespaceConflict))
+		}
+		owned := c.isKnownBrokerOrderID(ibkrOrder.OrderID)
+		var err error
+		claimEpoch, err = conn.claimOrderIDForForwardingAtEpoch(ibkrOrder.OrderID, owned, &binding.epoch)
+		if err != nil {
+			c.brokerIDNamespaceMu.Unlock()
+			return definitelyUnsent(err)
+		}
+	}
+	defer conn.discardOrderIDReservation(ibkrOrder.OrderID)
+	c.orderIDHighWater = max(c.orderIDHighWater, ibkrOrder.OrderID)
+
 	brokerID := strconv.Itoa(ibkrOrder.OrderID)
 	localID := strings.TrimSpace(order.OrderRef)
 	if localID == "" {
@@ -2632,28 +3348,36 @@ func (c *Connector) submitOrder(contract *Contract, order *RawOrder, paperGate *
 	c.openOrders[localID] = coreOrder
 	c.brokerOrderIndex[brokerID] = localID
 	c.orderMu.Unlock()
+	c.brokerIDNamespaceMu.Unlock()
 
 	// Place the order through the connection after local indexing so fast
 	// broker callbacks and errors can be correlated with the journal.
 	var err error
 	if paperGate != nil {
-		err = conn.PlacePaperOrder(*paperGate, ibkrOrder)
+		err = conn.placePaperOrderForEpochGuarded(ctx, *paperGate, ibkrOrder, claimEpoch, guard)
 	} else {
-		err = conn.PlaceOrder(ibkrOrder)
+		err = conn.placeOrderForEpochGuarded(ctx, ibkrOrder, claimEpoch, guard)
 	}
 	if err != nil {
-		c.orderMu.Lock()
-		if hadPreviousOrder {
-			c.openOrders[localID] = previousOrder
-		} else {
-			delete(c.openOrders, localID)
+		if SendDispositionOf(err) == SendDispositionDefinitelyUnsent {
+			c.orderMu.Lock()
+			if hadPreviousOrder {
+				c.openOrders[localID] = previousOrder
+			} else {
+				delete(c.openOrders, localID)
+			}
+			if hadPreviousIndex {
+				c.brokerOrderIndex[brokerID] = previousIndex
+			} else {
+				delete(c.brokerOrderIndex, brokerID)
+			}
+			c.orderMu.Unlock()
 		}
-		if hadPreviousIndex {
-			c.brokerOrderIndex[brokerID] = previousIndex
-		} else {
-			delete(c.brokerOrderIndex, brokerID)
-		}
-		c.orderMu.Unlock()
+		// A possibly written instruction retains its exact positive ID and local
+		// correlation so callbacks and a later safety cancel can still find it.
+		order.OrderID = ibkrOrder.OrderID
+		order.ClientID = ibkrOrder.ClientID
+		order.PermID = ibkrOrder.PermID
 		return fmt.Errorf("failed to place order: %w", err)
 	}
 	order.OrderID = ibkrOrder.OrderID
@@ -2682,29 +3406,256 @@ func (c *Connector) ReserveOrderID() (int, error) {
 	if !tradingEnabled {
 		return 0, ErrTradingDisabled
 	}
-	if !c.isConnected() {
+	binding, ok := c.CaptureSession()
+	if !ok {
 		return 0, fmt.Errorf("not connected to IBKR")
 	}
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-	if conn == nil {
-		return 0, fmt.Errorf("no active connection")
-	}
-	return conn.GetNextOrderID(), nil
+	return c.ReserveOrderIDForSession(binding)
 }
 
-// RegisterOrderLifecycleHandler appends a callback for broker order lifecycle
-// messages. Callbacks run synchronously on the dispatching goroutine in
-// registration order, must return quickly, and cannot be unregistered. A nil
-// Connector or handler is ignored.
+// ReserveOrderIDForSession claims the next broker order ID from the exact
+// socket generation named by binding. The reservation remains tied to that
+// epoch and cannot authorize a later-session submission.
+func (c *Connector) ReserveOrderIDForSession(binding ConnectorSessionBinding) (int, error) {
+	if !tradingEnabled {
+		return 0, ErrTradingDisabled
+	}
+	if !c.SessionCurrent(binding) {
+		return 0, fmt.Errorf("broker session binding is not current for this Connector")
+	}
+	c.brokerIDNamespaceMu.Lock()
+	id, _, err := c.nextDisjointOrderIDLockedForSession(binding)
+	if err != nil {
+		c.brokerIDNamespaceMu.Unlock()
+		return 0, err
+	}
+	c.orderIDHighWater = max(c.orderIDHighWater, id)
+	c.brokerIDNamespaceMu.Unlock()
+	return id, nil
+}
+
+func (c *Connector) nextDisjointOrderIDLockedForSession(binding ConnectorSessionBinding) (int, uint64, error) {
+	for {
+		id, epoch, err := binding.connection.reserveNextOrderIDForEpoch(binding.epoch)
+		if err != nil {
+			return 0, epoch, err
+		}
+		if !c.feeRequestOwnsID(id) {
+			return id, epoch, nil
+		}
+		binding.connection.discardOrderIDReservation(id)
+	}
+}
+
+func (c *Connector) nextDisjointOrderIDLocked(conn *Connection) (int, uint64, error) {
+	for {
+		id, epoch, err := conn.reserveNextOrderID()
+		if err != nil {
+			return 0, epoch, err
+		}
+		if !c.feeRequestOwnsID(id) {
+			return id, epoch, nil
+		}
+		// The shared frontier remains consumed, but a skipped read-owned ID
+		// must not retain order-reservation provenance that could authorize a
+		// later explicit claim.
+		conn.discardOrderIDReservation(id)
+	}
+}
+
+func (c *Connector) feeRequestOwnsID(id int) bool {
+	if id <= 0 {
+		return false
+	}
+	c.historicalMu.Lock()
+	defer c.historicalMu.Unlock()
+	request := c.historicalReqs[id]
+	return c.historicalRouteReqs[id] != nil || (request != nil && request.requestOwnsNoticeCollision)
+}
+
+type orderLifecycleHandlerEntry struct {
+	legacy  func(OrderLifecycleEvent)
+	receipt func(OrderLifecycleReceipt)
+}
+
+// RegisterOrderLifecycleHandler appends a compatibility callback for broker
+// order lifecycle messages. Callbacks run synchronously in registration order
+// and must return quickly. A nil Connector or handler is ignored.
 func (c *Connector) RegisterOrderLifecycleHandler(handler func(OrderLifecycleEvent)) {
 	if c == nil || handler == nil {
 		return
 	}
 	c.orderLifecycleMu.Lock()
-	defer c.orderLifecycleMu.Unlock()
-	c.orderLifecycle = append(c.orderLifecycle, handler)
+	c.orderLifecycle = append(c.orderLifecycle, orderLifecycleHandlerEntry{legacy: handler})
+	c.orderLifecycleMu.Unlock()
+}
+
+// RegisterOrderLifecycleReceiptHandler appends a callback that receives the
+// exact socket-session receipt for every event.
+func (c *Connector) RegisterOrderLifecycleReceiptHandler(handler func(OrderLifecycleReceipt)) {
+	if c == nil || handler == nil {
+		return
+	}
+	c.orderLifecycleMu.Lock()
+	c.orderLifecycle = append(c.orderLifecycle, orderLifecycleHandlerEntry{receipt: handler})
+	c.orderLifecycleMu.Unlock()
+}
+
+// OrderLifecycleGeneration returns the current connection-local order-event
+// frontier without issuing a broker request. Zero means no accepted lifecycle
+// callback has been observed by this Connector.
+func (c *Connector) OrderLifecycleGeneration() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.orderLifecycleGeneration.Load()
+}
+
+// PortfolioProjectionGeneration returns the current structural portfolio
+// frontier without issuing a broker request. It advances for scope,
+// completeness, contract-set, or quantity changes, but not mark/PnL-only
+// updates.
+func (c *Connector) PortfolioProjectionGeneration() uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil {
+		return 0
+	}
+	return conn.PortfolioProjectionGeneration()
+}
+
+// PortfolioProjectionBinding is a caller-owned, exact-session snapshot of the
+// structural portfolio projection and its typed stream receipt.
+type PortfolioProjectionBinding struct {
+	Session    ConnectorSessionBinding
+	Positions  []*RawPosition
+	Health     PortfolioStreamHealth
+	Generation uint64
+}
+
+// CapturePortfolioProjectionForSession snapshots positions, health, and the
+// structural generation while portfolio/session mutations are excluded.
+// False means binding is stale or the Connector is not ready.
+func (c *Connector) CapturePortfolioProjectionForSession(binding ConnectorSessionBinding) (PortfolioProjectionBinding, bool) {
+	if c == nil {
+		return PortfolioProjectionBinding{}, false
+	}
+	c.publicationBarrier.RLock()
+	defer c.publicationBarrier.RUnlock()
+	c.evidenceBarrier.Lock()
+	defer c.evidenceBarrier.Unlock()
+	if !c.SessionCurrent(binding) {
+		return PortfolioProjectionBinding{}, false
+	}
+	positions, health := binding.connection.GetPositionsWithPortfolioHealth()
+	return PortfolioProjectionBinding{
+		Session: binding, Positions: c.filteredCachedPositions(positions),
+		Health: health, Generation: health.ProjectionGeneration,
+	}, true
+}
+
+// CapturePortfolioProjectionForBoundSession snapshots the structural
+// portfolio authority without acquiring publicationBarrier or evidenceBarrier.
+// It is only valid from a protected order wire guard while the transport owns
+// publicationBarrier for reading and evidenceBarrier exclusively. Keeping this
+// variant lock-free preserves the publication-then-evidence lock order.
+func (c *Connector) CapturePortfolioProjectionForBoundSession(binding ConnectorSessionBinding) (PortfolioProjectionBinding, bool) {
+	if c == nil || !c.SessionCurrent(binding) {
+		return PortfolioProjectionBinding{}, false
+	}
+	positions, health := binding.connection.GetPositionsWithPortfolioHealth()
+	if !c.SessionCurrent(binding) {
+		return PortfolioProjectionBinding{}, false
+	}
+	return PortfolioProjectionBinding{
+		Session: binding, Positions: c.filteredCachedPositions(positions),
+		Health: health, Generation: health.ProjectionGeneration,
+	}, true
+}
+
+// BrokerEvidenceBinding is a point-in-time identity for the Connector session,
+// order callback frontier, and structural portfolio projection.
+type BrokerEvidenceBinding struct {
+	Session                       ConnectorSessionBinding
+	OrderLifecycleGeneration      uint64
+	PortfolioProjectionGeneration uint64
+}
+
+// CaptureBrokerEvidence returns one stable broker-evidence frontier. False
+// means the Connector is not a ready current session.
+func (c *Connector) CaptureBrokerEvidence() (BrokerEvidenceBinding, bool) {
+	if c == nil {
+		return BrokerEvidenceBinding{}, false
+	}
+	c.publicationBarrier.RLock()
+	defer c.publicationBarrier.RUnlock()
+	c.evidenceBarrier.RLock()
+	defer c.evidenceBarrier.RUnlock()
+	session, ok := c.CaptureSession()
+	if !ok {
+		return BrokerEvidenceBinding{}, false
+	}
+	return BrokerEvidenceBinding{
+		Session: session, OrderLifecycleGeneration: c.OrderLifecycleGeneration(),
+		PortfolioProjectionGeneration: c.PortfolioProjectionGeneration(),
+	}, true
+}
+
+// WithStableBrokerEvidence executes commit while structural portfolio/session
+// writers and order lifecycle dispatch are excluded. It returns false without
+// calling commit when binding is no longer exact.
+func (c *Connector) WithStableBrokerEvidence(binding BrokerEvidenceBinding, commit func() bool) bool {
+	if c == nil || commit == nil {
+		return false
+	}
+	c.publicationBarrier.RLock()
+	defer c.publicationBarrier.RUnlock()
+	c.evidenceBarrier.Lock()
+	defer c.evidenceBarrier.Unlock()
+	if !c.SessionCurrent(binding.Session) || c.OrderLifecycleGeneration() != binding.OrderLifecycleGeneration ||
+		c.PortfolioProjectionGeneration() != binding.PortfolioProjectionGeneration {
+		return false
+	}
+	return commit()
+}
+
+// WithBrokerEvidenceMutation serializes an external owner-published identity
+// change after all in-flight Connector evidence dispatch and exact-session
+// broker operations have drained. It exists for daemon connector publication
+// only; it does not authorize broker activity.
+func (c *Connector) WithBrokerEvidenceMutation(change func()) {
+	if change == nil {
+		return
+	}
+	if c == nil {
+		change()
+		return
+	}
+	c.publicationBarrier.Lock()
+	defer c.publicationBarrier.Unlock()
+	c.evidenceBarrier.Lock()
+	defer c.evidenceBarrier.Unlock()
+	change()
+}
+
+// WithBoundBrokerSession admits operation only when binding names the current
+// Connector socket session. It deliberately does not hold publication while
+// operation waits in pacing or on a paused transport. Protected transports
+// acquire the publication read side only for their final guarded write, where
+// the exact Connection epoch remains the final pre-wire authority.
+// False means binding was not current and operation was not called.
+func (c *Connector) WithBoundBrokerSession(binding ConnectorSessionBinding, operation func() error) (bool, error) {
+	if c == nil || operation == nil {
+		return false, nil
+	}
+	if !c.SessionCurrent(binding) {
+		return false, nil
+	}
+	return true, operation()
 }
 
 func multiplierToString(mult int) string {
@@ -2719,36 +3670,40 @@ func multiplierToString(mult int) string {
 // sent, not that the broker confirmed the order cancelled.
 func (c *Connector) CancelOrder(orderID int) error {
 	if !tradingEnabled {
-		return ErrTradingDisabled
+		return definitelyUnsent(ErrTradingDisabled)
 	}
-	if !c.isConnected() {
-		return fmt.Errorf("not connected to IBKR")
+	binding, ok := c.CaptureSession()
+	if !ok {
+		return definitelyUnsent(fmt.Errorf("not connected to IBKR"))
 	}
+	return c.CancelOrderForSession(binding, orderID)
+}
 
-	// Get connection
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
+// CancelOrderForSession sends a cancellation only on the exact Connector
+// socket generation named by binding.
+func (c *Connector) CancelOrderForSession(binding ConnectorSessionBinding, orderID int) error {
+	return c.CancelOrderForSessionGuarded(context.Background(), binding, orderID, nil)
+}
 
-	if conn == nil {
-		return fmt.Errorf("no active connection")
+// CancelOrderForSessionGuarded carries caller cancellation and a final
+// authority guard to the exact cancel frame.
+func (c *Connector) CancelOrderForSessionGuarded(ctx context.Context, binding ConnectorSessionBinding, orderID int, guard func() error) error {
+	if !tradingEnabled {
+		return definitelyUnsent(ErrTradingDisabled)
 	}
-
-	// Send cancel request through connection
-	err := conn.CancelOrder(orderID)
+	if ctx == nil {
+		return definitelyUnsent(fmt.Errorf("broker cancel context is nil"))
+	}
+	if err := ctx.Err(); err != nil {
+		return definitelyUnsent(err)
+	}
+	if !c.SessionCurrent(binding) {
+		return definitelyUnsent(fmt.Errorf("broker session binding is not current for this Connector"))
+	}
+	err := binding.connection.cancelOrderForEpochGuarded(ctx, orderID, binding.epoch, guard)
 	if err != nil {
 		return fmt.Errorf("failed to cancel order: %w", err)
 	}
-
-	// Update local tracking
-	c.orderMu.Lock()
-	orderIDStr := fmt.Sprintf("%d", orderID)
-	if order, exists := c.openOrders[orderIDStr]; exists {
-		order.Status = OrderStatusCancelled
-		now := time.Now()
-		order.CancelledAt = &now
-	}
-	c.orderMu.Unlock()
 
 	c.logInfo("Order cancel request sent for ID: %d", orderID)
 
@@ -2759,29 +3714,37 @@ func (c *Connector) CancelOrder(orderID int) error {
 // a cancellation for broker orderID in a paper account. A successful return
 // means the frame was sent, not that the broker confirmed cancellation.
 func (c *Connector) CancelPaperOrder(gate PaperOrderGate, orderID int) error {
+	binding, ok := c.CaptureSession()
+	if !ok {
+		return definitelyUnsent(fmt.Errorf("not connected to IBKR"))
+	}
+	return c.CancelPaperOrderForSession(binding, gate, orderID)
+}
+
+// CancelPaperOrderForSession validates gate and sends a paper cancellation
+// only on the exact Connector socket generation named by binding.
+func (c *Connector) CancelPaperOrderForSession(binding ConnectorSessionBinding, gate PaperOrderGate, orderID int) error {
+	return c.CancelPaperOrderForSessionGuarded(context.Background(), binding, gate, orderID, nil)
+}
+
+// CancelPaperOrderForSessionGuarded is the paper-gated counterpart to
+// CancelOrderForSessionGuarded.
+func (c *Connector) CancelPaperOrderForSessionGuarded(ctx context.Context, binding ConnectorSessionBinding, gate PaperOrderGate, orderID int, guard func() error) error {
 	if err := gate.validate(); err != nil {
-		return err
+		return definitelyUnsent(err)
 	}
-	if !c.isConnected() {
-		return fmt.Errorf("not connected to IBKR")
+	if ctx == nil {
+		return definitelyUnsent(fmt.Errorf("broker cancel context is nil"))
 	}
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-	if conn == nil {
-		return fmt.Errorf("no active connection")
+	if err := ctx.Err(); err != nil {
+		return definitelyUnsent(err)
 	}
-	if err := conn.CancelPaperOrder(gate, orderID); err != nil {
+	if !c.SessionCurrent(binding) {
+		return definitelyUnsent(fmt.Errorf("broker session binding is not current for this Connector"))
+	}
+	if err := binding.connection.cancelPaperOrderForEpochGuarded(ctx, gate, orderID, binding.epoch, guard); err != nil {
 		return fmt.Errorf("failed to cancel order: %w", err)
 	}
-	c.orderMu.Lock()
-	orderIDStr := strconv.Itoa(orderID)
-	if order, exists := c.openOrders[orderIDStr]; exists {
-		order.Status = OrderStatusCancelled
-		now := time.Now()
-		order.CancelledAt = &now
-	}
-	c.orderMu.Unlock()
 	c.logInfo("Paper order cancel request sent for ID: %d", orderID)
 	return nil
 }
@@ -2868,25 +3831,6 @@ func (c *Connector) isConnected() bool {
 // [Connector.IsReady] when issuing requests.
 func (c *Connector) IsConnected() bool { return c.isConnected() }
 
-// connCtx returns the underlying Connection's lifetime ctx, or
-// context.Background() when no connection is wired up. Used by background
-// recovery paths (subscription refresh after farm reconnect, error-driven
-// re-route) that have no per-request deadline of their own — the slot-
-// acquire should only abort if the daemon itself shuts down.
-//
-// Per-request callers (regime fetcher, snapshot helpers) must pass their
-// own ctx through SubscribeMarketData / Request* so the caller's deadline
-// is what bounds the slot-acquire, not daemon lifetime.
-func (c *Connector) connCtx() context.Context {
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-	if conn == nil || conn.ctx == nil {
-		return context.Background()
-	}
-	return conn.ctx
-}
-
 // UsingTLS reports the TLS mode the active session negotiated. False when
 // disconnected or when a non-TLS handshake succeeded (possibly via fallback).
 func (c *Connector) UsingTLS() bool {
@@ -2906,6 +3850,67 @@ func (c *Connector) IsReady() bool {
 	rd := c.ready
 	c.mu.RUnlock()
 	return rd && c.isConnected()
+}
+
+// CaptureSession returns the exact ready Connection object and socket epoch
+// that may own a new broker-adjacent read. The token is process-local and is
+// evidence for a later equality check, not durable readiness or authority.
+func (c *Connector) CaptureSession() (ConnectorSessionBinding, bool) {
+	if c == nil {
+		return ConnectorSessionBinding{}, false
+	}
+	c.mu.RLock()
+	conn := c.conn
+	ready := c.ready
+	c.mu.RUnlock()
+	if !ready || conn == nil || !conn.IsConnected() {
+		return ConnectorSessionBinding{}, false
+	}
+	return ConnectorSessionBinding{connector: c, connection: conn, epoch: conn.BrokerSessionEpoch()}, true
+}
+
+// SessionCurrent reports whether binding still names this Connector's ready
+// Connection and exact socket epoch.
+func (c *Connector) SessionCurrent(binding ConnectorSessionBinding) bool {
+	if c == nil || binding.connector != c || binding.connection == nil {
+		return false
+	}
+	c.mu.RLock()
+	conn := c.conn
+	ready := c.ready
+	c.mu.RUnlock()
+	return ready && conn == binding.connection && conn.IsConnected() && conn.BrokerSessionEpoch() == binding.epoch
+}
+
+// SessionReceiptCurrent reports whether binding names the Connector's exact
+// installed inbound socket generation. Connecting is accepted because
+// startAPI synchronously processes a small frame burst before onConnect;
+// disconnected/failed/reconnecting states are never current. This does not
+// authorize outbound requests.
+func (c *Connector) SessionReceiptCurrent(binding ConnectorSessionBinding) bool {
+	if c == nil || binding.connector != c || binding.connection == nil {
+		return false
+	}
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn != binding.connection || conn.BrokerSessionEpoch() != binding.epoch {
+		return false
+	}
+	status := conn.Status()
+	return status == StatusConnecting || status == StatusConnected
+}
+
+// CaptureHistoricalSession is the historical-data compatibility spelling for
+// [Connector.CaptureSession].
+func (c *Connector) CaptureHistoricalSession() (HistoricalSessionBinding, bool) {
+	return c.CaptureSession()
+}
+
+// HistoricalSessionCurrent is the historical-data compatibility spelling for
+// [Connector.SessionCurrent].
+func (c *Connector) HistoricalSessionCurrent(binding HistoricalSessionBinding) bool {
+	return c.SessionCurrent(binding)
 }
 
 // ServerVersion returns the IBKR server protocol version reported by the
@@ -3133,10 +4138,21 @@ func (c *Connector) acctUpdatesClock() time.Time {
 // acctUpdatesResubscribeThrottle window, counted from the last subscribe;
 // a genuinely flat account (no gross position value) never triggers.
 func (c *Connector) maybeResubscribeAccountUpdates() {
+	c.maybeResubscribeAccountUpdatesForReason(false)
+}
+
+// maybeResubscribeAccountUpdatesForScopeConflict repairs a rejected foreign
+// account frame even when the retained cache is non-empty. The rows remain
+// context only until a new, account-scoped subscription completes.
+func (c *Connector) maybeResubscribeAccountUpdatesForScopeConflict() {
+	c.maybeResubscribeAccountUpdatesForReason(true)
+}
+
+func (c *Connector) maybeResubscribeAccountUpdatesForReason(scopeConflict bool) {
 	if !c.isConnected() {
 		return
 	}
-	if !accountSummaryShowsPositions(c.conn.GetAccountSummary()) {
+	if !scopeConflict && !accountSummaryShowsPositions(c.conn.GetAccountSummary()) {
 		return
 	}
 	now := c.acctUpdatesClock()
@@ -3146,7 +4162,11 @@ func (c *Connector) maybeResubscribeAccountUpdates() {
 	if !stale {
 		return
 	}
-	ibkrLogger.Warnf("positions cache empty while account summary shows gross position value; resubscribing account updates")
+	if scopeConflict {
+		ibkrLogger.Warnf("portfolio stream account scope conflicted; resubscribing account updates")
+	} else {
+		ibkrLogger.Warnf("positions cache empty while account summary shows gross position value; resubscribing account updates")
+	}
 	_ = c.RequestAccountUpdates("")
 }
 
@@ -3193,8 +4213,10 @@ func (c *Connector) CachedPositions() ([]*RawPosition, error) {
 
 // CachedPositionsWithHealth returns the same read-only cached rows as
 // [Connector.CachedPositions] together with the latest stream completion and
-// heartbeat receipts. It performs no positions request. A disconnected
-// Connector returns nil rows, zero health, and a nil error.
+// heartbeat receipts. It performs no positions snapshot request; a typed
+// account-scope conflict may trigger the throttled stream resubscribe behind
+// the read. A disconnected Connector returns nil rows, zero health, and a nil
+// error.
 func (c *Connector) CachedPositionsWithHealth() ([]*RawPosition, PortfolioStreamHealth, error) {
 	if !c.isConnected() {
 		return nil, PortfolioStreamHealth{}, nil
@@ -3207,7 +4229,10 @@ func (c *Connector) CachedPositionsWithHealth() ([]*RawPosition, PortfolioStream
 	}
 	ibkrPositions, health := conn.GetPositionsWithPortfolioHealth()
 	result := c.filteredCachedPositions(ibkrPositions)
-	if len(result) == 0 && accountSummaryShowsPositions(conn.GetAccountSummary()) {
+	if !health.ScopeConflictAt.IsZero() || !health.InvalidPayloadAt.IsZero() {
+		c.maybeResubscribeAccountUpdatesForScopeConflict()
+		_, health = conn.GetPositionsWithPortfolioHealth()
+	} else if len(result) == 0 && accountSummaryShowsPositions(conn.GetAccountSummary()) {
 		c.maybeResubscribeAccountUpdates()
 		_, health = conn.GetPositionsWithPortfolioHealth()
 	}
@@ -3267,7 +4292,7 @@ func (c *Connector) RefreshPositions(timeout time.Duration) ([]*RawPosition, err
 	if err := conn.WaitForPositionsEnd(timeout); err != nil {
 		return nil, err
 	}
-	return c.CachedPositions()
+	return c.filteredCachedPositions(conn.GetPositionsSnapshot()), nil
 }
 
 // registerHandlers sets up message handlers for IBKR responses.
@@ -3279,6 +4304,18 @@ func (c *Connector) registerHandlers(conn *Connection) {
 	}
 
 	c.logInfo("Registering message handlers")
+	conn.setOpenOrderSnapshotObserver(func(msgID int, fields []string, epoch uint64) {
+		switch msgID {
+		case msgOpenOrder:
+			ev, ok := ParseOrderLifecycleEvent(fields)
+			if !ok || ev.WhatIf || ev.Type != OrderLifecycleEventOpenOrder || conn.IsWhatIfOrderID(ev.OrderID) {
+				return
+			}
+			c.collectOpenOrderSnapshotFrom(conn, epoch, ev)
+		case msgOpenOrderEnd:
+			c.finishOpenOrderSnapshotFrom(conn, epoch)
+		}
+	})
 
 	// Register tick price handler (msgID 1)
 	conn.RegisterHandler(1, func(fields []string) {
@@ -3316,10 +4353,13 @@ func (c *Connector) registerHandlers(conn *Connection) {
 		c.handleHistoricalDataEnd(fields)
 	})
 
-	// Register error handler (msgID 4) to proactively refresh subscriptions on errors
-	conn.RegisterHandler(4, func(fields []string) {
-		c.handleIBKRError(fields)
+	// Register the Connector-owned error handler separately so any returned
+	// outbound cleanup runs only after Connection releases its inbound epoch
+	// lease. Legacy externally registered handlers still use msgID 4 below.
+	conn.setErrorPostActionHandler(func(fields []string, epoch uint64) func() {
+		return c.handleIBKRErrorFrom(ConnectorSessionBinding{connector: c, connection: conn, epoch: epoch}, fields)
 	})
+	conn.RegisterHandler(msgErrMsg, func([]string) {})
 
 	// Register position handler (msgID 61)
 	conn.RegisterHandler(61, func(fields []string) {
@@ -3332,24 +4372,23 @@ func (c *Connector) registerHandlers(conn *Connection) {
 	})
 
 	// Register order lifecycle handlers (openOrder/orderStatus/execDetails).
-	conn.RegisterHandler(msgOpenOrder, func(fields []string) {
-		c.notifyOrderLifecycle(fields)
+	conn.RegisterHandlerAtEpoch(msgOpenOrder, func(fields []string, epoch uint64) {
+		c.notifyOrderLifecycleFrom(conn, epoch, fields)
 	})
-	conn.RegisterHandler(msgOrderStatus, func(fields []string) {
-		c.handleOrderStatus(fields)
-		c.notifyOrderLifecycle(fields)
+	conn.RegisterHandlerAtEpoch(msgOrderStatus, func(fields []string, epoch uint64) {
+		c.notifyOrderLifecycleFrom(conn, epoch, fields)
 	})
-	conn.RegisterHandler(msgExecDetails, func(fields []string) {
-		c.notifyOrderLifecycle(fields)
+	conn.RegisterHandlerAtEpoch(msgExecDetails, func(fields []string, epoch uint64) {
+		c.notifyOrderLifecycleFrom(conn, epoch, fields)
 	})
 	conn.RegisterHandler(msgOpenOrderEnd, func(fields []string) {
-		c.finishOpenOrderSnapshot()
+		// The epoch-aware Connection observer owns snapshot completion.
 	})
 
 	// Register system notification handler (msgID 204) for farm status changes
 	conn.RegisterHandler(204, func(fields []string) {})
-	conn.SetSystemNoticeHandler(func(note *systemNotification, alias reqAliasEntry) {
-		c.processSystemNotice(alias, note)
+	conn.SetSystemNoticeHandlerAtEpochWithPostAction(func(note *systemNotification, alias reqAliasEntry, epoch uint64) func() {
+		return c.processSystemNoticeFrom(ConnectorSessionBinding{connector: c, connection: conn, epoch: epoch}, alias, note)
 	})
 
 	// Daily P&L streams: msgPnL (94) for account-level, msgPnLSingle (95)
@@ -3843,6 +4882,19 @@ func (c *Connector) pushSubscriptionRejection(reqID, code int, message string) {
 // handleIBKRError receives raw IBKR error messages for proactive recovery.
 // fields: [msgID=4, version, reqID, errorCode, errorMsg]
 func (c *Connector) handleIBKRError(fields []string) {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	origin := ConnectorSessionBinding{connector: c, connection: conn}
+	if conn != nil {
+		origin.epoch = conn.BrokerSessionEpoch()
+	}
+	if post := c.handleIBKRErrorFrom(origin, fields); post != nil {
+		post()
+	}
+}
+
+func (c *Connector) handleIBKRErrorFrom(origin ConnectorSessionBinding, fields []string) (postBarrier func()) {
 	if len(fields) < 4 {
 		return
 	}
@@ -3858,6 +4910,22 @@ func (c *Connector) handleIBKRError(fields []string) {
 		if v, err := strconv.Atoi(fields[3]); err == nil {
 			code = v
 		}
+	}
+	rawMsg := ""
+	if len(fields) > 4 {
+		rawMsg = fields[4]
+	}
+	c.publicationBarrier.RLock()
+	defer c.publicationBarrier.RUnlock()
+	c.evidenceBarrier.RLock()
+	defer c.evidenceBarrier.RUnlock()
+	if !c.SessionReceiptCurrent(origin) {
+		c.notifyOrderErrorLifecycleUnderBarrier(origin, reqID, code, rawMsg, "")
+		return
+	}
+	if reqID > 0 && c.failPendingExactHistoricalRoute(reqID, code, rawMsg) {
+		c.recordDataFarmNotice(code, rawMsg, time.Now())
+		return
 	}
 
 	// Fast-abort signal for in-flight pollers. Sent first so a code-200
@@ -3876,6 +4944,7 @@ func (c *Connector) handleIBKRError(fields []string) {
 	// Map to symbol if available (subscriptions or historical request)
 	symbol := ""
 	histPending := false
+	histOwnsNoticeCollision := false
 	if reqID > 0 {
 		c.subMu.RLock()
 		symbol = c.reqIDMap[reqID]
@@ -3885,6 +4954,7 @@ func (c *Connector) handleIBKRError(fields []string) {
 			if hr, ok := c.historicalReqs[reqID]; ok {
 				symbol = hr.symbol
 				histPending = true
+				histOwnsNoticeCollision = hr.requestOwnsNoticeCollision
 			}
 			c.historicalMu.Unlock()
 		}
@@ -3895,11 +4965,13 @@ func (c *Connector) handleIBKRError(fields []string) {
 		}
 	}
 
-	rawMsg := ""
-	if len(fields) > 4 {
-		rawMsg = fields[4]
+	// The legacy msgErrMsg path shares the same multiplexed order/request-id
+	// collision as msg-204. A FEE_RATE request explicitly owns this closed set
+	// of request codes, so do not fabricate an order error when the integers
+	// overlap. Explicit order codes remain order-owned.
+	if !(histPending && histOwnsNoticeCollision && historicalNoticeOwnsIDCollision(code)) {
+		c.notifyOrderErrorLifecycleUnderBarrier(origin, reqID, code, rawMsg, "")
 	}
-	c.notifyOrderErrorLifecycle(reqID, code, rawMsg, "")
 	c.recordDataFarmNotice(code, rawMsg, time.Now())
 	upperMsg := strings.ToUpper(rawMsg)
 	upperSymbol := strings.ToUpper(symbol)
@@ -3941,7 +5013,7 @@ func (c *Connector) handleIBKRError(fields []string) {
 		c.failHistoricalRequest(reqID, hErr)
 		if symbol != "" {
 			if code == 366 || (code == 162 && strings.Contains(upperMsg, "NO DATA")) {
-				c.registerInactiveCandidate(symbol, rawMsg)
+				_, postBarrier = c.registerInactiveCandidatePostAction(symbol, rawMsg)
 			}
 		}
 		return
@@ -3949,7 +5021,9 @@ func (c *Connector) handleIBKRError(fields []string) {
 
 	if code == 200 && symbol != "" {
 		if strings.Contains(upperMsg, "NO SECURITY DEFINITION HAS BEEN FOUND") {
-			if c.registerInactiveCandidate(symbol, rawMsg) {
+			marked, post := c.registerInactiveCandidatePostAction(symbol, rawMsg)
+			postBarrier = joinPostActions(postBarrier, post)
+			if marked {
 				return
 			}
 		}
@@ -3963,96 +5037,13 @@ func (c *Connector) handleIBKRError(fields []string) {
 			sub.Observed = false
 		}
 		c.subMu.Unlock()
-	case 2119, 2104: // Farm OK/connected
-		// Trigger gentle refresh for all current subs. Uses the connection's
-		// lifetime ctx because this is a background recovery path with no
-		// per-request deadline — the slot-acquire should only abort if the
-		// daemon itself shuts down.
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			c.subMu.RLock()
-			syms := make([]string, 0, len(c.subscriptions))
-			for s := range c.subscriptions {
-				syms = append(syms, s)
-			}
-			c.subMu.RUnlock()
-			ctx := c.connCtx()
-			for _, s := range syms {
-				_, _ = c.EnsureMarketDataSubscription(ctx, s, []string{"BID", "ASK", "LAST", "VOLUME"}, 0)
-			}
-		}()
-	case 200, 320, 321, 354:
-		// Destination/parse/validation errors: refresh this specific symbol immediately with alternate routing
-		if symbol != "" {
-			go c.refreshSubscription(symbol)
-		}
+	case 2119, 2104, 200, 320, 321, 354:
+		// Never launch an unbound recovery request from an inbound socket
+		// callback. Ordinary pollers own resubscription after current-session
+		// state has settled; a retired reader therefore cannot write on its
+		// successor socket.
 	}
-}
-
-// refreshSubscription cancels and re-requests a subscription with alternate routing hints.
-func (c *Connector) refreshSubscription(symbol string) {
-	symbol = strings.ToUpper(symbol)
-	if _, inactive := c.inactiveReason(symbol); inactive {
-		return
-	}
-	c.subMu.Lock()
-	sub, ok := c.subscriptions[symbol]
-	if !ok {
-		c.subMu.Unlock()
-		return
-	}
-	// Best-effort cancel if active
-	if c.conn != nil && c.conn.IsConnected() && sub.ReqID != 0 {
-		_ = c.conn.CancelMarketData(sub.ReqID)
-	}
-	// Select routing: toggle primary hint if available
-	primary := ""
-	c.contractMu.RLock()
-	if d, ok := c.contractCache[symbol]; ok {
-		primary = d.PrimaryExch
-	}
-	c.contractMu.RUnlock()
-	// Clear observed and reqID; we will replace it
-	sub.Observed = false
-	sub.ReqID = 0
-	c.subMu.Unlock()
-
-	// Re-request
-	if !c.IsReady() {
-		return
-	}
-	var (
-		reqID int
-		err   error
-	)
-	// Background recovery path: use connection lifetime ctx — no
-	// per-request deadline. The slot-acquire should only abort if the
-	// daemon itself shuts down.
-	ctx := c.connCtx()
-	if primary != "" {
-		// First try without primary to avoid repeating the same rejection
-		reqID, err = c.conn.RequestMarketData(ctx, symbol)
-		if err != nil {
-			// Fall back to primary if no-primary fails
-			reqID, err = c.conn.RequestMarketDataWithPrimary(ctx, symbol, primary)
-		}
-	} else {
-		// Try with classified primary if known; otherwise plain SMART
-		if _, exch, _, prim := classifySymbol(symbol); exch == "SMART" && prim != "" {
-			reqID, err = c.conn.RequestMarketDataWithPrimary(ctx, symbol, prim)
-		} else {
-			reqID, err = c.conn.RequestMarketData(ctx, symbol)
-		}
-	}
-	if err != nil {
-		return
-	}
-	c.subMu.Lock()
-	c.reqIDMap[reqID] = symbol
-	if sub2, ok := c.subscriptions[symbol]; ok {
-		sub2.ReqID = reqID
-	}
-	c.subMu.Unlock()
+	return postBarrier
 }
 
 func (c *Connector) parserContext(symbol string) string {
@@ -4086,6 +5077,10 @@ func (c *Connector) handleHistoricalData(fields []string) {
 	if req == nil {
 		return
 	}
+	if req.requireEpoch && !c.HistoricalSessionCurrent(HistoricalSessionBinding{connector: c, connection: req.connection, epoch: req.epoch}) {
+		c.failHistoricalRequest(reqID, &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable})
+		return
+	}
 
 	serverVersion := 0
 	if c.conn != nil {
@@ -4109,49 +5104,99 @@ func (c *Connector) handleHistoricalData(fields []string) {
 	}
 
 	count := 0
+	var countErr error
 	if idx < len(fields) {
 		if v, err := strconv.Atoi(fields[idx]); err == nil {
 			count = v
+		} else {
+			countErr = err
 		}
 		idx++
 	}
+	if req.strictDaily && (countErr != nil || count < 0) {
+		c.failHistoricalRequest(reqID, &HistoricalDataValidationError{Reason: "invalid_bar_count"})
+		return
+	}
+	bars, parseErr := parseHistoricalBars(fields, &idx, count, req.strictDaily)
+	if parseErr != nil {
+		c.failHistoricalRequest(reqID, parseErr)
+		return
+	}
+	if req.strictDaily && idx != len(fields) {
+		c.failHistoricalRequest(reqID, &HistoricalDataValidationError{Reason: "trailing_payload"})
+		return
+	}
 
-	bars := make([]HistoricalBar, 0, count)
-	for i := 0; i < count; i++ {
-		if idx >= len(fields) {
+	result := historicalResult{
+		start: start,
+		end:   end,
+		bars:  bars,
+	}
+	if req.waitForEnd && !legacyFormat {
+		if err := c.bufferHistoricalResult(reqID, result); err != nil {
+			c.failHistoricalRequest(reqID, err)
+		}
+		return
+	}
+	c.completeHistoricalRequest(reqID, result)
+}
+
+func parseHistoricalBars(fields []string, idx *int, count int, strictDaily bool) ([]HistoricalBar, error) {
+	bars := make([]HistoricalBar, 0, max(count, 0))
+	for range count {
+		if *idx >= len(fields) {
+			if strictDaily {
+				return nil, &HistoricalDataValidationError{Reason: "truncated_bar"}
+			}
 			break
 		}
 
-		dateStr := fields[idx]
-		idx++
-
-		// Require six scalar fields (open, high, low, close, volume, average) plus barCount
-		if idx+6 > len(fields) {
+		dateStr := fields[*idx]
+		*idx++
+		// Require six scalar fields (open, high, low, close, volume, average)
+		// plus barCount.
+		if *idx+6 >= len(fields) {
+			if strictDaily {
+				return nil, &HistoricalDataValidationError{Reason: "truncated_bar"}
+			}
 			break
 		}
 
-		openVal := parseFloat(fields[idx])
-		idx++
-		highVal := parseFloat(fields[idx])
-		idx++
-		lowVal := parseFloat(fields[idx])
-		idx++
-		closeVal := parseFloat(fields[idx])
-		idx++
-		volumeVal := parseFloat(fields[idx])
-		idx++
-		avgVal := parseFloat(fields[idx])
-		idx++
+		values := [6]float64{}
+		for i := range values {
+			if strictDaily {
+				value, err := strconv.ParseFloat(strings.TrimSpace(fields[*idx]), 64)
+				if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+					return nil, &HistoricalDataValidationError{Reason: "invalid_numeric"}
+				}
+				if i < 4 && value < 0 {
+					return nil, &HistoricalDataValidationError{Reason: "invalid_ohlc"}
+				}
+				values[i] = value
+			} else {
+				values[i] = parseFloat(fields[*idx])
+			}
+			*idx++
+		}
+		openVal, highVal, lowVal, closeVal := values[0], values[1], values[2], values[3]
+		if strictDaily && (highVal < lowVal || highVal < openVal || highVal < closeVal || lowVal > openVal || lowVal > closeVal) {
+			return nil, &HistoricalDataValidationError{Reason: "incoherent_ohlc"}
+		}
 
 		barCount := 0
-		if idx < len(fields) {
-			if v, err := strconv.Atoi(fields[idx]); err == nil {
-				barCount = v
+		if *idx < len(fields) {
+			if value, err := strconv.Atoi(fields[*idx]); err == nil {
+				barCount = value
+			} else if strictDaily {
+				return nil, &HistoricalDataValidationError{Reason: "invalid_bar_count"}
 			}
-			idx++
+			*idx++
 		}
 
-		barTime, _ := parseHistoricalTimestamp(dateStr)
+		barTime, timeErr := parseHistoricalTimestamp(dateStr)
+		if strictDaily && timeErr != nil {
+			return nil, &HistoricalDataValidationError{Reason: "invalid_daily_as_of"}
+		}
 		bars = append(bars, HistoricalBar{
 			Time:     barTime,
 			Date:     dateStr,
@@ -4159,17 +5204,12 @@ func (c *Connector) handleHistoricalData(fields []string) {
 			High:     highVal,
 			Low:      lowVal,
 			Close:    closeVal,
-			Volume:   int64(volumeVal),
-			Average:  avgVal,
+			Volume:   int64(values[4]),
+			Average:  values[5],
 			BarCount: barCount,
 		})
 	}
-
-	c.completeHistoricalRequest(reqID, historicalResult{
-		start: start,
-		end:   end,
-		bars:  bars,
-	})
+	return bars, nil
 }
 
 func (c *Connector) handleHistoricalDataEnd(fields []string) {
@@ -4192,6 +5232,11 @@ func (c *Connector) handleHistoricalDataEnd(fields []string) {
 		return
 	}
 	idx++
+	if req := c.getHistoricalRequest(reqID); req != nil && req.requireEpoch &&
+		!c.HistoricalSessionCurrent(HistoricalSessionBinding{connector: c, connection: req.connection, epoch: req.epoch}) {
+		c.failHistoricalRequest(reqID, &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable})
+		return
+	}
 
 	start := ""
 	if idx < len(fields) {
@@ -4201,9 +5246,22 @@ func (c *Connector) handleHistoricalDataEnd(fields []string) {
 	end := ""
 	if idx < len(fields) {
 		end = fields[idx]
+		idx++
+	}
+	if req := c.getHistoricalRequest(reqID); req != nil && req.strictDaily && idx != len(fields) {
+		c.failHistoricalRequest(reqID, &HistoricalDataValidationError{Reason: "trailing_payload"})
+		return
 	}
 
-	c.completeHistoricalRequest(reqID, historicalResult{start: start, end: end})
+	c.historicalMu.Lock()
+	req := c.historicalReqs[reqID]
+	result := historicalResult{start: start, end: end}
+	if req != nil {
+		result.bars = slices.Clone(req.bufferedBars)
+		result.err = req.bufferedErr
+	}
+	c.historicalMu.Unlock()
+	c.completeHistoricalRequest(reqID, result)
 }
 
 func safeField(fields []string, idx *int) string {
@@ -4241,6 +5299,9 @@ func parseHistoricalTimestamp(raw string) (time.Time, error) {
 			return ts, nil
 		}
 	}
+	if epoch, err := strconv.ParseInt(normalized, 10, 64); err == nil && epoch > 0 {
+		return time.Unix(epoch, 0).UTC(), nil
+	}
 
 	return time.Time{}, fmt.Errorf("unable to parse historical timestamp: %s", raw)
 }
@@ -4252,14 +5313,60 @@ func (c *Connector) getHistoricalRequest(reqID int) *historicalRequest {
 }
 
 func (c *Connector) createHistoricalRequest(reqID int, symbol string) *historicalRequest {
+	return c.createHistoricalRequestWithOptions(reqID, symbol, historicalRequestOptions{})
+}
+
+type historicalRequestOptions struct {
+	strictDaily                bool
+	waitForEnd                 bool
+	requestOwnsNoticeCollision bool
+	formatDate                 int
+	session                    HistoricalSessionBinding
+	requireEpoch               bool
+}
+
+func (c *Connector) createHistoricalRequestWithOptions(reqID int, symbol string, options historicalRequestOptions) *historicalRequest {
 	req := &historicalRequest{
-		symbol: symbol,
-		result: make(chan historicalResult, 1),
+		symbol:                     symbol,
+		result:                     make(chan historicalResult, 1),
+		strictDaily:                options.strictDaily,
+		waitForEnd:                 options.waitForEnd,
+		requestOwnsNoticeCollision: options.requestOwnsNoticeCollision,
+		connection:                 options.session.connection,
+		epoch:                      options.session.epoch,
+		requireEpoch:               options.requireEpoch,
 	}
 	c.historicalMu.Lock()
 	c.historicalReqs[reqID] = req
 	c.historicalMu.Unlock()
 	return req
+}
+
+func (c *Connector) bufferHistoricalResult(reqID int, res historicalResult) error {
+	c.historicalMu.Lock()
+	defer c.historicalMu.Unlock()
+	req := c.historicalReqs[reqID]
+	if req == nil {
+		return nil
+	}
+	if req.strictDaily {
+		seen := make(map[string]struct{}, len(req.bufferedBars)+len(res.bars))
+		for _, bar := range req.bufferedBars {
+			seen[bar.Time.UTC().Format("2006-01-02")] = struct{}{}
+		}
+		for _, bar := range res.bars {
+			date := bar.Time.UTC().Format("2006-01-02")
+			if _, duplicate := seen[date]; duplicate {
+				return &HistoricalDataValidationError{Reason: "duplicate_session_date"}
+			}
+			seen[date] = struct{}{}
+		}
+	}
+	req.bufferedBars = append(req.bufferedBars, res.bars...)
+	if res.err != nil {
+		req.bufferedErr = res.err
+	}
+	return nil
 }
 
 func (c *Connector) completeHistoricalRequest(reqID int, res historicalResult) {
@@ -4389,6 +5496,583 @@ func (c *Connector) fetchHistoricalDailyBars(ctx context.Context, symbol string,
 // [Connector.FetchHistoricalDailyBars].
 func (c *Connector) FetchHistoricalDailyBarsWithContract(ctx context.Context, contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
 	return c.fetchHistoricalDailyBarsWithContract(ctx, contract, lookbackDays, timeout)
+}
+
+// FetchHistoricalDailyFeeRates requests daily stock-borrow fee-rate bars for
+// an exact broker contract. It is intentionally narrower than the general
+// historical APIs: FEE_RATE is pinned and ConID is required. A missing
+// executable exchange may be completed only by a bounded exact-ConID contract
+// details read whose identity and route are strictly checked; the method never
+// resolves by symbol, substitutes another ConID, or fabricates SMART.
+// Concurrent identical requests share one open HMDS request, and its detached
+// typed result is reused for IBKR's 15-second identical-request cooldown.
+func (c *Connector) FetchHistoricalDailyFeeRates(ctx context.Context, contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	contract = normalizeExactHistoricalContract(contract)
+	if contract.ConID <= 0 {
+		return nil, &HistoricalDataValidationError{Reason: "missing_contract_id"}
+	}
+	if contract.Symbol == "" {
+		return nil, &HistoricalDataValidationError{Reason: "missing_symbol"}
+	}
+	if contract.SecType != "STK" {
+		return nil, &HistoricalDataValidationError{Reason: "unsupported_security_type"}
+	}
+	if contract.Currency == "" {
+		return nil, &HistoricalDataValidationError{Reason: "incomplete_exact_route"}
+	}
+	if !HistoricalFeeRateUSRouteSupported(contract, contract.Exchange != "") {
+		return nil, &HistoricalDataValidationError{Reason: "unsupported_market_calendar"}
+	}
+	if lookbackDays <= 0 {
+		lookbackDays = 7
+	}
+	if timeout <= 0 {
+		timeout = historicalFeeRateBackendTimeout
+	}
+	binding, ok := c.CaptureHistoricalSession()
+	if !ok {
+		return nil, &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+	}
+
+	key := "fee-rate\x00" + historicalDailyFeeRateKey(contract, lookbackDays)
+	flight, leader := c.acquireHistoricalExactFlight(key, binding)
+	if leader {
+		go c.runHistoricalDailyFeeRateFlight(flight, binding, contract, lookbackDays)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	select {
+	case <-flight.done:
+		return slices.Clone(flight.bars), cloneSanitizedHistoricalError(flight.err)
+	case <-waitCtx.Done():
+		return nil, waitCtx.Err()
+	}
+}
+
+// ResolveExactHistoricalStockRoute completes a missing executable exchange
+// only through an exact positive-ConID contract-details request. It rejects
+// wrong, missing, or ambiguous broker details and never resolves by symbol or
+// substitutes a default route. Callers may retain their original position
+// identity separately from the returned route used on the wire.
+func (c *Connector) ResolveExactHistoricalStockRoute(ctx context.Context, contract Contract, timeout time.Duration) (Contract, error) {
+	return c.resolveExactHistoricalStockRoute(ctx, contract, timeout)
+}
+
+func normalizeExactHistoricalContract(contract Contract) Contract {
+	contract.Symbol = strings.ToUpper(strings.TrimSpace(contract.Symbol))
+	contract.SecType = strings.ToUpper(strings.TrimSpace(contract.SecType))
+	contract.Exchange = strings.ToUpper(strings.TrimSpace(contract.Exchange))
+	contract.PrimaryExch = strings.ToUpper(strings.TrimSpace(contract.PrimaryExch))
+	contract.Currency = strings.ToUpper(strings.TrimSpace(contract.Currency))
+	contract.LocalSymbol = strings.TrimSpace(contract.LocalSymbol)
+	contract.TradingClass = strings.TrimSpace(contract.TradingClass)
+	contract.SecIDType = strings.TrimSpace(contract.SecIDType)
+	contract.SecID = strings.TrimSpace(contract.SecID)
+	return contract
+}
+
+var historicalFeeRateUSExchanges = map[string]struct{}{
+	"AMEX": {}, "ARCA": {}, "NASDAQ": {}, "NYSE": {}, "SMART": {},
+}
+
+// HistoricalFeeRateUSRouteSupported restricts FEE_RATE to the embedded U.S.
+// cash-equity calendar and a closed set of exact IBKR stock routes. When
+// requireExchange is false, an allowlisted primary exchange may be used only
+// as a route-resolution hint; the resolved executable exchange is validated
+// again before HMDS admission.
+func HistoricalFeeRateUSRouteSupported(contract Contract, requireExchange bool) bool {
+	contract = normalizeExactHistoricalContract(contract)
+	if contract.SecType != "STK" || contract.Currency != "USD" {
+		return false
+	}
+	if contract.PrimaryExch != "" {
+		if _, ok := historicalFeeRateUSExchanges[contract.PrimaryExch]; !ok {
+			return false
+		}
+	}
+	if contract.Exchange == "" {
+		return !requireExchange && contract.PrimaryExch != ""
+	}
+	_, ok := historicalFeeRateUSExchanges[contract.Exchange]
+	return ok
+}
+
+// sendExactHistoricalStockRouteRequest is the positive-ConID contract-details
+// encoder used only by the FEE_RATE fallback. The socket epoch is checked by
+// sendMessageWithTypeContextForEpoch while transportMu is held, immediately
+// before writer access; a reconnect can therefore never redirect this request
+// onto a new socket.
+func (c *Connection) sendExactHistoricalStockRouteRequest(ctx context.Context, contract Contract, reqID int, epoch uint64) error {
+	c.registerReqAlias(reqID, contract)
+	fields := []any{
+		reqContractData,
+		8,
+		reqID,
+		contract.ConID,
+		contract.Symbol,
+		contract.SecType,
+		contract.Expiry,
+		"",
+		contract.Right,
+		"",
+		contract.Exchange,
+		contract.PrimaryExch,
+		contract.Currency,
+		contract.LocalSymbol,
+		contract.TradingClass,
+		0,
+		contract.SecIDType,
+		contract.SecID,
+		"",
+	}
+	return c.sendMessageWithTypeContextForEpoch(ctx, c.encodeMsg(fields...), RequestTypeGeneral, epoch, true)
+}
+
+// requestHistoricalDailyFeeRateForEpoch is a deliberately closed HMDS
+// encoder. It accepts no caller-selected whatToShow, calendar, bar size, or
+// timestamp format and uses Connection's shared request/order allocator.
+func (c *Connection) requestHistoricalDailyFeeRateForEpoch(
+	ctx context.Context,
+	contract Contract,
+	lookbackDays int,
+	epoch uint64,
+	beforeSend func(int),
+) (int, error) {
+	if !c.IsConnected() || c.BrokerSessionEpoch() != epoch {
+		return 0, &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+	}
+	if err := c.requireServerVersion("RequestHistoricalData"); err != nil {
+		return 0, err
+	}
+	if contract.ConID <= 0 || !HistoricalFeeRateUSRouteSupported(contract, true) {
+		return 0, &HistoricalDataValidationError{Reason: "unsupported_market_calendar"}
+	}
+	reqID, err := c.reserveRequestID(nil)
+	if err != nil {
+		return 0, err
+	}
+	multiplier := ""
+	if contract.Multiplier != 0 {
+		multiplier = strconv.Itoa(contract.Multiplier)
+	}
+	fields := []any{
+		reqHistoricalData,
+		reqID,
+		contract.ConID,
+		contract.Symbol,
+		contract.SecType,
+		contract.Expiry,
+		"",
+		contract.Right,
+		multiplier,
+		contract.Exchange,
+		contract.PrimaryExch,
+		contract.Currency,
+		contract.LocalSymbol,
+		contract.TradingClass,
+		false,
+	}
+	if contract.SecIDType != "" || contract.SecID != "" {
+		fields = append(fields, contract.SecIDType, contract.SecID)
+	}
+	fields = append(fields,
+		"",
+		"1 day",
+		formatHistoricalDuration(lookbackDays),
+		true,
+		"FEE_RATE",
+		2,
+		false,
+		"",
+	)
+	if beforeSend != nil {
+		beforeSend(reqID)
+	}
+	if err := c.sendMessageWithTypeContextForEpoch(ctx, c.encodeMsg(fields...), RequestTypeHistorical, epoch, true); err != nil {
+		return 0, fmt.Errorf("failed to request historical FEE_RATE data: %w", err)
+	}
+	return reqID, nil
+}
+
+func (c *Connection) cancelHistoricalDataForEpoch(ctx context.Context, reqID int, epoch uint64) error {
+	if reqID <= 0 {
+		return nil
+	}
+	msg := c.encodeMsg(cancelHistoricalData, 1, reqID)
+	return c.sendMessageWithTypeContextForEpoch(ctx, msg, RequestTypeHistorical, epoch, true)
+}
+
+func historicalDailyFeeRateKey(contract Contract, lookbackDays int) string {
+	return strings.Join([]string{
+		strconv.Itoa(contract.ConID),
+		contract.Symbol,
+		contract.SecType,
+		contract.Expiry,
+		strconv.FormatFloat(contract.Strike, 'g', -1, 64),
+		contract.Right,
+		strconv.Itoa(contract.Multiplier),
+		contract.Exchange,
+		contract.PrimaryExch,
+		contract.Currency,
+		contract.LocalSymbol,
+		contract.TradingClass,
+		contract.SecIDType,
+		contract.SecID,
+		formatHistoricalDuration(lookbackDays),
+		"1 day",
+		"FEE_RATE",
+		"useRTH=1",
+		"formatDate=2",
+	}, "\x00")
+}
+
+func (c *Connector) historicalClock() time.Time {
+	if c.historicalNow != nil {
+		return c.historicalNow()
+	}
+	return time.Now()
+}
+
+func (c *Connector) acquireHistoricalExactFlight(key string, binding HistoricalSessionBinding) (*historicalExactFlight, bool) {
+	now := c.historicalClock()
+	c.historicalMu.Lock()
+	defer c.historicalMu.Unlock()
+	for candidateKey, candidate := range c.historicalExactFlights {
+		if !candidate.expiresAt.IsZero() && !now.Before(candidate.expiresAt) {
+			delete(c.historicalExactFlights, candidateKey)
+		}
+	}
+	if flight := c.historicalExactFlights[key]; flight != nil {
+		if flight.connection == binding.connection && flight.epoch == binding.epoch {
+			return flight, false
+		}
+		delete(c.historicalExactFlights, key)
+	}
+	flight := &historicalExactFlight{done: make(chan struct{}), connection: binding.connection, epoch: binding.epoch}
+	c.historicalExactFlights[key] = flight
+	return flight, true
+}
+
+func (c *Connector) runHistoricalDailyFeeRateFlight(flight *historicalExactFlight, binding HistoricalSessionBinding, contract Contract, lookbackDays int) {
+	flightCtx, cancel := context.WithTimeout(context.Background(), historicalFeeRateBackendTimeout)
+	defer cancel()
+	var err error
+	if contract.Exchange == "" {
+		contract, err = c.resolveExactHistoricalStockRoute(flightCtx, contract, historicalExactRouteBackendTimeout)
+	}
+	var bars []HistoricalBar
+	if err == nil && c.HistoricalSessionCurrent(binding) {
+		bars, err = c.fetchHistoricalWithContractOptions(
+			flightCtx,
+			contract.Symbol,
+			contract,
+			lookbackDays,
+			historicalFeeRateBackendTimeout,
+			"FEE_RATE",
+			historicalRequestOptions{
+				strictDaily: true, waitForEnd: true, requestOwnsNoticeCollision: true, formatDate: 2,
+				session: binding, requireEpoch: true,
+			},
+		)
+	} else if err == nil {
+		err = &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+	}
+	if err == nil && len(bars) == 0 {
+		err = &HistoricalRequestError{Category: HistoricalFailureNoData}
+	}
+	if err == nil && !c.HistoricalSessionCurrent(binding) {
+		bars = nil
+		err = &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+	}
+	if err != nil {
+		bars = nil
+		err = sanitizeExactHistoricalError(err)
+	}
+
+	c.historicalMu.Lock()
+	flight.bars = slices.Clone(bars)
+	flight.err = err
+	flight.completedAt = c.historicalClock()
+	flight.expiresAt = flight.completedAt.Add(historicalIdenticalRequestCooldown)
+	close(flight.done)
+	c.historicalMu.Unlock()
+}
+
+func (c *Connector) resolveExactHistoricalStockRoute(ctx context.Context, contract Contract, timeout time.Duration) (Contract, error) {
+	contract = normalizeExactHistoricalContract(contract)
+	if contract.ConID <= 0 || contract.Symbol == "" || contract.SecType != "STK" || contract.Currency == "" {
+		return Contract{}, &HistoricalRequestError{Category: HistoricalFailureContractUnavailable}
+	}
+	if !HistoricalFeeRateUSRouteSupported(contract, contract.Exchange != "") {
+		return Contract{}, &HistoricalDataValidationError{Reason: "unsupported_market_calendar"}
+	}
+	if contract.Exchange != "" {
+		return contract, nil
+	}
+	if timeout <= 0 {
+		timeout = historicalExactRouteBackendTimeout
+	}
+	binding, ok := c.CaptureHistoricalSession()
+	if !ok {
+		return Contract{}, &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+	}
+	key := "fee-route\x00" + historicalDailyFeeRateKey(contract, 0)
+	flight, leader := c.acquireHistoricalExactFlight(key, binding)
+	if leader {
+		go c.runExactHistoricalStockRouteFlight(flight, binding, contract)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	select {
+	case <-flight.done:
+		return flight.route, cloneSanitizedHistoricalError(flight.err)
+	case <-waitCtx.Done():
+		return Contract{}, waitCtx.Err()
+	}
+}
+
+func (c *Connector) runExactHistoricalStockRouteFlight(flight *historicalExactFlight, binding HistoricalSessionBinding, contract Contract) {
+	ctx, cancel := context.WithTimeout(context.Background(), historicalExactRouteBackendTimeout)
+	defer cancel()
+	route, err := c.resolveExactHistoricalStockRouteWire(ctx, binding, contract)
+	if err == nil && !c.HistoricalSessionCurrent(binding) {
+		route = Contract{}
+		err = &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+	}
+	if err != nil {
+		route = Contract{}
+		err = sanitizeExactHistoricalError(err)
+	}
+	now := c.historicalClock()
+	expiresAt := now.Add(historicalIdenticalRequestCooldown)
+	if err == nil {
+		expiresAt = now.Add(historicalExactRouteSuccessTTL)
+	}
+	c.historicalMu.Lock()
+	flight.route = route
+	flight.err = err
+	flight.completedAt = now
+	flight.expiresAt = expiresAt
+	close(flight.done)
+	c.historicalMu.Unlock()
+}
+
+func (c *Connector) resolveExactHistoricalStockRouteWire(ctx context.Context, binding HistoricalSessionBinding, contract Contract) (Contract, error) {
+	if !c.HistoricalSessionCurrent(binding) {
+		return Contract{}, &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+	}
+	conn := binding.connection
+
+	reqID, err := conn.reserveRequestID(nil)
+	if err != nil {
+		return Contract{}, &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+	}
+	detailsCh := make(chan ContractDetailsLite, 8)
+	doneCh := make(chan struct{}, 1)
+	failureCh := make(chan error, 1)
+	overflowCh := make(chan struct{}, 1)
+	serverVersion := conn.serverVersion
+	dataHandlerID := conn.RegisterHandler(msgContractData, func(fields []string) {
+		if conn.BrokerSessionEpoch() != binding.epoch {
+			return
+		}
+		if detail, ok := parseContractDetailsLite(fields, reqID, serverVersion); ok {
+			select {
+			case detailsCh <- *detail:
+			default:
+				select {
+				case overflowCh <- struct{}{}:
+				default:
+				}
+			}
+		}
+	})
+	endHandlerID := conn.RegisterHandler(msgContractDataEnd, func(fields []string) {
+		if conn.BrokerSessionEpoch() != binding.epoch {
+			return
+		}
+		if len(fields) < 3 {
+			return
+		}
+		id, _ := strconv.Atoi(fields[2])
+		if id == reqID {
+			select {
+			case doneCh <- struct{}{}:
+			default:
+			}
+		}
+	})
+	c.historicalMu.Lock()
+	c.historicalRouteReqs[reqID] = failureCh
+	c.historicalMu.Unlock()
+	defer func() {
+		conn.UnregisterHandler(msgContractData, dataHandlerID)
+		conn.UnregisterHandler(msgContractDataEnd, endHandlerID)
+		c.historicalMu.Lock()
+		delete(c.historicalRouteReqs, reqID)
+		c.historicalMu.Unlock()
+	}()
+
+	if !c.HistoricalSessionCurrent(binding) {
+		return Contract{}, &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+	}
+	if err := conn.sendExactHistoricalStockRouteRequest(ctx, contract, reqID, binding.epoch); err != nil {
+		return Contract{}, &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+	}
+	details := make([]ContractDetailsLite, 0, 1)
+	for {
+		select {
+		case detail := <-detailsCh:
+			details = append(details, detail)
+		case <-overflowCh:
+			return Contract{}, &HistoricalDataValidationError{Reason: "contract_details_overflow"}
+		case <-doneCh:
+			for {
+				select {
+				case detail := <-detailsCh:
+					details = append(details, detail)
+				case <-overflowCh:
+					return Contract{}, &HistoricalDataValidationError{Reason: "contract_details_overflow"}
+				default:
+					return exactHistoricalStockRoute(contract, details)
+				}
+			}
+		case routeErr := <-failureCh:
+			return Contract{}, routeErr
+		case <-ctx.Done():
+			return Contract{}, ctx.Err()
+		}
+	}
+}
+
+func exactHistoricalStockRoute(contract Contract, details []ContractDetailsLite) (Contract, error) {
+	var selected ContractDetailsLite
+	for _, detail := range details {
+		detail.Symbol = strings.ToUpper(strings.TrimSpace(detail.Symbol))
+		detail.SecType = strings.ToUpper(strings.TrimSpace(detail.SecType))
+		detail.Exchange = strings.ToUpper(strings.TrimSpace(detail.Exchange))
+		detail.PrimaryExch = strings.ToUpper(strings.TrimSpace(detail.PrimaryExch))
+		detail.Currency = strings.ToUpper(strings.TrimSpace(detail.Currency))
+		detail.LocalSymbol = strings.TrimSpace(detail.LocalSymbol)
+		detail.TradingClass = strings.TrimSpace(detail.TradingClass)
+		if detail.ConID != contract.ConID || detail.Symbol != contract.Symbol || detail.SecType != contract.SecType ||
+			detail.Currency != contract.Currency || detail.Exchange == "" ||
+			(contract.PrimaryExch != "" && detail.PrimaryExch != "" && detail.PrimaryExch != contract.PrimaryExch) ||
+			(contract.LocalSymbol != "" && detail.LocalSymbol != "" && detail.LocalSymbol != contract.LocalSymbol) ||
+			(contract.TradingClass != "" && detail.TradingClass != "" && detail.TradingClass != contract.TradingClass) {
+			return Contract{}, &HistoricalRequestError{Category: HistoricalFailureContractUnavailable}
+		}
+		if selected.ConID != 0 && (detail.Exchange != selected.Exchange || detail.PrimaryExch != selected.PrimaryExch ||
+			detail.LocalSymbol != selected.LocalSymbol || detail.TradingClass != selected.TradingClass) {
+			return Contract{}, &HistoricalRequestError{Category: HistoricalFailureContractUnavailable}
+		}
+		selected = detail
+	}
+	if selected.ConID == 0 {
+		return Contract{}, &HistoricalRequestError{Category: HistoricalFailureContractUnavailable}
+	}
+	resolved := contract
+	resolved.Exchange = selected.Exchange
+	if selected.PrimaryExch != "" {
+		resolved.PrimaryExch = selected.PrimaryExch
+	}
+	if resolved.LocalSymbol == "" {
+		resolved.LocalSymbol = selected.LocalSymbol
+	}
+	if resolved.TradingClass == "" {
+		resolved.TradingClass = selected.TradingClass
+	}
+	if !HistoricalFeeRateUSRouteSupported(resolved, true) {
+		return Contract{}, &HistoricalDataValidationError{Reason: "unsupported_market_calendar"}
+	}
+	return resolved, nil
+}
+
+func sanitizeExactHistoricalError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := errors.AsType[*HistoricalDataValidationError](err); ok {
+		return &HistoricalRequestError{Category: HistoricalFailureInvalidPayload}
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	if requestErr, ok := errors.AsType[*HistoricalRequestError](err); ok {
+		category := classifyHistoricalRequestFailure(requestErr)
+		return &HistoricalRequestError{
+			Code:       requestErr.Code,
+			RetryAfter: requestErr.RetryAfter,
+			Category:   category,
+		}
+	}
+	return &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+}
+
+func classifyHistoricalRequestFailure(err *HistoricalRequestError) string {
+	if err == nil {
+		return HistoricalFailureProtocolRejected
+	}
+	switch err.Category {
+	case HistoricalFailureNotEntitled,
+		HistoricalFailureNoData,
+		HistoricalFailurePacing,
+		HistoricalFailureGatewayUnavailable,
+		HistoricalFailureContractUnavailable,
+		HistoricalFailureProtocolRejected,
+		HistoricalFailureInvalidPayload:
+		return err.Category
+	}
+
+	upperMessage := strings.ToUpper(err.Message)
+	switch err.Code {
+	case 354, 10089, 10090, 10091, 10186, 10187:
+		return HistoricalFailureNotEntitled
+	case 502, 504, 1100, 1300:
+		return HistoricalFailureGatewayUnavailable
+	case 200:
+		return HistoricalFailureContractUnavailable
+	case 321, 366:
+		return HistoricalFailureProtocolRejected
+	}
+	if err.Code == 162 {
+		switch {
+		case strings.Contains(upperMessage, "NO MARKET DATA PERMISSION"),
+			strings.Contains(upperMessage, "NOT SUBSCRIBED"),
+			strings.Contains(upperMessage, "MARKET DATA SUBSCRIPTION"),
+			strings.Contains(upperMessage, "PERMISSION TO USE"):
+			return HistoricalFailureNotEntitled
+		case strings.Contains(upperMessage, "NO DATA"):
+			return HistoricalFailureNoData
+		case strings.Contains(upperMessage, "PACING"):
+			return HistoricalFailurePacing
+		}
+	}
+	return HistoricalFailureProtocolRejected
+}
+
+func cloneSanitizedHistoricalError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if requestErr, ok := errors.AsType[*HistoricalRequestError](err); ok {
+		return &HistoricalRequestError{
+			Code:       requestErr.Code,
+			RetryAfter: requestErr.RetryAfter,
+			Category:   requestErr.Category,
+		}
+	}
+	if validation, ok := errors.AsType[*HistoricalDataValidationError](err); ok {
+		return &HistoricalDataValidationError{Reason: validation.Reason}
+	}
+	return err
 }
 
 func (c *Connector) fetchHistoricalDailyBarsWithContract(ctx context.Context, contract Contract, lookbackDays int, timeout time.Duration) ([]HistoricalBar, error) {
@@ -4678,6 +6362,10 @@ func shouldRetryHistorical(err error) bool {
 }
 
 func (c *Connector) fetchHistoricalWithContract(ctx context.Context, symbol string, contract Contract, lookbackDays int, timeout time.Duration, whatToShow string) ([]HistoricalBar, error) {
+	return c.fetchHistoricalWithContractOptions(ctx, symbol, contract, lookbackDays, timeout, whatToShow, historicalRequestOptions{})
+}
+
+func (c *Connector) fetchHistoricalWithContractOptions(ctx context.Context, symbol string, contract Contract, lookbackDays int, timeout time.Duration, whatToShow string, options historicalRequestOptions) ([]HistoricalBar, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -4692,10 +6380,27 @@ func (c *Connector) fetchHistoricalWithContract(ctx context.Context, symbol stri
 	var req *historicalRequest
 	var registeredReqID int
 	duration := formatHistoricalDuration(lookbackDays)
-	reqID, err := c.conn.RequestHistoricalData(ctx, contract, "", duration, "1 day", whatToShow, true, false, 1, false, func(id int) {
+	formatDate := options.formatDate
+	if formatDate == 0 {
+		formatDate = 1
+	}
+	register := func(id int) {
 		registeredReqID = id
-		req = c.createHistoricalRequest(id, symbol)
-	})
+		req = c.createHistoricalRequestWithOptions(id, symbol, options)
+	}
+	var reqID int
+	if options.requireEpoch {
+		if whatToShow != "FEE_RATE" || formatDate != 2 || !c.HistoricalSessionCurrent(options.session) {
+			return nil, &HistoricalRequestError{Category: HistoricalFailureGatewayUnavailable}
+		}
+		reqID, err = options.session.connection.requestHistoricalDailyFeeRateForEpoch(ctx, contract, lookbackDays, options.session.epoch, register)
+	} else {
+		// Connection's shared monotonic broker namespace is the sole allocator
+		// for both requests and orders. The request-local ownership flag below
+		// affects only delayed-notice routing; it must not create a second
+		// allocator.
+		reqID, err = c.conn.requestHistoricalDataWithIDGuard(ctx, contract, "", duration, "1 day", whatToShow, true, false, formatDate, false, nil, register)
+	}
 	if err != nil {
 		if registeredReqID != 0 {
 			c.failHistoricalRequest(registeredReqID, err)
@@ -4703,7 +6408,7 @@ func (c *Connector) fetchHistoricalWithContract(ctx context.Context, symbol stri
 		return nil, err
 	}
 	if req == nil {
-		req = c.createHistoricalRequest(reqID, symbol)
+		req = c.createHistoricalRequestWithOptions(reqID, symbol, options)
 	}
 
 	timer := time.NewTimer(timeout)
@@ -4716,24 +6421,31 @@ func (c *Connector) fetchHistoricalWithContract(ctx context.Context, symbol stri
 		}
 		return res.bars, nil
 	case <-ctx.Done():
-		c.cancelHistoricalDataBestEffort(reqID)
+		c.cancelHistoricalDataBestEffortWithOptions(reqID, options)
 		c.failHistoricalRequest(reqID, ctx.Err())
 		return nil, ctx.Err()
 	case <-timer.C:
-		c.cancelHistoricalDataBestEffort(reqID)
-		c.failHistoricalRequest(reqID, fmt.Errorf("historical data timeout after %s", timeout))
-		return nil, fmt.Errorf("historical data timeout for %s", symbol)
+		c.cancelHistoricalDataBestEffortWithOptions(reqID, options)
+		timeoutErr := fmt.Errorf("historical data timeout for %s after %s: %w", symbol, timeout, context.DeadlineExceeded)
+		c.failHistoricalRequest(reqID, timeoutErr)
+		return nil, timeoutErr
 	}
 }
 
-func (c *Connector) cancelHistoricalDataBestEffort(reqID int) {
+func (c *Connector) cancelHistoricalDataBestEffortWithOptions(reqID int, options historicalRequestOptions) {
 	if reqID == 0 {
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := c.conn.CancelHistoricalData(ctx, reqID); err != nil {
+		var err error
+		if options.requireEpoch {
+			err = options.session.connection.cancelHistoricalDataForEpoch(ctx, reqID, options.session.epoch)
+		} else {
+			err = c.conn.CancelHistoricalData(ctx, reqID)
+		}
+		if err != nil {
 			c.logDebug("Historical cancel reqID=%d skipped/failed: %v", reqID, err)
 		}
 	}()
@@ -5272,7 +6984,7 @@ func (c *Connector) forgetOrderStatusLog(orderID string) {
 	c.orderStatusLogMu.Unlock()
 }
 
-func (c *Connector) notifyOrderLifecycle(fields []string) {
+func (c *Connector) notifyOrderLifecycleFrom(conn *Connection, epoch uint64, fields []string) {
 	ev, ok := ParseOrderLifecycleEvent(fields)
 	if !ok {
 		return
@@ -5283,10 +6995,27 @@ func (c *Connector) notifyOrderLifecycle(fields []string) {
 	if ev.Type == OrderLifecycleEventStatus && c.isWhatIfOrderID(ev.OrderID) {
 		return
 	}
-	if ev.Type == OrderLifecycleEventOpenOrder {
-		c.collectOpenOrderSnapshot(ev)
+	origin := ConnectorSessionBinding{connector: c, connection: conn, epoch: epoch}
+	c.publicationBarrier.RLock()
+	defer c.publicationBarrier.RUnlock()
+	c.evidenceBarrier.RLock()
+	defer c.evidenceBarrier.RUnlock()
+	current := c.SessionReceiptCurrent(origin)
+	if current && ev.Type == OrderLifecycleEventStatus {
+		c.handleOrderStatus(fields)
 	}
-	c.dispatchOrderLifecycle(ev)
+	c.dispatchOrderLifecycleUnderBarrier(origin, ev, current)
+}
+
+func (c *Connector) notifyOrderLifecycle(fields []string) {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	epoch := uint64(0)
+	if conn != nil {
+		epoch = conn.BrokerSessionEpoch()
+	}
+	c.notifyOrderLifecycleFrom(conn, epoch, fields)
 }
 
 func (c *Connector) isWhatIfOrderID(orderID int) bool {
@@ -5315,7 +7044,15 @@ func (c *Connector) isKnownBrokerOrderID(id int) bool {
 	return indexed || direct || c.isWhatIfOrderID(id)
 }
 
-func (c *Connector) notifyOrderErrorLifecycle(orderID, code int, message, advancedRejectJSON string) {
+func (c *Connector) notifyOrderErrorLifecycleFrom(origin ConnectorSessionBinding, orderID, code int, message, advancedRejectJSON string) {
+	c.publicationBarrier.RLock()
+	defer c.publicationBarrier.RUnlock()
+	c.evidenceBarrier.RLock()
+	defer c.evidenceBarrier.RUnlock()
+	c.notifyOrderErrorLifecycleUnderBarrier(origin, orderID, code, message, advancedRejectJSON)
+}
+
+func (c *Connector) notifyOrderErrorLifecycleUnderBarrier(origin ConnectorSessionBinding, orderID, code int, message, advancedRejectJSON string) {
 	if orderID <= 0 || code == 0 || orderWhatIfInformationalError(code) {
 		return
 	}
@@ -5335,15 +7072,45 @@ func (c *Connector) notifyOrderErrorLifecycle(orderID, code int, message, advanc
 		Status:    orderBrokerErrorStatus(code),
 		Message:   message,
 	}
-	c.dispatchOrderLifecycle(ev)
+	c.dispatchOrderLifecycleUnderBarrier(origin, ev, c.SessionReceiptCurrent(origin))
+}
+
+func (c *Connector) notifyOrderErrorLifecycle(orderID, code int, message, advancedRejectJSON string) {
+	binding, _ := c.CaptureSession()
+	c.notifyOrderErrorLifecycleFrom(binding, orderID, code, message, advancedRejectJSON)
 }
 
 func (c *Connector) dispatchOrderLifecycle(ev OrderLifecycleEvent) {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	epoch := uint64(0)
+	if conn != nil {
+		epoch = conn.BrokerSessionEpoch()
+	}
+	c.dispatchOrderLifecycleFrom(ConnectorSessionBinding{connector: c, connection: conn, epoch: epoch}, ev)
+}
+
+func (c *Connector) dispatchOrderLifecycleFrom(origin ConnectorSessionBinding, ev OrderLifecycleEvent) {
+	c.publicationBarrier.RLock()
+	defer c.publicationBarrier.RUnlock()
+	c.evidenceBarrier.RLock()
+	defer c.evidenceBarrier.RUnlock()
+	c.dispatchOrderLifecycleUnderBarrier(origin, ev, c.SessionReceiptCurrent(origin))
+}
+
+func (c *Connector) dispatchOrderLifecycleUnderBarrier(origin ConnectorSessionBinding, ev OrderLifecycleEvent, current bool) {
+	c.orderLifecycleGeneration.Add(1)
 	c.orderLifecycleMu.RLock()
-	handlers := append([]func(OrderLifecycleEvent){}, c.orderLifecycle...)
+	handlers := append([]orderLifecycleHandlerEntry(nil), c.orderLifecycle...)
 	c.orderLifecycleMu.RUnlock()
+	receipt := OrderLifecycleReceipt{Session: origin, Event: ev}
 	for _, handler := range handlers {
-		handler(ev)
+		if handler.receipt != nil {
+			handler.receipt(receipt)
+		} else if current && handler.legacy != nil {
+			handler.legacy(ev)
+		}
 	}
 }
 

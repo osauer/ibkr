@@ -225,7 +225,7 @@ func TestAccountSummarySnapshotIsolatedFromStreamingZeros(t *testing.T) {
 		t.Fatalf("NewConnection returned nil")
 	}
 
-	conn.registerSummarySnapshot(7)
+	conn.registerSummarySnapshot(7, "U111")
 	conn.handleAccountSummary([]string{"63", "2", "7", "U111", "NetLiquidation", "311599.04", "EUR"})
 
 	// A streaming zero batch for the same account lands before the read —
@@ -252,7 +252,7 @@ func TestAwaitAccountSummarySnapshotTimeoutCleansUp(t *testing.T) {
 		t.Fatalf("NewConnection returned nil")
 	}
 
-	conn.registerSummarySnapshot(9)
+	conn.registerSummarySnapshot(9, "U111")
 	if _, err := conn.awaitAccountSummarySnapshot(9, 10*time.Millisecond); err == nil {
 		t.Fatalf("expected timeout error")
 	}
@@ -264,6 +264,41 @@ func TestAwaitAccountSummarySnapshotTimeoutCleansUp(t *testing.T) {
 	}
 	if _, err := conn.awaitAccountSummarySnapshot(9, time.Millisecond); err == nil {
 		t.Fatalf("expected unregistered-reqID error after drop")
+	}
+}
+
+func TestAccountSummarySnapshotRejectsMixedOrUnscopedRows(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		rowAccount string
+	}{
+		{name: "foreign account", rowAccount: "U999"},
+		{name: "blank account", rowAccount: ""},
+		{name: "aggregate account", rowAccount: "All"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conn := NewConnection(DefaultConfig())
+			if conn == nil {
+				t.Fatal("NewConnection returned nil")
+			}
+			defer conn.rateLimiter.Stop()
+			conn.account = "U111"
+			conn.registerSummarySnapshot(41, "U111")
+			conn.handleAccountSummary([]string{"63", "2", "41", "U111", "NetLiquidation", "100000", "EUR"})
+			conn.handleAccountSummary([]string{"63", "2", "41", test.rowAccount, "BuyingPower", "200000", "EUR"})
+			conn.processMessage(conn.encodeMsg(msgAccountSummaryEnd, "1", 41))
+
+			rows, err := conn.awaitAccountSummarySnapshot(41, time.Second)
+			if !errors.Is(err, ErrAccountSummaryScopeConflict) || rows != nil {
+				t.Fatalf("mixed summary rows=%+v err=%v, want typed scope conflict", rows, err)
+			}
+			if shared := conn.GetAccountSummary(); len(shared) != 0 {
+				t.Fatalf("rejected request mutated shared cache: %+v", shared)
+			}
+			if got := conn.GetAccountCode(); got != "U111" {
+				t.Fatalf("rejected request rebound account to %q", got)
+			}
+		})
 	}
 }
 
@@ -309,6 +344,8 @@ func TestConnectionPortfolioStreamHealthTracksCompletionAndHeartbeat(t *testing.
 	if conn == nil {
 		t.Fatal("NewConnection returned nil")
 	}
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	conn.resetPortfolioStreamHealth("DU123", now)
 
 	conn.processMessage(conn.encodeMsg(msgAcctDownloadEnd, "1", "DU123"))
 	_, completed := conn.GetPositionsWithPortfolioHealth()
@@ -323,5 +360,34 @@ func TestConnectionPortfolioStreamHealthTracksCompletionAndHeartbeat(t *testing.
 	_, heartbeat := conn.GetPositionsWithPortfolioHealth()
 	if heartbeat.LastUpdateAt.IsZero() || heartbeat.LastUpdateAt.Before(completed.InitialCompletedAt) {
 		t.Fatalf("heartbeat health=%+v after completion=%+v", heartbeat, completed)
+	}
+}
+
+func TestConnectionPortfolioStreamScopeConflictStaysUnavailableUntilReset(t *testing.T) {
+	conn := NewConnection(DefaultConfig())
+	if conn == nil {
+		t.Fatal("NewConnection returned nil")
+	}
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	conn.resetPortfolioStreamHealth("DU123", now)
+
+	conn.processMessage(conn.encodeMsg(msgAcctDownloadEnd, "1", "DU999"))
+	_, conflicted := conn.GetPositionsWithPortfolioHealth()
+	if conflicted.Account != "DU123" || !conflicted.RequestedAt.IsZero() || !conflicted.InitialCompletedAt.IsZero() || !conflicted.LastUpdateAt.IsZero() || conflicted.ScopeConflictAt.IsZero() {
+		t.Fatalf("foreign completion health=%+v", conflicted)
+	}
+
+	conn.processMessage(conn.encodeMsg(msgAcctUpdateTime, "1", "12:01"))
+	conn.processMessage(conn.encodeMsg(msgAcctDownloadEnd, "1", "DU123"))
+	_, stillConflicted := conn.GetPositionsWithPortfolioHealth()
+	if !stillConflicted.InitialCompletedAt.IsZero() || !stillConflicted.LastUpdateAt.IsZero() {
+		t.Fatalf("matching frames bypassed latched scope conflict: %+v", stillConflicted)
+	}
+
+	conn.resetPortfolioStreamHealth("DU123", now.Add(time.Minute))
+	conn.processMessage(conn.encodeMsg(msgAcctDownloadEnd, "1", "DU123"))
+	_, recovered := conn.GetPositionsWithPortfolioHealth()
+	if recovered.Account != "DU123" || recovered.RequestedAt.IsZero() || recovered.InitialCompletedAt.IsZero() || !recovered.ScopeConflictAt.IsZero() {
+		t.Fatalf("subscription reset did not recover current scope: %+v", recovered)
 	}
 }

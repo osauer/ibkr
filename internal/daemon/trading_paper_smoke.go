@@ -4,7 +4,9 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/config"
@@ -218,17 +220,46 @@ func (s *Server) finishPaperSmoke(res *rpc.TradingPaperSmokeResult, status rpc.T
 // cancel-requested event.
 func (s *Server) cancelSmokeOrder(ctx context.Context, status rpc.TradingStatus, place *rpc.OrderPlaceResult, origin string, eligible bool) error {
 	if eligible {
-		_, err := s.cancelOrder(ctx, rpc.OrderCancelParams{ID: place.OrderRef, Origin: origin})
+		_, err := s.cancelOrderForAction(ctx, rpc.OrderCancelParams{ID: place.OrderRef, Origin: origin}, corestore.ActionSmokeCleanup)
 		return err
 	}
-	ev := orderJournalEventForDraft(place.Draft, orderJournalEventCancelRequested, status, place.PreviewTokenID, place.ReservedOrderID, s.orderNow())
+	auth, binding, bindingErr := s.authorizeBrokerWriteTransaction(origin, true)
+	if !auth.Allowed {
+		return fmt.Errorf("%w: %s", ErrTradingDisabled, firstTradingBlockerMessage(auth.Blockers))
+	}
+	if bindingErr != nil {
+		return bindingErr
+	}
+	currentStatus := auth.Status
+	if !strings.EqualFold(status.Mode, currentStatus.Mode) || !strings.EqualFold(status.Account, currentStatus.Account) ||
+		status.Endpoint != currentStatus.Endpoint || status.ClientID != currentStatus.ClientID ||
+		!strings.EqualFold(place.Mode, currentStatus.Mode) || !strings.EqualFold(place.Account, currentStatus.Account) ||
+		place.Endpoint != currentStatus.Endpoint || place.ClientID != currentStatus.ClientID {
+		return brokerWriteTransactionDriftError()
+	}
+	ev := orderJournalEventForDraft(place.Draft, orderJournalEventCancelRequested, currentStatus, place.PreviewTokenID, place.ReservedOrderID, s.orderNow())
+	attemptID, err := randomTokenID()
+	if err != nil {
+		return fmt.Errorf("prepare paper-smoke cleanup attempt: %w", err)
+	}
+	ev.AttemptID = attemptID
+	ev.ActionKind = corestore.ActionSmokeCleanup
 	ev.SendState = orderSendStateSendAttempted
 	ev.Origin = normalizedWriteOrigin(origin)
 	ev.Message = "paper-smoke cleanup: broker cancel attempted before acknowledgement"
+	if err := s.requireBrokerWriteTransactionCurrent(binding); err != nil {
+		return err
+	}
 	if err := s.orderJournal.StagePreTransmit("", "", 0, place.ReservedOrderID, corestore.ActionSmokeCleanup, coreOrderOrigin(origin), []orderJournalEvent{ev}); err != nil {
 		return fmt.Errorf("append cancel journal: %w", err)
 	}
-	return s.cancelConfiguredOrder(ctx, status, place.ReservedOrderID)
+	if err := s.cancelBoundConfiguredOrder(ctx, binding, currentStatus, place.ReservedOrderID); err != nil {
+		if journalErr := s.appendOrderSendError(place.Draft, currentStatus, place.PreviewTokenID, place.ReservedOrderID, attemptID, corestore.ActionSmokeCleanup, err); journalErr != nil {
+			err = errors.Join(err, journalErr)
+		}
+		return err
+	}
+	return s.appendOrderSendCompleted(place.Draft, currentStatus, place.PreviewTokenID, place.ReservedOrderID, attemptID, corestore.ActionSmokeCleanup)
 }
 
 // waitForOrderView polls the order read model (poll first, then every

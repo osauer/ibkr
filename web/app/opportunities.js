@@ -1,7 +1,7 @@
 import { renderAll } from "./app.js";
 import { protectionEmptyRow } from "./protection-coverage.js";
 import { goDurationMinutes, protectionContractLabel } from "./protection.js";
-import { $, blockerText, hasNumericValue, labelize, money, normalizeSymbol, numberRead, protectionWriteConfirmation, protectionWriteConfirmationLabel, readJSONOrText, renderFreshnessTimestamp, shortPreviewMessage, shortPreviewTokenID, shortTimeWithZone } from "./shared.js";
+import { $, blockerText, hasNumericValue, labelize, money, normalizeSymbol, numberRead, renderFreshnessTimestamp, shortPreviewMessage } from "./shared.js";
 import { state } from "./state.js";
 
 function renderOpportunitiesPanel(opportunities = {}) {
@@ -122,8 +122,6 @@ function opportunityRow(opportunity) {
   const previewKey = opportunityPreviewStateKey(opportunity);
   const previewBusy = state.opportunityPreviewBusy === previewKey;
   const previewResult = state.opportunityPreviews[previewKey] || null;
-  const submitBusy = state.opportunitySubmitBusy === previewKey;
-  const submitResult = state.opportunitySubmits[previewKey] || null;
   const previewGate = opportunityPreviewGate(opportunity);
   const submitGate = opportunitySubmitGate(opportunity, previewResult);
 
@@ -152,31 +150,20 @@ function opportunityRow(opportunity) {
     preview.textContent = previewText;
     copy.append(preview);
   }
-  const submitStateText = opportunitySubmitStateText({ result: submitResult, gate: submitGate, busy: submitBusy, previewResult });
-  if (submitStateText) {
-    const submitState = document.createElement("small");
-    submitState.className = opportunitySubmitStateClass({ result: submitResult, gate: submitGate, busy: submitBusy });
-    submitState.textContent = submitStateText;
-    copy.append(submitState);
-  }
+  const submitState = document.createElement("small");
+  submitState.className = opportunitySubmitStateClass({ gate: submitGate });
+  submitState.textContent = `Exercise submission unavailable · ${submitGate.reason}`;
+  copy.append(submitState);
   const actions = document.createElement("div");
   actions.className = "opportunity-row__actions";
   const preview = document.createElement("button");
   preview.type = "button";
   preview.className = "opportunity-preview";
-  preview.textContent = previewBusy ? "Previewing" : "Preview";
-  preview.disabled = blocked || previewBusy || submitBusy || !previewGate.ready;
+  preview.textContent = previewBusy ? "Reviewing" : "Review";
+  preview.disabled = blocked || previewBusy || !previewGate.ready;
   preview.title = blocked ? opportunityBlockerText(opportunity.blockers) : previewGate.reason;
   preview.addEventListener("click", () => previewOpportunityExercise(opportunity));
   actions.append(preview);
-  const exercise = document.createElement("button");
-  exercise.type = "button";
-  exercise.className = "opportunity-exercise";
-  exercise.textContent = submitBusy ? "Exercising" : "Exercise";
-  exercise.disabled = blocked || previewBusy || submitBusy || !submitGate.ready;
-  exercise.title = submitGate.reason || "Submit exercise request";
-  exercise.addEventListener("click", () => submitOpportunityExercise(opportunity));
-  actions.append(exercise);
   const ignore = document.createElement("button");
   ignore.type = "button";
   ignore.className = "opportunity-ignore";
@@ -195,7 +182,7 @@ function opportunityBucketLabel(opportunity = {}) {
 
 function opportunityTitle(opportunity = {}) {
   return [
-    "Exercise",
+    "Exercise candidate",
     opportunity.quantity || 0,
     opportunity.symbol || "--",
     protectionContractLabel(opportunity.contract || {}),
@@ -259,21 +246,16 @@ function opportunityPostExerciseRiskChangeLabel(risk = {}) {
 function opportunityPreviewGate(opportunity = {}) {
 	const blocker = (opportunity.blockers || [])[0];
 	if (blocker) return { ready: false, reason: `${blocker.code}: ${blocker.message}` };
-	return { ready: true, reason: "Ask the daemon to preview exercise eligibility; no broker instruction is sent" };
+	return { ready: true, reason: "Review the current exercise evidence; no token is minted and no broker instruction is sent" };
 }
 
 function opportunitySubmitGate(opportunity = {}, previewResult = null) {
-  const blocker = (opportunity.blockers || [])[0];
-  if (blocker) return { ready: false, reason: blockerText(blocker) };
-  if (!previewResult) return { ready: false, reason: "Run preview first" };
-  if (previewResult.pending) return { ready: false, reason: "Exercise preview is still running" };
-  const previewBlocker = (previewResult.blockers || [])[0];
-  if (previewBlocker) return { ready: false, reason: `${previewBlocker.code}: ${previewBlocker.message}` };
-	if (!previewResult.submit_eligible) return { ready: false, reason: "Preview is not submit eligible" };
-	if (opportunityPreviewStale(previewResult, opportunity)) {
-		return { ready: false, reason: "Opportunity changed; preview again before exercising" };
-	}
-	return { ready: true, reason: `Submit exercise request to ${protectionWriteConfirmationLabel()}` };
+	void opportunity;
+	void previewResult;
+	return {
+		ready: false,
+		reason: "Use TWS after reviewing the resulting position; exact option-to-underlying risk policy and durable one-shot authority are not approved",
+	};
 }
 
 function opportunityPreviewStateKey(opportunity = {}) {
@@ -282,26 +264,18 @@ function opportunityPreviewStateKey(opportunity = {}) {
 
 function opportunityPreviewText(result = null) {
   if (!result) return "";
-  if (result.local && result.pending) return "Previewing exercise; no broker instruction is sent";
-  if (result.pending) return "Previewing exercise; no broker instruction is sent";
+  if (result.local && result.pending) return "Reviewing exercise evidence; no broker instruction is sent";
+  if (result.pending) return "Reviewing exercise evidence; no broker instruction is sent";
   const blocker = (result.blockers || [])[0];
-  if (blocker) return `Preview blocked · ${blocker.code}: ${blocker.message}`;
-  const parts = [
-    result.accepted ? "Exercise preview accepted" : "Exercise preview returned",
-    result.submit_eligible ? "submit eligible" : "not submit eligible",
-  ];
-  if (result.preview_token_id) parts.push(`token ${shortPreviewTokenID(result.preview_token_id)}`);
-  if (result.preview_token_expires_at) parts.push(`expires ${shortTimeWithZone(result.preview_token_expires_at)}`);
-  return parts.filter(Boolean).join(" · ");
+  if (blocker) return `Review blocked · ${blocker.code}: ${blocker.message}`;
+  return "Exercise review returned · submission remains unavailable";
 }
 
 function opportunitySubmitStateText({ result = null, gate = {}, busy = false, previewResult = null } = {}) {
-  if (busy) return "Submitting exercise request";
+  if (busy) return "Exercise submission unavailable";
   if (result) return opportunitySubmitResultText(result);
-  if (!previewResult) return "";
-  if (previewResult.pending) return "";
-  if (!gate.ready) return `Exercise blocked · ${gate.reason}`;
-  return `Ready; Exercise sends the broker write to ${protectionWriteConfirmationLabel()}`;
+  if (previewResult?.pending) return "";
+  return `Exercise submission unavailable · ${gate.reason || opportunitySubmitGate().reason}`;
 }
 
 function opportunitySubmitStateClass({ result = null, gate = {}, busy = false } = {}) {
@@ -316,11 +290,8 @@ function opportunitySubmitStateClass({ result = null, gate = {}, busy = false } 
 
 function opportunitySubmitResultText(result = {}) {
   const blocker = (result.blockers || [])[0];
-  if (blocker) return `Exercise blocked · ${blocker.code}: ${blocker.message}`;
-  if (result.accepted) {
-    return ["Exercise submitted", result.order_ref ? `order ${result.order_ref}` : ""].filter(Boolean).join(" · ");
-  }
-  return result.message ? `Exercise returned · ${result.message}` : "Exercise returned without accepted submit";
+  if (blocker) return `Exercise submission unavailable · ${blocker.code}: ${blocker.message}`;
+  return "Exercise submission unavailable · use TWS after reviewing the resulting position";
 }
 
 function opportunityBlockerText(blockers = []) {
@@ -374,63 +345,15 @@ async function previewOpportunityExercise(opportunity) {
 
 async function submitOpportunityExercise(opportunity) {
   const previewKey = opportunityPreviewStateKey(opportunity);
-  const previewResult = state.opportunityPreviews[previewKey] || null;
-  const gate = opportunitySubmitGate(opportunity, previewResult);
-  if (!gate.ready) {
-    state.opportunitySubmits = {
-      ...state.opportunitySubmits,
-      [previewKey]: { blockers: [{ code: "submit_gate_blocked", message: gate.reason }], as_of: new Date().toISOString() },
-    };
-    renderOpportunitiesPanel(state.snapshot?.opportunities || {});
-    return;
-  }
-  const confirmation = protectionWriteConfirmation(opportunity);
-  if (!confirmation) {
-    state.opportunitySubmits = {
-      ...state.opportunitySubmits,
-      [previewKey]: { blockers: [{ code: "confirmation_cancelled", message: "broker exercise confirmation was cancelled" }], as_of: new Date().toISOString() },
-    };
-    renderOpportunitiesPanel(state.snapshot?.opportunities || {});
-    return;
-  }
-  state.opportunitySubmitBusy = previewKey;
+  const gate = opportunitySubmitGate(opportunity, state.opportunityPreviews[previewKey] || null);
   state.opportunitySubmits = {
     ...state.opportunitySubmits,
-    [previewKey]: { local: true, pending: true, opportunity, as_of: new Date().toISOString() },
+    [previewKey]: {
+      blockers: [{ code: "exercise_submission_unavailable", message: gate.reason }],
+      as_of: new Date().toISOString(),
+    },
   };
   renderOpportunitiesPanel(state.snapshot?.opportunities || {});
-  try {
-    const res = await fetch("/api/opportunities/exercise", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        key: opportunity.key,
-        revision: opportunity.revision,
-        quantity: opportunity.quantity,
-        timeout_ms: opportunityPreviewTimeoutMs(opportunity),
-        confirm_account: confirmation.account,
-        confirm_mode: confirmation.mode,
-      }),
-    });
-    const body = await readJSONOrText(res);
-    if (!res.ok) throw new Error(body.error || body.message || String(body));
-    state.opportunitySubmits = {
-      ...state.opportunitySubmits,
-      [previewKey]: body,
-    };
-  } catch (err) {
-    state.opportunitySubmits = {
-      ...state.opportunitySubmits,
-      [previewKey]: {
-        blockers: [{ code: "submit_failed", message: err.message }],
-        as_of: new Date().toISOString(),
-      },
-    };
-  } finally {
-    if (state.opportunitySubmitBusy === previewKey) state.opportunitySubmitBusy = "";
-    renderOpportunitiesPanel(state.snapshot?.opportunities || {});
-  }
 }
 
 function opportunityPreviewTimeoutMs() {

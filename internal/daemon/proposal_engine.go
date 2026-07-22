@@ -2471,6 +2471,17 @@ func cloneProposalSnapshot(in rpc.TradeProposalSnapshot) rpc.TradeProposalSnapsh
 		events := *in.MarketEvents
 		events.Flags = append([]rpc.MarketEventFlag(nil), in.MarketEvents.Flags...)
 		events.SourceHealth = append([]rpc.SourceHealth(nil), in.MarketEvents.SourceHealth...)
+		events.BorrowFeeCoverage = append([]rpc.MarketEventBorrowFeeCoverage(nil), in.MarketEvents.BorrowFeeCoverage...)
+		for i := range events.BorrowFeeCoverage {
+			if feeRate := in.MarketEvents.BorrowFeeCoverage[i].FeeRate; feeRate != nil {
+				value := *feeRate
+				events.BorrowFeeCoverage[i].FeeRate = &value
+			}
+			if failure := in.MarketEvents.BorrowFeeCoverage[i].LastFailure; failure != nil {
+				copy := *failure
+				events.BorrowFeeCoverage[i].LastFailure = &copy
+			}
+		}
 		events.WarningDetails = append([]rpc.DataWarning(nil), in.MarketEvents.WarningDetails...)
 		if in.MarketEvents.BySymbol != nil {
 			events.BySymbol = make(map[string][]rpc.MarketEventFlag, len(in.MarketEvents.BySymbol))

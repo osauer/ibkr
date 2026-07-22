@@ -2413,6 +2413,31 @@ func healthyCanaryMarketEvents(now time.Time, symbols ...string) rpc.MarketEvent
 	}
 }
 
+func TestBorrowFeeCoverageDoesNotChurnAllLongOrEstablishedMarketEventFingerprint(t *testing.T) {
+	now := time.Date(2026, 7, 21, 16, 0, 0, 0, time.UTC)
+	base := healthyCanaryMarketEvents(now, "XYZ")
+	base.Fingerprint = rpc.BuildMarketEventsFingerprint(&base)
+	fee := 71.0
+	withCoverage := base
+	withCoverage.BorrowFeeCoverage = []rpc.MarketEventBorrowFeeCoverage{{
+		Symbol: "XYZ", ContractConID: 481516, ContractFingerprint: "sha256:exact",
+		CoverageScope: rpc.BorrowFeeCoveragePortfolioOnly, Status: rpc.BorrowFeeCoverageScaleUnknown,
+		Reason: "scale_not_commissioned", Source: rpc.BorrowFeeSourceTWSHistorical,
+		DataType: rpc.BorrowFeeDataTypeHistorical, AsOf: now.Add(-24 * time.Hour), ObservedAt: now,
+		FeeRate: &fee, Entitlement: rpc.BorrowFeeEntitlementObserved,
+		ScaleStatus: rpc.BorrowFeeScaleUnverified, PolicyEligible: false,
+	}}
+	withCoverage.Fingerprint = rpc.BuildMarketEventsFingerprint(&withCoverage)
+
+	longOnly := rpc.PositionsResult{Stocks: []rpc.PositionView{{Symbol: "XYZ", SecType: "stock", Quantity: 10}}}
+	if got, want := canaryRelevantMarketEventsFingerprint(longOnly, withCoverage), canaryRelevantMarketEventsFingerprint(longOnly, base); got != want {
+		t.Fatalf("all-long fingerprint changed on borrow-only coverage: %v != %v", got, want)
+	}
+	if got, want := canaryEstablishedMarketEventsFingerprint(withCoverage), canaryEstablishedMarketEventsFingerprint(base); got != want {
+		t.Fatalf("established fingerprint changed on new coverage projection: %v != %v", got, want)
+	}
+}
+
 func healthyCanaryRegime() rpc.RegimeSnapshotResult {
 	return rpc.RegimeSnapshotResult{
 		Composite: rpc.RegimeComposite{ClusterGreenCount: 6, ClusterRankedCount: 6},

@@ -21,12 +21,25 @@ func (s *Server) handleTradingStatus() *rpc.TradingStatus {
 }
 
 func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
+	return s.tradingStatusWithWriteProjection(ep, true)
+}
+
+// tradingStatusForCancel omits the runtime control projection. Cancellation
+// must remain available while a human freeze/limit commit is in progress; the
+// cancel authorization path applies every non-control blocker separately.
+func (s *Server) tradingStatusForCancel(ep discover.Endpoint) rpc.TradingStatus {
+	return s.tradingStatusWithWriteProjection(ep, false)
+}
+
+func (s *Server) tradingStatusWithWriteProjection(ep discover.Endpoint, includeWriteProjection bool) rpc.TradingStatus {
 	if s != nil {
 		// These hooks are exercised only by the trading-tag write tests, but
 		// Server is compiled in the default read-only build too.
 		_ = s.orderReserveBrokerID
 		_ = s.orderPlaceBroker
 		_ = s.orderCancelBroker
+		_ = s.orderWriteBindingForTest
+		_ = s.orderWriteBeforeBrokerSend
 		_ = &s.paperSmokeMu
 		_ = s.paperSmokeCancelBudgetOverride
 	}
@@ -149,10 +162,12 @@ func (s *Server) tradingStatus(ep discover.Endpoint) rpc.TradingStatus {
 
 	status.Blocked = len(status.Blockers) > 0
 	status.CanPreview = tr.OrderEntryEnabled() && !status.Blocked
-	writeAuth := s.brokerWriteAuthorization(status)
-	status.CanWrite = writeAuth.Allowed
-	if !writeAuth.Allowed && !status.Blocked {
-		status.WriteBlockers = writeAuth.Blockers
+	if includeWriteProjection {
+		writeAuth := s.brokerWriteAuthorization(status)
+		status.CanWrite = writeAuth.Allowed
+		if !writeAuth.Allowed && !status.Blocked {
+			status.WriteBlockers = writeAuth.Blockers
+		}
 	}
 	if tr.Mode == config.TradingModeLive && !status.Blocked {
 		status.LiveOverride = rpc.TradingLiveOverrideReady
@@ -201,6 +216,14 @@ func (auth brokerWriteAuthorization) forCancel() brokerWriteAuthorization {
 }
 
 func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteAuthorization {
+	return s.brokerWriteAuthorizationWithControls(status, true)
+}
+
+func (s *Server) brokerCancelAuthorization(status rpc.TradingStatus) brokerWriteAuthorization {
+	return s.brokerWriteAuthorizationWithControls(status, false)
+}
+
+func (s *Server) brokerWriteAuthorizationWithControls(status rpc.TradingStatus, includeControls bool) brokerWriteAuthorization {
 	auth := brokerWriteAuthorization{Status: status, Route: status.Mode}
 	var blockers []rpc.TradingBlocker
 	add := func(code, message, action string) {
@@ -214,6 +237,12 @@ func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteA
 		add("trading_disabled", "trading is disabled", `Set [trading].mode to "paper" or "live" before broker writes.`)
 	}
 	for _, blocker := range status.Blockers {
+		blockers = appendTradingBlockerOnce(blockers, blocker)
+	}
+	// Status is a request-time snapshot. Authoritative SQLite health can latch
+	// fail-closed after a durable pre-transmit stage, so every later/final gate
+	// must sample it again instead of trusting the copied blocker list.
+	if blocker, blocked := s.authorityTradingBlocker(); blocked {
 		blockers = appendTradingBlockerOnce(blockers, blocker)
 	}
 	if status.Blocked && len(status.Blockers) == 0 {
@@ -230,7 +259,7 @@ func (s *Server) brokerWriteAuthorization(status rpc.TradingStatus) brokerWriteA
 	if s == nil || s.orderJournal == nil {
 		add("order_journal_unavailable", "order writes require a writable local order journal", "Fix the daemon state directory before enabling trading.")
 	}
-	if s.tradingFrozen() {
+	if includeControls && s.tradingFrozen() {
 		add(tradingFrozenBlockerCode, "trading writes are frozen by runtime platform settings", "Run `ibkr settings set trading.freeze=false` to resume broker writes; new orders, modifies, and reduce sweeps are all blocked while frozen — only cancels remain allowed.")
 	}
 	auth.Blockers = blockers

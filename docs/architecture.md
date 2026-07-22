@@ -113,19 +113,39 @@ Not all market context arrives through TWS or Gateway.
 
 | Source | Runtime Path | Data |
 |---|---|---|
-| TWS / IB Gateway API socket | TWS wire protocol over TCP/TLS | Account, positions, quotes, option chains/Greeks/OI, historical bars, scanners, order lifecycle, shortable-share observations, subscription-gated Wall Street Horizon earnings events, and broker WhatIf/eligibility. |
+| TWS / IB Gateway API socket | TWS wire protocol over TCP/TLS | Account, positions, quotes, option chains/Greeks/OI, historical bars, scanners, order lifecycle, shortable-share observations, subscription-gated Wall Street Horizon earnings events, and broker WhatIf/eligibility. This includes an exact-contract historical `FEE_RATE` context fallback for currently held short stocks when the due FTP source is unusable; its scale is uncommissioned and policy-ineligible. |
 | IBKR Flex Web Service | HTTPS POST and polling | Daily raw Flex XML statements used as broker statement truth for reconciliation. |
-| IBKR short-stock availability | FTP | Borrow availability and fee-rate evidence. |
+| IBKR short-stock availability | FTP | Primary global borrow availability and annualized fee-rate evidence; only current/session-valid rows can drive the extreme-fee flag. |
 | Nasdaq | HTTPS JSON, pipe-delimited text, and RSS/XML | One independent earnings-date input, Reg SHO threshold securities, and LULD/trade-halt context. |
 | FRED, CBOE, Federal Reserve, US Treasury | HTTPS CSV/XML | Public regime and rates series. |
 | Wikipedia S&P 500 list | Scheduled HTTPS refresh | Breadth constituent membership, with a validated SQLite projection and embedded fallback. |
 | Official exchange calendars | Embedded Go data | Handwritten build-time tables for US equities, US options, and Xetra, covering 2026 through 2028; a date outside coverage reports an explicit unknown state. There is no runtime calendar network call. |
 
 Market-event, earnings-provider, contract-resolution, and membership
-projections plus retained observations live in `daemon.db`. Borrow-fee and
-earnings attempts retain typed failure and retry state there so a restart
-cannot erase a failed source read. Other refreshable views stay in memory or
-use disposable scratch only.
+projections plus retained observations live in `daemon.db`. The primary FTP
+borrow-fee state and the exact-contract TWS fallback use separate documents, so
+a portfolio-only result can never replace the global last-good. TWS keys combine
+an opaque account-scope fingerprint with the complete exact contract identity;
+observations remain decision-ineligible while the scale is uncommissioned.
+Persisted fallback attempts are dated context and never suppress a fresh
+post-restart entitlement/data read. Earnings and FTP borrow-fee attempts retain
+typed failure and retry state there so a restart cannot erase a failed source
+read. Other refreshable views stay in memory or use disposable scratch only.
+
+Reviewed terminal/non-reporting earnings evidence is also daemon-owned typed
+state. An optional private `[rulebook].terminal_evidence_file` is read only at
+startup as a validated import/update; rule snapshots serve the committed
+exact-contract SQLite revision and never fall back to the file or ticker text.
+Explicit removal retains a per-ConID revocation watermark in that SQLite
+document; reactivation requires record verification strictly later than the
+watermark, so bumping only the import wrapper cannot resurrect old evidence.
+Every initialize/import/update/revoke revision atomically appends a typed,
+prose-free authority-change observation with the old/new catalog fingerprints,
+review times, and per-contract dispositions. Rule-transition event payloads
+link any accepted terminal classification back to that chain with the exact
+contract ConID, authority revision and record fingerprint, review and validity
+times, and classification. They emit an explicit empty linkage list otherwise
+and exclude issuer/symbol text, CIK, source URLs, and evidence prose.
 
 ## Data and Persistence
 
@@ -146,7 +166,7 @@ current recovery limits.
 
 | Class | Default Location | Owner and Representative Contents |
 |---|---|---|
-| Operator configuration | `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`; policy defaults under `~/.config/ibkr/policies/` | Gateway/account/client pins, daemon/trading settings, protection/opportunity policy, the operator-authored `risk-policy.toml`, and the separate `flex-token` secret. The risk policy has no embedded default: missing approval stays unapproved. |
+| Operator configuration | `$XDG_CONFIG_HOME/ibkr/config.toml`, falling back to `~/.config/ibkr/config.toml`; policy defaults under `~/.config/ibkr/policies/` | Gateway/account/client pins, daemon/trading settings, protection/opportunity policy, the operator-authored `risk-policy.toml`, the optional private terminal-evidence import path, and the separate `flex-token` secret. The risk policy has no embedded default: missing approval stays unapproved. |
 | Daemon durable authority | `$XDG_STATE_HOME/ibkr/daemon.db` (SQLite, WAL), falling back to `~/.local/state/ibkr/daemon.db` | Sole live daemon authority for platform settings, risk-capital and governance state, the last-good Regime publication and projection receipt, shadow alert episodes, trading readiness, purge state, orders and token tombstones, proposals and opportunities, decision/event history, retained observations, and statement projections. It is not delete-safe and never falls back to legacy files. |
 | Original broker evidence | `$XDG_STATE_HOME/ibkr/statements/flex-*.xml` | Immutable retained Flex statements. SQLite stores a complete current inventory, immutable file/equity versions, and current per-day winners derived transactionally from this set; it does not replace the XML evidence claim. |
 | Recovery artifacts | `$XDG_STATE_HOME/ibkr/backups/`, `$XDG_STATE_HOME/ibkr/legacy-sealed/<cutover-id>/`, and `$XDG_STATE_HOME/ibkr/daemon.db.head` | Verified database backups, hashed pre-cutover artifacts, and the external monotonic-head watermark. They are recovery and anti-rollback material only, never normal read fallbacks or dual-write targets. |
@@ -321,7 +341,12 @@ daemon-owned sources and never recreate risk or trading verdicts.
 Market-event flags are daemon-owned observed context. Adapters render or
 filter the typed `market_events.snapshot`; they do not refetch Reg SHO, halt,
 borrow-inventory, borrow-fee, or earnings sources, and they do not duplicate
-proposal-blocking policy.
+proposal-blocking policy. The daemon also owns the `borrow_fee_coverage`
+projection: FTP is global authority, while historical `FEE_RATE` is bounded by
+the atomic portfolio rows/receipt, exact ConID and route, and a same-scope check
+before persistence. Restart discards runtime entitlement, failure, and backoff
+state; only an exact identical-wire 15-second retry boundary survives so a
+bounce cannot duplicate the same broker request immediately.
 
 For operator and builder reference, use [Trading Policy](policies.md) for the
 human decision and system-control model, and [Storage](database.md) for state,

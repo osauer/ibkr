@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // Recorded api.nasdaq.com response shape (captured 2026-07-06; see design
@@ -154,6 +156,76 @@ func TestAssembleEarningsRetriesDueProviderBehindFreshAggregate(t *testing.T) {
 	}
 }
 
+func TestAssembleEarningsUsesPersistedExactContractTerminalEvidence(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	authority := openMarketTestCoreStore(t)
+	terminal := newEarningsTerminalStore(writeTerminalImport(t, syntheticTerminalDocument(now)))
+	if err := terminal.UseCoreStore(t.Context(), authority, now); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{earningsTerminal: terminal}
+	name := risk.NameInput{Symbol: "ACMEQ", StockConID: 1001, StockSecType: "STK"}
+	earnings, infos := srv.assembleEarnings(t.Context(), []risk.NameInput{name}, risk.DefaultRulebookPolicy(), marketcal.New(), now, false)
+	if len(infos) != 1 || infos[0].Status != rpc.EarningsStatusTerminalNonReporting ||
+		infos[0].Source != "verified_terminal" || infos[0].Terminal == nil ||
+		infos[0].Terminal.AuthorityRevision != 1 {
+		t.Fatalf("terminal earnings info = %+v", infos)
+	}
+	if got := earnings["ACMEQ"]; !got.TerminalNonReporting || got.Known || got.Source != "verified_terminal" {
+		t.Fatalf("terminal risk input = %+v", got)
+	}
+	health, degraded := rulesEarningsSourceHealth(infos, now)
+	if degraded || health.Status != rpc.SourceStatusOK {
+		t.Fatalf("terminal source health = %+v degraded=%v", health, degraded)
+	}
+}
+
+func TestAssembleEarningsTerminalConflictsFailClosed(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	authority := openMarketTestCoreStore(t)
+	terminal := newEarningsTerminalStore(writeTerminalImport(t, syntheticTerminalDocument(now)))
+	if err := terminal.UseCoreStore(t.Context(), authority, now); err != nil {
+		t.Fatal(err)
+	}
+	name := risk.NameInput{Symbol: "ACMEQ", StockConID: 1001, StockSecType: "STK"}
+
+	t.Run("provider publishes date", func(t *testing.T) {
+		cache := newEarningsCacheMemory(nil)
+		cache.clock = func() time.Time { return now }
+		entry := earningsEntry{Date: "2026-08-01", ObservedAt: now}
+		next := now.Add(earningsFreshWindow)
+		providers := map[string]earningsProviderState{earningsNasdaqProvider: {
+			LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusDate, Entry: &entry, AttemptedAt: now, CompletedAt: now, NextAttempt: &next},
+			LastGood:    &entry,
+		}}
+		cache.symbols["ACMEQ"] = earningsSymbolState{Resolution: resolveEarningsProviders(providers, now), Providers: providers, UpdatedAt: now}
+		srv := &Server{earnings: cache, earningsTerminal: terminal}
+		earnings, infos := srv.assembleEarnings(t.Context(), []risk.NameInput{name}, risk.DefaultRulebookPolicy(), marketcal.New(), now, false)
+		if len(infos) != 1 || infos[0].Status != rpc.EarningsStatusConflictingSources || infos[0].Reason != earningsTerminalReasonSourceConflict {
+			t.Fatalf("provider conflict info = %+v", infos)
+		}
+		if got := earnings["ACMEQ"]; got.Known || got.TerminalNonReporting {
+			t.Fatalf("provider conflict became usable = %+v", got)
+		}
+	})
+
+	t.Run("operator override publishes date", func(t *testing.T) {
+		srv := &Server{
+			earningsTerminal: terminal,
+			platformSettings: &platformSettingsStore{data: platformSettingsData{Version: 1, Features: platformFeatureSettingsData{
+				Rulebook: platformRulebookSettingsData{EarningsOverrides: map[string]string{"ACMEQ": "2026-08-01"}},
+			}}},
+		}
+		earnings, infos := srv.assembleEarnings(t.Context(), []risk.NameInput{name}, risk.DefaultRulebookPolicy(), marketcal.New(), now, false)
+		if len(infos) != 1 || infos[0].Status != rpc.EarningsStatusConflictingSources || infos[0].Reason != earningsTerminalReasonSourceConflict {
+			t.Fatalf("override conflict info = %+v", infos)
+		}
+		if got := earnings["ACMEQ"]; got.Known || got.TerminalNonReporting {
+			t.Fatalf("override conflict became usable = %+v", got)
+		}
+	})
+}
+
 func TestSessionsUntilCountsTradingDays(t *testing.T) {
 	cal := marketcal.New()
 	loc, _ := time.LoadLocation("America/New_York")
@@ -172,6 +244,303 @@ func TestSessionsUntilCountsTradingDays(t *testing.T) {
 	}
 }
 
+func TestRulebookPortfolioSourceHealthRequiresCurrentScopedReceipt(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
+	tests := []struct {
+		name       string
+		receipt    ibkrlib.PortfolioStreamHealth
+		wantStatus string
+		wantReason string
+		wantOK     bool
+	}{
+		{
+			name: "current empty snapshot is trustworthy",
+			receipt: ibkrlib.PortfolioStreamHealth{Account: "DU123", RequestedAt: now.Add(-time.Minute),
+				InitialCompletedAt: now.Add(-30 * time.Second)},
+			wantStatus: rpc.SourceStatusOK, wantOK: true,
+		},
+		{
+			name: "receipt completed after evaluation start but before read completion",
+			receipt: ibkrlib.PortfolioStreamHealth{Account: "DU123", RequestedAt: now.Add(-time.Second),
+				InitialCompletedAt: now.Add(-100 * time.Millisecond)},
+			wantStatus: rpc.SourceStatusOK, wantOK: true,
+		},
+		{
+			name: "silent cached snapshot is stale",
+			receipt: ibkrlib.PortfolioStreamHealth{Account: "DU123", RequestedAt: now.Add(-time.Hour),
+				InitialCompletedAt: now.Add(-portfolioStreamReceiptMaxAge - time.Second)},
+			wantStatus: rpc.SourceStatusStale, wantReason: "positions_stale",
+		},
+		{
+			name: "reconnect account mismatch is unavailable",
+			receipt: ibkrlib.PortfolioStreamHealth{Account: "DU999", RequestedAt: now.Add(-time.Minute),
+				InitialCompletedAt: now.Add(-30 * time.Second)},
+			wantStatus: "unavailable", wantReason: "positions_unavailable",
+		},
+		{
+			name: "latched account scope conflict is unavailable",
+			receipt: ibkrlib.PortfolioStreamHealth{Account: "DU123", RequestedAt: now.Add(-time.Minute),
+				InitialCompletedAt: now.Add(-30 * time.Second), ScopeConflictAt: now},
+			wantStatus: "unavailable", wantReason: "positions_unavailable",
+		},
+		{
+			name:       "initial snapshot in flight is pending",
+			receipt:    ibkrlib.PortfolioStreamHealth{Account: "DU123", RequestedAt: now.Add(-30 * time.Second)},
+			wantStatus: "pending", wantReason: "positions_pending",
+		},
+		{
+			name: "future receipt is unavailable",
+			receipt: ibkrlib.PortfolioStreamHealth{Account: "DU123", RequestedAt: now.Add(-time.Minute),
+				InitialCompletedAt: now.Add(time.Second)},
+			wantStatus: "unavailable", wantReason: "positions_unavailable",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state, health := rulebookPortfolioSourceHealth(scope, test.receipt, now)
+			if state.Healthy != test.wantOK || state.Reason != test.wantReason || health.Status != test.wantStatus {
+				t.Fatalf("state=%+v health=%+v", state, health)
+			}
+			if health.MaxAgeSeconds != int64(portfolioStreamReceiptMaxAge/time.Second) {
+				t.Fatalf("max age = %d", health.MaxAgeSeconds)
+			}
+		})
+	}
+}
+
+func TestRulebookPortfolioProjectionRejectsForeignAccountRows(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
+	health := ibkrlib.PortfolioStreamHealth{
+		Account: "DU123", RequestedAt: now.Add(-time.Minute), InitialCompletedAt: now.Add(-30 * time.Second),
+	}
+	rows := []*ibkrlib.RawPosition{{
+		Account: "DU999", Contract: ibkrlib.Contract{ConID: 1001, Symbol: "FOREIGN", SecType: "STK"}, Position: 1,
+	}}
+
+	health, scoped := scopedPortfolioStreamHealth(rows, health, scope, now)
+	if scoped || health.ScopeConflictAt.IsZero() {
+		t.Fatalf("foreign-account Rulebook projection scoped=%t health=%+v, want latched conflict", scoped, health)
+	}
+	state, source := rulebookPortfolioSourceHealth(scope, health, now)
+	if state.Healthy || state.Reason != "positions_unavailable" || source.Status != "unavailable" {
+		t.Fatalf("foreign-account Rulebook health state=%+v source=%+v, want unavailable", state, source)
+	}
+}
+
+func TestRulebookTapeSourceHealthRTHAndOffHours(t *testing.T) {
+	now := time.Date(2026, 7, 21, 15, 0, 0, 0, time.UTC)
+	dayChange := -1.25
+	tests := []struct {
+		name             string
+		includeTape      bool
+		sessionOpen      bool
+		positionsHealthy bool
+		dayChange        *float64
+		wantStatus       string
+		wantRefresh      string
+	}{
+		{name: "RTH current quote", includeTape: true, sessionOpen: true, positionsHealthy: true, dayChange: &dayChange, wantStatus: rpc.SourceStatusOK},
+		{name: "RTH quote unavailable", includeTape: true, sessionOpen: true, positionsHealthy: true, wantStatus: "unavailable"},
+		{name: "RTH portfolio unavailable", includeTape: true, sessionOpen: true, wantStatus: "unavailable"},
+		{name: "off-hours typed not due", includeTape: true, positionsHealthy: true, wantStatus: rpc.SourceStatusOK, wantRefresh: rpc.SourceRefreshNotDue},
+		{name: "noncanonical read", sessionOpen: true, positionsHealthy: true, dayChange: &dayChange, wantStatus: "unavailable"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			health := rulebookTapeSourceHealth(test.includeTape, test.sessionOpen, test.positionsHealthy, test.dayChange, now)
+			if health.Source != "tape" || health.Status != test.wantStatus || health.RefreshState != test.wantRefresh {
+				t.Fatalf("tape health=%+v", health)
+			}
+		})
+	}
+}
+
+func TestRulebookUnavailableResultCoversFiveInputClasses(t *testing.T) {
+	result := (&Server{}).rulebookUnavailableResult("canonical_cache_missing_or_stale")
+	seen := map[string]bool{}
+	for _, health := range result.InputHealth {
+		seen[health.Source] = health.Status == "unavailable"
+	}
+	for _, source := range []string{"account", "positions", "earnings", "regime_stage", "tape"} {
+		if !seen[source] {
+			t.Fatalf("unavailable result missing %s: %+v", source, result.InputHealth)
+		}
+	}
+	if result.Status != "degraded" || len(result.Rules) != 0 {
+		t.Fatalf("unavailable result=%+v", result)
+	}
+}
+
+func TestRulebookCacheInvalidatesAcrossConnectorEpoch(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	server := &Server{}
+	attachAlertShadowCadenceTestAuthority(t, server, func() time.Time { return now })
+	binding := server.currentRulebookBinding()
+	result := alertShadowTestRulebook(now, risk.RuleStatusPass)
+	if !server.cacheRulebookResult(&result, binding, now) {
+		t.Fatal("failed to cache scoped result")
+	}
+	if _, ok := server.cachedRulebookResult(binding, rulesPreviewTTL, now); !ok {
+		t.Fatal("same-generation cache unexpectedly unavailable")
+	}
+	server.mu.Lock()
+	server.connectorEpoch++
+	server.mu.Unlock()
+	if _, ok := server.cachedRulebookResult(server.currentRulebookBinding(), rulesPreviewTTL, now); ok {
+		t.Fatal("pre-reconnect Rulebook cache survived connector generation change")
+	}
+}
+
+func TestRulebookAccountSourceHealthRequiresFreshCompleteOneShot(t *testing.T) {
+	completedAt := time.Date(2026, 7, 21, 12, 0, 2, 0, time.UTC)
+	requestAt := completedAt.Add(-time.Second)
+	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
+	complete := &rpc.AccountResult{AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: 0}
+	completeAuthority := accountSummaryAuthority{
+		Provenance: ibkrlib.AccountSummaryProvenanceRequest, AsOf: requestAt,
+		NetLiquidationAvailable: true, TotalCashAvailable: true, BaseCurrencyAvailable: true,
+	}
+
+	tests := []struct {
+		name       string
+		account    *rpc.AccountResult
+		authority  accountSummaryAuthority
+		wantOK     bool
+		wantStatus string
+		wantReason string
+	}{
+		{name: "fresh complete request", account: complete, authority: completeAuthority, wantOK: true, wantStatus: rpc.SourceStatusOK},
+		{
+			name: "fresh complete request permits negative finite cash",
+			account: &rpc.AccountResult{
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: -2500,
+			},
+			authority: completeAuthority, wantOK: true, wantStatus: rpc.SourceStatusOK,
+		},
+		{
+			name: "unstamped cached fallback", account: complete,
+			authority: accountSummaryAuthority{
+				Provenance: ibkrlib.AccountSummaryProvenanceCachedFallback, AsOf: requestAt,
+				NetLiquidationAvailable: true, TotalCashAvailable: true, BaseCurrencyAvailable: true,
+			},
+			wantStatus: rpc.SourceStatusDegraded, wantReason: "account_cached_fallback",
+		},
+		{
+			name: "fresh response missing net liquidation", account: complete,
+			authority: func() accountSummaryAuthority {
+				partial := completeAuthority
+				partial.NetLiquidationAvailable = false
+				return partial
+			}(),
+			wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name:    "fresh response missing base currency",
+			account: &rpc.AccountResult{AccountID: "DU123", NetLiquidation: 100000, TotalCash: 0},
+			authority: func() accountSummaryAuthority {
+				partial := completeAuthority
+				partial.BaseCurrencyAvailable = false
+				return partial
+			}(),
+			wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name: "fresh response missing cash presence", account: complete,
+			authority: func() accountSummaryAuthority {
+				partial := completeAuthority
+				partial.TotalCashAvailable = false
+				return partial
+			}(),
+			wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name: "non-finite net liquidation",
+			account: &rpc.AccountResult{
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: math.NaN(), TotalCash: 0,
+			},
+			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name: "non-positive net liquidation",
+			account: &rpc.AccountResult{
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 0, TotalCash: 0,
+			},
+			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name: "non-finite cash",
+			account: &rpc.AccountResult{
+				AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: math.Inf(1),
+			},
+			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name: "malformed base currency",
+			account: &rpc.AccountResult{
+				AccountID: "DU123", BaseCurrency: "EU1", NetLiquidation: 100000, TotalCash: 0,
+			},
+			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name: "placeholder base currency",
+			account: &rpc.AccountResult{
+				AccountID: "DU123", BaseCurrency: "BASE", NetLiquidation: 100000, TotalCash: 0,
+			},
+			authority: completeAuthority, wantStatus: rpc.SourceStatusDegraded, wantReason: "account_incomplete",
+		},
+		{
+			name: "future request receipt", account: complete,
+			authority: func() accountSummaryAuthority {
+				future := completeAuthority
+				future.AsOf = completedAt.Add(time.Second)
+				return future
+			}(),
+			wantStatus: "unavailable", wantReason: "account_unavailable",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state, health := rulebookAccountSourceHealth(scope, test.account, test.authority, completedAt)
+			if state.Healthy != test.wantOK || state.Reason != test.wantReason || health.Status != test.wantStatus {
+				t.Fatalf("state=%+v health=%+v", state, health)
+			}
+		})
+	}
+}
+
+func TestRulesForPreviewReturnsTypedUnavailableWhenBusyUntilDeadline(t *testing.T) {
+	server := &Server{}
+	attachAlertShadowCadenceTestAuthority(t, server, time.Now)
+	binding := server.currentRulebookBinding()
+	stale := &rpc.RulesResult{Enabled: true, Status: "ok"}
+	if !server.cacheRulebookResult(stale, binding, time.Now().Add(-rulesPreviewTTL-time.Second)) {
+		t.Fatal("failed to seed stale scoped cache")
+	}
+
+	server.rulesEvaluationMu.Lock()
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Millisecond)
+	got := server.rulesForPreview(ctx)
+	cancel()
+	server.rulesEvaluationMu.Unlock()
+	if got == nil || got.Status != "degraded" || len(got.Rules) != 0 {
+		t.Fatalf("busy preview result=%+v, want typed unavailable advisory input", got)
+	}
+	warnings := rulebookPreviewWarnings(got, rpc.OrderDraft{Action: "BUY", Contract: rpc.ContractParams{Symbol: "NOW", SecType: "STK"}}, rpc.OrderPositionImpact{Effect: "increase"})
+	if codes := warningCodes(warnings); !codes["rulebook_unavailable"] {
+		t.Fatalf("busy preview silently omitted Rulebook warning: %+v", warnings)
+	}
+
+	fresh := &rpc.RulesResult{Enabled: true, Status: "degraded"}
+	if !server.cacheRulebookResult(fresh, binding, time.Now()) {
+		t.Fatal("failed to seed fresh scoped cache")
+	}
+	if got := server.rulesForPreview(t.Context()); got == nil || got.Status != fresh.Status {
+		t.Fatalf("fresh preview cache = %+v, want status %q", got, fresh.Status)
+	}
+}
+
 // TestMapRuleNamesExposureMatchesGroups is the aggregation-consistency
 // gate: rule 1 must read the identical delta-dollar exposure the canary's
 // concentration check reads (GroupDollarDeltaBase). Bars may differ across
@@ -183,7 +552,7 @@ func TestMapRuleNamesExposureMatchesGroups(t *testing.T) {
 				Underlying:           "NOW",
 				GroupDollarDeltaBase: new(380000.0),
 				GroupMarketValueBase: new(120000.0),
-				Stock:                &rpc.PositionView{Symbol: "NOW", Quantity: 500, DayChangePct: new(1.6)},
+				Stock:                &rpc.PositionView{Symbol: "NOW", SecType: "STK", ConID: 1234, Quantity: 500, DayChangePct: new(1.6)},
 				Options: []rpc.PositionView{{
 					Symbol: "NOW", SecType: "OPTION", Quantity: 50, Multiplier: 100,
 					Expiry: "20260821", Strike: 115, Right: "C", Mark: 7.86,
@@ -212,6 +581,9 @@ func TestMapRuleNamesExposureMatchesGroups(t *testing.T) {
 	if bysym["NOW"].ExposureBase != 380000 {
 		t.Fatalf("NOW exposure = %v, want the group's GroupDollarDeltaBase 380000", bysym["NOW"].ExposureBase)
 	}
+	if bysym["NOW"].StockConID != 1234 || bysym["NOW"].StockSecType != "STK" {
+		t.Fatalf("NOW exact stock identity = conid %d type %q", bysym["NOW"].StockConID, bysym["NOW"].StockSecType)
+	}
 	if bysym["NOW"].Legs[0].ExtrinsicBase == nil {
 		t.Fatal("computable leg extrinsic must be set")
 	}
@@ -222,6 +594,27 @@ func TestMapRuleNamesExposureMatchesGroups(t *testing.T) {
 	}
 	if bysym["NOW"].Legs[0].DTE <= 0 {
 		t.Fatalf("DTE = %d, want positive", bysym["NOW"].Legs[0].DTE)
+	}
+}
+
+func TestMapRuleNamesExactStockIdentityFailsClosedOnSameTickerListings(t *testing.T) {
+	groupStock := rpc.PositionView{Symbol: "DUAL", SecType: "STK", ConID: 1001, Quantity: 10, Mark: 20}
+	pos := &rpc.PositionsResult{
+		Stocks: []rpc.PositionView{
+			groupStock,
+			{Symbol: "DUAL", SecType: "STK", ConID: 2002, Quantity: 5, Mark: 21},
+		},
+		ByUnderlying: []rpc.PositionGroup{{Underlying: "DUAL", Stock: &groupStock}},
+	}
+	names := mapRuleNames(pos, risk.DefaultRulebookPolicy(), "USD")
+	if len(names) != 1 || names[0].StockConID != 0 || names[0].StockSecType != "" {
+		t.Fatalf("same-ticker listings leaked one exact identity: %+v", names)
+	}
+
+	pos.Stocks = pos.Stocks[:1]
+	names = mapRuleNames(pos, risk.DefaultRulebookPolicy(), "USD")
+	if len(names) != 1 || names[0].StockConID != 1001 || names[0].StockSecType != "STK" {
+		t.Fatalf("single exact stock identity was not preserved: %+v", names)
 	}
 }
 
@@ -420,6 +813,7 @@ func TestRulebookPreviewWarnings(t *testing.T) {
 	res := &rpc.RulesResult{
 		Enabled: true,
 		AsOf:    time.Now(),
+		Status:  "ok",
 		Rules: []risk.RuleRow{
 			{ID: risk.RuleSingleNameExposure, Number: 1, Status: risk.RuleStatusAct,
 				Offenders: []risk.RuleOffender{{Symbol: "NOW"}}},
@@ -471,19 +865,31 @@ func TestRulebookPreviewWarnings(t *testing.T) {
 	}
 }
 
-func TestJournalRuleTransitionsCarriesPolicyFingerprint(t *testing.T) {
+func TestJournalRuleTransitionsCarriesPolicyAndTerminalAuthorityFingerprints(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	pol := risk.DefaultRulebookPolicy()
 	key := pol.FingerprintKey()
+	at := time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
+	terminalKey := "sha256:" + strings.Repeat("a", 64)
 	server := &Server{}
 	server.journalRuleTransitions(&rpc.RulesResult{
-		AsOf:          time.Now(),
+		AsOf:          at,
 		PolicyID:      pol.ID,
 		PolicyVersion: pol.Version,
 		PolicyFingerprint: &rpc.Fingerprint{
 			Version: rpc.RulebookPolicyFingerprintVersion,
 			Key:     key,
 		},
+		Earnings: []rpc.EarningsInfo{{
+			Symbol: "PRIVATE", Source: "verified_terminal", Status: rpc.EarningsStatusTerminalNonReporting,
+			Terminal: &rpc.EarningsTerminalInfo{
+				ContractConID: 42, Issuer: "private issuer must not enter transitions", CIK: "0000000042",
+				Classification: earningsTerminalClassEquityCancelled,
+				VerifiedAt:     at.Add(-2 * time.Hour), RevalidateAfter: at.Add(30 * 24 * time.Hour),
+				AuthorityRevision: 7, AuthorityReviewedAt: at.Add(-time.Hour), AuthorityFingerprint: terminalKey,
+				Evidence: []rpc.EarningsEvidenceReference{{Authority: "SEC", Document: "private document", URL: "https://www.sec.gov/Archives/edgar/data/42/private"}},
+			},
+		}},
 		Rules: []risk.RuleRow{{ID: risk.RuleSingleNameExposure, Status: risk.RuleStatusWatch}},
 	})
 	(&Server{}).journalRuleTransitions(&rpc.RulesResult{
@@ -512,11 +918,109 @@ func TestJournalRuleTransitionsCarriesPolicyFingerprint(t *testing.T) {
 	if got, _ := entry["policy_fingerprint"].(string); got == "" || got != key {
 		t.Fatalf("policy_fingerprint = %q, want %q", got, key)
 	}
+	authorities, ok := entry["terminal_authorities"].([]any)
+	if !ok || len(authorities) != 1 {
+		t.Fatalf("terminal_authorities = %#v, want one accepted authority", entry["terminal_authorities"])
+	}
+	authority, ok := authorities[0].(map[string]any)
+	if !ok {
+		t.Fatalf("terminal authority = %#v, want object", authorities[0])
+	}
+	if got := int(authority["contract_con_id"].(float64)); got != 42 {
+		t.Fatalf("contract_con_id = %d, want 42", got)
+	}
+	if got, _ := authority["authority_fingerprint"].(string); got != terminalKey {
+		t.Fatalf("authority_fingerprint = %q, want %q", got, terminalKey)
+	}
+	allowed := map[string]bool{
+		"contract_con_id": true, "authority_revision": true, "authority_fingerprint": true,
+		"authority_reviewed_at": true, "verified_at": true, "revalidate_after": true, "classification": true,
+	}
+	for field := range authority {
+		if !allowed[field] {
+			t.Fatalf("terminal authority leaked non-audit field %q: %#v", field, authority[field])
+		}
+	}
+	if len(authority) != len(allowed) {
+		t.Fatalf("terminal authority fields = %#v, want exactly %#v", authority, allowed)
+	}
 	if err := json.Unmarshal([]byte(lines[1]), &entry); err != nil {
 		t.Fatalf("nil-fingerprint journal entry is not JSON: %v", err)
 	}
 	if got, ok := entry["policy_fingerprint"].(string); !ok || got != "" {
 		t.Fatalf("nil policy_fingerprint = %#v, want empty string", entry["policy_fingerprint"])
+	}
+	if authorities, ok := entry["terminal_authorities"].([]any); !ok || len(authorities) != 0 {
+		t.Fatalf("empty terminal_authorities = %#v, want []", entry["terminal_authorities"])
+	}
+}
+
+func TestJournalRuleTransitionsSQLitePayloadCarriesAcceptedTerminalAuthority(t *testing.T) {
+	store := openMarketTestCoreStore(t)
+	at := time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
+	terminalKey := "sha256:" + strings.Repeat("b", 64)
+	server := &Server{coreStore: store}
+	server.journalRuleTransitions(&rpc.RulesResult{
+		AsOf: at, PolicyID: "rulebook", PolicyVersion: 3,
+		Earnings: []rpc.EarningsInfo{{
+			Source: "verified_terminal", Status: rpc.EarningsStatusTerminalNonReporting,
+			Terminal: &rpc.EarningsTerminalInfo{
+				ContractConID: 84, Classification: earningsTerminalClassIssuerDissolved,
+				VerifiedAt: at.Add(-2 * time.Hour), RevalidateAfter: at.Add(24 * time.Hour),
+				AuthorityRevision: 9, AuthorityReviewedAt: at.Add(-time.Hour), AuthorityFingerprint: terminalKey,
+			},
+		}},
+		Rules: []risk.RuleRow{{ID: risk.RuleEarningsSizeFreeze, Status: risk.RuleStatusInfo}},
+	})
+	events, err := loadAllCoreEvents(t.Context(), store, coreEventRuleTransition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("rule transition events = %d, want 1", len(events))
+	}
+	var payload struct {
+		TerminalAuthorities []ruleTransitionTerminalAuthority `json:"terminal_authorities"`
+	}
+	if err := json.Unmarshal(events[0].PayloadJSON, &payload); err != nil {
+		t.Fatalf("decode raw event payload: %v", err)
+	}
+	if len(payload.TerminalAuthorities) != 1 || payload.TerminalAuthorities[0].ContractConID != 84 ||
+		payload.TerminalAuthorities[0].AuthorityRevision != 9 || payload.TerminalAuthorities[0].AuthorityFingerprint != terminalKey {
+		t.Fatalf("raw terminal authority = %+v", payload.TerminalAuthorities)
+	}
+}
+
+func TestAcceptedRuleTransitionTerminalAuthoritiesSortsDedupesAndRejectsEquivocation(t *testing.T) {
+	at := time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
+	makeInfo := func(conID int, fingerprint string) rpc.EarningsInfo {
+		return rpc.EarningsInfo{
+			Source: "verified_terminal", Status: rpc.EarningsStatusTerminalNonReporting,
+			Terminal: &rpc.EarningsTerminalInfo{
+				ContractConID: conID, Classification: earningsTerminalClassEquityCancelled,
+				VerifiedAt: at.Add(-2 * time.Hour), RevalidateAfter: at.Add(time.Hour),
+				AuthorityRevision: 3, AuthorityReviewedAt: at.Add(-time.Hour), AuthorityFingerprint: fingerprint,
+			},
+		}
+	}
+	one := "sha256:" + strings.Repeat("1", 64)
+	two := "sha256:" + strings.Repeat("2", 64)
+	conflictA := "sha256:" + strings.Repeat("3", 64)
+	conflictB := "sha256:" + strings.Repeat("4", 64)
+	info200 := makeInfo(200, two)
+	info100 := makeInfo(100, one)
+	conflictedA := makeInfo(300, conflictA)
+	conflictedB := makeInfo(300, conflictB)
+	invalid := makeInfo(400, "raw-free-text")
+	expired := makeInfo(500, one)
+	expired.Terminal.RevalidateAfter = at
+	wrongSource := makeInfo(600, one)
+	wrongSource.Source = "fetched"
+	got := acceptedRuleTransitionTerminalAuthorities(&rpc.RulesResult{AsOf: at, Earnings: []rpc.EarningsInfo{
+		info200, info100, info100, conflictedA, conflictedB, invalid, expired, wrongSource,
+	}})
+	if len(got) != 2 || got[0].ContractConID != 100 || got[1].ContractConID != 200 {
+		t.Fatalf("accepted authorities = %+v, want sorted deduped ConIDs 100, 200", got)
 	}
 }
 

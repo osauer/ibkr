@@ -17,6 +17,19 @@ func TestValidSourceFailureRejectsFreeText(t *testing.T) {
 	}
 }
 
+func TestValidSourceFailureAcceptsHistoricalFeeVocabulary(t *testing.T) {
+	for _, failure := range []*SourceFailure{
+		{Code: SourceFailureNoData, Stage: SourceFailureStageHistoricalFeeDecode},
+		{Code: SourceFailurePacing, Stage: SourceFailureStageHistoricalFeeRequest},
+		{Code: SourceFailureContractUnavailable, Stage: SourceFailureStageHistoricalFeeRequest},
+		{Code: SourceFailureNotEntitled, Stage: SourceFailureStageHistoricalFeeRequest},
+	} {
+		if !ValidSourceFailure(failure) {
+			t.Fatalf("historical fee failure rejected: %+v", failure)
+		}
+	}
+}
+
 func TestCompactSourceHealthClonesTypedFailure(t *testing.T) {
 	t.Parallel()
 	failure := &SourceFailure{Code: SourceFailureInvalidPayload, Stage: SourceFailureStageNasdaqSchema}

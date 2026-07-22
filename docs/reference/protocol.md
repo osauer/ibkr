@@ -6,6 +6,30 @@ Last reviewed: 2026-07-21 CEST
 
 Unrestricted `SubmitOrder`/`CancelOrder`, `PlaceOrder`/`CancelOrder`, and `ExerciseOptions` methods are present in every build, but their position-changing wire paths are enabled only in trading-capable builds; default builds return `pkg/ibkr.ErrTradingDisabled` before writing such a frame. The narrower `SubmitPaperOrder`, `PlacePaperOrder`, and `CancelPaperOrder` methods are present in both builds and validate a concrete paper account plus matching connection coordinates. That library-level evidence is not submit authority. Broker WhatIf previews are also available in both builds, but they do not create working orders and never grant submit authority. The daemon adds trading status, pinned account/mode, preview-token, freeze, journal, broker, and origin checks; the MCP server remains preview/read-oriented and exposes no place/modify/cancel tools.
 
+Order caps bind every equity/ETF or single-leg option order, including an
+apparent close or reduction. `reqAllOpenOrders` covers API-created orders across
+clients but cannot prove that a manual TWS order has not already consumed exit
+capacity, so sell-side apparent exits also pass the short/sell-to-open gates
+under worst-case exposure. If that blocks a genuine exit, use TWS and then
+refresh and reconcile the daemon.
+
+The account-base unit used by those caps is exact-session authority. A
+completed one-shot account-summary response must identify it through the
+explicit currency tag or one consistent suffix from the closed allowlist of
+ordinary aggregate value tags; `$LEDGER:ALL` rows and `ExchangeRate=1` are
+ineligible. Preview and token redemption bind the value plus provenance to the
+same concrete broker session. A reconnect or redemption-time change rejects
+the token. The first-byte guard treats the redeemed value as immutable for that
+session and never issues a new broker request or reparses an unstamped cache.
+
+Purge/restore preview and submission are unconditionally unavailable until the
+daemon has exact per-leg portfolio and account-global working-order authority.
+Option-exercise preview likewise returns the typed
+`exercise_submission_unavailable` blocker and mints no token because exact
+option-to-underlying risk policy and durable one-shot authority are not yet
+approved. These disabled daemon capabilities do not become available merely
+because the lower-level wire method or a platform workflow setting exists.
+
 ## Semantic fingerprints
 
 Decision surfaces that are useful to monitors expose a semantic `fingerprint` object:
@@ -22,11 +46,13 @@ codes/scopes/severities, high-level data quality, source-health buckets, and
 gamma/breadth semantic state. V2 adds the allowlisted failure code/stage when a
 source carries typed failure evidence.
 
-`market_events.snapshot` emits `market-events-fp-v2` from requested symbols,
-semantic flag categories/statuses/severities/roles/sources, and source-health
-buckets. It excludes timestamps, exact rates/share counts inside the same flag
-classification, source prose, and rendering order. V2 includes typed failure
-code/stage so a materially different source failure changes monitor identity.
+`market_events.snapshot` emits `market-events-fp-v3` from requested symbols,
+semantic flag categories/statuses/severities/roles/sources, source-health
+buckets, and the typed identity/status of borrow-fee coverage. It excludes
+timestamps, exact rates/share counts, retry timing, source prose, and rendering
+order. V3 retains the V2 typed failure code/stage projection and adds coverage
+scope, exact-contract identity, source/data type, entitlement, scale status,
+policy eligibility, and closed reason/status buckets.
 
 `canary` emits `canary-fp-v2` from policy, action, market confirmation,
 portfolio fit, input health, direction, severity, planner mode/readiness,
@@ -57,7 +83,8 @@ hash.
 `market_events.snapshot` returns `MarketEventsResult` for explicit symbols or,
 when symbols are omitted, held stock/ETF underlyings from the positions snapshot.
 The result contains `flags[]`, `by_symbol`, `source_health[]`,
-`warning_details[]`, `fingerprint`, and `not_execution`.
+`borrow_fee_coverage[]`, `warning_details[]`, `fingerprint`, and
+`not_execution`.
 
 `MarketEventFlag.id` is one of `borrow_inventory_tight`,
 `borrow_fee_extreme`, `reg_sho_threshold`, `luld_pause`, or
@@ -70,11 +97,31 @@ redacted typed `last_failure` fields (`code`, `stage`, `failed_at`,
 `retryable`). Consumers must respect backoff/not-due state and use these typed
 fields instead of parsing provider or transport prose from `notes`.
 
-Borrow inventory comes from IBKR shortable-share market data. Borrow fee comes
-from IBKR short-stock availability fee-rate evidence and emits
-`borrow_fee_extreme` only at or above 50% annualized. Reg SHO V1 uses Nasdaq's
-threshold list, so non-Nasdaq listing-exchange absence remains outside coverage.
-LULD and halt context comes from Nasdaq trade-halt evidence.
+Borrow inventory comes from IBKR shortable-share market data. The global FTP
+short-stock availability file remains the primary borrow-fee source and is the
+only source currently eligible to emit `borrow_fee_extreme` at or above 50%
+annualized. A stale FTP last-good never emits or clears that flag.
+
+When a regular-session FTP refresh is due but fails, is backed off, or returns
+unusable evidence, the daemon may request historical `FEE_RATE` only for exact
+positive-ConID stock contracts that are currently held short in a complete,
+fresh, same-account portfolio stream. It never resolves a symbol, invents a
+route, or queries a long/non-held name. `borrow_fee_coverage[]` discloses
+`coverage_scope` (`global` or `portfolio_only`), optional
+`contract_con_id`/`contract_fingerprint`, `source`, `data_type`, nullable
+`fee_rate`, `as_of`, `observed_at`, `status`, `reason`, `entitlement`,
+`scale_status`, `policy_eligible`, and a redacted typed `last_failure`.
+
+Historical `FEE_RATE` is portfolio-only context with
+`scale_status=unverified` and `policy_eligible=false` until a controlled broker
+fixture commissions its numeric scale. It therefore cannot emit or clear the
+50% flag; missing, unentitled, malformed, paced, or unavailable evidence stays
+nullable and explicit rather than becoming zero. Outside the FTP publication
+window, `refresh_state=not_due` suppresses the fallback. Reg SHO V1 uses
+Nasdaq's threshold list, so non-Nasdaq listing-exchange absence remains outside
+coverage. LULD and halt context comes from Nasdaq trade-halt evidence.
+Runtime entitlement, failure, and backoff are not restored after a restart;
+only the exact identical-wire 15-second retry boundary is durable.
 
 Flags are context and safety gates, not execution authority. Active halt/LULD
 can block proposal preview/submit; borrow flags modify existing short
@@ -90,13 +137,13 @@ paired with an existing reduce/cover proposal.
 | Generic-tick set | gen-ticks 100, 101, 104, 106, 165 (option vol, OI, HV, IV, misc stats including range / average volume) | populated into `MarketData` automatically | ready |
 | Contract resolution | `reqContractData` (9), `contractData` (10) | `Connector.FetchContractDetails` | ready |
 | Option chains | `reqSecDefOptParams` (78), `tickOptionComputation` (21) | `Connector.FetchOptionExpiries`, `FetchOptionExpiryStrikes`, `OptionGreeks`, `OptionIV` | ready |
-| Daily historical bars | `reqHistoricalData` (20), `historicalData` (17) | `Connector.FetchHistoricalDailyBars` | ready |
+| Daily historical bars | `reqHistoricalData` (20), `historicalData` (17), `historicalDataEnd` (17) | `Connector.FetchHistoricalDailyBars`, exact-contract `Connector.FetchHistoricalDailyFeeRates` | ready; `FEE_RATE` is a held-short daemon fallback and remains policy-ineligible until its scale fixture is commissioned |
 | Market scanner | `reqScannerSubscription` (22), `reqScannerParameters` (24) | `Connector.RunScannerSubscription`, `RunScannerParameters` | ready |
 | Market-data type switch | `reqMarketDataType` (59), `marketDataType` (58) | `Connector.SetMarketDataType` | ready |
 | Unrestricted order placement / cancel | `placeOrder` (3), `cancelOrder` (4) | `Connector.SubmitOrder`, `CancelOrder`; `Connection.PlaceOrder`, `CancelOrder` | disabled by default (`ErrTradingDisabled`); `-tags trading` only |
 | Paper-gated order placement / cancel | `placeOrder` (3), `cancelOrder` (4) | `Connector.SubmitPaperOrder`, `CancelPaperOrder`; `Connection.PlacePaperOrder`, `CancelPaperOrder` | all builds; validates paper account and connection coordinates, but does not replace application authorization |
 | Broker WhatIf preview | `placeOrder` (3) with WhatIf | `Connector.PreviewOrderWhatIf`, `Connection.PreviewOrderWhatIf` | all builds; broker evaluation that does not create a working order, never submit authority |
-| Option exercise / lapse | `exerciseOptions` (21) | `Connector.ExerciseOptions`, `Connection.ExerciseOptions` | disabled by default (`ErrTradingDisabled`); `-tags trading` only; position-changing when accepted |
+| Option exercise / lapse | `exerciseOptions` (21) | `Connector.ExerciseOptions`, `Connection.ExerciseOptions` | low-level wire disabled by default (`ErrTradingDisabled`) and `-tags trading` only; daemon preview/submission remains typed-disabled with no token |
 | API open-order snapshot | `reqAllOpenOrders` (5) | `Connector.SnapshotOpenOrders`, `Connection.RequestAllOpenOrders` | all builds; covers API-created orders across clients, not manual TWS orders by itself |
 | Real-time bars | `reqRealTimeBars` (50) | - | not implemented |
 | Market depth (L2) | `reqMktDepth` (10), `reqMktDepthL2` (13) | - | not implemented |

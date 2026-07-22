@@ -233,7 +233,7 @@ func TestDaemonStateCutoverPreservesEverySafetyField(t *testing.T) {
 	notional := 123456.78
 	keepMonths := 7
 	settings := platformSettingsData{
-		Version: 1,
+		Version: 1, TradingControlGeneration: 1,
 		Features: platformFeatureSettingsData{
 			PurgeRestore:    platformPurgeRestoreSettingsData{Enabled: &flag},
 			StockProtection: platformStockProtectionSettingsData{Enabled: &flag},

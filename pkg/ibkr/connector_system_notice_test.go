@@ -16,7 +16,7 @@ func noDefinitionNotice(reqID int) *systemNotification {
 }
 
 func TestProcessSystemNoticeSkipsDerivativeInactive(t *testing.T) {
-	c := NewConnector(&ConnectorConfig{})
+	c := readyBrokerEvidenceTestConnector(t)
 	c.subMu.Lock()
 	c.reqIDMap[5] = "AMD"
 	c.subMu.Unlock()
@@ -41,7 +41,7 @@ func TestProcessSystemNoticeSkipsDerivativeInactive(t *testing.T) {
 // so HGENQ was re-marked and re-requested every poll cycle. A single notice
 // must NOT mark: one code-200 is routinely transient.
 func TestProcessSystemNoticeMarksStockInactive(t *testing.T) {
-	c := NewConnector(&ConnectorConfig{})
+	c := readyBrokerEvidenceTestConnector(t)
 	c.subMu.Lock()
 	c.reqIDMap[7] = "HGENQ"
 	c.subscriptions["HGENQ"] = &Subscription{Symbol: "HGENQ", ReqID: 7}
@@ -64,7 +64,7 @@ func TestProcessSystemNoticeMarksStockInactive(t *testing.T) {
 }
 
 func TestProcessSystemNoticeMarksRoutedStockInactiveByRoute(t *testing.T) {
-	c := NewConnector(&ConnectorConfig{})
+	c := readyBrokerEvidenceTestConnector(t)
 	key := MarketDataKeyForContract(Contract{Symbol: "MBG", SecType: "STK", Exchange: "SMART", Currency: "USD"})
 	c.subMu.Lock()
 	c.reqIDMap[8] = key
@@ -95,7 +95,7 @@ func TestProcessSystemNoticeMarksRoutedStockInactiveByRoute(t *testing.T) {
 // impairment.
 func TestProcessSystemNoticeInactiveGuards(t *testing.T) {
 	t.Run("unowned reqID", func(t *testing.T) {
-		c := NewConnector(&ConnectorConfig{})
+		c := readyBrokerEvidenceTestConnector(t)
 		alias := reqAliasEntry{symbol: "USD", secType: "CASH", exchange: "IDEALPRO", primaryExch: "IDEALPRO", currency: "EUR"}
 		c.processSystemNotice(alias, noDefinitionNotice(11))
 		c.processSystemNotice(alias, noDefinitionNotice(11))
@@ -108,7 +108,7 @@ func TestProcessSystemNoticeInactiveGuards(t *testing.T) {
 	})
 
 	t.Run("impaired farm", func(t *testing.T) {
-		c := NewConnector(&ConnectorConfig{})
+		c := readyBrokerEvidenceTestConnector(t)
 		c.subMu.Lock()
 		c.reqIDMap[12] = "AAPL"
 		c.subMu.Unlock()
@@ -146,7 +146,7 @@ func TestRegisterInactiveCandidateWindowReset(t *testing.T) {
 }
 
 func TestProcessSystemNoticeTracksDataFarmProblemAndRecovery(t *testing.T) {
-	c := &Connector{}
+	c := readyBrokerEvidenceTestConnector(t)
 	brokenAt := time.Date(2026, time.June, 1, 8, 20, 0, 0, time.UTC)
 	c.processSystemNotice(reqAliasEntry{}, &systemNotification{
 		code:      2103,
@@ -178,7 +178,7 @@ func TestProcessSystemNoticeTracksDataFarmProblemAndRecovery(t *testing.T) {
 }
 
 func TestProcessSystemNoticeTracksConnectivityBreak(t *testing.T) {
-	c := &Connector{}
+	c := readyBrokerEvidenceTestConnector(t)
 	c.processSystemNotice(reqAliasEntry{}, &systemNotification{
 		code:    2110,
 		message: "Connectivity between TWS and server is broken",

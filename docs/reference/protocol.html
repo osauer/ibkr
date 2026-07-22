@@ -28,6 +28,27 @@
 <p>Last reviewed: 2026-07-21 CEST</p>
 <p><code>pkg/ibkr</code> is a clean-room Go implementation of the TWS wire protocol. It is not a full replacement for every TWS API method; it covers the broker reads and narrow order-wire operations used by the <code>ibkr</code> binary and daemon.</p>
 <p>Unrestricted <code>SubmitOrder</code>/<code>CancelOrder</code>, <code>PlaceOrder</code>/<code>CancelOrder</code>, and <code>ExerciseOptions</code> methods are present in every build, but their position-changing wire paths are enabled only in trading-capable builds; default builds return <code>pkg/ibkr.ErrTradingDisabled</code> before writing such a frame. The narrower <code>SubmitPaperOrder</code>, <code>PlacePaperOrder</code>, and <code>CancelPaperOrder</code> methods are present in both builds and validate a concrete paper account plus matching connection coordinates. That library-level evidence is not submit authority. Broker WhatIf previews are also available in both builds, but they do not create working orders and never grant submit authority. The daemon adds trading status, pinned account/mode, preview-token, freeze, journal, broker, and origin checks; the MCP server remains preview/read-oriented and exposes no place/modify/cancel tools.</p>
+<p>Order caps bind every equity/ETF or single-leg option order, including an
+apparent close or reduction. <code>reqAllOpenOrders</code> covers API-created orders across
+clients but cannot prove that a manual TWS order has not already consumed exit
+capacity, so sell-side apparent exits also pass the short/sell-to-open gates
+under worst-case exposure. If that blocks a genuine exit, use TWS and then
+refresh and reconcile the daemon.</p>
+<p>The account-base unit used by those caps is exact-session authority. A
+completed one-shot account-summary response must identify it through the
+explicit currency tag or one consistent suffix from the closed allowlist of
+ordinary aggregate value tags; <code>$LEDGER:ALL</code> rows and <code>ExchangeRate=1</code> are
+ineligible. Preview and token redemption bind the value plus provenance to the
+same concrete broker session. A reconnect or redemption-time change rejects
+the token. The first-byte guard treats the redeemed value as immutable for that
+session and never issues a new broker request or reparses an unstamped cache.</p>
+<p>Purge/restore preview and submission are unconditionally unavailable until the
+daemon has exact per-leg portfolio and account-global working-order authority.
+Option-exercise preview likewise returns the typed
+<code>exercise_submission_unavailable</code> blocker and mints no token because exact
+option-to-underlying risk policy and durable one-shot authority are not yet
+approved. These disabled daemon capabilities do not become available merely
+because the lower-level wire method or a platform workflow setting exists.</p>
 <h2 id="semantic-fingerprints">Semantic fingerprints</h2>
 <p>Decision surfaces that are useful to monitors expose a semantic <code>fingerprint</code> object:</p>
 <pre><code class="language-json">{&quot;version&quot;: &quot;canary-fp-v2&quot;, &quot;key&quot;: &quot;sha256:...&quot;}
@@ -38,11 +59,13 @@ composite counts, lifecycle stage/severity/readiness buckets, warning
 codes/scopes/severities, high-level data quality, source-health buckets, and
 gamma/breadth semantic state. V2 adds the allowlisted failure code/stage when a
 source carries typed failure evidence.</p>
-<p><code>market_events.snapshot</code> emits <code>market-events-fp-v2</code> from requested symbols,
-semantic flag categories/statuses/severities/roles/sources, and source-health
-buckets. It excludes timestamps, exact rates/share counts inside the same flag
-classification, source prose, and rendering order. V2 includes typed failure
-code/stage so a materially different source failure changes monitor identity.</p>
+<p><code>market_events.snapshot</code> emits <code>market-events-fp-v3</code> from requested symbols,
+semantic flag categories/statuses/severities/roles/sources, source-health
+buckets, and the typed identity/status of borrow-fee coverage. It excludes
+timestamps, exact rates/share counts, retry timing, source prose, and rendering
+order. V3 retains the V2 typed failure code/stage projection and adds coverage
+scope, exact-contract identity, source/data type, entitlement, scale status,
+policy eligibility, and closed reason/status buckets.</p>
 <p><code>canary</code> emits <code>canary-fp-v2</code> from policy, action, market confirmation,
 portfolio fit, input health, direction, severity, planner mode/readiness,
 primary drivers, signal semantics including held-underlying stress buckets,
@@ -68,7 +91,8 @@ hash.</p>
 <p><code>market_events.snapshot</code> returns <code>MarketEventsResult</code> for explicit symbols or,
 when symbols are omitted, held stock/ETF underlyings from the positions snapshot.
 The result contains <code>flags[]</code>, <code>by_symbol</code>, <code>source_health[]</code>,
-<code>warning_details[]</code>, <code>fingerprint</code>, and <code>not_execution</code>.</p>
+<code>borrow_fee_coverage[]</code>, <code>warning_details[]</code>, <code>fingerprint</code>, and
+<code>not_execution</code>.</p>
 <p><code>MarketEventFlag.id</code> is one of <code>borrow_inventory_tight</code>,
 <code>borrow_fee_extreme</code>, <code>reg_sho_threshold</code>, <code>luld_pause</code>, or
 <code>halt_regulatory_or_news</code>. Event <code>status</code> uses event terms such as <code>active</code> and
@@ -78,11 +102,29 @@ The result contains <code>flags[]</code>, <code>by_symbol</code>, <code>source_h
 redacted typed <code>last_failure</code> fields (<code>code</code>, <code>stage</code>, <code>failed_at</code>,
 <code>retryable</code>). Consumers must respect backoff/not-due state and use these typed
 fields instead of parsing provider or transport prose from <code>notes</code>.</p>
-<p>Borrow inventory comes from IBKR shortable-share market data. Borrow fee comes
-from IBKR short-stock availability fee-rate evidence and emits
-<code>borrow_fee_extreme</code> only at or above 50% annualized. Reg SHO V1 uses Nasdaq's
-threshold list, so non-Nasdaq listing-exchange absence remains outside coverage.
-LULD and halt context comes from Nasdaq trade-halt evidence.</p>
+<p>Borrow inventory comes from IBKR shortable-share market data. The global FTP
+short-stock availability file remains the primary borrow-fee source and is the
+only source currently eligible to emit <code>borrow_fee_extreme</code> at or above 50%
+annualized. A stale FTP last-good never emits or clears that flag.</p>
+<p>When a regular-session FTP refresh is due but fails, is backed off, or returns
+unusable evidence, the daemon may request historical <code>FEE_RATE</code> only for exact
+positive-ConID stock contracts that are currently held short in a complete,
+fresh, same-account portfolio stream. It never resolves a symbol, invents a
+route, or queries a long/non-held name. <code>borrow_fee_coverage[]</code> discloses
+<code>coverage_scope</code> (<code>global</code> or <code>portfolio_only</code>), optional
+<code>contract_con_id</code>/<code>contract_fingerprint</code>, <code>source</code>, <code>data_type</code>, nullable
+<code>fee_rate</code>, <code>as_of</code>, <code>observed_at</code>, <code>status</code>, <code>reason</code>, <code>entitlement</code>,
+<code>scale_status</code>, <code>policy_eligible</code>, and a redacted typed <code>last_failure</code>.</p>
+<p>Historical <code>FEE_RATE</code> is portfolio-only context with
+<code>scale_status=unverified</code> and <code>policy_eligible=false</code> until a controlled broker
+fixture commissions its numeric scale. It therefore cannot emit or clear the
+50% flag; missing, unentitled, malformed, paced, or unavailable evidence stays
+nullable and explicit rather than becoming zero. Outside the FTP publication
+window, <code>refresh_state=not_due</code> suppresses the fallback. Reg SHO V1 uses
+Nasdaq's threshold list, so non-Nasdaq listing-exchange absence remains outside
+coverage. LULD and halt context comes from Nasdaq trade-halt evidence.
+Runtime entitlement, failure, and backoff are not restored after a restart;
+only the exact identical-wire 15-second retry boundary is durable.</p>
 <p>Flags are context and safety gates, not execution authority. Active halt/LULD
 can block proposal preview/submit; borrow flags modify existing short
 buy-to-cover reductions only; <code>reg_sho_threshold</code> is regulatory context unless
@@ -142,9 +184,9 @@ paired with an existing reduce/cover proposal.</p>
 </tr>
 <tr>
 <td>Daily historical bars</td>
-<td><code>reqHistoricalData</code> (20), <code>historicalData</code> (17)</td>
-<td><code>Connector.FetchHistoricalDailyBars</code></td>
-<td>ready</td>
+<td><code>reqHistoricalData</code> (20), <code>historicalData</code> (17), <code>historicalDataEnd</code> (17)</td>
+<td><code>Connector.FetchHistoricalDailyBars</code>, exact-contract <code>Connector.FetchHistoricalDailyFeeRates</code></td>
+<td>ready; <code>FEE_RATE</code> is a held-short daemon fallback and remains policy-ineligible until its scale fixture is commissioned</td>
 </tr>
 <tr>
 <td>Market scanner</td>
@@ -180,7 +222,7 @@ paired with an existing reduce/cover proposal.</p>
 <td>Option exercise / lapse</td>
 <td><code>exerciseOptions</code> (21)</td>
 <td><code>Connector.ExerciseOptions</code>, <code>Connection.ExerciseOptions</code></td>
-<td>disabled by default (<code>ErrTradingDisabled</code>); <code>-tags trading</code> only; position-changing when accepted</td>
+<td>low-level wire disabled by default (<code>ErrTradingDisabled</code>) and <code>-tags trading</code> only; daemon preview/submission remains typed-disabled with no token</td>
 </tr>
 <tr>
 <td>API open-order snapshot</td>

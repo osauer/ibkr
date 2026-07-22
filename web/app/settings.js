@@ -10,12 +10,12 @@ function renderSettings() {
   const purge = settings.features?.purge_restore?.enabled || {};
   const stockProtection = settings.features?.stock_protection?.enabled || {};
   renderFreshnessTimestamp("settingsAsOf", settings.as_of, { staleMinutes: 15 });
-  $("purgeRestoreSettingState").textContent = purge.value === false ? "Disabled" : "Enabled";
-  $("purgeRestoreSettingMeta").textContent = settingMeta(purge);
+  $("purgeRestoreSettingState").textContent = purge.value === false ? "Workflow off" : "Workflow on";
+  $("purgeRestoreSettingMeta").textContent = `Broker submission unavailable · ${settingMeta(purge)}`;
   const toggle = $("purgeRestoreToggle");
   toggle.checked = purge.value !== false;
   toggle.disabled = purge.access !== "write";
-  toggle.title = purge.reason || "Runtime preference";
+  toggle.title = purge.reason || "Toggle the purge/restore workflow preference; this never enables broker submission";
   $("stockProtectionSettingState").textContent = stockProtection.value === false ? "Disabled" : "Enabled";
   $("stockProtectionSettingMeta").textContent = settingMeta(stockProtection);
   const stockToggle = $("stockProtectionToggle");

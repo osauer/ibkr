@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/osauer/ibkr/v2/internal/marketcal"
 	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
+	ibkrlib "github.com/osauer/ibkr/v2/pkg/ibkr"
 )
 
 // Trading rulebook assembly (docs/design/trading-rulebook.md). The pure
@@ -23,14 +26,256 @@ import (
 // submit eligibility or broker-write authorization.
 
 const (
-	// rulesPreviewTTL bounds how stale a cached evaluation may be when the
-	// order-preview path annotates drafts with rule causes. Previews never
-	// trigger a fresh assembly — a preview must stay a preview-priced call.
-	rulesPreviewTTL = 45 * time.Second
+	// rulesPreviewTTL spans the established one-minute Canary cadence with a
+	// small scheduling margin. All cache reuse remains scope- and connector-
+	// generation-bound; after this budget a preview gets a bounded canonical
+	// evaluation or an explicit unavailable advisory.
+	rulesPreviewTTL = 75 * time.Second
+	// rulebookDaemonRefreshEvery moves the app's established complete Rulebook
+	// workload into the daemon so alerts remain operational with the app shut.
+	rulebookDaemonRefreshEvery = time.Minute
+	rulebookRefreshRetryEvery  = 5 * time.Second
 	// rulesSPYQuoteTimeout bounds the one best-effort SPY snapshot quote
 	// per evaluation during regular hours (rules 9/10 tape context).
 	rulesSPYQuoteTimeout = 2500 * time.Millisecond
 )
+
+type rulebookCacheBinding struct {
+	scope          brokerStateScope
+	connector      *ibkrlib.Connector
+	connectorEpoch uint64
+	broker         ibkrlib.BrokerEvidenceBinding
+	brokerCaptured bool
+}
+
+func (s *Server) currentRulebookBinding() rulebookCacheBinding {
+	if s == nil {
+		return rulebookCacheBinding{}
+	}
+	scope := s.currentBrokerStateScope()
+	s.mu.Lock()
+	connector, epoch := s.connector, s.connectorEpoch
+	s.mu.Unlock()
+	binding := rulebookCacheBinding{scope: scope, connector: connector, connectorEpoch: epoch}
+	if connector != nil {
+		binding.broker, binding.brokerCaptured = connector.CaptureBrokerEvidence()
+	}
+	return binding
+}
+
+func sameRulebookBinding(a, b rulebookCacheBinding) bool {
+	if !sameBrokerScope(a.scope, b.scope) || a.connector != b.connector || a.connectorEpoch != b.connectorEpoch {
+		return false
+	}
+	if a.connector == nil {
+		return true
+	}
+	return a.brokerCaptured && b.brokerCaptured && a.broker == b.broker
+}
+
+func (s *Server) cachedRulebookResult(binding rulebookCacheBinding, maxAge time.Duration, now time.Time) (*rpc.RulesResult, bool) {
+	if s == nil || maxAge <= 0 || !brokerScopeConcrete(binding.scope) {
+		return nil, false
+	}
+	s.rulesMu.Lock()
+	cached, at := s.lastRules, s.lastRulesAt
+	cachedBinding := rulebookCacheBinding{
+		scope: s.lastRulesScope, connector: s.lastRulesConnector, connectorEpoch: s.lastRulesConnectorEpoch,
+		broker: s.lastRulesBroker, brokerCaptured: s.lastRulesBrokerCaptured,
+	}
+	s.rulesMu.Unlock()
+	now = now.UTC()
+	if cached == nil || at.IsZero() || at.After(now) || now.Sub(at.UTC()) > maxAge || !sameRulebookBinding(binding, cachedBinding) {
+		return nil, false
+	}
+	return cloneRulesResult(cached), true
+}
+
+func (s *Server) cacheRulebookResult(result *rpc.RulesResult, binding rulebookCacheBinding, cachedAt time.Time) bool {
+	if s == nil || result == nil || !brokerScopeConcrete(binding.scope) {
+		return false
+	}
+	if binding.connector != nil && !sameRulebookBinding(binding, s.currentRulebookBinding()) {
+		return false
+	}
+	return s.cacheRulebookResultStable(result, binding, cachedAt)
+}
+
+// cacheRulebookResultStable publishes after the caller has either validated
+// an unbound/unavailable result or entered the exact Connector evidence
+// barrier. It must not call currentRulebookBinding while that write barrier is
+// held because doing so would recursively acquire its read side.
+func (s *Server) cacheRulebookResultStable(result *rpc.RulesResult, binding rulebookCacheBinding, cachedAt time.Time) bool {
+	copyResult := cloneRulesResult(result)
+	if copyResult == nil {
+		return false
+	}
+	s.rulesMu.Lock()
+	s.lastRules = copyResult
+	s.lastRulesAt = cachedAt.UTC()
+	s.lastRulesScope = binding.scope
+	s.lastRulesConnector = binding.connector
+	s.lastRulesConnectorEpoch = binding.connectorEpoch
+	s.lastRulesBroker = binding.broker
+	s.lastRulesBrokerCaptured = binding.brokerCaptured
+	wake := s.rulesRefreshWake
+	s.rulesMu.Unlock()
+	if wake != nil {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	return true
+}
+
+func (s *Server) rulebookRefreshWakeChannel() <-chan struct{} {
+	s.rulesMu.Lock()
+	if s.rulesRefreshWake == nil {
+		s.rulesRefreshWake = make(chan struct{}, 1)
+	}
+	wake := s.rulesRefreshWake
+	s.rulesMu.Unlock()
+	return wake
+}
+
+func (s *Server) rulebookNextRefreshDue(binding rulebookCacheBinding, now time.Time) time.Time {
+	s.rulesMu.Lock()
+	at := s.lastRulesAt
+	cachedBinding := rulebookCacheBinding{
+		scope: s.lastRulesScope, connector: s.lastRulesConnector, connectorEpoch: s.lastRulesConnectorEpoch,
+		broker: s.lastRulesBroker, brokerCaptured: s.lastRulesBrokerCaptured,
+	}
+	current := s.lastRules != nil && !at.IsZero() && sameRulebookBinding(binding, cachedBinding)
+	s.rulesMu.Unlock()
+	if !current || at.After(now.UTC()) {
+		return now.UTC()
+	}
+	return at.UTC().Add(rulebookDaemonRefreshEvery)
+}
+
+func (s *Server) publishCanonicalRulebookResult(ctx context.Context, result *rpc.RulesResult, binding rulebookCacheBinding) bool {
+	if s == nil || result == nil || ctx == nil || ctx.Err() != nil || !sameRulebookBinding(binding, s.currentRulebookBinding()) {
+		return false
+	}
+	commit := func(shadowResult *rpc.RulesResult) error {
+		if err := s.commitRulebookAlertShadow(ctx, shadowResult, binding.scope); err != nil {
+			return err
+		}
+		s.journalRuleTransitionsForBinding(result, binding)
+		if !s.cacheRulebookResultStable(result, binding, s.orderNow().UTC()) {
+			return fmt.Errorf("cache canonical rulebook result")
+		}
+		return nil
+	}
+	if binding.connector == nil {
+		// A real unbound evaluation is necessarily degraded because neither
+		// account nor portfolio authority is available. Preserve that useful
+		// diagnostic and the test seam, but make the shadow copy explicitly
+		// uncovered so an injected/current-looking result can never recover.
+		shadowResult := cloneRulesResult(result)
+		if shadowResult.Status == "ok" {
+			shadowResult.Status = "degraded"
+		}
+		return commit(shadowResult) == nil
+	}
+	if !binding.brokerCaptured {
+		return false
+	}
+	committed, err := s.withStableBrokerEvidence(daemonBrokerEvidenceBinding{
+		scope: binding.scope, connector: binding.connector, connectorEpoch: binding.connectorEpoch, broker: binding.broker,
+	}, func() error { return commit(result) })
+	return committed && err == nil
+}
+
+func cloneRulesResult(in *rpc.RulesResult) *rpc.RulesResult {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Rules = append([]risk.RuleRow(nil), in.Rules...)
+	for i := range out.Rules {
+		out.Rules[i].Offenders = append([]risk.RuleOffender(nil), in.Rules[i].Offenders...)
+		out.Rules[i].Exempt = append([]risk.RuleOffender(nil), in.Rules[i].Exempt...)
+		out.Rules[i].Notes = append([]string(nil), in.Rules[i].Notes...)
+		if in.Rules[i].Observed != nil {
+			value := *in.Rules[i].Observed
+			out.Rules[i].Observed = &value
+		}
+		if in.Rules[i].Threshold != nil {
+			value := *in.Rules[i].Threshold
+			out.Rules[i].Threshold = &value
+		}
+	}
+	out.Ranked = append([]int(nil), in.Ranked...)
+	if in.BreachCounts != nil {
+		out.BreachCounts = make(map[string]int, len(in.BreachCounts))
+		maps.Copy(out.BreachCounts, in.BreachCounts)
+	}
+	out.InputHealth = append([]rpc.SourceHealth(nil), in.InputHealth...)
+	for i := range out.InputHealth {
+		out.InputHealth[i].Notes = append([]string(nil), in.InputHealth[i].Notes...)
+		if in.InputHealth[i].Fingerprint != nil {
+			value := *in.InputHealth[i].Fingerprint
+			out.InputHealth[i].Fingerprint = &value
+		}
+		if in.InputHealth[i].NextAttempt != nil {
+			value := *in.InputHealth[i].NextAttempt
+			out.InputHealth[i].NextAttempt = &value
+		}
+		if in.InputHealth[i].LastFailure != nil {
+			value := *in.InputHealth[i].LastFailure
+			out.InputHealth[i].LastFailure = &value
+		}
+	}
+	out.Earnings = append([]rpc.EarningsInfo(nil), in.Earnings...)
+	for i := range out.Earnings {
+		out.Earnings[i].Providers = append([]rpc.EarningsProviderInfo(nil), in.Earnings[i].Providers...)
+		for j := range out.Earnings[i].Providers {
+			provider := &out.Earnings[i].Providers[j]
+			if in.Earnings[i].Providers[j].NextAttempt != nil {
+				value := *in.Earnings[i].Providers[j].NextAttempt
+				provider.NextAttempt = &value
+			}
+			if in.Earnings[i].Providers[j].LastFailure != nil {
+				value := *in.Earnings[i].Providers[j].LastFailure
+				provider.LastFailure = &value
+			}
+		}
+		if in.Earnings[i].Terminal != nil {
+			terminal := *in.Earnings[i].Terminal
+			terminal.Evidence = append([]rpc.EarningsEvidenceReference(nil), in.Earnings[i].Terminal.Evidence...)
+			out.Earnings[i].Terminal = &terminal
+		}
+	}
+	if in.PolicyFingerprint != nil {
+		value := *in.PolicyFingerprint
+		out.PolicyFingerprint = &value
+	}
+	return &out
+}
+
+func (s *Server) rulebookUnavailableResult(reason string) *rpc.RulesResult {
+	now := time.Now().UTC()
+	if s != nil {
+		now = s.orderNow().UTC()
+	}
+	pol := risk.DefaultRulebookPolicy()
+	fingerprint := rpc.Fingerprint{Version: rpc.RulebookPolicyFingerprintVersion, Key: pol.FingerprintKey()}
+	if strings.TrimSpace(reason) == "" {
+		reason = "canonical_cache_unavailable"
+	}
+	health := make([]rpc.SourceHealth, 0, 5)
+	for _, source := range []string{"account", "positions", "earnings", "regime_stage", "tape"} {
+		health = append(health, rpc.SourceHealth{
+			Source: source, Status: "unavailable", Notes: []string{reason},
+		})
+	}
+	return &rpc.RulesResult{
+		AsOf: now, Enabled: true, Status: "degraded", InputHealth: health,
+		PolicyID: pol.ID, PolicyVersion: pol.Version, PolicyFingerprint: &fingerprint,
+	}
+}
 
 // rulebookEnabled reads features.rulebook.enabled (runtime, default true).
 func (s *Server) rulebookEnabled() bool {
@@ -68,53 +313,105 @@ func (s *Server) handleRulesSnapshot(ctx context.Context, req *rpc.Request) (*rp
 			return nil, err
 		}
 	}
-	res := s.evaluateRules(ctx, true)
-	// Observe the complete result before any caller-local offender filter.
-	// A filtered view cannot prove that rules outside its symbol are clear.
-	s.observeRulebookAlertShadow(ctx, res, s.currentBrokerStateScope())
+	binding := s.currentRulebookBinding()
+	if cached, ok := s.cachedRulebookResult(binding, rulesPreviewTTL, s.orderNow().UTC()); ok {
+		if params.Symbol != "" {
+			filterRuleOffenders(cached, strings.ToUpper(strings.TrimSpace(params.Symbol)))
+		}
+		return cached, nil
+	}
+	res := s.canonicalRulebookResult(ctx, binding)
 	if params.Symbol != "" {
 		filterRuleOffenders(res, strings.ToUpper(strings.TrimSpace(params.Symbol)))
 	}
-	s.journalRuleTransitions(res)
-	s.rulesMu.Lock()
-	s.lastRules = res
-	s.lastRulesAt = time.Now()
-	s.rulesMu.Unlock()
 	return res, nil
 }
 
-// rulesForPreview returns the last evaluation if fresh enough for advisory
-// preview causes; nil means "no rule warnings", never an error.
+// rulesForPreview returns a scope-bound canonical evaluation. If neither a
+// fresh cache nor a bounded canonical read is available, the returned
+// degraded result produces a typed rulebook_unavailable advisory; contention
+// can never silently erase warnings.
 func (s *Server) rulesForPreview(ctx context.Context) *rpc.RulesResult {
 	if !s.rulebookEnabled() {
 		return nil
 	}
-	s.rulesMu.Lock()
-	cached, at := s.lastRules, s.lastRulesAt
-	s.rulesMu.Unlock()
-	if cached != nil && time.Since(at) <= rulesPreviewTTL {
+	binding := s.currentRulebookBinding()
+	if cached, ok := s.cachedRulebookResult(binding, rulesPreviewTTL, s.orderNow().UTC()); ok {
 		return cached
 	}
-	// Tape rules (9/10) never produce preview causes, so skip the SPY quote
-	// on this path — a preview must not pay a market-data round-trip.
-	res := s.evaluateRules(ctx, false)
-	s.rulesMu.Lock()
-	s.lastRules = res
-	s.lastRulesAt = time.Now()
-	s.rulesMu.Unlock()
-	return res
+	return s.canonicalRulebookResult(ctx, binding)
 }
 
-func (s *Server) evaluateRules(ctx context.Context, includeTape bool) *rpc.RulesResult {
-	return s.evaluateRulesMode(ctx, includeTape, true)
+// canonicalRulebookResult is the full Rulebook single-flight used by user,
+// app, and preview reads. It rechecks the cache after acquiring the evaluation
+// lock so a caller queued behind the daemon refresh reuses that result instead
+// of issuing a second account/positions/quote fanout.
+func (s *Server) canonicalRulebookResult(ctx context.Context, binding rulebookCacheBinding) *rpc.RulesResult {
+	if ctx == nil {
+		return s.rulebookUnavailableResult("canonical_read_context_missing")
+	}
+	if cached, ok := s.cachedRulebookResult(binding, rulesPreviewTTL, s.orderNow().UTC()); ok {
+		return cached
+	}
+	if !s.lockRulesEvaluation(ctx) {
+		return s.rulebookUnavailableResult("canonical_read_contention")
+	}
+	defer s.rulesEvaluationMu.Unlock()
+	if cached, ok := s.cachedRulebookResult(binding, rulesPreviewTTL, s.orderNow().UTC()); ok {
+		return cached
+	}
+	result := s.evaluateRulesModeLocked(ctx, true, true)
+	if ctx.Err() != nil || !sameRulebookBinding(binding, s.currentRulebookBinding()) {
+		return s.rulebookUnavailableResult("canonical_read_interrupted")
+	}
+	// Publish while the single-flight remains held. A queued caller's post-lock
+	// recheck therefore cannot slip between evaluation completion and caching.
+	if !s.publishCanonicalRulebookResult(ctx, result, binding) {
+		return s.rulebookUnavailableResult("canonical_publish_interrupted")
+	}
+	return cloneRulesResult(result)
+}
+
+func (s *Server) lockRulesEvaluation(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	for !s.rulesEvaluationMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	return true
 }
 
 // evaluateRulesMode lets read-only daemon composition reuse the exact rule
 // mapper/evaluator without turning its account fetch into a capital-state
 // observation. Transition journaling remains exclusively in
-// handleRulesSnapshot.
+// handleRulesSnapshot. All canonical callers serialize here so two complete
+// account/positions/tape assemblies cannot overlap.
 func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMaintenance bool) *rpc.RulesResult {
+	if ctx == nil {
+		return s.rulebookUnavailableResult("canonical_read_context_missing")
+	}
+	binding := s.currentRulebookBinding()
+	if cached, ok := s.cachedRulebookResult(binding, rulesPreviewTTL, s.orderNow().UTC()); ok {
+		return cached
+	}
+	if !s.lockRulesEvaluation(ctx) {
+		return s.rulebookUnavailableResult("canonical_read_contention")
+	}
+	defer s.rulesEvaluationMu.Unlock()
+	if cached, ok := s.cachedRulebookResult(binding, rulesPreviewTTL, s.orderNow().UTC()); ok {
+		return cached
+	}
+	return s.evaluateRulesModeLocked(ctx, includeTape, allowMaintenance)
+}
+
+func (s *Server) evaluateRulesModeLocked(ctx context.Context, includeTape, allowMaintenance bool) *rpc.RulesResult {
 	now := time.Now()
+	brokerScope := s.currentBrokerStateScope()
 	pol := risk.DefaultRulebookPolicy()
 	fp := rpc.Fingerprint{Version: rpc.RulebookPolicyFingerprintVersion, Key: pol.FingerprintKey()}
 	res := &rpc.RulesResult{
@@ -133,21 +430,33 @@ func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMainte
 	in := risk.RuleInputs{AsOf: now}
 	var health []rpc.SourceHealth
 
-	acct, acctErr := s.buildAccountSummary(ctx, allowMaintenance)
+	acct, accountAuthority, acctErr := s.buildAccountSummaryWithAuthority(ctx, allowMaintenance)
+	accountCompletedAt := time.Now().UTC()
 	if acctErr != nil || acct == nil {
 		in.Account = risk.SourceState{Healthy: false, Reason: "account_unavailable"}
 		health = append(health, rpc.SourceHealth{Source: "account", Status: "unavailable", Notes: []string{errText(acctErr)}})
 	} else {
-		in.Account = risk.SourceState{Healthy: true}
-		in.NLVBase = new(acct.NetLiquidation)
-		in.CashBase = new(acct.TotalCash)
+		accountState, accountHealth := rulebookAccountSourceHealth(brokerScope, acct, accountAuthority, accountCompletedAt)
+		in.Account = accountState
+		if accountAuthority.NetLiquidationAvailable {
+			in.NLVBase = new(acct.NetLiquidation)
+		}
+		if accountAuthority.TotalCashAvailable {
+			in.CashBase = new(acct.TotalCash)
+		}
 		in.DailyPnLBase = acct.DailyPnL
-		in.BaseCurrency = acct.BaseCurrency
-		res.BaseCurrency = acct.BaseCurrency
-		health = append(health, rpc.SourceHealth{Source: "account", Status: "ok", AsOf: now})
+		if accountAuthority.BaseCurrencyAvailable {
+			if baseCurrency, ok := rulebookBaseCurrency(acct.BaseCurrency); ok {
+				in.BaseCurrency = baseCurrency
+				res.BaseCurrency = baseCurrency
+			}
+		}
+		health = append(health, accountHealth)
 	}
 
-	pos, posErr := s.handlePositionsList(ctx, &rpc.Request{})
+	var portfolioHealth ibkrlib.PortfolioStreamHealth
+	pos, posErr := s.handlePositionsListCapturedForScope(ctx, &rpc.Request{}, &portfolioHealth, brokerScope)
+	positionsCompletedAt := time.Now().UTC()
 	switch {
 	case posErr != nil || pos == nil:
 		in.Positions = risk.SourceState{Healthy: false, Reason: "positions_unavailable"}
@@ -157,8 +466,9 @@ func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMainte
 		health = append(health, rpc.SourceHealth{Source: "positions", Status: "pending",
 			Notes: []string{"portfolio stream not yet primed; account summary reports open positions"}})
 	default:
-		in.Positions = risk.SourceState{Healthy: true}
-		health = append(health, rpc.SourceHealth{Source: "positions", Status: "ok", AsOf: pos.AsOf})
+		positionsState, positionsHealth := rulebookPortfolioSourceHealth(brokerScope, portfolioHealth, positionsCompletedAt)
+		in.Positions = positionsState
+		health = append(health, positionsHealth)
 	}
 
 	cal := marketcal.New()
@@ -210,16 +520,18 @@ func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMainte
 		earningsHealth, degraded := rulesEarningsSourceHealth(infos, now)
 		earningsDegraded = degraded
 		health = append(health, earningsHealth)
+	} else {
+		earningsDegraded = true
+		health = append(health, rpc.SourceHealth{
+			Source: "earnings", Status: "unavailable",
+			Notes: []string{"earnings cannot be projected without a current scoped portfolio"},
+		})
 	}
 
 	if includeTape && in.SessionOpen && in.Positions.Healthy {
 		in.SPYDayChangePct = s.spyDayChangePct(ctx)
-		tapeStatus := "ok"
-		if in.SPYDayChangePct == nil {
-			tapeStatus = "unavailable"
-		}
-		health = append(health, rpc.SourceHealth{Source: "tape", Status: tapeStatus, AsOf: now})
 	}
+	health = append(health, rulebookTapeSourceHealth(includeTape, in.SessionOpen, in.Positions.Healthy, in.SPYDayChangePct, now))
 
 	ev := risk.EvaluateRulebook(in, pol)
 	res.Rules = ev.Rows
@@ -230,7 +542,7 @@ func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMainte
 		counts[r.Status]++
 	}
 	res.BreachCounts = counts
-	if !in.Positions.Healthy || !in.Account.Healthy || earningsDegraded {
+	if !in.Positions.Healthy || !in.Account.Healthy || earningsDegraded || rulebookInputHealthDegraded(health) {
 		res.Status = "degraded"
 	}
 	// The envelope is the completion boundary for the assembled inputs. Some
@@ -241,13 +553,123 @@ func (s *Server) evaluateRulesMode(ctx context.Context, includeTape, allowMainte
 	return res
 }
 
+func rulebookInputHealthDegraded(health []rpc.SourceHealth) bool {
+	for _, source := range health {
+		if source.Status != rpc.SourceStatusOK {
+			return true
+		}
+	}
+	return false
+}
+
+func rulebookTapeSourceHealth(includeTape, sessionOpen, positionsHealthy bool, dayChange *float64, now time.Time) rpc.SourceHealth {
+	switch {
+	case !includeTape:
+		return rpc.SourceHealth{Source: "tape", Status: "unavailable", Notes: []string{"canonical tape read was not requested"}}
+	case !sessionOpen:
+		return rpc.SourceHealth{
+			Source: "tape", Status: rpc.SourceStatusOK, AsOf: now.UTC(), RefreshState: rpc.SourceRefreshNotDue,
+			Notes: []string{"US equity tape rules are not due outside the live session"},
+		}
+	case !positionsHealthy:
+		return rpc.SourceHealth{Source: "tape", Status: "unavailable", Notes: []string{"tape rules require a current scoped portfolio"}}
+	case dayChange == nil:
+		return rpc.SourceHealth{Source: "tape", Status: "unavailable", AsOf: now.UTC(), Notes: []string{"current SPY tape quote is unavailable"}}
+	default:
+		return rpc.SourceHealth{Source: "tape", Status: rpc.SourceStatusOK, AsOf: now.UTC()}
+	}
+}
+
+func rulebookAccountSourceHealth(scope brokerStateScope, account *rpc.AccountResult, authority accountSummaryAuthority, completedAt time.Time) (risk.SourceState, rpc.SourceHealth) {
+	health := rpc.SourceHealth{Source: "account"}
+	if account == nil || !brokerScopeConcrete(scope) || !brokerScopeAccountConcrete(account.AccountID) ||
+		!strings.EqualFold(strings.TrimSpace(account.AccountID), strings.TrimSpace(scope.Account)) {
+		health.Status = "unavailable"
+		health.Notes = []string{"account snapshot is missing or belongs to another broker account"}
+		return risk.SourceState{Reason: "account_unavailable"}, health
+	}
+	if authority.Provenance != ibkrlib.AccountSummaryProvenanceRequest {
+		health.Status = rpc.SourceStatusDegraded
+		health.Notes = []string{"one-shot account snapshot was unavailable; unstamped cache is context only"}
+		return risk.SourceState{Reason: "account_cached_fallback"}, health
+	}
+	health.AsOf = authority.AsOf.UTC()
+	if health.AsOf.IsZero() || health.AsOf.After(completedAt.UTC()) {
+		health.Status = "unavailable"
+		health.Notes = []string{"account snapshot receipt time is missing or future-dated"}
+		return risk.SourceState{Reason: "account_unavailable"}, health
+	}
+	missing := make([]string, 0, 3)
+	if !authority.NetLiquidationAvailable || account.NetLiquidation <= 0 || math.IsNaN(account.NetLiquidation) || math.IsInf(account.NetLiquidation, 0) {
+		missing = append(missing, "positive net liquidation")
+	}
+	if _, ok := rulebookBaseCurrency(account.BaseCurrency); !authority.BaseCurrencyAvailable || !ok {
+		missing = append(missing, "base currency")
+	}
+	if !authority.TotalCashAvailable || math.IsNaN(account.TotalCash) || math.IsInf(account.TotalCash, 0) {
+		missing = append(missing, "total cash")
+	}
+	if len(missing) > 0 {
+		health.Status = rpc.SourceStatusDegraded
+		health.Notes = []string{"fresh account snapshot is incomplete: " + strings.Join(missing, ", ")}
+		return risk.SourceState{Reason: "account_incomplete"}, health
+	}
+	health.Status = rpc.SourceStatusOK
+	return risk.SourceState{Healthy: true}, health
+}
+
+func rulebookBaseCurrency(raw string) (string, bool) {
+	currency := normCcy(raw)
+	if len(currency) != 3 || currency == "BASE" {
+		return "", false
+	}
+	for i := range len(currency) {
+		if currency[i] < 'A' || currency[i] > 'Z' {
+			return "", false
+		}
+	}
+	return currency, true
+}
+
+func rulebookPortfolioSourceHealth(scope brokerStateScope, receipt ibkrlib.PortfolioStreamHealth, now time.Time) (risk.SourceState, rpc.SourceHealth) {
+	evidenceAt := portfolioStreamEvidenceAsOf(receipt)
+	health := rpc.SourceHealth{
+		Source: "positions", AsOf: evidenceAt,
+		MaxAgeSeconds: int64(portfolioStreamReceiptMaxAge / time.Second),
+	}
+	if !evidenceAt.IsZero() && !evidenceAt.After(now.UTC()) {
+		health.AgeSeconds = int64(now.UTC().Sub(evidenceAt) / time.Second)
+	}
+	switch classifyPortfolioStreamHealth(scope, receipt, now) {
+	case orderIntegrityHealthCurrent:
+		health.Status = rpc.SourceStatusOK
+		return risk.SourceState{Healthy: true}, health
+	case orderIntegrityHealthStale:
+		health.Status = rpc.SourceStatusStale
+		health.Notes = []string{"portfolio stream receipt exceeded its freshness budget"}
+		return risk.SourceState{Reason: "positions_stale"}, health
+	default:
+		if receipt.InitialCompletedAt.IsZero() && !receipt.RequestedAt.IsZero() && !receipt.RequestedAt.After(now.UTC()) {
+			health.Status = "pending"
+			health.AsOf = receipt.RequestedAt.UTC()
+			health.AgeSeconds = int64(now.UTC().Sub(receipt.RequestedAt.UTC()) / time.Second)
+			health.Notes = []string{"portfolio stream has not completed its initial snapshot"}
+			return risk.SourceState{Reason: "positions_pending"}, health
+		}
+		health.Status = "unavailable"
+		health.Notes = []string{"portfolio stream receipt is missing, future-dated, or belongs to another broker account"}
+		return risk.SourceState{Reason: "positions_unavailable"}, health
+	}
+}
+
 func rulesEarningsSourceHealth(infos []rpc.EarningsInfo, now time.Time) (rpc.SourceHealth, bool) {
 	status := rpc.SourceStatusOK
 	degraded := false
 	var lastFailure *rpc.SourceFailure
 	var notes []string
 	for _, info := range infos {
-		if info.Source == "unknown" || info.Stale || info.Status != rpc.EarningsStatusDate {
+		resolved := info.Status == rpc.EarningsStatusDate || info.Status == rpc.EarningsStatusTerminalNonReporting
+		if info.Source == "unknown" || info.Stale || !resolved {
 			status = rpc.SourceStatusDegraded
 			degraded = true
 			notes = append(notes, info.Symbol+": "+nonEmptyString(info.Reason, nonEmptyString(info.Status, "not_observed")))
@@ -271,9 +693,21 @@ func rulesEarningsSourceHealth(infos []rpc.EarningsInfo, now time.Time) (rpc.Sou
 func mapRuleNames(pos *rpc.PositionsResult, pol risk.RulebookPolicy, baseCcy string) []risk.NameInput {
 	loc, _ := time.LoadLocation("America/New_York")
 	today := time.Now().In(loc)
+	exactStocks, stocksAuthoritative := rulebookExactStocksBySymbol(pos)
 	names := make([]risk.NameInput, 0, len(pos.ByUnderlying))
 	for _, g := range pos.ByUnderlying {
 		n := risk.NameInput{Symbol: g.Underlying}
+		if stocksAuthoritative {
+			identity, ok := exactStocks[strings.ToUpper(strings.TrimSpace(g.Underlying))]
+			if ok && !identity.ambiguous && g.Stock != nil && g.Stock.ConID == identity.conID &&
+				sameStockSecurityType(g.Stock.SecType, identity.secType) {
+				n.StockConID = identity.conID
+				n.StockSecType = identity.secType
+			}
+		} else if g.Stock != nil {
+			n.StockConID = g.Stock.ConID
+			n.StockSecType = g.Stock.SecType
+		}
 		// ExposureBaseComplete guards rule 1's lower bound: the group sum
 		// excludes legs the aggregator couldn't price (delta without spot,
 		// markless stock, missing FX) — a bound seeded from a partial sum
@@ -374,6 +808,46 @@ func mapRuleNames(pos *rpc.PositionsResult, pol risk.RulebookPolicy, baseCcy str
 	return names
 }
 
+type rulebookExactStockIdentity struct {
+	conID     int
+	secType   string
+	ambiguous bool
+}
+
+// rulebookExactStocksBySymbol uses the ungrouped position rows as identity
+// authority. PositionGroup is intentionally symbol-aggregated and has room
+// for only one stock pointer, so it cannot prove exact identity when two
+// listings share a ticker. A non-nil Stocks slice means the full projection
+// was supplied; any missing, malformed, or conflicting identity then stays
+// unclassified instead of falling back to the group's overwritten pointer.
+func rulebookExactStocksBySymbol(pos *rpc.PositionsResult) (map[string]rulebookExactStockIdentity, bool) {
+	if pos == nil || pos.Stocks == nil {
+		return nil, false
+	}
+	identities := make(map[string]rulebookExactStockIdentity, len(pos.Stocks))
+	for _, stock := range pos.Stocks {
+		symbol := strings.ToUpper(strings.TrimSpace(stock.Symbol))
+		secType := strings.ToUpper(strings.TrimSpace(stock.SecType))
+		if symbol == "" || stock.ConID <= 0 || !isStockSecurityType(secType) {
+			if symbol != "" {
+				identity := identities[symbol]
+				identity.ambiguous = true
+				identities[symbol] = identity
+			}
+			continue
+		}
+		secType = "STK"
+		identity, exists := identities[symbol]
+		if exists && (identity.ambiguous || identity.conID != stock.ConID || identity.secType != secType) {
+			identity.ambiguous = true
+			identities[symbol] = identity
+			continue
+		}
+		identities[symbol] = rulebookExactStockIdentity{conID: stock.ConID, secType: secType}
+	}
+	return identities, true
+}
+
 func legDesc(o rpc.PositionView) string {
 	return fmt.Sprintf("%s %s %s %s", o.Symbol, o.Expiry, o.Right, trimFloat(o.Strike))
 }
@@ -435,8 +909,11 @@ func trimFloat(v float64) string {
 	return strings.TrimRight(s, ".")
 }
 
-// assembleEarnings merges manual overrides (authoritative) with the cache,
-// kicks the async refresher for gaps, and computes ET session distances.
+// assembleEarnings merges manual overrides with the cache, applies reviewed
+// exact-contract terminal evidence, kicks the async refresher for gaps, and
+// computes ET session distances. Overrides remain authoritative over ordinary
+// provider dates, but they cannot silently overrule a terminal classification:
+// a date on the same exact cancelled contract is an explicit conflict.
 func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, pol risk.RulebookPolicy, cal *marketcal.Calendar, now time.Time, allowRefresh bool) (map[string]risk.EarningsInput, []rpc.EarningsInfo) {
 	loc, _ := time.LoadLocation("America/New_York")
 	overrides := s.rulebookEarningsOverrides()
@@ -449,44 +926,79 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 			continue // index products have no earnings print
 		}
 		info := rpc.EarningsInfo{Symbol: sym, Source: "unknown", Reason: "not_observed"}
+		override, hasOverride := risk.EarningsInput{}, false
 		if raw, ok := overrides[sym]; ok {
-			if e, parseOK := parseEarningsOverride(raw, loc); parseOK {
-				e.Source = "override"
-				e.Reason = "override"
-				e.SessionsUntil = sessionsUntil(cal, now.In(loc), e.Date)
-				earnings[sym] = e
-				info.Source = "override"
-				info.Status = rpc.EarningsStatusDate
-				info.Reason = "override"
-				info.Date = e.Date.Format("2006-01-02")
-				info.TimeOfDay = e.TimeOfDay
+			override, hasOverride = parseEarningsOverride(raw, loc)
+		}
+		view, observed := earningsResolutionView{}, false
+		if s.earnings != nil {
+			view, observed = s.earnings.resolution(sym)
+		}
+		if observed {
+			info.Status = view.Status
+			info.Reason = view.Reason
+			info.Providers = view.Providers
+		}
+
+		if terminal, found := s.earningsTerminal.terminalEarningsFor(n, now); found {
+			terminalInfo := terminal.Info
+			info.Terminal = &terminalInfo
+			switch {
+			case terminal.Status != rpc.EarningsStatusTerminalNonReporting:
+				info.Status = terminal.Status
+				info.Reason = terminal.Reason
+			case hasOverride || (observed && (view.Status == rpc.EarningsStatusDate || view.Status == rpc.EarningsStatusConflictingSources)):
+				info.Status = rpc.EarningsStatusConflictingSources
+				info.Reason = earningsTerminalReasonSourceConflict
+			default:
+				info.Source = "verified_terminal"
+				info.Status = rpc.EarningsStatusTerminalNonReporting
+				info.Reason = terminal.Reason
+				earnings[sym] = risk.EarningsInput{
+					TerminalNonReporting: true,
+					Source:               "verified_terminal",
+					Reason:               terminal.Reason,
+				}
 				infos = append(infos, info)
 				continue
 			}
+			earnings[sym] = risk.EarningsInput{Source: "verified_terminal", Reason: info.Reason}
+			toFetch = append(toFetch, sym)
+			infos = append(infos, info)
+			continue
 		}
-		if s.earnings != nil {
-			view, observed := s.earnings.resolution(sym)
-			if observed {
-				info.Status = view.Status
-				info.Reason = view.Reason
-				info.Providers = view.Providers
-				if view.Status == rpc.EarningsStatusDate {
-					entry := view.Entry
-					if d, err := time.ParseInLocation("2006-01-02", entry.Date, loc); err == nil {
-						e := risk.EarningsInput{Known: true, Date: d, TimeOfDay: entry.TimeOfDay,
-							Estimated: entry.Estimated, Stale: view.Stale, Source: "fetched", Reason: view.Reason}
-						e.SessionsUntil = sessionsUntil(cal, now.In(loc), d)
-						earnings[sym] = e
-						info.Source = "fetched"
-						info.Date = entry.Date
-						info.TimeOfDay = entry.TimeOfDay
-						info.Estimated = entry.Estimated
-						info.ObservedAt = entry.ObservedAt
-						info.Stale = view.Stale
-					}
-				} else {
-					earnings[sym] = risk.EarningsInput{Known: false, Source: "fetched", Reason: nonEmptyString(view.Reason, view.Status)}
+
+		if hasOverride {
+			override.Source = "override"
+			override.Reason = "override"
+			override.SessionsUntil = sessionsUntil(cal, now.In(loc), override.Date)
+			earnings[sym] = override
+			info.Source = "override"
+			info.Status = rpc.EarningsStatusDate
+			info.Reason = "override"
+			info.Date = override.Date.Format("2006-01-02")
+			info.TimeOfDay = override.TimeOfDay
+			infos = append(infos, info)
+			continue
+		}
+
+		if observed {
+			if view.Status == rpc.EarningsStatusDate {
+				entry := view.Entry
+				if d, err := time.ParseInLocation("2006-01-02", entry.Date, loc); err == nil {
+					e := risk.EarningsInput{Known: true, Date: d, TimeOfDay: entry.TimeOfDay,
+						Estimated: entry.Estimated, Stale: view.Stale, Source: "fetched", Reason: view.Reason}
+					e.SessionsUntil = sessionsUntil(cal, now.In(loc), d)
+					earnings[sym] = e
+					info.Source = "fetched"
+					info.Date = entry.Date
+					info.TimeOfDay = entry.TimeOfDay
+					info.Estimated = entry.Estimated
+					info.ObservedAt = entry.ObservedAt
+					info.Stale = view.Stale
 				}
+			} else {
+				earnings[sym] = risk.EarningsInput{Known: false, Source: "fetched", Reason: nonEmptyString(view.Reason, view.Status)}
 			}
 		}
 		if _, ok := earnings[sym]; !ok {
@@ -588,12 +1100,97 @@ func filterOffenders(list []risk.RuleOffender, sym string) []risk.RuleOffender {
 	return out
 }
 
+// ruleTransitionTerminalAuthority is the minimum exact-contract linkage a
+// rule transition needs to name the accepted terminal/non-reporting authority
+// it consumed. Human-facing issuer text and source-document references remain
+// on the live RulesResult; immutable transition evidence carries only typed
+// identities, revisions, timestamps, and fingerprints.
+type ruleTransitionTerminalAuthority struct {
+	ContractConID        int       `json:"contract_con_id"`
+	AuthorityRevision    int64     `json:"authority_revision"`
+	AuthorityFingerprint string    `json:"authority_fingerprint"`
+	AuthorityReviewedAt  time.Time `json:"authority_reviewed_at"`
+	VerifiedAt           time.Time `json:"verified_at"`
+	RevalidateAfter      time.Time `json:"revalidate_after"`
+	Classification       string    `json:"classification"`
+}
+
+func acceptedRuleTransitionTerminalAuthorities(res *rpc.RulesResult) []ruleTransitionTerminalAuthority {
+	// A non-nil empty slice deliberately serializes as [] on every transition:
+	// omission must not be mistaken for a writer-version or ingest failure.
+	out := make([]ruleTransitionTerminalAuthority, 0)
+	if res == nil || res.AsOf.IsZero() {
+		return out
+	}
+	byConID := make(map[int]ruleTransitionTerminalAuthority)
+	conflicted := make(map[int]bool)
+	for _, info := range res.Earnings {
+		terminal := info.Terminal
+		if info.Source != "verified_terminal" || info.Status != rpc.EarningsStatusTerminalNonReporting || terminal == nil {
+			continue
+		}
+		authority := ruleTransitionTerminalAuthority{
+			ContractConID:        terminal.ContractConID,
+			AuthorityRevision:    terminal.AuthorityRevision,
+			AuthorityFingerprint: terminal.AuthorityFingerprint,
+			AuthorityReviewedAt:  terminal.AuthorityReviewedAt.UTC(),
+			VerifiedAt:           terminal.VerifiedAt.UTC(),
+			RevalidateAfter:      terminal.RevalidateAfter.UTC(),
+			Classification:       terminal.Classification,
+		}
+		if authority.ContractConID <= 0 || authority.AuthorityRevision <= 0 ||
+			!validAlertRegistryFingerprint(authority.AuthorityFingerprint) ||
+			(authority.Classification != earningsTerminalClassEquityCancelled && authority.Classification != earningsTerminalClassIssuerDissolved) ||
+			authority.AuthorityReviewedAt.IsZero() || authority.VerifiedAt.IsZero() || authority.RevalidateAfter.IsZero() ||
+			authority.AuthorityReviewedAt.After(res.AsOf.UTC()) || authority.VerifiedAt.After(authority.AuthorityReviewedAt) ||
+			!authority.RevalidateAfter.After(res.AsOf.UTC()) {
+			continue
+		}
+		if conflicted[authority.ContractConID] {
+			continue
+		}
+		if previous, exists := byConID[authority.ContractConID]; exists && previous != authority {
+			delete(byConID, authority.ContractConID)
+			conflicted[authority.ContractConID] = true
+			continue
+		}
+		byConID[authority.ContractConID] = authority
+	}
+	for _, authority := range byConID {
+		out = append(out, authority)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ContractConID != out[j].ContractConID {
+			return out[i].ContractConID < out[j].ContractConID
+		}
+		return out[i].AuthorityFingerprint < out[j].AuthorityFingerprint
+	})
+	return out
+}
+
 // journalRuleTransitions appends status changes as typed SQLite events so
 // threshold calibration has a direct authoritative history. The JSONL branch
 // remains only for legacy unit/import oracles.
 func (s *Server) journalRuleTransitions(res *rpc.RulesResult) {
+	s.journalRuleTransitionsBound(res, rulebookCacheBinding{}, false)
+}
+
+func (s *Server) journalRuleTransitionsForBinding(res *rpc.RulesResult, binding rulebookCacheBinding) {
+	s.journalRuleTransitionsBound(res, binding, true)
+}
+
+func (s *Server) journalRuleTransitionsBound(res *rpc.RulesResult, binding rulebookCacheBinding, enforceBinding bool) {
 	s.rulesMu.Lock()
 	prev := s.lastRules
+	if enforceBinding {
+		cachedBinding := rulebookCacheBinding{
+			scope: s.lastRulesScope, connector: s.lastRulesConnector, connectorEpoch: s.lastRulesConnectorEpoch,
+			broker: s.lastRulesBroker, brokerCaptured: s.lastRulesBrokerCaptured,
+		}
+		if !sameRulebookBinding(binding, cachedBinding) {
+			prev = nil
+		}
+	}
 	s.rulesMu.Unlock()
 	if res == nil || len(res.Rules) == 0 {
 		return
@@ -602,6 +1199,7 @@ func (s *Server) journalRuleTransitions(res *rpc.RulesResult) {
 	if res.PolicyFingerprint != nil {
 		policyFingerprint = res.PolicyFingerprint.Key
 	}
+	terminalAuthorities := acceptedRuleTransitionTerminalAuthorities(res)
 	prevStatus := map[string]string{}
 	if prev != nil {
 		for _, r := range prev.Rules {
@@ -632,7 +1230,13 @@ func (s *Server) journalRuleTransitions(res *rpc.RulesResult) {
 			"version": 1, "at": res.AsOf, "rule": r.ID, "status": r.Status,
 			"was": prevStatus[r.ID], "evidence": r.Evidence,
 			"policy_id": res.PolicyID, "policy_version": res.PolicyVersion,
-			"policy_fingerprint": policyFingerprint,
+			"policy_fingerprint":   policyFingerprint,
+			"terminal_authorities": terminalAuthorities,
+		}
+		if enforceBinding {
+			entry["account"] = binding.scope.Account
+			entry["mode"] = binding.scope.Mode
+			entry["connector_epoch"] = binding.connectorEpoch
 		}
 		_ = enc.Encode(entry)
 		if s.coreStore != nil {
@@ -702,12 +1306,26 @@ func errText(err error) string {
 // breached metric. Reduce/close intents never warn; submit eligibility is
 // never touched (advisory-only, docs/design/trading-rulebook.md).
 func rulebookPreviewWarnings(res *rpc.RulesResult, draft rpc.OrderDraft, position rpc.OrderPositionImpact) []rpc.DataWarning {
-	if res == nil || !res.Enabled || len(res.Rules) == 0 {
+	if res == nil || !res.Enabled {
 		return nil
+	}
+	var out []rpc.DataWarning
+	if res.Status != "ok" {
+		out = append(out, rpc.DataWarning{
+			Code:     "rulebook_unavailable",
+			Scope:    "rulebook",
+			Severity: "warning",
+			Message:  "The canonical Rulebook evaluation is unavailable or incomplete for this broker scope.",
+			Impact:   "Rulebook causes may be missing from this advisory preview; submit eligibility is unaffected.",
+			Action:   "Resolve the reported account, portfolio, earnings, regime, or tape input gap and preview again.",
+		})
+	}
+	if len(res.Rules) == 0 {
+		return out
 	}
 	switch position.Effect {
 	case "close", "reduce":
-		return nil
+		return out
 	}
 	sym := strings.ToUpper(draft.Contract.Symbol)
 	isBuy := strings.EqualFold(draft.Action, "BUY")
@@ -738,7 +1356,6 @@ func rulebookPreviewWarnings(res *rpc.RulesResult, draft rpc.OrderDraft, positio
 			Action:   "Run `ibkr rules` for the full checklist.",
 		}
 	}
-	var out []rpc.DataWarning
 	if r, ok := breached(risk.RuleSingleNameExposure); ok && offends(r) {
 		out = append(out, warn(r, fmt.Sprintf("%s already breaches the per-name exposure cap; this order increases it.", sym)))
 	}

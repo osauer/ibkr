@@ -40,22 +40,56 @@ const (
 // socket write. Once the call reaches an active Connection, the default build
 // returns [ErrTradingDisabled] before validation or transmission.
 func (c *Connector) ExerciseOptions(ctx context.Context, req OptionExerciseRequest) error {
+	if ctx == nil {
+		return definitelyUnsent(fmt.Errorf("exerciseOptions context is nil"))
+	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return definitelyUnsent(err)
 	}
-	if !c.isConnected() {
-		return fmt.Errorf("not connected to IBKR")
+	if !tradingEnabled {
+		return definitelyUnsent(ErrTradingDisabled)
 	}
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-	if conn == nil {
-		return fmt.Errorf("no active connection")
+	binding, ok := c.CaptureSession()
+	if !ok {
+		return definitelyUnsent(fmt.Errorf("not connected to IBKR"))
 	}
+	return c.ExerciseOptionsForSession(ctx, binding, req)
+}
+
+// ExerciseOptionsForSession sends an option exercise or lapse instruction
+// only on the exact Connector socket generation named by binding. A reconnect
+// or disconnect before request-ID reservation or frame transmission is refused.
+func (c *Connector) ExerciseOptionsForSession(ctx context.Context, binding ConnectorSessionBinding, req OptionExerciseRequest) error {
+	return c.ExerciseOptionsForSessionGuarded(ctx, binding, req, nil)
+}
+
+// ExerciseOptionsForSessionGuarded carries a final authority guard through
+// pacing to the exact exercise/lapse socket write.
+func (c *Connector) ExerciseOptionsForSessionGuarded(ctx context.Context, binding ConnectorSessionBinding, req OptionExerciseRequest, guard func() error) error {
+	if ctx == nil {
+		return definitelyUnsent(fmt.Errorf("exerciseOptions context is nil"))
+	}
+	if err := ctx.Err(); err != nil {
+		return definitelyUnsent(err)
+	}
+	if !tradingEnabled {
+		return definitelyUnsent(ErrTradingDisabled)
+	}
+	if !c.SessionCurrent(binding) {
+		return definitelyUnsent(fmt.Errorf("broker session binding is not current for this Connector"))
+	}
+	conn := binding.connection
 	if req.TickerID == 0 {
-		req.TickerID = conn.GetNextRequestID()
+		var err error
+		var epoch uint64
+		req.TickerID, epoch, err = conn.reserveNextRequestIDForEpoch(binding.epoch)
+		if err != nil {
+			return definitelyUnsent(err)
+		}
+		defer conn.discardRequestIDReservation(req.TickerID)
+		return conn.exerciseOptionsForEpochGuarded(ctx, req, &epoch, guard)
 	}
-	return conn.ExerciseOptions(req)
+	return conn.exerciseOptionsForEpochGuarded(ctx, req, &binding.epoch, guard)
 }
 
 // ExerciseOptions validates and sends an IBKR option exercise or lapse
@@ -66,19 +100,56 @@ func (c *Connector) ExerciseOptions(ctx context.Context, req OptionExerciseReque
 // tag enables this low-level wire method but does not grant submit authority.
 func (c *Connection) ExerciseOptions(req OptionExerciseRequest) error {
 	if !tradingEnabled {
-		return ErrTradingDisabled
+		return definitelyUnsent(ErrTradingDisabled)
+	}
+	return c.exerciseOptionsForEpochGuarded(context.Background(), req, nil, nil)
+}
+
+func (c *Connection) exerciseOptionsForEpoch(req OptionExerciseRequest, expectedEpoch *uint64) error {
+	return c.exerciseOptionsForEpochGuarded(context.Background(), req, expectedEpoch, nil)
+}
+
+func (c *Connection) exerciseOptionsForEpochGuarded(ctx context.Context, req OptionExerciseRequest, expectedEpoch *uint64, guard func() error) error {
+	if ctx == nil {
+		return definitelyUnsent(fmt.Errorf("exerciseOptions context is nil"))
+	}
+	if err := ctx.Err(); err != nil {
+		return definitelyUnsent(err)
 	}
 	if err := validateOptionExerciseRequest(req); err != nil {
-		return err
+		return definitelyUnsent(err)
+	}
+	if c == nil {
+		return definitelyUnsent(fmt.Errorf("no active connection"))
 	}
 	if !c.IsConnected() {
-		return fmt.Errorf("not connected to IBKR")
+		return definitelyUnsent(fmt.Errorf("not connected to IBKR"))
 	}
+	var (
+		epoch uint64
+		err   error
+	)
+	if expectedEpoch != nil {
+		epoch, err = c.claimRequestIDForEpoch(req.TickerID, *expectedEpoch)
+	} else {
+		epoch, err = c.claimRequestIDCurrentEpoch(req.TickerID)
+	}
+	if err != nil {
+		return definitelyUnsent(err)
+	}
+	return c.sendExerciseOptionsFrameGuarded(ctx, req, epoch, guard)
+}
+
+func (c *Connection) sendExerciseOptionsFrame(req OptionExerciseRequest, epoch uint64) error {
+	return c.sendExerciseOptionsFrameGuarded(context.Background(), req, epoch, nil)
+}
+
+func (c *Connection) sendExerciseOptionsFrameGuarded(ctx context.Context, req OptionExerciseRequest, epoch uint64, guard func() error) error {
 	msg, err := c.encodeExerciseOptionsMessage(req)
 	if err != nil {
-		return err
+		return definitelyUnsent(err)
 	}
-	return c.sendMessageWithType(msg, RequestTypeOrder)
+	return c.sendMessageWithTypeContextForEpochGuarded(ctx, msg, RequestTypeOrder, epoch, true, guard)
 }
 
 func validateOptionExerciseRequest(req OptionExerciseRequest) error {

@@ -53,15 +53,73 @@ func BuildMarketEventsFingerprint(r *MarketEventsResult) Fingerprint {
 		return cmp.Compare(a.Status, b.Status)
 	})
 	projection := struct {
-		Symbols []string                     `json:"symbols,omitempty"`
-		Flags   []marketEventFlagFingerprint `json:"flags,omitempty"`
-		Sources []sourceHealthFingerprint    `json:"sources,omitempty"`
+		Symbols           []string                                  `json:"symbols,omitempty"`
+		Flags             []marketEventFlagFingerprint              `json:"flags,omitempty"`
+		Sources           []sourceHealthFingerprint                 `json:"sources,omitempty"`
+		BorrowFeeCoverage []marketEventBorrowFeeCoverageFingerprint `json:"borrow_fee_coverage,omitempty"`
 	}{
-		Symbols: cleanSorted(r.Symbols),
-		Flags:   flags,
-		Sources: sourceHealthFingerprints(r.SourceHealth),
+		Symbols:           cleanSorted(r.Symbols),
+		Flags:             flags,
+		Sources:           sourceHealthFingerprints(r.SourceHealth),
+		BorrowFeeCoverage: marketEventBorrowFeeCoverageFingerprints(r.BorrowFeeCoverage),
 	}
 	return semanticFingerprint(MarketEventsFingerprintVersion, projection)
+}
+
+type marketEventBorrowFeeCoverageFingerprint struct {
+	Symbol              string `json:"symbol,omitempty"`
+	ContractConID       int    `json:"contract_con_id,omitempty"`
+	ContractFingerprint string `json:"contract_fingerprint,omitempty"`
+	CoverageScope       string `json:"coverage_scope,omitempty"`
+	Status              string `json:"status,omitempty"`
+	Reason              string `json:"reason,omitempty"`
+	Source              string `json:"source,omitempty"`
+	DataType            string `json:"data_type,omitempty"`
+	Entitlement         string `json:"entitlement,omitempty"`
+	ScaleStatus         string `json:"scale_status,omitempty"`
+	PolicyEligible      bool   `json:"policy_eligible"`
+	FailureCode         string `json:"failure_code,omitempty"`
+	FailureStage        string `json:"failure_stage,omitempty"`
+}
+
+func marketEventBorrowFeeCoverageFingerprints(rows []MarketEventBorrowFeeCoverage) []marketEventBorrowFeeCoverageFingerprint {
+	out := make([]marketEventBorrowFeeCoverageFingerprint, 0, len(rows))
+	for _, row := range rows {
+		fingerprint := marketEventBorrowFeeCoverageFingerprint{
+			Symbol:              cleanString(row.Symbol),
+			ContractConID:       row.ContractConID,
+			ContractFingerprint: cleanString(row.ContractFingerprint),
+			CoverageScope:       cleanString(row.CoverageScope),
+			Status:              cleanString(row.Status),
+			Reason:              cleanString(row.Reason),
+			Source:              cleanString(row.Source),
+			DataType:            cleanString(row.DataType),
+			Entitlement:         cleanString(row.Entitlement),
+			ScaleStatus:         cleanString(row.ScaleStatus),
+			PolicyEligible:      row.PolicyEligible,
+		}
+		if row.LastFailure != nil {
+			fingerprint.FailureCode = cleanString(row.LastFailure.Code)
+			fingerprint.FailureStage = cleanString(row.LastFailure.Stage)
+		}
+		out = append(out, fingerprint)
+	}
+	slices.SortFunc(out, func(a, b marketEventBorrowFeeCoverageFingerprint) int {
+		if c := cmp.Compare(a.Symbol, b.Symbol); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.ContractConID, b.ContractConID); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.ContractFingerprint, b.ContractFingerprint); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Source, b.Source); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Status, b.Status)
+	})
+	return out
 }
 
 // BuildRegimeFingerprint returns the semantic identity of a regime snapshot.

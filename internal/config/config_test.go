@@ -105,6 +105,9 @@ allow_stock_short = true
 allow_option_sell_to_open = true
 paper_smoke_max_age = "24h"
 
+[rulebook]
+terminal_evidence_file = "/tmp/earnings-terminal-evidence.json"
+
 [opportunities]
 enabled = false
 policy_file = "/tmp/opportunity-policy.toml"
@@ -168,6 +171,9 @@ timeout    = "30s"
 	}
 	if res.Trading.PaperSmokeMaxAgeDuration() != 24*time.Hour {
 		t.Errorf("Trading.PaperSmokeMaxAge = %v, want 24h", res.Trading.PaperSmokeMaxAgeDuration())
+	}
+	if res.Rulebook.TerminalEvidenceFile != "/tmp/earnings-terminal-evidence.json" {
+		t.Errorf("Rulebook.TerminalEvidenceFile = %q", res.Rulebook.TerminalEvidenceFile)
 	}
 	if res.Opportunities.EnabledResolved() {
 		t.Error("Opportunities.Enabled should parse false")

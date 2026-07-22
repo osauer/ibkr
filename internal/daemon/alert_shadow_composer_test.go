@@ -164,6 +164,80 @@ func TestAlertShadowComposerRulebookCurrentNegativeAndDegradedHold(t *testing.T)
 	}
 }
 
+func TestAlertShadowRulebookRequiresCanonicalUniverseAndReasons(t *testing.T) {
+	base := time.Date(2026, 7, 21, 11, 0, 0, 0, time.UTC)
+	assertUncovered := func(t *testing.T, result rpc.RulesResult) {
+		t.Helper()
+		batch := alertShadowMapRulebook(alertShadowTestBrokerScope(t), result, base.Add(time.Second))
+		if batch.Covered || batch.Status == alertShadowStatusCurrent {
+			t.Fatalf("noncanonical Rulebook evidence was trusted: %+v", batch)
+		}
+	}
+
+	t.Run("missing rule", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		result.Rules = result.Rules[:len(result.Rules)-1]
+		assertUncovered(t, result)
+	})
+	t.Run("wrong rule number", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		result.Rules[0].Number++
+		assertUncovered(t, result)
+	})
+	t.Run("extra rule", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		result.Rules = append(result.Rules, risk.RuleRow{ID: "future_rule", Number: 15, Status: risk.RuleStatusPass})
+		assertUncovered(t, result)
+	})
+	t.Run("missing health source", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		result.InputHealth = result.InputHealth[:len(result.InputHealth)-1]
+		assertUncovered(t, result)
+	})
+	t.Run("extra health source", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		result.InputHealth = append(result.InputHealth, rpc.SourceHealth{Source: "future_source", Status: rpc.SourceStatusOK, AsOf: base})
+		assertUncovered(t, result)
+	})
+	t.Run("unknown row", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		result.Rules[0].Status = risk.RuleStatusUnknown
+		assertUncovered(t, result)
+	})
+	t.Run("unapproved not evaluated reason", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		result.Rules[0].Status = risk.RuleStatusNotEvaluated
+		result.Rules[0].Reason = "future_reason"
+		assertUncovered(t, result)
+	})
+
+	for _, tc := range []struct {
+		id     string
+		reason string
+	}{
+		{risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting},
+		{risk.RuleOverwriteEarnings, risk.EarningsReasonTerminalNonReporting},
+		{risk.RuleEarningsSizeFreeze, risk.EarningsReasonTerminalNonReporting},
+		{risk.RuleRedOnGreen, risk.RuleReasonOffSession},
+		{risk.RuleWinnerTrim, risk.RuleReasonOffSession},
+		{risk.RuleHedgeIntegrity, risk.RuleReasonNoLongBook},
+	} {
+		t.Run("approved "+tc.id, func(t *testing.T) {
+			result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+			for i := range result.Rules {
+				if result.Rules[i].ID == tc.id {
+					result.Rules[i].Status = risk.RuleStatusNotEvaluated
+					result.Rules[i].Reason = tc.reason
+				}
+			}
+			batch := alertShadowMapRulebook(alertShadowTestBrokerScope(t), result, base.Add(time.Second))
+			if !batch.Covered || batch.Status != alertShadowStatusCurrent {
+				t.Fatalf("approved not-evaluated reason was not trusted: %+v", batch)
+			}
+		})
+	}
+}
+
 func TestAlertShadowComposerOrderIntegrityRequiresConfirmationAndCurrentNegative(t *testing.T) {
 	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
 	defer store.Close()
@@ -357,6 +431,7 @@ func TestAlertShadowComposerProtectionAlertsOnlyOnReconciliationFacts(t *testing
 	composer.now = func() time.Time { return now }
 
 	unprotected := alertShadowProtectionInput{AsOf: base, EvidenceAsOf: base, Status: orderIntegrityHealthCurrent, Scope: scope,
+		OrderSnapshotAsOf: base, OrderSnapshotComplete: true, OrderUniverse: protectionOrderUniverseJournaledAPI,
 		Summary: rpc.ProtectionCoverageSummary{AsOf: base, Status: "review", Counts: rpc.ProtectionCoverageCounts{Unprotected: 1},
 			ByUnderlying: []rpc.ProtectionCoverageRow{{Underlying: "AAA", State: rpc.ProtectionCoverageStateUnprotected}}}}
 	clear, err := composer.ObserveProtection(t.Context(), unprotected)
@@ -369,8 +444,8 @@ func TestAlertShadowComposerProtectionAlertsOnlyOnReconciliationFacts(t *testing
 	if _, err := composer.ObserveProtection(t.Context(), unprotected); err != nil {
 		t.Fatal(err)
 	}
-	if got := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceProtection).Measurements.Evaluations; got != evaluations {
-		t.Fatalf("portfolio receipt churn bypassed Protection throttle: evaluations=%d want %d", got, evaluations)
+	if got := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceProtection).Measurements.Evaluations; got != evaluations+1 {
+		t.Fatalf("changed Protection receipt time was throttled: evaluations=%d want %d", got, evaluations+1)
 	}
 
 	now = base.Add(time.Minute + time.Second)
@@ -378,6 +453,7 @@ func TestAlertShadowComposerProtectionAlertsOnlyOnReconciliationFacts(t *testing
 	issueOrder := rpc.ProtectionCoverageOrder{OrderRef: "opaque-order", Symbol: "AAA", Action: "SELL", OrderType: "STP", Remaining: 10,
 		ReconciliationState: "position_mismatch", UpdatedAt: issueAt}
 	issue := alertShadowProtectionInput{AsOf: issueAt, EvidenceAsOf: issueAt, Status: orderIntegrityHealthCurrent, Scope: scope,
+		OrderSnapshotAsOf: issueAt, OrderSnapshotComplete: true, OrderUniverse: protectionOrderUniverseJournaledAPI,
 		Summary: rpc.ProtectionCoverageSummary{AsOf: issueAt, Status: rpc.ProtectionCoverageStateReconcileRequired,
 			Counts: rpc.ProtectionCoverageCounts{ReconcileRequired: 1}, ReconcileRequiredOrders: []rpc.ProtectionCoverageOrder{issueOrder},
 			ByUnderlying: []rpc.ProtectionCoverageRow{{Underlying: "AAA", State: rpc.ProtectionCoverageStateReconcileRequired, Orders: []rpc.ProtectionCoverageOrder{issueOrder}}}}}
@@ -387,9 +463,24 @@ func TestAlertShadowComposerProtectionAlertsOnlyOnReconciliationFacts(t *testing
 		t.Fatalf("protection issue=%+v err=%v", opened, err)
 	}
 
+	now = base.Add(75 * time.Second)
+	missingReceiptAt := base.Add(75 * time.Second)
+	missingReceipt := alertShadowProtectionInput{
+		AsOf: missingReceiptAt, EvidenceAsOf: missingReceiptAt, Status: orderIntegrityHealthCurrent, Scope: scope,
+		Summary: rpc.ProtectionCoverageSummary{AsOf: missingReceiptAt, Status: "ok"},
+	}
+	heldMissing, err := composer.ObserveProtection(t.Context(), missingReceipt)
+	if err != nil || len(heldMissing.Candidates) != 1 || heldMissing.Candidates[0].State != rpc.AlertEpisodeOpen {
+		t.Fatalf("missing API-order receipt recovered Protection issue: %+v err=%v", heldMissing, err)
+	}
+	if status := alertShadowTestSourceStatus(t, composer.Status(scope), rpc.AlertSourceProtection); status.Covered || status.Status != alertShadowStatusUnavailable {
+		t.Fatalf("missing API-order receipt was treated as covered: %+v", status)
+	}
+
 	now = base.Add(90*time.Second + time.Second)
 	malformedAt := base.Add(90 * time.Second)
 	malformed := alertShadowProtectionInput{AsOf: malformedAt, EvidenceAsOf: malformedAt, Status: orderIntegrityHealthCurrent, Scope: scope,
+		OrderSnapshotAsOf: malformedAt, OrderSnapshotComplete: true, OrderUniverse: protectionOrderUniverseJournaledAPI,
 		Summary: rpc.ProtectionCoverageSummary{AsOf: malformedAt, Status: "ok", ReconcileRequiredOrders: []rpc.ProtectionCoverageOrder{issueOrder}}}
 	heldMalformed, err := composer.ObserveProtection(t.Context(), malformed)
 	if err != nil || len(heldMalformed.Candidates) != 1 || heldMalformed.Candidates[0].EvidenceHealth == rpc.AlertEvidenceCurrent {
@@ -410,6 +501,7 @@ func TestAlertShadowComposerProtectionAlertsOnlyOnReconciliationFacts(t *testing
 	now = base.Add(3*time.Minute + time.Second)
 	clearAt := base.Add(3 * time.Minute)
 	current := alertShadowProtectionInput{AsOf: clearAt, EvidenceAsOf: clearAt, Status: orderIntegrityHealthCurrent, Scope: scope,
+		OrderSnapshotAsOf: clearAt, OrderSnapshotComplete: true, OrderUniverse: protectionOrderUniverseJournaledAPI,
 		Summary: rpc.ProtectionCoverageSummary{AsOf: clearAt, Status: "ok", Counts: rpc.ProtectionCoverageCounts{Covered: 1},
 			ByUnderlying: []rpc.ProtectionCoverageRow{{Underlying: "AAA", State: rpc.ProtectionCoverageStateCovered}}}}
 	recovered, err := composer.ObserveProtection(t.Context(), current)
@@ -796,6 +888,139 @@ func TestAlertShadowComposerNudgeV3InactiveReminderSourcesRemainCovered(t *testi
 	}
 }
 
+func TestAlertShadowNudgePositiveDependenciesAreCandidateSpecific(t *testing.T) {
+	base := time.Date(2026, 7, 21, 10, 45, 0, 0, time.UTC)
+	ok := func() rpc.NudgeInputHealth { return rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusOK, AsOf: base} }
+	stale := func() rpc.NudgeInputHealth {
+		return rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusStale, Reason: rpc.NudgeHealthReasonEvidenceStale, AsOf: base}
+	}
+	unavailable := func() rpc.NudgeInputHealth {
+		return rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusUnavailable, Reason: rpc.NudgeHealthReasonSourceUnavailable, AsOf: base}
+	}
+	tests := []struct {
+		name string
+		kind string
+		edit func(*rpc.NudgeSourceHealth, *rpc.NudgeInputHealth)
+		want rpc.AlertEvidenceHealth
+	}{
+		{"policy drift ignores capital", rpc.NudgeKindPolicyDrift, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Capital = stale() }, rpc.AlertEvidenceCurrent},
+		{"policy drift requires pins", rpc.NudgeKindPolicyDrift, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Pins = stale() }, rpc.AlertEvidenceStale},
+		{"drawdown ignores pins", rpc.NudgeKindDrawdownLatched, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Pins = stale() }, rpc.AlertEvidenceCurrent},
+		{"drawdown requires capital", rpc.NudgeKindDrawdownLatched, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Capital = stale() }, rpc.AlertEvidenceStale},
+		{"shadow requires store", rpc.NudgeKindShadowWouldBlock, func(_ *rpc.NudgeSourceHealth, store *rpc.NudgeInputHealth) { *store = unavailable() }, rpc.AlertEvidenceUnavailable},
+		{"reconcile exception ignores capital", rpc.NudgeKindReconcileException, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Capital = stale() }, rpc.AlertEvidenceCurrent},
+		{"reconcile exception requires report", rpc.NudgeKindReconcileException, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Reconciliation = unavailable() }, rpc.AlertEvidenceUnavailable},
+		{"reconcile due ignores report", rpc.NudgeKindReconcileDue, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Reconciliation = unavailable() }, rpc.AlertEvidenceCurrent},
+		{"reconcile due requires cadence", rpc.NudgeKindReconcileDue, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Cadence = stale() }, rpc.AlertEvidenceStale},
+		{"confirmed flow ignores cadence", rpc.NudgeKindConfirmedFlow, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Cadence = stale() }, rpc.AlertEvidenceCurrent},
+		{"confirmed flow requires report", rpc.NudgeKindConfirmedFlow, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Reconciliation = unavailable() }, rpc.AlertEvidenceUnavailable},
+		{"monthly ignores capital", rpc.NudgeKindMonthlyPulse, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Capital = stale() }, rpc.AlertEvidenceCurrent},
+		{"monthly requires report", rpc.NudgeKindMonthlyPulse, func(h *rpc.NudgeSourceHealth, _ *rpc.NudgeInputHealth) { h.Reconciliation = unavailable() }, rpc.AlertEvidenceUnavailable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			health := rpc.NudgeSourceHealth{Policy: ok(), Reconciliation: ok(), Capital: ok(), Pins: ok(), Cadence: ok(), ConfirmedFlow: ok()}
+			store := ok()
+			tc.edit(&health, &store)
+			_, got, _, _ := alertShadowNudgeCandidateHealth(tc.kind, base, health, store)
+			if got != tc.want {
+				t.Fatalf("evidence health=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAlertShadowNudgeStoreOutageKeepsIndependentPositiveCurrent(t *testing.T) {
+	base := time.Date(2026, 7, 21, 10, 50, 0, 0, time.UTC)
+	input := alertShadowTestNudges(alertShadowTestBrokerScope(t), base, alertShadowTestPolicyDrift(base.Add(-time.Minute)))
+	input.StoreHealth = rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusUnavailable, Reason: rpc.NudgeHealthReasonSourceUnavailable, AsOf: base}
+	batches, _, err := alertShadowMapNudges(input, base.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := batches[rpc.AlertSourceRiskPolicy]
+	if batch.Covered || len(batch.Observations) != 1 || batch.Observations[0].EvidenceHealth != rpc.AlertEvidenceCurrent {
+		t.Fatalf("store outage suppressed independent policy-drift positive: %+v", batch)
+	}
+}
+
+func TestAlertShadowCurrentNegativeRecoversAcrossPolicyChangeExceptProtection(t *testing.T) {
+	newComposer := func(t *testing.T, now *time.Time) (*alertShadowComposer, alertShadowBrokerScope) {
+		t.Helper()
+		store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+		t.Cleanup(func() { store.Close() })
+		registry, err := newAlertEpisodeRegistry(t.Context(), store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		composer := newAlertShadowComposer(registry)
+		composer.now = func() time.Time { return *now }
+		return composer, alertShadowTestBrokerScope(t)
+	}
+	assertRecovered := func(t *testing.T, snapshot rpc.AlertCandidateSnapshot) {
+		t.Helper()
+		if len(snapshot.Candidates) != 1 || snapshot.Candidates[0].State != rpc.AlertEpisodeRecovered {
+			t.Fatalf("cross-policy current negative did not recover: %+v", snapshot.Candidates)
+		}
+	}
+	base := time.Date(2026, 7, 21, 10, 55, 0, 0, time.UTC)
+	relevant := true
+
+	t.Run("Canary", func(t *testing.T) {
+		now := base.Add(time.Second)
+		composer, scope := newComposer(t, &now)
+		active := alertShadowTestCanary(base, risk.SeverityWatch, "monitor", &relevant, rpc.SourceStatusOK, "policy-a-active")
+		active.PolicyFingerprint.Key = alertShadowTestFingerprint("canary-policy-a")
+		if _, err := composer.ObserveCanary(t.Context(), scope, active); err != nil {
+			t.Fatal(err)
+		}
+		now = base.Add(time.Minute + time.Second)
+		clear := alertShadowTestCanary(base.Add(time.Minute), risk.SeverityObserve, "observe", &relevant, rpc.SourceStatusOK, "policy-b-clear")
+		clear.PolicyFingerprint.Key = alertShadowTestFingerprint("canary-policy-b")
+		snapshot, err := composer.ObserveCanary(t.Context(), scope, clear)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRecovered(t, snapshot)
+	})
+
+	t.Run("Rulebook", func(t *testing.T) {
+		now := base.Add(time.Second)
+		composer, scope := newComposer(t, &now)
+		active := alertShadowTestRulebook(base, risk.RuleStatusWatch)
+		active.PolicyFingerprint.Key = alertShadowTestFingerprint("rulebook-policy-a")
+		if _, err := composer.ObserveRulebook(t.Context(), scope, active); err != nil {
+			t.Fatal(err)
+		}
+		now = base.Add(time.Minute + time.Second)
+		clear := alertShadowTestRulebook(base.Add(time.Minute), risk.RuleStatusPass)
+		clear.PolicyFingerprint.Key = alertShadowTestFingerprint("rulebook-policy-b")
+		snapshot, err := composer.ObserveRulebook(t.Context(), scope, clear)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRecovered(t, snapshot)
+	})
+
+	t.Run("Nudge", func(t *testing.T) {
+		now := base.Add(time.Second)
+		composer, scope := newComposer(t, &now)
+		active := alertShadowTestNudges(scope, base, alertShadowTestPolicyDrift(base.Add(-time.Minute)))
+		active.PolicyFingerprint.Key = alertShadowTestFingerprint("nudge-policy-a")
+		if _, err := composer.ObserveNudges(t.Context(), active); err != nil {
+			t.Fatal(err)
+		}
+		now = base.Add(time.Minute + time.Second)
+		clear := alertShadowTestNudges(scope, base.Add(time.Minute))
+		clear.PolicyFingerprint.Key = alertShadowTestFingerprint("nudge-policy-b")
+		snapshot, err := composer.ObserveNudges(t.Context(), clear)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRecovered(t, snapshot)
+	})
+}
+
 func TestAlertShadowComposerNudgeOutageDuplicateAndEquivocation(t *testing.T) {
 	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
 	defer store.Close()
@@ -969,14 +1194,23 @@ func alertShadowTestNudges(scope alertShadowBrokerScope, at time.Time, candidate
 func alertShadowTestRulebook(at time.Time, status string) rpc.RulesResult {
 	policy := risk.DefaultRulebookPolicy()
 	fingerprint := rpc.Fingerprint{Version: rpc.RulebookPolicyFingerprintVersion, Key: policy.FingerprintKey()}
+	rules := make([]risk.RuleRow, 0, len(alertShadowCanonicalRulebookRows))
+	for _, canonical := range alertShadowCanonicalRulebookRows {
+		rules = append(rules, risk.RuleRow{
+			ID: canonical.ID, Number: canonical.Number, Title: canonical.ID,
+			Status: risk.RuleStatusPass, Evidence: "classified",
+		})
+	}
+	rules[0].Status = status
+	health := make([]rpc.SourceHealth, 0, len(alertShadowCanonicalRulebookHealth))
+	for _, source := range alertShadowCanonicalRulebookHealth {
+		health = append(health, rpc.SourceHealth{Source: source, Status: rpc.SourceStatusOK, AsOf: at})
+	}
 	return rpc.RulesResult{
 		AsOf: at, Enabled: true, Status: "ok", PolicyID: policy.ID, PolicyVersion: policy.Version,
 		PolicyFingerprint: &fingerprint,
-		Rules:             []risk.RuleRow{{ID: risk.RuleSingleNameExposure, Number: 1, Title: "Single-name exposure", Status: status, Evidence: "classified"}},
-		InputHealth: []rpc.SourceHealth{
-			{Source: "account", Status: rpc.SourceStatusOK, AsOf: at},
-			{Source: "positions", Status: rpc.SourceStatusOK, AsOf: at},
-		},
+		Rules:             rules,
+		InputHealth:       health,
 	}
 }
 

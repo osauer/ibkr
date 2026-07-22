@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/daemon/corestore"
+	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
 func newTestOrderJournalStore(t *testing.T, path string) *orderJournalStore {
@@ -641,9 +642,43 @@ func TestOrderFoldIsolatesCompleteBrokerRoute(t *testing.T) {
 	}
 	matched, ok := orderJournalViewForLifecycleEvent(orderJournalEvent{
 		ReservedOrderID: 77, Endpoint: "127.0.0.1:7497", ClientID: 44, Account: "DU123", Mode: "paper",
+		clientIDPresent: true,
 	}, views)
 	if !ok || matched.Symbol != "MSFT" {
 		t.Fatalf("route-aware lifecycle match = %+v ok=%v, want MSFT route", matched, ok)
+	}
+}
+
+func TestLifecycleMatchKnownPermIDOutranksCollidingOrderRef(t *testing.T) {
+	t.Parallel()
+	views := []rpc.OrderView{{
+		OrderRef: "reused-ref", ReservedOrderID: 77, PermID: 555,
+		Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU123", Mode: "paper",
+	}}
+	event := orderJournalEvent{
+		OrderRef: "reused-ref", ReservedOrderID: 77, PermID: 999,
+		Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU123", Mode: "paper",
+		clientIDPresent: true,
+	}
+	if matched, ok := orderJournalViewForLifecycleEvent(event, views); ok {
+		t.Fatalf("known conflicting PermID matched a reused order ref: %+v", matched)
+	}
+}
+
+func TestLifecycleMatchCanAttachFirstPermIDToExactLocalReference(t *testing.T) {
+	t.Parallel()
+	views := []rpc.OrderView{{
+		OrderRef: "new-ref", ReservedOrderID: 77,
+		Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU123", Mode: "paper",
+	}}
+	event := orderJournalEvent{
+		OrderRef: "new-ref", ReservedOrderID: 77, PermID: 999,
+		Endpoint: "127.0.0.1:4002", ClientID: 31, Account: "DU123", Mode: "paper",
+		clientIDPresent: true,
+	}
+	matched, ok := orderJournalViewForLifecycleEvent(event, views)
+	if !ok || matched.OrderRef != "new-ref" || matched.PermID != 0 {
+		t.Fatalf("first broker PermID did not attach to the exact pre-transmit row: %+v ok=%v", matched, ok)
 	}
 }
 

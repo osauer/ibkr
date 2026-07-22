@@ -112,7 +112,8 @@ func (s *Server) handleAlertShadowStatus(ctx context.Context, req *rpc.Request) 
 		m := source.Measurements
 		result.Sources = append(result.Sources, rpc.AlertShadowSourceStatus{
 			Source: source.Source, Status: source.Status, Reason: source.Reason,
-			InputAsOf: source.InputAsOf, ObservedAt: source.ObservedAt, Covered: source.Covered, Active: source.Active,
+			AuthorityUniverse: source.AuthorityUniverse,
+			InputAsOf:         source.InputAsOf, ObservedAt: source.ObservedAt, Covered: source.Covered, Active: source.Active,
 			Measurements: rpc.AlertShadowMeasurements{
 				Evaluations: m.Evaluations, CoveredEvaluations: m.CoveredEvaluations,
 				ActiveEvaluations: m.ActiveEvaluations, ActiveObservations: m.ActiveObservations,
@@ -174,25 +175,58 @@ func (s *Server) observeRegimeAlertShadow(ctx context.Context, result *rpc.Regim
 }
 
 func (s *Server) observeRulebookAlertShadow(ctx context.Context, result *rpc.RulesResult, brokerScope brokerStateScope) {
+	if err := s.commitRulebookAlertShadow(ctx, result, brokerScope); err != nil {
+		s.warnf("alert shadow: Rulebook observation failed: %v", err)
+	}
+}
+
+func (s *Server) commitRulebookAlertShadow(ctx context.Context, result *rpc.RulesResult, brokerScope brokerStateScope) error {
 	if s == nil || s.alertShadow == nil || result == nil {
-		return
+		return nil
 	}
 	scope, err := newAlertShadowBrokerScope(brokerScope)
 	if err != nil {
-		s.warnf("alert shadow: Rulebook observation skipped: %v", err)
-		return
+		return err
 	}
 	if _, err := s.alertShadow.ObserveRulebook(ctx, scope, *result); err != nil {
-		s.warnf("alert shadow: Rulebook observation failed: %v", err)
+		return err
 	}
+	return nil
 }
 
 func (s *Server) observeProtectionAlertShadow(ctx context.Context, input alertShadowProtectionInput) {
 	if s == nil || s.alertShadow == nil {
 		return
 	}
-	if _, err := s.alertShadow.ObserveProtection(ctx, input); err != nil {
+	if err := s.commitProtectionAlertShadow(ctx, input); err != nil {
 		s.warnf("alert shadow: Protection observation failed: %v", err)
+	}
+}
+
+func (s *Server) commitProtectionAlertShadow(ctx context.Context, input alertShadowProtectionInput) error {
+	if s == nil || s.alertShadow == nil {
+		return nil
+	}
+	_, err := s.alertShadow.ObserveProtection(ctx, input)
+	return err
+}
+
+func (s *Server) observeProtectionAlertShadowStable(ctx context.Context, binding daemonBrokerEvidenceBinding, input alertShadowProtectionInput) {
+	if s == nil || s.alertShadow == nil {
+		return
+	}
+	if s.protectionBeforeCommit != nil {
+		s.protectionBeforeCommit()
+	}
+	committed, err := s.withStableBrokerAndOrderEvidence(binding, input.orderJournal, input.orderAuthorityHeadSeq, func() error {
+		return s.commitProtectionAlertShadow(ctx, input)
+	})
+	if err != nil {
+		s.warnf("alert shadow: Protection observation failed: %v", err)
+		return
+	}
+	if !committed {
+		s.debugf("alert shadow: Protection broker, portfolio, or journal evidence changed before final commit")
 	}
 }
 
@@ -205,9 +239,39 @@ func (s *Server) observeOrderIntegrityAlertShadow(ctx context.Context, input ord
 		s.warnf("alert shadow: Order Integrity observation skipped: %v", err)
 		return
 	}
-	if _, err := s.alertShadow.ObserveOrderIntegrity(ctx, scope, input); err != nil {
-		s.warnf("alert shadow: Order Integrity observation failed: %v", err)
+	if input.connector == nil {
+		// Injected heartbeat seams use unbound evaluations to exercise mapper
+		// policy. Production load paths force unbound evidence unavailable, so
+		// this branch can update health but cannot authorize a recovery.
+		if err := s.commitOrderIntegrityAlertShadow(ctx, scope, input); err != nil {
+			s.warnf("alert shadow: Order Integrity observation failed: %v", err)
+		}
+		return
 	}
+	if s.orderIntegrityBeforeCommit != nil {
+		s.orderIntegrityBeforeCommit()
+	}
+	committed, err := s.withStableBrokerAndOrderEvidence(daemonBrokerEvidenceBinding{
+		scope: input.Scope, connector: input.connector, connectorEpoch: input.connectorEpoch,
+		broker: input.brokerEvidence,
+	}, input.orderJournal, input.orderAuthorityHeadSeq, func() error {
+		return s.commitOrderIntegrityAlertShadow(ctx, scope, input)
+	})
+	if err != nil {
+		s.warnf("alert shadow: Order Integrity observation failed: %v", err)
+		return
+	}
+	if !committed {
+		s.debugf("alert shadow: Order Integrity broker or journal evidence changed before final commit")
+	}
+}
+
+func (s *Server) commitOrderIntegrityAlertShadow(ctx context.Context, scope alertShadowBrokerScope, input orderIntegrityEvaluation) error {
+	if s == nil || s.alertShadow == nil {
+		return nil
+	}
+	_, err := s.alertShadow.ObserveOrderIntegrity(ctx, scope, input)
+	return err
 }
 
 func (s *Server) observeDataHealthAlertShadow(result *rpc.HealthResult, brokerScope brokerStateScope, gatewayPhase alertShadowGatewayPhase, observedAt time.Time) {

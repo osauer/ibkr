@@ -230,13 +230,18 @@ func TestDataHealthWorkerShutdownDoesNotRequeueFailedApply(t *testing.T) {
 
 func TestProtectionHeartbeatPreservesContractIdentityAndRejectsAmbiguousFallback(t *testing.T) {
 	asOf := time.Date(2026, 7, 21, 19, 0, 0, 0, time.UTC)
-	positions := protectionHeartbeatPositions([]*ibkrlib.RawPosition{{
+	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
+	positions, scoped := protectionHeartbeatPositions([]*ibkrlib.RawPosition{{
+		Account: "DU123",
 		Contract: ibkrlib.Contract{
 			ConID: 101, Symbol: "abc", SecType: "STK", Exchange: "SMART", Currency: "USD",
 			LocalSymbol: "ABC", TradingClass: "NMS",
 		},
 		Position: 10,
-	}}, asOf)
+	}}, scope, asOf)
+	if !scoped {
+		t.Fatal("current-account Protection projection was rejected")
+	}
 	if len(positions.Stocks) != 1 {
 		t.Fatalf("stock rows=%d want 1", len(positions.Stocks))
 	}
@@ -244,6 +249,11 @@ func TestProtectionHeartbeatPreservesContractIdentityAndRejectsAmbiguousFallback
 	if got.ConID != 101 || got.Symbol != "ABC" || got.Exchange != "SMART" || got.Currency != "USD" ||
 		got.LocalSymbol != "ABC" || got.TradingClass != "NMS" {
 		t.Fatalf("contract identity was dropped: %+v", got)
+	}
+	if foreign, ok := protectionHeartbeatPositions([]*ibkrlib.RawPosition{{
+		Account: "DU999", Contract: ibkrlib.Contract{ConID: 202, Symbol: "ABC", SecType: "STK"}, Position: 10,
+	}}, scope, asOf); ok || len(foreign.Stocks) != 0 {
+		t.Fatalf("foreign-account Protection projection = %+v scoped=%t, want fail-closed empty", foreign, ok)
 	}
 	protectiveOrder := func(conID int) rpc.OrderView {
 		return rpc.OrderView{Symbol: "ABC", SecType: "STK", ConID: conID, Open: true, OrderType: "STP", OpenClose: "C"}
@@ -341,6 +351,7 @@ func TestAlertShadowApprovedProducerIntegrationIsDurableAndRecordOnly(t *testing
 	server.observeRegimeAlertShadow(t.Context(), &regime, scope)
 	server.observeProtectionAlertShadow(t.Context(), alertShadowProtectionInput{
 		AsOf: base, EvidenceAsOf: base, Status: orderIntegrityHealthCurrent, Scope: shadowScope,
+		OrderSnapshotAsOf: base, OrderSnapshotComplete: true, OrderUniverse: protectionOrderUniverseJournaledAPI,
 		Summary: rpc.ProtectionCoverageSummary{AsOf: base, Status: "ok"},
 	})
 	server.observeDataHealthAlertShadow(&rpc.HealthResult{
@@ -360,6 +371,16 @@ func TestAlertShadowApprovedProducerIntegrationIsDurableAndRecordOnly(t *testing
 	if err != nil || status.DeliveryActive {
 		t.Fatalf("shadow delivery changed: %+v err=%v", status, err)
 	}
+	var protectionStatus *rpc.AlertShadowSourceStatus
+	for i := range status.Sources {
+		if status.Sources[i].Source == rpc.AlertSourceProtection {
+			protectionStatus = &status.Sources[i]
+			break
+		}
+	}
+	if protectionStatus == nil || protectionStatus.AuthorityUniverse != rpc.AlertAuthorityUniverseJournaledAPIOrders {
+		t.Fatalf("Protection source did not disclose its narrow authority universe: %+v", protectionStatus)
+	}
 
 	restarted := &Server{coreStore: store, cfg: server.cfg, now: func() time.Time { return base.Add(2 * time.Second) }}
 	if err := restarted.attachAlertShadowAuthority(t.Context()); err != nil {
@@ -376,6 +397,7 @@ func TestAlertShadowApprovedProducerIntegrationIsDurableAndRecordOnly(t *testing
 	restarted.observeRegimeAlertShadow(t.Context(), &regime, scope)
 	restarted.observeProtectionAlertShadow(t.Context(), alertShadowProtectionInput{
 		AsOf: base, EvidenceAsOf: base, Status: orderIntegrityHealthCurrent, Scope: shadowScope,
+		OrderSnapshotAsOf: base, OrderSnapshotComplete: true, OrderUniverse: protectionOrderUniverseJournaledAPI,
 		Summary: rpc.ProtectionCoverageSummary{AsOf: base, Status: "ok"},
 	})
 	restarted.observeDataHealthAlertShadow(&rpc.HealthResult{

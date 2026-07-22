@@ -170,13 +170,14 @@ func canaryEstablishedMarketEventsFingerprint(events rpc.MarketEventsResult) rpc
 	if !canaryHasMarketEventsInput(events) {
 		return rpc.Fingerprint{}
 	}
-	if events.Fingerprint.Key != "" && !canarySourceHealthHasTypedFailure(events.SourceHealth) {
+	if events.Fingerprint.Key != "" && len(events.BorrowFeeCoverage) == 0 && !canarySourceHealthHasTypedFailure(events.SourceHealth) {
 		fingerprint := events.Fingerprint
 		fingerprint.Version = canaryEstablishedMarketEventsFingerprintVersion
 		return fingerprint
 	}
 	filtered := events
 	filtered.Fingerprint = rpc.Fingerprint{}
+	filtered.BorrowFeeCoverage = nil
 	filtered.SourceHealth = slices.Clone(filtered.SourceHealth)
 	for i := range filtered.SourceHealth {
 		filtered.SourceHealth[i].LastFailure = nil
@@ -216,6 +217,7 @@ func canaryRelevantMarketEvents(pos rpc.PositionsResult, events rpc.MarketEvents
 		return events
 	}
 	filtered := events
+	filtered.BorrowFeeCoverage = nil
 	filtered.SourceHealth = slices.DeleteFunc(slices.Clone(events.SourceHealth), func(health rpc.SourceHealth) bool {
 		return canaryMarketEventBorrowSource(canaryMarketEventSourceName(health.Source))
 	})
@@ -2663,6 +2665,7 @@ func canaryHasMarketEventsInput(events rpc.MarketEventsResult) bool {
 		!events.AsOf.IsZero() ||
 		len(events.Symbols) > 0 ||
 		len(events.Flags) > 0 ||
+		len(events.BorrowFeeCoverage) > 0 ||
 		len(events.SourceHealth) > 0 ||
 		len(events.WarningDetails) > 0
 }

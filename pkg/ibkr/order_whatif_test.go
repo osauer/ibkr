@@ -19,7 +19,7 @@ func TestPreviewOrderWhatIfSendsBrokerWhatIfAndWaitsForOpenOrder(t *testing.T) {
 	defer conn.rateLimiter.Stop()
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder-1)
-	conn.nextOrderID = 77
+	conn.observeNextValidOrderID(77)
 
 	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
@@ -89,7 +89,7 @@ func TestPreviewOrderWhatIfModernServerSendsProtobufWhatIfAndWaitsForOpenOrder(t
 	defer conn.rateLimiter.Stop()
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
-	conn.nextOrderID = 77
+	conn.observeNextValidOrderID(77)
 
 	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
@@ -218,7 +218,7 @@ func TestConnectorPreviewOrderWhatIfBindsRawOrderAccountAndClientID(t *testing.T
 	defer conn.rateLimiter.Stop()
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
-	conn.nextOrderID = 88
+	conn.observeNextValidOrderID(88)
 
 	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
@@ -272,6 +272,33 @@ func TestConnectorPreviewOrderWhatIfBindsRawOrderAccountAndClientID(t *testing.T
 	}
 	if got.result.Status == "" {
 		t.Fatalf("PreviewOrderWhatIf returned empty status")
+	}
+}
+
+func TestConnectorPreviewOrderWhatIfClearsPreMarkOnValidationFailure(t *testing.T) {
+	conn := NewConnection(DefaultConfig())
+	defer conn.rateLimiter.Stop()
+	conn.status = StatusConnected
+	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
+	var out safeBuffer
+	conn.writer = bufio.NewWriter(&out)
+
+	c := NewConnector(&ConnectorConfig{})
+	c.conn = conn
+	c.running = true
+	c.ready = true
+	_, err := c.PreviewOrderWhatIf(context.Background(),
+		&Contract{SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		&RawOrder{Action: "BUY", TotalQty: 1, OrderType: "LMT", LmtPrice: 1, TIF: "DAY"},
+	)
+	if err == nil {
+		t.Fatal("invalid WhatIf unexpectedly succeeded")
+	}
+	if conn.IsWhatIfOrderID(1) {
+		t.Fatal("validation failure leaked Connector pre-marked WhatIf ID")
+	}
+	if out.Len() != 0 {
+		t.Fatalf("invalid WhatIf wrote %d bytes", out.Len())
 	}
 }
 
@@ -439,7 +466,7 @@ func TestPreviewOrderWhatIfRejectsBrokerError(t *testing.T) {
 	defer conn.rateLimiter.Stop()
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder-1)
-	conn.nextOrderID = 88
+	conn.observeNextValidOrderID(88)
 
 	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
@@ -485,7 +512,7 @@ func TestPreviewOrderWhatIfRejectsBrokerSystemNotice(t *testing.T) {
 	defer conn.rateLimiter.Stop()
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
-	conn.nextOrderID = 91
+	conn.observeNextValidOrderID(91)
 
 	var buf safeBuffer
 	conn.writer = bufio.NewWriter(&buf)
@@ -534,7 +561,7 @@ func TestEncodePlaceOrderProtoRejectsUnsupportedPopulatedOrderField(t *testing.T
 	defer conn.rateLimiter.Stop()
 	conn.status = StatusConnected
 	setServerVersionReady(conn, minServerVerProtoBufPlaceOrder)
-	conn.nextOrderID = 77
+	conn.observeNextValidOrderID(77)
 
 	order := &IBKROrder{
 		Symbol:    "MSFT",
@@ -549,7 +576,7 @@ func TestEncodePlaceOrderProtoRejectsUnsupportedPopulatedOrderField(t *testing.T
 		Account:   "DU123456",
 		OcaGroup:  "unsupported-oca",
 	}
-	if err := preparePlaceOrder(order, conn); err != nil {
+	if _, err := preparePlaceOrder(order, conn, nil); err != nil {
 		t.Fatalf("preparePlaceOrder err = %v", err)
 	}
 
@@ -659,4 +686,67 @@ func encodeSystemNotificationForTest(reqID, code int, message, advancedRejectJSO
 	msg = binary.BigEndian.AppendUint32(msg, uint32(msgSystemNotification))
 	msg = append(msg, body...)
 	return msg
+}
+
+func TestSessionBoundWhatIfRejectsRolloverBeforeBrokerIDClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		orderID int
+	}{
+		{name: "allocate"},
+		{name: "explicit_modify_id", orderID: 700},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, connector, oldSocket, newSocket, gate := newQueuedInstructionReconnectFixture(t)
+			binding, ok := connector.CaptureSession()
+			if !ok {
+				t.Fatal("capture session A")
+			}
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			connector.whatIfBeforeBrokerIDClaim = func() {
+				close(entered)
+				<-release
+			}
+			type outcome struct {
+				result OrderWhatIfResult
+				err    error
+			}
+			done := make(chan outcome, 1)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			go func() {
+				contract := &Contract{ConID: 1, Symbol: "TEST", SecType: "STK", Exchange: "SMART", Currency: "USD"}
+				order := &RawOrder{Action: "BUY", TotalQty: 1, OrderType: "LMT", LmtPrice: 1, TIF: "DAY", Account: gate.Account}
+				var result OrderWhatIfResult
+				var err error
+				if tc.orderID > 0 {
+					result, err = connector.PreviewOrderWhatIfWithOrderIDForSession(ctx, binding, contract, order, tc.orderID)
+				} else {
+					result, err = connector.PreviewOrderWhatIfForSession(ctx, binding, contract, order)
+				}
+				done <- outcome{result: result, err: err}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("WhatIf did not reach broker ID claim seam")
+			}
+			conn.resetOrderIDReadiness()
+			conn.writer = bufio.NewWriter(newSocket)
+			conn.observeNextValidOrderIDAtEpoch(500, conn.BrokerSessionEpoch())
+			close(release)
+			select {
+			case got := <-done:
+				if got.err == nil && got.result.Status != OrderWhatIfStatusUnavailable {
+					t.Fatalf("rolled WhatIf result=%+v err=%v, want refusal", got.result, got.err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("rolled WhatIf did not return")
+			}
+			if oldSocket.Len() != 0 || newSocket.Len() != 0 {
+				t.Fatalf("rolled WhatIf wrote bytes old=%d new=%d", oldSocket.Len(), newSocket.Len())
+			}
+		})
+	}
 }
