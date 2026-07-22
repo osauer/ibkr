@@ -224,11 +224,9 @@ func (s *Server) startCanaryEvaluationLoop(ctx context.Context) {
 	if s == nil || ctx == nil {
 		return
 	}
-	s.canaryEvaluationLoopWG.Add(1)
-	go func() {
-		defer s.canaryEvaluationLoopWG.Done()
+	s.canaryEvaluationLoopWG.Go(func() {
 		s.runCanaryEvaluationLoop(ctx)
-	}()
+	})
 }
 
 func (s *Server) runCanaryEvaluationLoop(ctx context.Context) {
@@ -245,6 +243,46 @@ func (s *Server) runCanaryEvaluationLoop(ctx context.Context) {
 }
 
 type canaryEvaluation func(context.Context) bool
+
+// canaryEvaluationSourceReader keeps the production tick on the same typed
+// daemon RPC builders used by request-driven Canary recomputation. Tests swap
+// this one narrow seam to exercise the real tick without a broker socket.
+type canaryEvaluationSourceReader interface {
+	ready() bool
+	account(context.Context) (*rpc.AccountResult, error)
+	positions(context.Context) (*rpc.PositionsResult, error)
+	regime(context.Context) (*rpc.RegimeSnapshotResult, error)
+	marketEvents(context.Context, []string) (*rpc.MarketEventsResult, error)
+	now() time.Time
+}
+
+type daemonCanaryEvaluationSourceReader struct {
+	server *Server
+}
+
+func (r daemonCanaryEvaluationSourceReader) ready() bool {
+	return r.server != nil && r.server.gatewayConnector() != nil
+}
+
+func (r daemonCanaryEvaluationSourceReader) account(ctx context.Context) (*rpc.AccountResult, error) {
+	return r.server.buildAccountSummary(ctx, false)
+}
+
+func (r daemonCanaryEvaluationSourceReader) positions(ctx context.Context) (*rpc.PositionsResult, error) {
+	return r.server.handlePositionsList(ctx, &rpc.Request{})
+}
+
+func (r daemonCanaryEvaluationSourceReader) regime(ctx context.Context) (*rpc.RegimeSnapshotResult, error) {
+	return r.server.briefRegimeSnapshotContext(ctx)
+}
+
+func (r daemonCanaryEvaluationSourceReader) marketEvents(ctx context.Context, symbols []string) (*rpc.MarketEventsResult, error) {
+	return r.server.handleMarketEventsSnapshot(ctx, &rpc.Request{Params: briefJSON(rpc.MarketEventsParams{Symbols: symbols})})
+}
+
+func (r daemonCanaryEvaluationSourceReader) now() time.Time {
+	return r.server.briefNow()
+}
 
 // runCanaryEvaluationLoopWith keeps the scheduler deterministic in tests. A
 // capacity-one wake channel coalesces repeated publications while an
@@ -283,20 +321,24 @@ func (s *Server) canaryEvaluationTick(ctx context.Context) bool {
 	if s == nil || ctx == nil || ctx.Err() != nil {
 		return false
 	}
-	if s.gatewayConnector() == nil {
+	var reader canaryEvaluationSourceReader = daemonCanaryEvaluationSourceReader{server: s}
+	if s.canaryEvaluationSourceReaderForTest != nil {
+		reader = s.canaryEvaluationSourceReaderForTest
+	}
+	if !reader.ready() {
 		return false
 	}
-	regime, err := s.briefRegimeSnapshotContext(ctx)
+	regime, err := reader.regime(ctx)
 	if err != nil || regime == nil {
 		return false // cached snapshot is nil until the first regime poll
 	}
-	acct, _ := s.buildAccountSummary(ctx, false)
-	pos, _ := s.handlePositionsList(ctx, &rpc.Request{})
+	acct, _ := reader.account(ctx)
+	pos, _ := reader.positions(ctx)
 	var events *rpc.MarketEventsResult
 	if pos != nil {
-		events, _ = s.handleMarketEventsSnapshot(ctx, &rpc.Request{Params: briefJSON(rpc.MarketEventsParams{Symbols: marketEventSymbolsFromPositions(pos)})})
+		events, _ = reader.marketEvents(ctx, marketEventSymbolsFromPositions(pos))
 	}
-	in := rpc.CanaryInput{Now: s.briefNow()}
+	in := rpc.CanaryInput{Now: reader.now()}
 	if acct != nil {
 		in.Account = *acct
 	}

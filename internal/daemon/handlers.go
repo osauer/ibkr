@@ -87,7 +87,7 @@ func (s *Server) buildAccountSummaryWithAuthority(ctx context.Context, observe b
 		AccountID:    raw.AccountID,
 		AccountType:  raw.AccountType,
 		BaseCurrency: raw.Currency,
-		AsOf:         raw.AsOf,
+		AsOf:         accountResultAuthorityAsOf(authority, time.Now().UTC()),
 	}
 	if raw.NetLiquidation != nil {
 		res.NetLiquidation = *raw.NetLiquidation
@@ -203,6 +203,19 @@ func (s *Server) buildAccountSummaryWithAuthority(ctx context.Context, observe b
 	return res, authority, nil
 }
 
+// accountResultAuthorityAsOf keeps display context separate from decision
+// authority. Cached account-update rows are reparsed and stamped at read time,
+// so only a completed one-shot request has an observation time that consumers
+// may use as current evidence.
+func accountResultAuthorityAsOf(authority accountSummaryAuthority, completedAt time.Time) time.Time {
+	asOf := authority.AsOf.UTC()
+	if authority.Provenance != ibkrlib.AccountSummaryProvenanceRequest ||
+		asOf.IsZero() || asOf.After(completedAt.UTC()) {
+		return time.Time{}
+	}
+	return asOf
+}
+
 type accountDailyPnLReader interface {
 	AccountDailyPnL() (ibkrlib.AccountDailyPnL, bool)
 }
@@ -270,7 +283,7 @@ func (s *Server) handlePositionsList(ctx context.Context, req *rpc.Request) (*rp
 }
 
 func (s *Server) handlePositionsListCaptured(ctx context.Context, req *rpc.Request, portfolioHealth *ibkrlib.PortfolioStreamHealth) (*rpc.PositionsResult, error) {
-	return s.handlePositionsListCapturedForScope(ctx, req, portfolioHealth, brokerStateScope{})
+	return s.handlePositionsListCapturedForScope(ctx, req, portfolioHealth, s.currentBrokerStateScope())
 }
 
 func (s *Server) handlePositionsListCapturedForScope(ctx context.Context, req *rpc.Request, portfolioHealth *ibkrlib.PortfolioStreamHealth, expectedScope brokerStateScope) (*rpc.PositionsResult, error) {
@@ -282,13 +295,16 @@ func (s *Server) handlePositionsListCapturedForScope(ctx context.Context, req *r
 	if c == nil {
 		return nil, s.gatewayUnavailableError()
 	}
+	session, sessionOK := c.CaptureSession()
 	var positions []*ibkrlib.RawPosition
 	positions, health, err := c.CachedPositionsWithHealth()
-	if portfolioHealth != nil && brokerScopeConcrete(expectedScope) {
+	if brokerScopeConcrete(expectedScope) {
 		var scoped bool
 		health, scoped = scopedPortfolioStreamHealth(positions, health, expectedScope, time.Now())
 		if !scoped {
-			*portfolioHealth = health
+			if portfolioHealth != nil {
+				*portfolioHealth = health
+			}
 			return nil, errors.New("portfolio stream account scope conflict")
 		}
 	}
@@ -443,7 +459,24 @@ func (s *Server) handlePositionsListCapturedForScope(ctx context.Context, req *r
 	addPortfolioBaseContext(res.Portfolio, res.ByUnderlying, baseCcy, netLiquidationBase)
 	addFXSensitivity(res.Portfolio, ledger, baseCcy)
 	s.attachProtectionCoverage(ctx, res, wantSym, wantType, health)
+	authorityScope := expectedScope
+	if !sessionOK || !c.SessionCurrent(session) || !sameBrokerScope(expectedScope, s.currentBrokerStateScope()) {
+		authorityScope = brokerStateScope{}
+	}
+	res.AsOf = positionsResultAuthorityAsOf(authorityScope, health, time.Now().UTC())
 	return res, nil
+}
+
+// positionsResultAuthorityAsOf stamps only a complete, current, account-scoped
+// portfolio projection. Cached rows remain useful context when the stream is
+// unprimed or stale, but a zero timestamp makes that uncertainty explicit to
+// Canary and every other consumer instead of laundering the handler time into
+// a fresh empty-book receipt.
+func positionsResultAuthorityAsOf(scope brokerStateScope, health ibkrlib.PortfolioStreamHealth, completedAt time.Time) time.Time {
+	if classifyPortfolioStreamHealth(scope, health, completedAt.UTC()) != orderIntegrityHealthCurrent {
+		return time.Time{}
+	}
+	return portfolioStreamEvidenceAsOf(health)
 }
 
 // positionStockQuoteBudget is the per-symbol wait for enriching held stock

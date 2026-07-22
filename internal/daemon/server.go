@@ -553,9 +553,12 @@ type Server struct {
 	// buffered wake; the loop drains during daemon shutdown.
 	canaryEvaluationWake   chan struct{}
 	canaryEvaluationLoopWG sync.WaitGroup
-	rulebookRefreshLoopWG  sync.WaitGroup
-	regimeConsumerWakeMu   sync.Mutex
-	regimeConsumerRevision int64
+	// canaryEvaluationSourceReaderForTest exercises the real evaluator against
+	// typed source receipts without constructing a broker wire session.
+	canaryEvaluationSourceReaderForTest canaryEvaluationSourceReader
+	rulebookRefreshLoopWG               sync.WaitGroup
+	regimeConsumerWakeMu                sync.Mutex
+	regimeConsumerRevision              int64
 	// Successful canonical gamma publications invalidate only Regime's refresh
 	// schedule and signal this capacity-one daemon-owned wake. The prior Regime
 	// authority remains visible until a complete replacement publishes.
