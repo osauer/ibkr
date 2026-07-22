@@ -176,7 +176,7 @@ func TestProtectionPolicyVersionCannotRecoverPriorEpisode(t *testing.T) {
 		AuthorityScope: scope.authority, AsOf: base, Coverage: coverage,
 		Observations: []alertEpisodeObservation{{
 			EpisodeKey: episode, Source: rpc.AlertSourceProtection, Kind: rpc.AlertKindProtectionGap,
-			Active: true, Severity: rpc.AlertSeverityWatch, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+			PresentationCode: rpc.AlertPresentationProtectionReconciliationRequired, Active: true, Severity: rpc.AlertSeverityWatch,
 			EvidenceFingerprint: alertRegistryFingerprint("old-protection-evidence"), EvidenceHealth: rpc.AlertEvidenceCurrent,
 			Destination: rpc.AlertDestinationAlerts, EvidenceAsOf: base, ObservedAt: base,
 			PolicyFingerprint: oldPolicy, ProducerDecisionReason: alertShadowDecisionProtectionActive,

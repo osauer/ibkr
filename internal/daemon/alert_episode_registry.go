@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	alertEpisodeRegistryDocumentVersion = 2
+	alertEpisodeRegistryDocumentVersion = 3
 	alertEpisodeRegistryStateKind       = "alert_episode_registry"
 	alertEpisodeDecisionEventType       = "alert_episode_decision"
 	alertEpisodeDecisionEventAction     = "evaluate"
@@ -37,17 +37,17 @@ const (
 
 // alertEpisodeObservation is an already-classified, redacted producer fact.
 // The registry does not decide whether a condition is active, its severity,
-// its delivery preference, or whether an escalation qualifies. A non-empty
+// presentation, or whether an escalation qualifies. A non-empty
 // EscalationFingerprint is the producer's stable identity for a qualifying
 // escalation; replaying the same identity does not mint another occurrence.
 type alertEpisodeObservation struct {
 	EpisodeKey             string
 	Source                 rpc.AlertSource
 	Kind                   rpc.AlertKind
+	PresentationCode       rpc.AlertPresentationCode
 	Active                 bool
 	EscalationFingerprint  string
 	Severity               rpc.AlertSeverity
-	DeliveryPreference     rpc.AlertDeliveryPreference
 	EvidenceFingerprint    string
 	EvidenceHealth         rpc.AlertEvidenceHealth
 	Destination            rpc.AlertDestination
@@ -106,26 +106,68 @@ type alertEpisodeRegistryDocumentV1 struct {
 }
 
 type alertEpisodeRegistryRecordV1 struct {
-	EpisodeKey                 string                      `json:"episode_key"`
-	OccurrenceKey              string                      `json:"occurrence_key"`
-	Source                     rpc.AlertSource             `json:"source"`
-	Kind                       rpc.AlertKind               `json:"kind"`
-	State                      rpc.AlertEpisodeState       `json:"state"`
-	Severity                   rpc.AlertSeverity           `json:"severity"`
-	DeliveryPreference         rpc.AlertDeliveryPreference `json:"delivery_preference"`
-	EvidenceFingerprint        string                      `json:"evidence_fingerprint"`
-	EvidenceHealth             rpc.AlertEvidenceHealth     `json:"evidence_health"`
-	Destination                rpc.AlertDestination        `json:"destination"`
-	EvidenceAsOf               time.Time                   `json:"evidence_as_of"`
-	StateChangedAt             time.Time                   `json:"state_changed_at"`
-	ObservedAt                 time.Time                   `json:"observed_at"`
-	PolicyFingerprint          string                      `json:"policy_fingerprint"`
-	ProducerDecisionReason     string                      `json:"producer_decision_reason"`
-	RegistryDecisionReason     string                      `json:"registry_decision_reason"`
-	LastSourceObservedAt       time.Time                   `json:"last_source_observed_at"`
-	LastObservationFingerprint string                      `json:"last_observation_fingerprint"`
-	LastEscalationFingerprint  string                      `json:"last_escalation_fingerprint,omitempty"`
-	EmitRecovered              bool                        `json:"emit_recovered"`
+	EpisodeKey                 string                  `json:"episode_key"`
+	OccurrenceKey              string                  `json:"occurrence_key"`
+	Source                     rpc.AlertSource         `json:"source"`
+	Kind                       rpc.AlertKind           `json:"kind"`
+	State                      rpc.AlertEpisodeState   `json:"state"`
+	Severity                   rpc.AlertSeverity       `json:"severity"`
+	DeliveryPreference         string                  `json:"delivery_preference"`
+	EvidenceFingerprint        string                  `json:"evidence_fingerprint"`
+	EvidenceHealth             rpc.AlertEvidenceHealth `json:"evidence_health"`
+	Destination                rpc.AlertDestination    `json:"destination"`
+	EvidenceAsOf               time.Time               `json:"evidence_as_of"`
+	StateChangedAt             time.Time               `json:"state_changed_at"`
+	ObservedAt                 time.Time               `json:"observed_at"`
+	PolicyFingerprint          string                  `json:"policy_fingerprint"`
+	ProducerDecisionReason     string                  `json:"producer_decision_reason"`
+	RegistryDecisionReason     string                  `json:"registry_decision_reason"`
+	LastSourceObservedAt       time.Time               `json:"last_source_observed_at"`
+	LastObservationFingerprint string                  `json:"last_observation_fingerprint"`
+	LastEscalationFingerprint  string                  `json:"last_escalation_fingerprint,omitempty"`
+	EmitRecovered              bool                    `json:"emit_recovered"`
+}
+
+type alertEpisodeRegistryDocumentV2 struct {
+	Version                int                                   `json:"version"`
+	UpdatedAt              time.Time                             `json:"updated_at"`
+	NextOccurrenceSequence uint64                                `json:"next_occurrence_sequence"`
+	Scopes                 []alertEpisodeRegistryScopeDocumentV2 `json:"scopes"`
+	LegacyUnscoped         *alertEpisodeLegacyUnscoped           `json:"legacy_unscoped,omitempty"`
+}
+
+type alertEpisodeRegistryScopeDocumentV2 struct {
+	AuthorityScope string                            `json:"authority_scope"`
+	AsOf           time.Time                         `json:"as_of"`
+	Coverage       rpc.AlertCoverage                 `json:"coverage"`
+	SourceStates   []alertEpisodeRegistrySourceState `json:"source_states"`
+	Cursors        alertShadowDurableCursors         `json:"input_cursors"`
+	Metrics        alertShadowDurableMetrics         `json:"commissioning_metrics"`
+	Episodes       []alertEpisodeRegistryRecordV2    `json:"episodes"`
+}
+
+type alertEpisodeRegistryRecordV2 struct {
+	AuthorityScope             string                  `json:"authority_scope"`
+	EpisodeKey                 string                  `json:"episode_key"`
+	OccurrenceKey              string                  `json:"occurrence_key"`
+	Source                     rpc.AlertSource         `json:"source"`
+	Kind                       rpc.AlertKind           `json:"kind"`
+	State                      rpc.AlertEpisodeState   `json:"state"`
+	Severity                   rpc.AlertSeverity       `json:"severity"`
+	DeliveryPreference         string                  `json:"delivery_preference"`
+	EvidenceFingerprint        string                  `json:"evidence_fingerprint"`
+	EvidenceHealth             rpc.AlertEvidenceHealth `json:"evidence_health"`
+	Destination                rpc.AlertDestination    `json:"destination"`
+	EvidenceAsOf               time.Time               `json:"evidence_as_of"`
+	StateChangedAt             time.Time               `json:"state_changed_at"`
+	ObservedAt                 time.Time               `json:"observed_at"`
+	PolicyFingerprint          string                  `json:"policy_fingerprint"`
+	ProducerDecisionReason     string                  `json:"producer_decision_reason"`
+	RegistryDecisionReason     string                  `json:"registry_decision_reason"`
+	LastSourceObservedAt       time.Time               `json:"last_source_observed_at"`
+	LastObservationFingerprint string                  `json:"last_observation_fingerprint"`
+	LastEscalationFingerprint  string                  `json:"last_escalation_fingerprint,omitempty"`
+	EmitRecovered              bool                    `json:"emit_recovered"`
 }
 
 type alertEpisodeRegistryScopeDocument struct {
@@ -179,27 +221,27 @@ type alertShadowDurableSourceMeasurements struct {
 }
 
 type alertEpisodeRegistryRecord struct {
-	AuthorityScope             string                      `json:"authority_scope"`
-	EpisodeKey                 string                      `json:"episode_key"`
-	OccurrenceKey              string                      `json:"occurrence_key"`
-	Source                     rpc.AlertSource             `json:"source"`
-	Kind                       rpc.AlertKind               `json:"kind"`
-	State                      rpc.AlertEpisodeState       `json:"state"`
-	Severity                   rpc.AlertSeverity           `json:"severity"`
-	DeliveryPreference         rpc.AlertDeliveryPreference `json:"delivery_preference"`
-	EvidenceFingerprint        string                      `json:"evidence_fingerprint"`
-	EvidenceHealth             rpc.AlertEvidenceHealth     `json:"evidence_health"`
-	Destination                rpc.AlertDestination        `json:"destination"`
-	EvidenceAsOf               time.Time                   `json:"evidence_as_of"`
-	StateChangedAt             time.Time                   `json:"state_changed_at"`
-	ObservedAt                 time.Time                   `json:"observed_at"`
-	PolicyFingerprint          string                      `json:"policy_fingerprint"`
-	ProducerDecisionReason     string                      `json:"producer_decision_reason"`
-	RegistryDecisionReason     string                      `json:"registry_decision_reason"`
-	LastSourceObservedAt       time.Time                   `json:"last_source_observed_at"`
-	LastObservationFingerprint string                      `json:"last_observation_fingerprint"`
-	LastEscalationFingerprint  string                      `json:"last_escalation_fingerprint,omitempty"`
-	EmitRecovered              bool                        `json:"emit_recovered"`
+	AuthorityScope             string                    `json:"authority_scope"`
+	EpisodeKey                 string                    `json:"episode_key"`
+	OccurrenceKey              string                    `json:"occurrence_key"`
+	Source                     rpc.AlertSource           `json:"source"`
+	Kind                       rpc.AlertKind             `json:"kind"`
+	PresentationCode           rpc.AlertPresentationCode `json:"presentation_code"`
+	State                      rpc.AlertEpisodeState     `json:"state"`
+	Severity                   rpc.AlertSeverity         `json:"severity"`
+	EvidenceFingerprint        string                    `json:"evidence_fingerprint"`
+	EvidenceHealth             rpc.AlertEvidenceHealth   `json:"evidence_health"`
+	Destination                rpc.AlertDestination      `json:"destination"`
+	EvidenceAsOf               time.Time                 `json:"evidence_as_of"`
+	StateChangedAt             time.Time                 `json:"state_changed_at"`
+	ObservedAt                 time.Time                 `json:"observed_at"`
+	PolicyFingerprint          string                    `json:"policy_fingerprint"`
+	ProducerDecisionReason     string                    `json:"producer_decision_reason"`
+	RegistryDecisionReason     string                    `json:"registry_decision_reason"`
+	LastSourceObservedAt       time.Time                 `json:"last_source_observed_at"`
+	LastObservationFingerprint string                    `json:"last_observation_fingerprint"`
+	LastEscalationFingerprint  string                    `json:"last_escalation_fingerprint,omitempty"`
+	EmitRecovered              bool                      `json:"emit_recovered"`
 }
 
 type alertEpisodeDecisionEvent struct {
@@ -211,23 +253,23 @@ type alertEpisodeDecisionEvent struct {
 }
 
 type alertEpisodeDecision struct {
-	EpisodeKey             string                      `json:"episode_key"`
-	OccurrenceKey          string                      `json:"occurrence_key,omitempty"`
-	Source                 rpc.AlertSource             `json:"source"`
-	Kind                   rpc.AlertKind               `json:"kind"`
-	Action                 string                      `json:"action"`
-	BeforeState            rpc.AlertEpisodeState       `json:"before_state,omitempty"`
-	AfterState             rpc.AlertEpisodeState       `json:"after_state,omitempty"`
-	Severity               rpc.AlertSeverity           `json:"severity"`
-	DeliveryPreference     rpc.AlertDeliveryPreference `json:"delivery_preference"`
-	EvidenceFingerprint    string                      `json:"evidence_fingerprint"`
-	EvidenceHealth         rpc.AlertEvidenceHealth     `json:"evidence_health"`
-	Destination            rpc.AlertDestination        `json:"destination"`
-	EvidenceAsOf           time.Time                   `json:"evidence_as_of"`
-	ObservedAt             time.Time                   `json:"observed_at"`
-	PolicyFingerprint      string                      `json:"policy_fingerprint"`
-	ProducerDecisionReason string                      `json:"producer_decision_reason"`
-	RegistryDecisionReason string                      `json:"registry_decision_reason"`
+	EpisodeKey             string                    `json:"episode_key"`
+	OccurrenceKey          string                    `json:"occurrence_key,omitempty"`
+	Source                 rpc.AlertSource           `json:"source"`
+	Kind                   rpc.AlertKind             `json:"kind"`
+	PresentationCode       rpc.AlertPresentationCode `json:"presentation_code"`
+	Action                 string                    `json:"action"`
+	BeforeState            rpc.AlertEpisodeState     `json:"before_state,omitempty"`
+	AfterState             rpc.AlertEpisodeState     `json:"after_state,omitempty"`
+	Severity               rpc.AlertSeverity         `json:"severity"`
+	EvidenceFingerprint    string                    `json:"evidence_fingerprint"`
+	EvidenceHealth         rpc.AlertEvidenceHealth   `json:"evidence_health"`
+	Destination            rpc.AlertDestination      `json:"destination"`
+	EvidenceAsOf           time.Time                 `json:"evidence_as_of"`
+	ObservedAt             time.Time                 `json:"observed_at"`
+	PolicyFingerprint      string                    `json:"policy_fingerprint"`
+	ProducerDecisionReason string                    `json:"producer_decision_reason"`
+	RegistryDecisionReason string                    `json:"registry_decision_reason"`
 }
 
 const (
@@ -572,6 +614,9 @@ func (r *alertEpisodeRegistry) reload(ctx context.Context) error {
 	if version.Version == 1 {
 		return r.migrateV1(ctx, doc)
 	}
+	if version.Version == 2 {
+		return r.migrateV2(ctx, doc)
+	}
 	decoded, err := decodeAlertEpisodeRegistryDocument(doc.JSON)
 	if err != nil {
 		return fmt.Errorf("load alert episode registry revision %d: %w", doc.Revision, err)
@@ -581,6 +626,58 @@ func (r *alertEpisodeRegistry) reload(ctx context.Context) error {
 	}
 	r.revision = doc.Revision
 	r.document = decoded
+	return nil
+}
+
+func (r *alertEpisodeRegistry) migrateV2(ctx context.Context, stored corestore.StateDocument) error {
+	legacy, err := decodeAlertEpisodeRegistryDocumentV2(stored.JSON)
+	if err != nil {
+		return fmt.Errorf("load alert episode registry revision %d legacy v2: %w", stored.Revision, err)
+	}
+	next := alertEpisodeRegistryDocument{
+		Version: alertEpisodeRegistryDocumentVersion, UpdatedAt: legacy.UpdatedAt,
+		NextOccurrenceSequence: legacy.NextOccurrenceSequence,
+		Scopes:                 make([]alertEpisodeRegistryScopeDocument, 0, len(legacy.Scopes)),
+		LegacyUnscoped:         legacy.LegacyUnscoped,
+	}
+	for _, oldScope := range legacy.Scopes {
+		scope := alertEpisodeRegistryScopeDocument{
+			AuthorityScope: oldScope.AuthorityScope, AsOf: oldScope.AsOf, Coverage: oldScope.Coverage,
+			SourceStates: oldScope.SourceStates, Cursors: oldScope.Cursors, Metrics: oldScope.Metrics,
+			Episodes: make([]alertEpisodeRegistryRecord, 0, len(oldScope.Episodes)),
+		}
+		for i, old := range oldScope.Episodes {
+			if !validLegacyAlertDeliveryPreference(old.DeliveryPreference) {
+				return fmt.Errorf("migrate alert episode registry v2: invalid delivery preference at record %d", i)
+			}
+			scope.Episodes = append(scope.Episodes, alertEpisodeRegistryRecord{
+				AuthorityScope: old.AuthorityScope, EpisodeKey: old.EpisodeKey, OccurrenceKey: old.OccurrenceKey,
+				Source: old.Source, Kind: old.Kind, PresentationCode: legacyAlertPresentationCode(old.Source),
+				State: old.State, Severity: old.Severity, EvidenceFingerprint: old.EvidenceFingerprint,
+				EvidenceHealth: old.EvidenceHealth, Destination: old.Destination, EvidenceAsOf: old.EvidenceAsOf,
+				StateChangedAt: old.StateChangedAt, ObservedAt: old.ObservedAt, PolicyFingerprint: old.PolicyFingerprint,
+				ProducerDecisionReason: old.ProducerDecisionReason, RegistryDecisionReason: old.RegistryDecisionReason,
+				LastSourceObservedAt: old.LastSourceObservedAt, LastObservationFingerprint: old.LastObservationFingerprint,
+				LastEscalationFingerprint: old.LastEscalationFingerprint, EmitRecovered: old.EmitRecovered,
+			})
+		}
+		next.Scopes = append(next.Scopes, scope)
+	}
+	if err := validateAlertEpisodeRegistryDocument(next, r.inactiveLimit); err != nil {
+		return fmt.Errorf("migrate alert episode registry v2: %w", err)
+	}
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return fmt.Errorf("encode migrated alert episode registry v2: %w", err)
+	}
+	saved, err := r.core.CompareAndSwapStateDocument(ctx, corestore.StateDocumentCAS{
+		ScopeKey: daemonStateScope, Kind: alertEpisodeRegistryStateKind,
+		ExpectedRevision: stored.Revision, JSON: raw,
+	})
+	if err != nil {
+		return fmt.Errorf("persist migrated alert episode registry v2: %w", err)
+	}
+	r.revision, r.document = saved.Revision, next
 	return nil
 }
 
@@ -842,7 +939,7 @@ func recordFromAlertObservation(authorityScope string, observation alertEpisodeO
 
 func applyAlertObservationToRecord(record *alertEpisodeRegistryRecord, observation alertEpisodeObservation, observationFingerprint string) {
 	record.Severity = observation.Severity
-	record.DeliveryPreference = observation.DeliveryPreference
+	record.PresentationCode = observation.PresentationCode
 	record.EvidenceFingerprint = observation.EvidenceFingerprint
 	record.EvidenceHealth = observation.EvidenceHealth
 	record.Destination = observation.Destination
@@ -950,6 +1047,7 @@ func alertEpisodeSnapshot(document alertEpisodeRegistryScopeDocument, now time.T
 	}
 	now = now.UTC()
 	coverage, staleSources := projectAlertEpisodeCoverage(document, now)
+	sources := projectAlertSourceCoverage(document, coverage, staleSources, now)
 	if clockInvalid {
 		coverage = rpc.AlertCoverage{
 			State: rpc.AlertCoverageUnavailable, Freshness: rpc.AlertCoverageUnknown, AsOf: now,
@@ -960,6 +1058,7 @@ func alertEpisodeSnapshot(document alertEpisodeRegistryScopeDocument, now time.T
 		for _, source := range coverage.ExpectedSources {
 			staleSources[source] = struct{}{}
 		}
+		sources = unavailableAlertSourceCoverage(coverage.ExpectedSources)
 	}
 	candidates := make([]rpc.AlertCandidate, 0, len(document.Episodes))
 	for _, record := range document.Episodes {
@@ -998,12 +1097,58 @@ func alertEpisodeSnapshot(document alertEpisodeRegistryScopeDocument, now time.T
 	}
 	snapshot := rpc.AlertCandidateSnapshot{
 		SchemaVersion: rpc.AlertCandidateSnapshotVersion, AuthorityScope: document.AuthorityScope, AsOf: now,
-		CurrentState: state, Coverage: coverage, Candidates: candidates,
+		CurrentState: state, Coverage: coverage, Sources: sources, Candidates: candidates,
 	}
 	if err := rpc.ValidateAlertCandidateSnapshot(snapshot); err != nil {
 		return rpc.AlertCandidateSnapshot{}, fmt.Errorf("validate alert episode snapshot: %w", err)
 	}
 	return snapshot, nil
+}
+
+func projectAlertSourceCoverage(document alertEpisodeRegistryScopeDocument, coverage rpc.AlertCoverage, stale map[rpc.AlertSource]struct{}, now time.Time) []rpc.AlertSourceCoverage {
+	states := make(map[rpc.AlertSource]alertEpisodeRegistrySourceState, len(document.SourceStates))
+	for _, state := range document.SourceStates {
+		states[state.Source] = state
+	}
+	rows := make([]rpc.AlertSourceCoverage, 0, len(coverage.ExpectedSources))
+	for _, source := range coverage.ExpectedSources {
+		state, ok := states[source]
+		if !ok {
+			row := rpc.AlertSourceCoverage{Source: source, Status: alertShadowStatusNotObserved, Reason: alertShadowReasonNotObserved, EvidenceHealth: rpc.AlertEvidenceUnavailable}
+			if alertCoverageContains(coverage.CoveredSources, source) {
+				row.Status, row.Reason, row.EvidenceHealth, row.Covered = alertShadowStatusCurrent, alertShadowReasonCurrent, rpc.AlertEvidenceCurrent, true
+				row.InputAsOf, row.ObservedAt, row.EvidenceAsOf, row.FreshUntil = document.AsOf, document.AsOf, document.AsOf, now
+			}
+			rows = append(rows, row)
+			continue
+		}
+		row := rpc.AlertSourceCoverage{
+			Source: state.Source, Status: state.Status, Reason: state.Reason, EvidenceHealth: state.EvidenceHealth,
+			InputAsOf: state.InputAsOf, ObservedAt: state.ObservedAt, EvidenceAsOf: state.EvidenceAsOf,
+			FreshUntil: state.FreshUntil, Covered: state.Covered,
+		}
+		if _, expired := stale[source]; expired {
+			row.Status, row.Reason = alertShadowStatusStale, alertShadowReasonProducerSilent
+			if row.EvidenceHealth != rpc.AlertEvidenceError {
+				row.EvidenceHealth = rpc.AlertEvidenceStale
+			}
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Source < rows[j].Source })
+	return rows
+}
+
+func unavailableAlertSourceCoverage(expected []rpc.AlertSource) []rpc.AlertSourceCoverage {
+	rows := make([]rpc.AlertSourceCoverage, 0, len(expected))
+	for _, source := range expected {
+		rows = append(rows, rpc.AlertSourceCoverage{
+			Source: source, Status: alertShadowStatusUnavailable, Reason: alertShadowReasonSourceTimeInvalid,
+			EvidenceHealth: rpc.AlertEvidenceUnavailable,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Source < rows[j].Source })
+	return rows
 }
 
 func projectAlertEpisodeCoverage(document alertEpisodeRegistryScopeDocument, now time.Time) (rpc.AlertCoverage, map[rpc.AlertSource]struct{}) {
@@ -1052,7 +1197,7 @@ func alertCandidateFromRecord(record alertEpisodeRegistryRecord) rpc.AlertCandid
 	return rpc.AlertCandidate{
 		EpisodeKey: record.EpisodeKey, OccurrenceKey: record.OccurrenceKey,
 		EvidenceFingerprint: record.EvidenceFingerprint, Source: record.Source, Kind: record.Kind,
-		State: record.State, Severity: record.Severity, DeliveryPreference: record.DeliveryPreference,
+		PresentationCode: record.PresentationCode, State: record.State, Severity: record.Severity,
 		EvidenceHealth: record.EvidenceHealth, Destination: record.Destination,
 		EvidenceAsOf: record.EvidenceAsOf, StateChangedAt: record.StateChangedAt, ObservedAt: record.ObservedAt,
 	}
@@ -1061,9 +1206,9 @@ func alertCandidateFromRecord(record alertEpisodeRegistryRecord) rpc.AlertCandid
 func decisionFromAlertRecord(record alertEpisodeRegistryRecord, before rpc.AlertEpisodeState, action string) alertEpisodeDecision {
 	return alertEpisodeDecision{
 		EpisodeKey: record.EpisodeKey, OccurrenceKey: record.OccurrenceKey, Source: record.Source, Kind: record.Kind,
-		Action: action, BeforeState: before, AfterState: record.State, Severity: record.Severity,
-		DeliveryPreference: record.DeliveryPreference, EvidenceFingerprint: record.EvidenceFingerprint,
-		EvidenceHealth: record.EvidenceHealth, Destination: record.Destination, EvidenceAsOf: record.EvidenceAsOf,
+		PresentationCode: record.PresentationCode, Action: action, BeforeState: before, AfterState: record.State, Severity: record.Severity,
+		EvidenceFingerprint: record.EvidenceFingerprint,
+		EvidenceHealth:      record.EvidenceHealth, Destination: record.Destination, EvidenceAsOf: record.EvidenceAsOf,
 		ObservedAt: record.ObservedAt, PolicyFingerprint: record.PolicyFingerprint,
 		ProducerDecisionReason: record.ProducerDecisionReason, RegistryDecisionReason: record.RegistryDecisionReason,
 	}
@@ -1072,9 +1217,9 @@ func decisionFromAlertRecord(record alertEpisodeRegistryRecord, before rpc.Alert
 func decisionFromAlertObservation(observation alertEpisodeObservation, action string, after rpc.AlertEpisodeState) alertEpisodeDecision {
 	return alertEpisodeDecision{
 		EpisodeKey: observation.EpisodeKey, Source: observation.Source, Kind: observation.Kind,
-		Action: action, AfterState: after, Severity: observation.Severity,
-		DeliveryPreference: observation.DeliveryPreference, EvidenceFingerprint: observation.EvidenceFingerprint,
-		EvidenceHealth: observation.EvidenceHealth, Destination: observation.Destination,
+		PresentationCode: observation.PresentationCode, Action: action, AfterState: after, Severity: observation.Severity,
+		EvidenceFingerprint: observation.EvidenceFingerprint,
+		EvidenceHealth:      observation.EvidenceHealth, Destination: observation.Destination,
 		EvidenceAsOf: observation.EvidenceAsOf, ObservedAt: observation.ObservedAt,
 		PolicyFingerprint: observation.PolicyFingerprint, ProducerDecisionReason: observation.ProducerDecisionReason,
 		RegistryDecisionReason: alertDecisionReasonAuthoritativeNegative,
@@ -1180,7 +1325,7 @@ func validateAlertEpisodeObservation(observation alertEpisodeObservation, covera
 	candidate := rpc.AlertCandidate{
 		EpisodeKey: observation.EpisodeKey, OccurrenceKey: dummyOccurrence,
 		EvidenceFingerprint: observation.EvidenceFingerprint, Source: observation.Source, Kind: observation.Kind,
-		State: dummyState, Severity: observation.Severity, DeliveryPreference: observation.DeliveryPreference,
+		PresentationCode: observation.PresentationCode, State: dummyState, Severity: observation.Severity,
 		EvidenceHealth: observation.EvidenceHealth, Destination: observation.Destination,
 		EvidenceAsOf: observation.EvidenceAsOf, StateChangedAt: observation.ObservedAt, ObservedAt: observation.ObservedAt,
 	}
@@ -1380,6 +1525,25 @@ func decodeAlertEpisodeRegistryDocumentV1(raw []byte) (alertEpisodeRegistryDocum
 	return document, nil
 }
 
+func decodeAlertEpisodeRegistryDocumentV2(raw []byte) (alertEpisodeRegistryDocumentV2, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var document alertEpisodeRegistryDocumentV2
+	if err := decoder.Decode(&document); err != nil {
+		return alertEpisodeRegistryDocumentV2{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return alertEpisodeRegistryDocumentV2{}, errors.New("legacy alert episode registry v2 contains trailing JSON")
+		}
+		return alertEpisodeRegistryDocumentV2{}, err
+	}
+	if document.Version != 2 {
+		return alertEpisodeRegistryDocumentV2{}, errors.New("invalid legacy alert episode registry v2 version")
+	}
+	return document, nil
+}
+
 func validateAlertEpisodeRegistryDocumentV1(document alertEpisodeRegistryDocumentV1, inactiveLimit int) error {
 	if document.Version != 1 || document.AsOf.IsZero() {
 		return errors.New("invalid legacy alert episode registry header")
@@ -1406,12 +1570,15 @@ func validateAlertEpisodeRegistryDocumentV1(document alertEpisodeRegistryDocumen
 		candidate := rpc.AlertCandidate{
 			EpisodeKey: record.EpisodeKey, OccurrenceKey: record.OccurrenceKey,
 			EvidenceFingerprint: record.EvidenceFingerprint, Source: record.Source, Kind: record.Kind,
-			State: record.State, Severity: record.Severity, DeliveryPreference: record.DeliveryPreference,
+			PresentationCode: legacyAlertPresentationCode(record.Source), State: record.State, Severity: record.Severity,
 			EvidenceHealth: record.EvidenceHealth, Destination: record.Destination,
 			EvidenceAsOf: record.EvidenceAsOf, StateChangedAt: record.StateChangedAt, ObservedAt: record.ObservedAt,
 		}
 		if err := rpc.ValidateAlertCandidate(candidate); err != nil {
 			return fmt.Errorf("invalid legacy alert episode registry record %d: %w", i, err)
+		}
+		if !validLegacyAlertDeliveryPreference(record.DeliveryPreference) {
+			return fmt.Errorf("invalid legacy alert episode registry delivery preference at record %d", i)
 		}
 		if record.ObservedAt.After(document.AsOf) || record.LastSourceObservedAt.IsZero() || record.LastSourceObservedAt.After(document.AsOf) {
 			return fmt.Errorf("invalid legacy alert episode registry timestamp at record %d", i)
@@ -1445,24 +1612,25 @@ func validateAlertEpisodeRegistryDocumentV1(document alertEpisodeRegistryDocumen
 
 func alertEpisodeObservationFingerprint(observation alertEpisodeObservation) (string, error) {
 	raw, err := json.Marshal(struct {
-		EpisodeKey             string                      `json:"episode_key"`
-		Source                 rpc.AlertSource             `json:"source"`
-		Kind                   rpc.AlertKind               `json:"kind"`
-		Active                 bool                        `json:"active"`
-		EscalationFingerprint  string                      `json:"escalation_fingerprint,omitempty"`
-		Severity               rpc.AlertSeverity           `json:"severity"`
-		DeliveryPreference     rpc.AlertDeliveryPreference `json:"delivery_preference"`
-		EvidenceFingerprint    string                      `json:"evidence_fingerprint"`
-		EvidenceHealth         rpc.AlertEvidenceHealth     `json:"evidence_health"`
-		Destination            rpc.AlertDestination        `json:"destination"`
-		EvidenceAsOf           time.Time                   `json:"evidence_as_of"`
-		ObservedAt             time.Time                   `json:"observed_at"`
-		PolicyFingerprint      string                      `json:"policy_fingerprint"`
-		ProducerDecisionReason string                      `json:"producer_decision_reason"`
+		EpisodeKey             string                    `json:"episode_key"`
+		Source                 rpc.AlertSource           `json:"source"`
+		Kind                   rpc.AlertKind             `json:"kind"`
+		PresentationCode       rpc.AlertPresentationCode `json:"presentation_code"`
+		Active                 bool                      `json:"active"`
+		EscalationFingerprint  string                    `json:"escalation_fingerprint,omitempty"`
+		Severity               rpc.AlertSeverity         `json:"severity"`
+		EvidenceFingerprint    string                    `json:"evidence_fingerprint"`
+		EvidenceHealth         rpc.AlertEvidenceHealth   `json:"evidence_health"`
+		Destination            rpc.AlertDestination      `json:"destination"`
+		EvidenceAsOf           time.Time                 `json:"evidence_as_of"`
+		ObservedAt             time.Time                 `json:"observed_at"`
+		PolicyFingerprint      string                    `json:"policy_fingerprint"`
+		ProducerDecisionReason string                    `json:"producer_decision_reason"`
 	}{
 		EpisodeKey: observation.EpisodeKey, Source: observation.Source, Kind: observation.Kind,
-		Active: observation.Active, EscalationFingerprint: observation.EscalationFingerprint,
-		Severity: observation.Severity, DeliveryPreference: observation.DeliveryPreference,
+		PresentationCode: observation.PresentationCode,
+		Active:           observation.Active, EscalationFingerprint: observation.EscalationFingerprint,
+		Severity:            observation.Severity,
 		EvidenceFingerprint: observation.EvidenceFingerprint, EvidenceHealth: observation.EvidenceHealth,
 		Destination: observation.Destination, EvidenceAsOf: observation.EvidenceAsOf,
 		ObservedAt: observation.ObservedAt, PolicyFingerprint: observation.PolicyFingerprint,
@@ -1494,6 +1662,42 @@ func validAlertDecisionCode(value string) bool {
 		}
 	}
 	return true
+}
+
+func validLegacyAlertDeliveryPreference(value string) bool {
+	switch value {
+	case "unapproved", "record_only", "inbox", "digest", "page":
+		return true
+	default:
+		return false
+	}
+}
+
+func legacyAlertPresentationCode(source rpc.AlertSource) rpc.AlertPresentationCode {
+	switch source {
+	case rpc.AlertSourceCanary:
+		return rpc.AlertPresentationCanaryPortfolioStress
+	case rpc.AlertSourceRegime:
+		return rpc.AlertPresentationRegimeMarketStress
+	case rpc.AlertSourceRulebook:
+		return rpc.AlertPresentationRulebookLegacyCondition
+	case rpc.AlertSourceRiskPolicy:
+		return rpc.AlertPresentationRiskPolicyLegacyCondition
+	case rpc.AlertSourceProtection:
+		return rpc.AlertPresentationProtectionReconciliationRequired
+	case rpc.AlertSourceOrderIntegrity:
+		return rpc.AlertPresentationOrderIntegrityMismatch
+	case rpc.AlertSourceReconciliation:
+		return rpc.AlertPresentationReconciliationLegacyCondition
+	case rpc.AlertSourceGovernance:
+		return rpc.AlertPresentationGovernanceLegacyCondition
+	case rpc.AlertSourceDataHealth:
+		return rpc.AlertPresentationDataHealthQuality
+	case rpc.AlertSourceDelivery:
+		return rpc.AlertPresentationDeliveryHealth
+	default:
+		return ""
+	}
 }
 
 func cloneAlertCoverage(in rpc.AlertCoverage) rpc.AlertCoverage {

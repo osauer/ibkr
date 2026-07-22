@@ -217,7 +217,7 @@ func TestAlertCandidateRejectsMalformedAndIncoherentValues(t *testing.T) {
 		{"kind", func(c *AlertCandidate) { c.Kind = "free-text" }},
 		{"state", func(c *AlertCandidate) { c.State = "cleared-by-caller" }},
 		{"severity", func(c *AlertCandidate) { c.Severity = "panic-now" }},
-		{"delivery", func(c *AlertCandidate) { c.DeliveryPreference = "send-everywhere" }},
+		{"presentation", func(c *AlertCandidate) { c.PresentationCode = "free_text" }},
 		{"evidence health", func(c *AlertCandidate) { c.EvidenceHealth = "probably-fine" }},
 		{"destination", func(c *AlertCandidate) { c.Destination = "https://attacker.invalid" }},
 		{"missing evidence time", func(c *AlertCandidate) { c.EvidenceAsOf = time.Time{} }},
@@ -244,8 +244,8 @@ func TestAlertCandidateRejectsMalformedAndIncoherentValues(t *testing.T) {
 func TestAlertCandidateHasNoDisplayOccurrenceOrDeliveryTargetFields(t *testing.T) {
 	typeOf := reflect.TypeFor[AlertCandidate]()
 	wantFields := []string{
-		"DeliveryPreference", "Destination", "EpisodeKey", "EvidenceAsOf", "EvidenceFingerprint",
-		"EvidenceHealth", "Kind", "ObservedAt", "OccurrenceKey", "Severity", "Source", "State", "StateChangedAt",
+		"Destination", "EpisodeKey", "EvidenceAsOf", "EvidenceFingerprint", "EvidenceHealth", "Kind", "ObservedAt",
+		"OccurrenceKey", "PresentationCode", "Severity", "Source", "State", "StateChangedAt",
 	}
 	gotFields := make([]string, 0, typeOf.NumField())
 	for field := range typeOf.Fields() {
@@ -320,9 +320,12 @@ func TestAlertSnapshotClearRequiresCompleteCurrentCoverage(t *testing.T) {
 	}
 
 	partial := clear
+	partial.Sources = append([]AlertSourceCoverage(nil), clear.Sources...)
 	partial.CurrentState = AlertSnapshotUnknown
 	partial.Coverage.State = AlertCoveragePartial
 	partial.Coverage.CoveredSources = []AlertSource{AlertSourceCanary}
+	partial.Sources[1].Covered = false
+	partial.Sources[1].EvidenceHealth = AlertEvidenceUnavailable
 	if err := partial.Validate(); err != nil || partial.IsClear() {
 		t.Fatalf("partial empty snapshot did not remain unknown: err=%v snapshot=%#v", err, partial)
 	}
@@ -379,6 +382,7 @@ func TestAlertSnapshotRejectsDuplicateEpisodesFutureOrUncoveredState(t *testing.
 	duplicateOccurrence.Candidates = []AlertCandidate{candidate, candidate}
 	duplicateOccurrence.Candidates[1].Source = AlertSourceRegime
 	duplicateOccurrence.Candidates[1].Kind = AlertKindMarketState
+	duplicateOccurrence.Candidates[1].PresentationCode = AlertPresentationRegimeMarketStress
 	duplicateOccurrence.Candidates[1].EpisodeKey, _ = BuildAlertEpisodeKey(AlertSourceRegime, AlertKindMarketState, "separate-root-problem")
 	duplicateOccurrence.Candidates[1].EvidenceFingerprint = testAlertFingerprint("b")
 	if err := duplicateOccurrence.Validate(); err == nil {
@@ -410,6 +414,7 @@ func TestAlertSnapshotCurrentEvidenceRequiresCoveredSource(t *testing.T) {
 	candidate := validAlertCandidate(t, now)
 	candidate.Source = AlertSourceRegime
 	candidate.Kind = AlertKindMarketState
+	candidate.PresentationCode = AlertPresentationRegimeMarketStress
 	candidate.EpisodeKey, _ = BuildAlertEpisodeKey(AlertSourceRegime, AlertKindMarketState, "regime-root")
 	candidate.OccurrenceKey = mustTestAlertOccurrenceKey(t, candidate.EpisodeKey, "occurrence-1")
 
@@ -417,6 +422,8 @@ func TestAlertSnapshotCurrentEvidenceRequiresCoveredSource(t *testing.T) {
 	snapshot.CurrentState = AlertSnapshotActive
 	snapshot.Coverage.State = AlertCoveragePartial
 	snapshot.Coverage.CoveredSources = []AlertSource{AlertSourceCanary}
+	snapshot.Sources[1].Covered = false
+	snapshot.Sources[1].EvidenceHealth = AlertEvidenceUnavailable
 	snapshot.Candidates = []AlertCandidate{candidate}
 	if err := snapshot.Validate(); err == nil {
 		t.Fatal("current candidate from an uncovered source was accepted")
@@ -471,23 +478,15 @@ func TestAlertJSONRoundTripAndExactObjectBoundary(t *testing.T) {
 	}
 }
 
-func TestAlertDeliveryPreferenceHasNoImplicitPageDefault(t *testing.T) {
-	var zero AlertDeliveryPreference
-	if zero == AlertDeliveryPage {
-		t.Fatal("zero delivery preference pages")
-	}
-	candidate := AlertCandidate{}
-	if candidate.DeliveryPreference != zero {
-		t.Fatalf("zero candidate has unexpected delivery preference %q", candidate.DeliveryPreference)
-	}
-	if err := candidate.Validate(); err == nil {
-		t.Fatal("zero candidate with implicit delivery preference was accepted")
-	}
-
+func TestAlertPresentationCodeIsClosedAndSourceBound(t *testing.T) {
 	now := time.Date(2026, time.July, 20, 20, 0, 0, 0, time.UTC)
-	explicit := validAlertCandidate(t, now)
-	if explicit.DeliveryPreference != AlertDeliveryUnapproved {
-		t.Fatalf("fixture selected approved routing unexpectedly: %q", explicit.DeliveryPreference)
+	candidate := validAlertCandidate(t, now)
+	if candidate.PresentationCode != AlertPresentationCanaryPortfolioStress {
+		t.Fatalf("presentation code=%q", candidate.PresentationCode)
+	}
+	candidate.PresentationCode = AlertPresentationRulebookSingleNameExposure
+	if err := candidate.Validate(); err == nil {
+		t.Fatal("candidate accepted another source's presentation code")
 	}
 }
 
@@ -503,9 +502,9 @@ func validAlertCandidate(t *testing.T, now time.Time) AlertCandidate {
 		EvidenceFingerprint: testAlertFingerprint("a"),
 		Source:              AlertSourceCanary,
 		Kind:                AlertKindPortfolioRisk,
+		PresentationCode:    AlertPresentationCanaryPortfolioStress,
 		State:               AlertEpisodeOpen,
 		Severity:            AlertSeverityWatch,
-		DeliveryPreference:  AlertDeliveryUnapproved,
 		EvidenceHealth:      AlertEvidenceCurrent,
 		Destination:         AlertDestinationMonitor,
 		EvidenceAsOf:        now.Add(-time.Minute),
@@ -543,7 +542,11 @@ func validAlertSnapshot(now time.Time) AlertCandidateSnapshot {
 		AsOf:         now,
 		CurrentState: AlertSnapshotClear,
 		Coverage:     completeAlertCoverage(now),
-		Candidates:   []AlertCandidate{},
+		Sources: []AlertSourceCoverage{
+			{Source: AlertSourceCanary, Status: "current", Reason: "current", EvidenceHealth: AlertEvidenceCurrent, InputAsOf: now, ObservedAt: now, EvidenceAsOf: now, FreshUntil: now.Add(time.Minute), Covered: true},
+			{Source: AlertSourceRegime, Status: "current", Reason: "current", EvidenceHealth: AlertEvidenceCurrent, InputAsOf: now, ObservedAt: now, EvidenceAsOf: now, FreshUntil: now.Add(time.Minute), Covered: true},
+		},
+		Candidates: []AlertCandidate{},
 	}
 }
 

@@ -360,6 +360,7 @@ func TestAlertEpisodeRegistryRecoversOnlyCurrentCoveredSourceUnderAggregateParti
 	regime := alertRegistryObservation(t, "per-source-regime", reopenAt, true)
 	regime.Source = rpc.AlertSourceRegime
 	regime.Kind = rpc.AlertKindMarketState
+	regime.PresentationCode = rpc.AlertPresentationRegimeMarketStress
 	regime.EpisodeKey, err = rpc.BuildAlertEpisodeKey(regime.Source, regime.Kind, "per-source-regime")
 	if err != nil {
 		t.Fatal(err)
@@ -537,7 +538,75 @@ func TestAlertEpisodeRegistryMigratesV1ToPreservedUnscopedEvidence(t *testing.T)
 		t.Fatalf("unscoped v1 evidence became current authority: %+v ok=%v err=%v", snapshot, ok, err)
 	}
 	if _, err := newAlertEpisodeRegistry(t.Context(), store); err != nil {
-		t.Fatalf("migrated v2 registry did not survive restart: %v", err)
+		t.Fatalf("migrated v3 registry did not survive restart: %v", err)
+	}
+}
+
+func TestAlertEpisodeRegistryMigratesV2WithoutLosingOccurrenceIdentity(t *testing.T) {
+	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
+	defer store.Close()
+	registry, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 7, 21, 12, 40, 0, 0, time.UTC)
+	observation := alertRegistryObservation(t, "v2-migration", at, true)
+	observation.Source = rpc.AlertSourceRulebook
+	observation.Kind = rpc.AlertKindGovernance
+	observation.PresentationCode = rpc.AlertPresentationRulebookSingleNameExposure
+	observation.EpisodeKey, err = rpc.BuildAlertEpisodeKey(observation.Source, observation.Kind, "v2-migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverage := rpc.AlertCoverage{State: rpc.AlertCoverageComplete, Freshness: rpc.AlertCoverageCurrent, AsOf: at,
+		ExpectedSources: []rpc.AlertSource{rpc.AlertSourceRulebook}, CoveredSources: []rpc.AlertSource{rpc.AlertSourceRulebook}}
+	snapshot, err := registry.Apply(t.Context(), alertRegistryEvaluation(at, coverage, observation))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOccurrence := snapshot.Candidates[0].OccurrenceKey
+
+	raw, err := json.Marshal(registry.document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy["version"] = float64(2)
+	for _, scope := range legacy["scopes"].([]any) {
+		for _, episode := range scope.(map[string]any)["episodes"].([]any) {
+			record := episode.(map[string]any)
+			delete(record, "presentation_code")
+			record["delivery_preference"] = "unapproved"
+		}
+	}
+	legacyRaw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompareAndSwapStateDocument(t.Context(), corestore.StateDocumentCAS{
+		ScopeKey: daemonStateScope, Kind: alertEpisodeRegistryStateKind,
+		ExpectedRevision: registry.revision, JSON: legacyRaw,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := newAlertEpisodeRegistry(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := migrated.Snapshot(alertRegistryAuthority(), at)
+	if err != nil || !ok || len(got.Candidates) != 1 {
+		t.Fatalf("migrated snapshot=%+v ok=%v err=%v", got, ok, err)
+	}
+	if got.Candidates[0].OccurrenceKey != wantOccurrence || got.Candidates[0].PresentationCode != rpc.AlertPresentationRulebookLegacyCondition {
+		t.Fatalf("v2 lifecycle identity changed: %+v", got.Candidates[0])
+	}
+	persisted, ok, err := store.GetStateDocument(t.Context(), daemonStateScope, alertEpisodeRegistryStateKind)
+	if err != nil || !ok || strings.Contains(string(persisted.JSON), "delivery_preference") {
+		t.Fatalf("v2 delivery axis survived migration: ok=%v err=%v json=%s", ok, err, persisted.JSON)
 	}
 }
 
@@ -597,7 +666,7 @@ func alertRegistryObservation(t *testing.T, identity string, at time.Time, activ
 	}
 	return alertEpisodeObservation{
 		EpisodeKey: episode, Source: rpc.AlertSourceCanary, Kind: rpc.AlertKindPortfolioRisk,
-		Active: active, Severity: rpc.AlertSeverityWatch, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+		PresentationCode: rpc.AlertPresentationCanaryPortfolioStress, Active: active, Severity: rpc.AlertSeverityWatch,
 		EvidenceFingerprint: alertRegistryFingerprint("evidence-" + identity), EvidenceHealth: rpc.AlertEvidenceCurrent,
 		Destination: rpc.AlertDestinationAlerts, EvidenceAsOf: at, ObservedAt: at,
 		PolicyFingerprint: alertRegistryFingerprint("policy-v1"), ProducerDecisionReason: "classified_active",

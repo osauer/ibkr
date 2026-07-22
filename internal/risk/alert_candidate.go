@@ -15,7 +15,7 @@ import (
 // AlertCandidateSnapshotVersion identifies the scope-bound source-neutral
 // alert candidate wire contract. It does not approve routing or pageability.
 const (
-	AlertCandidateSnapshotVersion  = "alert-candidate-snapshot-v2"
+	AlertCandidateSnapshotVersion  = "alert-candidate-snapshot-v3"
 	alertEpisodeKeyPrefix          = "alert-episode-v1:"
 	alertOccurrenceKeyPrefix       = "alert-occurrence-v1:"
 	alertEvidenceFingerprintPrefix = "sha256:"
@@ -92,19 +92,54 @@ const (
 	AlertSeverityUrgent  AlertSeverity = "urgent"
 )
 
-// AlertDeliveryPreference is advisory input to app-owned delivery policy. The
-// zero value is invalid. Unapproved is explicitly non-pageable; Page is part of
-// the contract, but no constructor or evaluator in this package selects it.
-type AlertDeliveryPreference string
+// AlertPresentationCode is a closed, redacted copy key. Adapters may map it to
+// human text, but cannot receive or interpolate broker identifiers through it.
+type AlertPresentationCode string
 
-// AlertDeliveryUnapproved and the related constants express advisory delivery
-// policy without selecting a concrete target.
+// Alert presentation codes cover every producer-owned candidate class. The
+// generic condition codes exist only to preserve lifecycle identity while a
+// version-2 registry is upgraded; the next producer observation replaces them
+// with the precise code without opening a new occurrence.
 const (
-	AlertDeliveryUnapproved AlertDeliveryPreference = "unapproved"
-	AlertDeliveryRecordOnly AlertDeliveryPreference = "record_only"
-	AlertDeliveryInbox      AlertDeliveryPreference = "inbox"
-	AlertDeliveryDigest     AlertDeliveryPreference = "digest"
-	AlertDeliveryPage       AlertDeliveryPreference = "page"
+	AlertPresentationCanaryPortfolioStress            AlertPresentationCode = "canary_portfolio_stress"
+	AlertPresentationRegimeMarketStress               AlertPresentationCode = "regime_market_stress"
+	AlertPresentationRulebookSingleNameExposure       AlertPresentationCode = "rulebook_single_name_exposure"
+	AlertPresentationRulebookOptionLinePremium        AlertPresentationCode = "rulebook_option_line_premium"
+	AlertPresentationRulebookCashSellOnly             AlertPresentationCode = "rulebook_cash_sell_only"
+	AlertPresentationRulebookExtrinsicBudget          AlertPresentationCode = "rulebook_extrinsic_budget"
+	AlertPresentationRulebookExpiryRunway             AlertPresentationCode = "rulebook_expiry_runway"
+	AlertPresentationRulebookCatalystCoverage         AlertPresentationCode = "rulebook_catalyst_coverage"
+	AlertPresentationRulebookOverwriteEarnings        AlertPresentationCode = "rulebook_overwrite_earnings"
+	AlertPresentationRulebookEarningsSizeFreeze       AlertPresentationCode = "rulebook_earnings_size_freeze"
+	AlertPresentationRulebookRedOnGreen               AlertPresentationCode = "rulebook_red_on_green"
+	AlertPresentationRulebookWinnerTrim               AlertPresentationCode = "rulebook_winner_trim"
+	AlertPresentationRulebookGreenDayAction           AlertPresentationCode = "rulebook_green_day_action"
+	AlertPresentationRulebookHedgeIntegrity           AlertPresentationCode = "rulebook_hedge_integrity"
+	AlertPresentationRulebookExitDiscipline           AlertPresentationCode = "rulebook_exit_discipline"
+	AlertPresentationRulebookFXExposure               AlertPresentationCode = "rulebook_fx_exposure"
+	AlertPresentationProtectionOrphanedOrder          AlertPresentationCode = "protection_orphaned_order"
+	AlertPresentationProtectionReconciliationRequired AlertPresentationCode = "protection_reconciliation_required"
+	AlertPresentationOrderIntegrityMismatch           AlertPresentationCode = "order_integrity_mismatch"
+	AlertPresentationDataHealthGateway                AlertPresentationCode = "data_health_gateway"
+	AlertPresentationDataHealthStorage                AlertPresentationCode = "data_health_storage"
+	AlertPresentationDataHealthProposals              AlertPresentationCode = "data_health_proposals"
+	AlertPresentationDataHealthOpportunities          AlertPresentationCode = "data_health_opportunities"
+	AlertPresentationDataHealthDataFarms              AlertPresentationCode = "data_health_data_farms"
+	AlertPresentationDataHealthRegime                 AlertPresentationCode = "data_health_regime"
+	AlertPresentationDataHealthGamma                  AlertPresentationCode = "data_health_gamma"
+	AlertPresentationDataHealthQuality                AlertPresentationCode = "data_health_quality"
+	AlertPresentationRiskPolicyLimitWouldBlock        AlertPresentationCode = "risk_policy_limit_would_block"
+	AlertPresentationRiskPolicyDrawdownLatched        AlertPresentationCode = "risk_policy_drawdown_latched"
+	AlertPresentationRiskPolicyDrift                  AlertPresentationCode = "risk_policy_drift"
+	AlertPresentationReconciliationDue                AlertPresentationCode = "reconciliation_due"
+	AlertPresentationReconciliationException          AlertPresentationCode = "reconciliation_exception"
+	AlertPresentationReconciliationConfirmedFlow      AlertPresentationCode = "reconciliation_confirmed_flow"
+	AlertPresentationGovernanceMonthlyPulse           AlertPresentationCode = "governance_monthly_pulse"
+	AlertPresentationDeliveryHealth                   AlertPresentationCode = "delivery_health"
+	AlertPresentationRulebookLegacyCondition          AlertPresentationCode = "rulebook_condition"
+	AlertPresentationRiskPolicyLegacyCondition        AlertPresentationCode = "risk_policy_condition"
+	AlertPresentationReconciliationLegacyCondition    AlertPresentationCode = "reconciliation_condition"
+	AlertPresentationGovernanceLegacyCondition        AlertPresentationCode = "governance_condition"
 )
 
 // AlertEvidenceHealth describes whether a candidate's supporting observation
@@ -180,19 +215,34 @@ const (
 // page-worthy escalation, or use a display ID as authority. StateChangedAt is
 // the daemon's semantic transition time.
 type AlertCandidate struct {
-	EpisodeKey          string                  `json:"episode_key"`
-	OccurrenceKey       string                  `json:"occurrence_key"`
-	EvidenceFingerprint string                  `json:"evidence_fingerprint"`
-	Source              AlertSource             `json:"source"`
-	Kind                AlertKind               `json:"kind"`
-	State               AlertEpisodeState       `json:"state"`
-	Severity            AlertSeverity           `json:"severity"`
-	DeliveryPreference  AlertDeliveryPreference `json:"delivery_preference"`
-	EvidenceHealth      AlertEvidenceHealth     `json:"evidence_health"`
-	Destination         AlertDestination        `json:"destination"`
-	EvidenceAsOf        time.Time               `json:"evidence_as_of"`
-	StateChangedAt      time.Time               `json:"state_changed_at"`
-	ObservedAt          time.Time               `json:"observed_at"`
+	EpisodeKey          string                `json:"episode_key"`
+	OccurrenceKey       string                `json:"occurrence_key"`
+	EvidenceFingerprint string                `json:"evidence_fingerprint"`
+	Source              AlertSource           `json:"source"`
+	Kind                AlertKind             `json:"kind"`
+	PresentationCode    AlertPresentationCode `json:"presentation_code"`
+	State               AlertEpisodeState     `json:"state"`
+	Severity            AlertSeverity         `json:"severity"`
+	EvidenceHealth      AlertEvidenceHealth   `json:"evidence_health"`
+	Destination         AlertDestination      `json:"destination"`
+	EvidenceAsOf        time.Time             `json:"evidence_as_of"`
+	StateChangedAt      time.Time             `json:"state_changed_at"`
+	ObservedAt          time.Time             `json:"observed_at"`
+}
+
+// AlertSourceCoverage names the health of one expected producer in the same
+// snapshot as its candidates. Times are absent only before that producer has
+// been observed in the current authority scope.
+type AlertSourceCoverage struct {
+	Source         AlertSource         `json:"source"`
+	Status         string              `json:"status"`
+	Reason         string              `json:"reason"`
+	EvidenceHealth AlertEvidenceHealth `json:"evidence_health"`
+	InputAsOf      time.Time           `json:"input_as_of"`
+	ObservedAt     time.Time           `json:"observed_at"`
+	EvidenceAsOf   time.Time           `json:"evidence_as_of"`
+	FreshUntil     time.Time           `json:"fresh_until"`
+	Covered        bool                `json:"covered"`
 }
 
 // AlertCoverage makes the universe behind an empty candidate list explicit.
@@ -210,12 +260,13 @@ type AlertCoverage struct {
 // CurrentState is validated from candidates and coverage: an empty result is
 // Clear only with complete, current coverage; otherwise it is Unknown.
 type AlertCandidateSnapshot struct {
-	SchemaVersion  string             `json:"schema_version"`
-	AuthorityScope string             `json:"authority_scope"`
-	AsOf           time.Time          `json:"as_of"`
-	CurrentState   AlertSnapshotState `json:"current_state"`
-	Coverage       AlertCoverage      `json:"coverage"`
-	Candidates     []AlertCandidate   `json:"candidates"`
+	SchemaVersion  string                `json:"schema_version"`
+	AuthorityScope string                `json:"authority_scope"`
+	AsOf           time.Time             `json:"as_of"`
+	CurrentState   AlertSnapshotState    `json:"current_state"`
+	Coverage       AlertCoverage         `json:"coverage"`
+	Sources        []AlertSourceCoverage `json:"sources"`
+	Candidates     []AlertCandidate      `json:"candidates"`
 }
 
 // BuildAlertAuthorityScope binds private alert state to one normalized broker
@@ -354,14 +405,14 @@ func (candidate AlertCandidate) Validate() error {
 	if !validAlertKind(candidate.Kind) {
 		return errors.New("invalid alert candidate kind")
 	}
+	if !validAlertPresentationCode(candidate.Source, candidate.PresentationCode) {
+		return errors.New("invalid alert candidate presentation_code")
+	}
 	if !validAlertEpisodeState(candidate.State) {
 		return errors.New("invalid alert candidate state")
 	}
 	if !validAlertSeverity(candidate.Severity) {
 		return errors.New("invalid alert candidate severity")
-	}
-	if !validAlertDeliveryPreference(candidate.DeliveryPreference) {
-		return errors.New("invalid alert candidate delivery_preference")
 	}
 	if !validAlertEvidenceHealth(candidate.EvidenceHealth) {
 		return errors.New("invalid alert candidate evidence_health")
@@ -380,6 +431,44 @@ func (candidate AlertCandidate) Validate() error {
 	}
 	if candidate.State == AlertEpisodeRecovered && candidate.EvidenceHealth != AlertEvidenceCurrent {
 		return errors.New("recovered alert candidate requires current evidence")
+	}
+	return nil
+}
+
+// Validate checks one source row without interpreting producer-specific status
+// or reason codes. Those codes remain bounded lowercase identifiers and cannot
+// carry free text or private identity.
+func (source AlertSourceCoverage) Validate(snapshotAsOf time.Time) error {
+	if !validAlertSource(source.Source) {
+		return errors.New("invalid alert source coverage source")
+	}
+	if !validAlertCode(source.Status) || !validAlertCode(source.Reason) {
+		return errors.New("invalid alert source coverage status or reason")
+	}
+	if !validAlertEvidenceHealth(source.EvidenceHealth) {
+		return errors.New("invalid alert source coverage evidence_health")
+	}
+	if snapshotAsOf.IsZero() {
+		return errors.New("alert source coverage requires snapshot as_of")
+	}
+	allZero := source.InputAsOf.IsZero() && source.ObservedAt.IsZero() && source.EvidenceAsOf.IsZero() && source.FreshUntil.IsZero()
+	if allZero {
+		if source.Covered || source.EvidenceHealth != AlertEvidenceUnavailable {
+			return errors.New("unobserved alert source coverage must be unavailable and uncovered")
+		}
+		return nil
+	}
+	if source.InputAsOf.IsZero() || source.ObservedAt.IsZero() || source.EvidenceAsOf.IsZero() || source.FreshUntil.IsZero() {
+		return errors.New("observed alert source coverage requires all timestamps")
+	}
+	if source.InputAsOf.After(source.ObservedAt) || source.ObservedAt.After(snapshotAsOf) || source.EvidenceAsOf.After(snapshotAsOf) {
+		return errors.New("alert source coverage timestamps are out of order")
+	}
+	if source.FreshUntil.Before(source.ObservedAt) {
+		return errors.New("alert source coverage fresh_until precedes observed_at")
+	}
+	if source.Covered && source.EvidenceHealth != AlertEvidenceCurrent && source.EvidenceHealth != AlertEvidenceStale {
+		return errors.New("covered alert source requires current or stale evidence")
 	}
 	return nil
 }
@@ -457,6 +546,9 @@ func (snapshot AlertCandidateSnapshot) Validate() error {
 	if snapshot.Candidates == nil {
 		return errors.New("alert candidate snapshot requires candidates")
 	}
+	if snapshot.Sources == nil {
+		return errors.New("alert candidate snapshot requires sources")
+	}
 	if err := snapshot.Coverage.Validate(); err != nil {
 		return fmt.Errorf("invalid alert candidate snapshot coverage: %w", err)
 	}
@@ -469,6 +561,31 @@ func (snapshot AlertCandidateSnapshot) Validate() error {
 
 	expected, _ := alertSourceSet("expected_sources", snapshot.Coverage.ExpectedSources)
 	covered, _ := alertSourceSet("covered_sources", snapshot.Coverage.CoveredSources)
+	if len(snapshot.Sources) != len(expected) {
+		return errors.New("alert candidate snapshot requires one source row per expected source")
+	}
+	seenSources := make(map[AlertSource]struct{}, len(snapshot.Sources))
+	previousSource := AlertSource("")
+	for i, source := range snapshot.Sources {
+		if err := source.Validate(snapshot.AsOf); err != nil {
+			return fmt.Errorf("invalid alert candidate snapshot source at index %d: %w", i, err)
+		}
+		if _, ok := expected[source.Source]; !ok {
+			return fmt.Errorf("invalid alert candidate snapshot source at index %d: source is not expected", i)
+		}
+		if _, duplicate := seenSources[source.Source]; duplicate {
+			return fmt.Errorf("invalid alert candidate snapshot source at index %d: duplicate source", i)
+		}
+		if previousSource != "" && source.Source <= previousSource {
+			return errors.New("alert candidate snapshot sources are not canonical")
+		}
+		previousSource = source.Source
+		seenSources[source.Source] = struct{}{}
+		_, aggregateCovered := covered[source.Source]
+		if source.Covered != aggregateCovered {
+			return fmt.Errorf("invalid alert candidate snapshot source at index %d: covered state disagrees with aggregate", i)
+		}
+	}
 	seenEpisodes := make(map[string]struct{}, len(snapshot.Candidates))
 	seenOccurrences := make(map[string]struct{}, len(snapshot.Candidates))
 	hasActive := false
@@ -533,8 +650,8 @@ func (candidate *AlertCandidate) UnmarshalJSON(data []byte) error {
 	type wire AlertCandidate
 	var decoded wire
 	if err := decodeExactAlertJSONObject(data, []string{
-		"episode_key", "occurrence_key", "evidence_fingerprint", "source", "kind", "state", "severity",
-		"delivery_preference", "evidence_health", "destination", "evidence_as_of",
+		"episode_key", "occurrence_key", "evidence_fingerprint", "source", "kind", "presentation_code", "state", "severity",
+		"evidence_health", "destination", "evidence_as_of",
 		"state_changed_at", "observed_at",
 	}, &decoded); err != nil {
 		return err
@@ -544,6 +661,50 @@ func (candidate *AlertCandidate) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*candidate = value
+	return nil
+}
+
+// MarshalJSON validates source coverage before encoding it.
+func (source AlertSourceCoverage) MarshalJSON() ([]byte, error) {
+	// Snapshot validation supplies the authoritative upper time bound. Use the
+	// row's latest known time here so standalone encoding still rejects shape
+	// errors without inventing a later observation.
+	latest := source.ObservedAt
+	if source.EvidenceAsOf.After(latest) {
+		latest = source.EvidenceAsOf
+	}
+	if latest.IsZero() {
+		latest = time.Unix(0, 0).UTC()
+	}
+	if err := source.Validate(latest); err != nil {
+		return nil, err
+	}
+	type wire AlertSourceCoverage
+	return json.Marshal(wire(source))
+}
+
+// UnmarshalJSON rejects unknown or missing fields. Snapshot validation applies
+// the final timestamp and aggregate-coverage coherence checks.
+func (source *AlertSourceCoverage) UnmarshalJSON(data []byte) error {
+	type wire AlertSourceCoverage
+	var decoded wire
+	if err := decodeExactAlertJSONObject(data, []string{
+		"source", "status", "reason", "evidence_health", "input_as_of", "observed_at", "evidence_as_of", "fresh_until", "covered",
+	}, &decoded); err != nil {
+		return err
+	}
+	value := AlertSourceCoverage(decoded)
+	latest := value.ObservedAt
+	if value.EvidenceAsOf.After(latest) {
+		latest = value.EvidenceAsOf
+	}
+	if latest.IsZero() {
+		latest = time.Unix(0, 0).UTC()
+	}
+	if err := value.Validate(latest); err != nil {
+		return err
+	}
+	*source = value
 	return nil
 }
 
@@ -589,7 +750,7 @@ func (snapshot *AlertCandidateSnapshot) UnmarshalJSON(data []byte) error {
 	type wire AlertCandidateSnapshot
 	var decoded wire
 	if err := decodeExactAlertJSONObject(data, []string{
-		"schema_version", "authority_scope", "as_of", "current_state", "coverage", "candidates",
+		"schema_version", "authority_scope", "as_of", "current_state", "coverage", "sources", "candidates",
 	}, &decoded); err != nil {
 		return err
 	}
@@ -657,9 +818,48 @@ func validAlertSeverity(value AlertSeverity) bool {
 	return value == AlertSeverityObserve || value == AlertSeverityWatch || value == AlertSeverityAct || value == AlertSeverityUrgent
 }
 
-func validAlertDeliveryPreference(value AlertDeliveryPreference) bool {
-	return value == AlertDeliveryUnapproved || value == AlertDeliveryRecordOnly || value == AlertDeliveryInbox ||
-		value == AlertDeliveryDigest || value == AlertDeliveryPage
+func validAlertPresentationCode(source AlertSource, value AlertPresentationCode) bool {
+	switch source {
+	case AlertSourceCanary:
+		return value == AlertPresentationCanaryPortfolioStress
+	case AlertSourceRegime:
+		return value == AlertPresentationRegimeMarketStress
+	case AlertSourceRulebook:
+		switch value {
+		case AlertPresentationRulebookSingleNameExposure, AlertPresentationRulebookOptionLinePremium,
+			AlertPresentationRulebookCashSellOnly, AlertPresentationRulebookExtrinsicBudget,
+			AlertPresentationRulebookExpiryRunway, AlertPresentationRulebookCatalystCoverage,
+			AlertPresentationRulebookOverwriteEarnings, AlertPresentationRulebookEarningsSizeFreeze,
+			AlertPresentationRulebookRedOnGreen, AlertPresentationRulebookWinnerTrim,
+			AlertPresentationRulebookGreenDayAction, AlertPresentationRulebookHedgeIntegrity,
+			AlertPresentationRulebookExitDiscipline, AlertPresentationRulebookFXExposure,
+			AlertPresentationRulebookLegacyCondition:
+			return true
+		}
+	case AlertSourceRiskPolicy:
+		return value == AlertPresentationRiskPolicyLimitWouldBlock || value == AlertPresentationRiskPolicyDrawdownLatched ||
+			value == AlertPresentationRiskPolicyDrift || value == AlertPresentationRiskPolicyLegacyCondition
+	case AlertSourceProtection:
+		return value == AlertPresentationProtectionOrphanedOrder || value == AlertPresentationProtectionReconciliationRequired
+	case AlertSourceOrderIntegrity:
+		return value == AlertPresentationOrderIntegrityMismatch
+	case AlertSourceReconciliation:
+		return value == AlertPresentationReconciliationDue || value == AlertPresentationReconciliationException ||
+			value == AlertPresentationReconciliationConfirmedFlow || value == AlertPresentationReconciliationLegacyCondition
+	case AlertSourceGovernance:
+		return value == AlertPresentationGovernanceMonthlyPulse || value == AlertPresentationGovernanceLegacyCondition
+	case AlertSourceDataHealth:
+		switch value {
+		case AlertPresentationDataHealthGateway, AlertPresentationDataHealthStorage,
+			AlertPresentationDataHealthProposals, AlertPresentationDataHealthOpportunities,
+			AlertPresentationDataHealthDataFarms, AlertPresentationDataHealthRegime,
+			AlertPresentationDataHealthGamma, AlertPresentationDataHealthQuality:
+			return true
+		}
+	case AlertSourceDelivery:
+		return value == AlertPresentationDeliveryHealth
+	}
+	return false
 }
 
 func validAlertEvidenceHealth(value AlertEvidenceHealth) bool {
@@ -677,6 +877,19 @@ func validAlertCoverageState(value AlertCoverageState) bool {
 
 func validAlertCoverageFreshness(value AlertCoverageFreshness) bool {
 	return value == AlertCoverageCurrent || value == AlertCoverageStale || value == AlertCoverageUnknown
+}
+
+func validAlertCode(value string) bool {
+	if len(value) == 0 || len(value) > 64 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		c := value[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func decodeExactAlertJSONObject(data []byte, requiredKeys []string, destination any) error {

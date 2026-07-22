@@ -62,12 +62,12 @@ func TestAlertShadowHandlersAreScopedColdRedactedAndDeliveryInactive(t *testing.
 	if active.AuthorityScope != wantA || len(active.Candidates) != 1 || active.CurrentState != rpc.AlertSnapshotActive {
 		t.Fatalf("active scoped snapshot=%+v", active)
 	}
-	status, err := server.handleAlertShadowStatus(t.Context(), &rpc.Request{})
+	status, err := server.handleAlertStatus(t.Context(), &rpc.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Authority != alertShadowAuthority || status.DeliveryActive || len(status.ExpectedSources) != 9 {
-		t.Fatalf("shadow status=%+v", status)
+	if len(status.ExpectedSources) != 9 {
+		t.Fatalf("alert status=%+v", status)
 	}
 
 	rawSnapshot, err := json.Marshal(active)
@@ -361,17 +361,17 @@ func TestAlertShadowApprovedProducerIntegrationIsDurableAndRecordOnly(t *testing
 
 	snapshot, err := server.handleAlertCandidates(t.Context(), &rpc.Request{})
 	if err != nil || len(snapshot.Candidates) != 1 || snapshot.Candidates[0].Source != rpc.AlertSourceRegime ||
-		snapshot.Candidates[0].DeliveryPreference != rpc.AlertDeliveryUnapproved {
+		snapshot.Candidates[0].PresentationCode != rpc.AlertPresentationRegimeMarketStress {
 		t.Fatalf("approved producer snapshot=%+v err=%v", snapshot, err)
 	}
 	assertAlertShadowCoverage(t, snapshot.Coverage, []rpc.AlertSource{
 		rpc.AlertSourceRegime, rpc.AlertSourceProtection, rpc.AlertSourceDataHealth,
 	})
-	status, err := server.handleAlertShadowStatus(t.Context(), &rpc.Request{})
-	if err != nil || status.DeliveryActive {
-		t.Fatalf("shadow delivery changed: %+v err=%v", status, err)
+	status, err := server.handleAlertStatus(t.Context(), &rpc.Request{})
+	if err != nil {
+		t.Fatalf("alert status: %+v err=%v", status, err)
 	}
-	var protectionStatus *rpc.AlertShadowSourceStatus
+	var protectionStatus *rpc.AlertSourceStatus
 	for i := range status.Sources {
 		if status.Sources[i].Source == rpc.AlertSourceProtection {
 			protectionStatus = &status.Sources[i]

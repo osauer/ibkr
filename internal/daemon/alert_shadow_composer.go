@@ -869,11 +869,13 @@ func (c *alertShadowComposer) currentSnapshotLocked(scope alertShadowBrokerScope
 
 func (c *alertShadowComposer) projectProcessSnapshotLocked(snapshot rpc.AlertCandidateSnapshot, state *alertShadowScopeState, now time.Time) (rpc.AlertCandidateSnapshot, error) {
 	coverage := alertShadowCoverage(now, state.sources)
+	sources := alertSourceCoverageFromBatches(now, state.sources)
 	if now.Before(snapshot.AsOf) {
 		coverage = rpc.AlertCoverage{
 			State: rpc.AlertCoverageUnavailable, Freshness: rpc.AlertCoverageUnknown, AsOf: snapshot.AsOf,
 			ExpectedSources: append([]rpc.AlertSource(nil), coverage.ExpectedSources...), CoveredSources: []rpc.AlertSource{},
 		}
+		sources = unavailableAlertSourceCoverage(coverage.ExpectedSources)
 	}
 	covered := make(map[rpc.AlertSource]struct{}, len(coverage.CoveredSources))
 	for _, source := range coverage.CoveredSources {
@@ -895,6 +897,7 @@ func (c *alertShadowComposer) projectProcessSnapshotLocked(snapshot rpc.AlertCan
 		filtered = append(filtered, candidate)
 	}
 	snapshot.Coverage = coverage
+	snapshot.Sources = sources
 	snapshot.Candidates = filtered
 	snapshot.CurrentState = rpc.AlertSnapshotUnknown
 	for _, candidate := range filtered {
@@ -910,6 +913,30 @@ func (c *alertShadowComposer) projectProcessSnapshotLocked(snapshot rpc.AlertCan
 		return rpc.AlertCandidateSnapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func alertSourceCoverageFromBatches(asOf time.Time, sources map[rpc.AlertSource]alertShadowSourceBatch) []rpc.AlertSourceCoverage {
+	rows := make([]rpc.AlertSourceCoverage, 0, len(alertShadowExpectedSources))
+	for _, source := range alertShadowExpectedSources {
+		batch := sources[source]
+		row := rpc.AlertSourceCoverage{
+			Source: source, Status: batch.Status, Reason: batch.Reason, EvidenceHealth: batch.EvidenceHealth,
+			InputAsOf: batch.InputAsOf, ObservedAt: batch.ObservedAt, EvidenceAsOf: batch.EvidenceAsOf,
+			FreshUntil: batch.FreshUntil, Covered: batch.Covered,
+		}
+		if row.Status == "" {
+			row.Status, row.Reason, row.EvidenceHealth = alertShadowStatusNotObserved, alertShadowReasonNotObserved, rpc.AlertEvidenceUnavailable
+		}
+		if row.Covered && !row.FreshUntil.IsZero() && asOf.After(row.FreshUntil) {
+			row.Status, row.Reason = alertShadowStatusStale, alertShadowReasonProducerSilent
+			if row.EvidenceHealth != rpc.AlertEvidenceError {
+				row.EvidenceHealth = rpc.AlertEvidenceStale
+			}
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Source < rows[j].Source })
+	return rows
 }
 
 func (c *alertShadowComposer) recordApplyFailureLocked(ctx context.Context, state *alertShadowScopeState, at time.Time) {
@@ -1034,7 +1061,7 @@ func (c *alertShadowComposer) applyLocked(ctx context.Context, state *alertShado
 			}
 			observations = append(observations, alertEpisodeObservation{
 				EpisodeKey: candidate.EpisodeKey, Source: candidate.Source, Kind: candidate.Kind,
-				Active: false, Severity: severity, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+				PresentationCode: candidate.PresentationCode, Active: false, Severity: severity,
 				EvidenceFingerprint: evidenceFingerprint, EvidenceHealth: batch.EvidenceHealth,
 				Destination: destination, EvidenceAsOf: batch.EvidenceAsOf, ObservedAt: evaluationAt,
 				PolicyFingerprint: batch.PolicyFingerprint, ProducerDecisionReason: reason,
@@ -1173,7 +1200,8 @@ func alertShadowMapRegime(scope alertShadowBrokerScope, result rpc.RegimeSnapsho
 	}
 	batch.Observations = append(batch.Observations, alertEpisodeObservation{
 		EpisodeKey: episodeKey, Source: rpc.AlertSourceRegime, Kind: rpc.AlertKindMarketState, Active: true,
-		EscalationFingerprint: escalation, Severity: severity, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+		PresentationCode:      rpc.AlertPresentationRegimeMarketStress,
+		EscalationFingerprint: escalation, Severity: severity,
 		EvidenceFingerprint: result.Fingerprint.Key, EvidenceHealth: batch.EvidenceHealth,
 		Destination: rpc.AlertDestinationAlerts, EvidenceAsOf: batch.EvidenceAsOf, ObservedAt: observedAt.UTC(),
 		PolicyFingerprint: policyFingerprint, ProducerDecisionReason: alertShadowDecisionRegimeActive,
@@ -1456,7 +1484,7 @@ func alertShadowMapProtection(input alertShadowProtectionInput, observedAt time.
 		}
 		batch.Observations = append(batch.Observations, alertEpisodeObservation{
 			EpisodeKey: episodeKey, Source: rpc.AlertSourceProtection, Kind: rpc.AlertKindProtectionGap,
-			Active: true, Severity: rpc.AlertSeverityWatch, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+			PresentationCode: alertProtectionPresentationCode(fact), Active: true, Severity: rpc.AlertSeverityWatch,
 			EvidenceFingerprint: evidenceFingerprint, EvidenceHealth: rpc.AlertEvidenceCurrent,
 			Destination: rpc.AlertDestinationAlerts, EvidenceAsOf: evidenceAsOf, ObservedAt: observedAt.UTC(),
 			PolicyFingerprint: policyFingerprint, ProducerDecisionReason: alertShadowDecisionProtectionActive,
@@ -1512,6 +1540,13 @@ func alertShadowProtectionFacts(summary rpc.ProtectionCoverageSummary) ([]alertS
 	}
 	sort.Slice(facts, func(i, j int) bool { return facts[i].Underlying < facts[j].Underlying })
 	return facts, true
+}
+
+func alertProtectionPresentationCode(fact alertShadowProtectionFact) rpc.AlertPresentationCode {
+	if slices.Contains(fact.States, rpc.ProtectionCoverageStateReconcileRequired) {
+		return rpc.AlertPresentationProtectionReconciliationRequired
+	}
+	return rpc.AlertPresentationProtectionOrphanedOrder
 }
 
 func alertShadowProtectionSummaryValid(summary rpc.ProtectionCoverageSummary) bool {
@@ -1678,7 +1713,7 @@ func alertShadowMapDataHealth(input alertShadowDataHealthInput, observedAt time.
 		}
 		batch.Observations = append(batch.Observations, alertEpisodeObservation{
 			EpisodeKey: episodeKey, Source: rpc.AlertSourceDataHealth, Kind: rpc.AlertKindDataHealth,
-			Active: true, Severity: rpc.AlertSeverityWatch, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+			PresentationCode: alertDataHealthPresentationCode(fact.Root), Active: true, Severity: rpc.AlertSeverityWatch,
 			EvidenceFingerprint: evidenceFingerprint, EvidenceHealth: rpc.AlertEvidenceCurrent,
 			Destination: rpc.AlertDestinationAlerts, EvidenceAsOf: fact.EvidenceAsOf, ObservedAt: observedAt.UTC(),
 			PolicyFingerprint: policyFingerprint, ProducerDecisionReason: alertShadowDecisionDataHealthActive,
@@ -1881,6 +1916,27 @@ func alertShadowDataHealthSemanticFacts(facts []alertShadowDataHealthFact) []ale
 	return out
 }
 
+func alertDataHealthPresentationCode(root string) rpc.AlertPresentationCode {
+	switch root {
+	case "gateway":
+		return rpc.AlertPresentationDataHealthGateway
+	case "subsystem:storage":
+		return rpc.AlertPresentationDataHealthStorage
+	case "subsystem:proposals":
+		return rpc.AlertPresentationDataHealthProposals
+	case "subsystem:opportunities":
+		return rpc.AlertPresentationDataHealthOpportunities
+	case "data_farms":
+		return rpc.AlertPresentationDataHealthDataFarms
+	case "quality:regime":
+		return rpc.AlertPresentationDataHealthRegime
+	case "quality:gamma":
+		return rpc.AlertPresentationDataHealthGamma
+	default:
+		return rpc.AlertPresentationDataHealthQuality
+	}
+}
+
 func alertShadowMapCanary(scope alertShadowBrokerScope, result rpc.CanaryResult, observedAt time.Time) alertShadowSourceBatch {
 	batch := alertShadowSourceBatch{
 		Source: rpc.AlertSourceCanary, Status: alertShadowStatusUnavailable, Reason: alertShadowReasonSourceHealthUnavailable,
@@ -1947,7 +2003,7 @@ func alertShadowMapCanary(scope alertShadowBrokerScope, result rpc.CanaryResult,
 	}
 	batch.Observations = append(batch.Observations, alertEpisodeObservation{
 		EpisodeKey: episodeKey, Source: rpc.AlertSourceCanary, Kind: rpc.AlertKindPortfolioRisk,
-		Active: true, Severity: severity, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+		PresentationCode: rpc.AlertPresentationCanaryPortfolioStress, Active: true, Severity: severity,
 		EvidenceFingerprint: result.Fingerprint.Key, EvidenceHealth: batch.EvidenceHealth,
 		Destination: rpc.AlertDestinationAlerts, EvidenceAsOf: batch.EvidenceAsOf, ObservedAt: observedAt.UTC(),
 		PolicyFingerprint: result.PolicyFingerprint.Key, ProducerDecisionReason: alertShadowDecisionLegacyGateActive,
@@ -2234,7 +2290,7 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 		}
 		batch.Observations = append(batch.Observations, alertEpisodeObservation{
 			EpisodeKey: episodeKey, Source: rpc.AlertSourceRulebook, Kind: rpc.AlertKindGovernance,
-			Active: true, Severity: severity, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+			PresentationCode: alertRulebookPresentationCode(id), Active: true, Severity: severity,
 			EvidenceFingerprint: evidenceFingerprint, EvidenceHealth: worst, Destination: rpc.AlertDestinationMonitor,
 			EvidenceAsOf: result.AsOf.UTC(), ObservedAt: observedAt.UTC(), PolicyFingerprint: result.PolicyFingerprint.Key,
 			ProducerDecisionReason: alertShadowDecisionRulebookActive,
@@ -2265,6 +2321,41 @@ func alertShadowCanonicalRulebookRow(id string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func alertRulebookPresentationCode(id string) rpc.AlertPresentationCode {
+	switch id {
+	case risk.RuleSingleNameExposure:
+		return rpc.AlertPresentationRulebookSingleNameExposure
+	case risk.RuleOptionLinePremium:
+		return rpc.AlertPresentationRulebookOptionLinePremium
+	case risk.RuleCashSellOnly:
+		return rpc.AlertPresentationRulebookCashSellOnly
+	case risk.RuleExtrinsicBudget:
+		return rpc.AlertPresentationRulebookExtrinsicBudget
+	case risk.RuleExpiryRunway:
+		return rpc.AlertPresentationRulebookExpiryRunway
+	case risk.RuleCatalystCoverage:
+		return rpc.AlertPresentationRulebookCatalystCoverage
+	case risk.RuleOverwriteEarnings:
+		return rpc.AlertPresentationRulebookOverwriteEarnings
+	case risk.RuleEarningsSizeFreeze:
+		return rpc.AlertPresentationRulebookEarningsSizeFreeze
+	case risk.RuleRedOnGreen:
+		return rpc.AlertPresentationRulebookRedOnGreen
+	case risk.RuleWinnerTrim:
+		return rpc.AlertPresentationRulebookWinnerTrim
+	case risk.RuleGreenDayAction:
+		return rpc.AlertPresentationRulebookGreenDayAction
+	case risk.RuleHedgeIntegrity:
+		return rpc.AlertPresentationRulebookHedgeIntegrity
+	case risk.RuleExitDiscipline:
+		return rpc.AlertPresentationRulebookExitDiscipline
+	case risk.RuleFXExposure:
+		return rpc.AlertPresentationRulebookFXExposure
+	default:
+		return ""
+	}
 }
 
 func alertShadowRulebookSafeNotEvaluated(row risk.RuleRow) bool {
@@ -2352,7 +2443,7 @@ func alertShadowMapOrderIntegrity(scope alertShadowBrokerScope, input orderInteg
 		}
 		batch.Observations = append(batch.Observations, alertEpisodeObservation{
 			EpisodeKey: episodeKey, Source: rpc.AlertSourceOrderIntegrity, Kind: rpc.AlertKindOrderIntegrity,
-			Active: true, Severity: rpc.AlertSeverityUrgent, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+			PresentationCode: rpc.AlertPresentationOrderIntegrityMismatch, Active: true, Severity: rpc.AlertSeverityUrgent,
 			EvidenceFingerprint: evidenceFingerprint, EvidenceHealth: rpc.AlertEvidenceCurrent,
 			Destination: rpc.AlertDestinationAlerts, EvidenceAsOf: evidenceAsOf, ObservedAt: observedAt.UTC(),
 			PolicyFingerprint: policyFingerprint, ProducerDecisionReason: alertShadowDecisionOrderIntegrityActive,
@@ -2497,7 +2588,7 @@ func alertShadowMapNudges(input alertShadowNudgeInput, observedAt time.Time) (ma
 		batch := batches[source]
 		observation := alertEpisodeObservation{
 			EpisodeKey: episodeKey, Source: source, Kind: kind, Active: true, Severity: severity,
-			DeliveryPreference: rpc.AlertDeliveryUnapproved, EvidenceFingerprint: canonical.Fingerprint,
+			PresentationCode: alertNudgePresentationCode(canonical.Kind), EvidenceFingerprint: canonical.Fingerprint,
 			EvidenceHealth: candidateEvidenceHealth, Destination: destination, EvidenceAsOf: canonical.OccurredAt.UTC(),
 			ObservedAt: observedAt.UTC(), PolicyFingerprint: policyFingerprint.Key,
 			ProducerDecisionReason: alertShadowDecisionNudgeActive,
@@ -2651,6 +2742,27 @@ func alertShadowNudgeOwner(kind string) (rpc.AlertSource, rpc.AlertKind, bool) {
 		return rpc.AlertSourceGovernance, rpc.AlertKindGovernance, true
 	default:
 		return "", "", false
+	}
+}
+
+func alertNudgePresentationCode(kind string) rpc.AlertPresentationCode {
+	switch kind {
+	case rpc.NudgeKindShadowWouldBlock:
+		return rpc.AlertPresentationRiskPolicyLimitWouldBlock
+	case rpc.NudgeKindDrawdownLatched:
+		return rpc.AlertPresentationRiskPolicyDrawdownLatched
+	case rpc.NudgeKindPolicyDrift:
+		return rpc.AlertPresentationRiskPolicyDrift
+	case rpc.NudgeKindReconcileDue:
+		return rpc.AlertPresentationReconciliationDue
+	case rpc.NudgeKindReconcileException:
+		return rpc.AlertPresentationReconciliationException
+	case rpc.NudgeKindConfirmedFlow:
+		return rpc.AlertPresentationReconciliationConfirmedFlow
+	case rpc.NudgeKindMonthlyPulse:
+		return rpc.AlertPresentationGovernanceMonthlyPulse
+	default:
+		return ""
 	}
 }
 

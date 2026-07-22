@@ -47,7 +47,7 @@ func TestAlertShadowComposerCanaryNormalStressRecoveryReopenAndMetrics(t *testin
 	opening := opened.Candidates[0]
 	if opening.Source != rpc.AlertSourceCanary || opening.Kind != rpc.AlertKindPortfolioRisk ||
 		opening.State != rpc.AlertEpisodeOpen || opening.Severity != rpc.AlertSeverityWatch ||
-		opening.DeliveryPreference != rpc.AlertDeliveryUnapproved || opening.Destination != rpc.AlertDestinationAlerts {
+		opening.PresentationCode != rpc.AlertPresentationCanaryPortfolioStress || opening.Destination != rpc.AlertDestinationAlerts {
 		t.Fatalf("unexpected Canary candidate: %+v", opening)
 	}
 
@@ -486,7 +486,7 @@ func TestAlertShadowComposerProtectionAlertsOnlyOnReconciliationFacts(t *testing
 			ByUnderlying: []rpc.ProtectionCoverageRow{{Underlying: "AAA", State: rpc.ProtectionCoverageStateReconcileRequired, Orders: []rpc.ProtectionCoverageOrder{issueOrder}}}}}
 	opened, err := composer.ObserveProtection(t.Context(), issue)
 	if err != nil || len(opened.Candidates) != 1 || opened.Candidates[0].Kind != rpc.AlertKindProtectionGap ||
-		opened.Candidates[0].Severity != rpc.AlertSeverityWatch || opened.Candidates[0].DeliveryPreference != rpc.AlertDeliveryUnapproved {
+		opened.Candidates[0].Severity != rpc.AlertSeverityWatch || opened.Candidates[0].PresentationCode != rpc.AlertPresentationProtectionReconciliationRequired {
 		t.Fatalf("protection issue=%+v err=%v", opened, err)
 	}
 
@@ -622,7 +622,7 @@ func TestAlertShadowComposerDataHealthUsesRootIncidentsAndNotDueIsClear(t *testi
 	}
 	for _, candidate := range opened.Candidates {
 		if candidate.Source != rpc.AlertSourceDataHealth || candidate.Kind != rpc.AlertKindDataHealth ||
-			candidate.Severity != rpc.AlertSeverityWatch || candidate.DeliveryPreference != rpc.AlertDeliveryUnapproved {
+			candidate.Severity != rpc.AlertSeverityWatch || candidate.PresentationCode == "" {
 			t.Fatalf("invalid data-health candidate=%+v", candidate)
 		}
 	}
@@ -845,9 +845,14 @@ func TestAlertShadowComposerNudgeOwnershipRecoveryAndNoDelivery(t *testing.T) {
 		rpc.AlertSourceReconciliation: rpc.AlertKindReconciliationException,
 		rpc.AlertSourceGovernance:     rpc.AlertKindGovernance,
 	}
+	wantPresentation := map[rpc.AlertSource]rpc.AlertPresentationCode{
+		rpc.AlertSourceRiskPolicy:     rpc.AlertPresentationRiskPolicyDrift,
+		rpc.AlertSourceReconciliation: rpc.AlertPresentationReconciliationException,
+		rpc.AlertSourceGovernance:     rpc.AlertPresentationGovernanceMonthlyPulse,
+	}
 	occurrences := make(map[rpc.AlertSource]string)
 	for _, candidate := range opened.Candidates {
-		if candidate.Kind != wantKind[candidate.Source] || candidate.DeliveryPreference != rpc.AlertDeliveryUnapproved {
+		if candidate.Kind != wantKind[candidate.Source] || candidate.PresentationCode != wantPresentation[candidate.Source] {
 			t.Fatalf("Nudge ownership/delivery mismatch: %+v", candidate)
 		}
 		occurrences[candidate.Source] = candidate.OccurrenceKey
@@ -863,7 +868,7 @@ func TestAlertShadowComposerNudgeOwnershipRecoveryAndNoDelivery(t *testing.T) {
 		t.Fatalf("Nudge recovery snapshot=%+v", recovered)
 	}
 	for _, candidate := range recovered.Candidates {
-		if candidate.State != rpc.AlertEpisodeRecovered || candidate.OccurrenceKey != occurrences[candidate.Source] || candidate.DeliveryPreference != rpc.AlertDeliveryUnapproved {
+		if candidate.State != rpc.AlertEpisodeRecovered || candidate.OccurrenceKey != occurrences[candidate.Source] || candidate.PresentationCode != wantPresentation[candidate.Source] {
 			t.Fatalf("Nudge recovery invalid: %+v", candidate)
 		}
 	}
@@ -1181,7 +1186,7 @@ func TestAlertShadowComposerRestartFacingEmptyAndConcurrentReplay(t *testing.T) 
 		t.Fatalf("concurrent duplicate inputs=%d want %d", canary.Measurements.DuplicateInputs, workers-1)
 	}
 	final, ok, err := restarted.Snapshot(scope)
-	if err != nil || !ok || len(final.Candidates) != 1 || final.Candidates[0].DeliveryPreference != rpc.AlertDeliveryUnapproved {
+	if err != nil || !ok || len(final.Candidates) != 1 || final.Candidates[0].PresentationCode != rpc.AlertPresentationCanaryPortfolioStress {
 		t.Fatalf("concurrent replay snapshot=%+v ok=%v err=%v", final, ok, err)
 	}
 }

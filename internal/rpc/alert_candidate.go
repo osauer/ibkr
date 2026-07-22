@@ -14,8 +14,8 @@ type (
 	AlertEpisodeState = risk.AlertEpisodeState
 	// AlertSeverity is the stable urgency classification of a candidate.
 	AlertSeverity = risk.AlertSeverity
-	// AlertDeliveryPreference is producer advice, not delivery authorization.
-	AlertDeliveryPreference = risk.AlertDeliveryPreference
+	// AlertPresentationCode is the closed redacted copy key for a candidate.
+	AlertPresentationCode = risk.AlertPresentationCode
 	// AlertEvidenceHealth reports the quality of evidence behind a candidate.
 	AlertEvidenceHealth = risk.AlertEvidenceHealth
 	// AlertDestination identifies an allowed presentation surface.
@@ -24,6 +24,8 @@ type (
 	AlertCoverageState = risk.AlertCoverageState
 	// AlertCoverageFreshness reports whether coverage evidence is current.
 	AlertCoverageFreshness = risk.AlertCoverageFreshness
+	// AlertSourceCoverage reports one expected producer's current evidence state.
+	AlertSourceCoverage = risk.AlertSourceCoverage
 	// AlertSnapshotState distinguishes conclusively clear, active, and unknown snapshots.
 	AlertSnapshotState = risk.AlertSnapshotState
 	// AlertCandidate is the shared pure-risk candidate contract.
@@ -72,11 +74,45 @@ const (
 	AlertSeverityAct     = risk.AlertSeverityAct
 	AlertSeverityUrgent  = risk.AlertSeverityUrgent
 
-	AlertDeliveryUnapproved = risk.AlertDeliveryUnapproved
-	AlertDeliveryRecordOnly = risk.AlertDeliveryRecordOnly
-	AlertDeliveryInbox      = risk.AlertDeliveryInbox
-	AlertDeliveryDigest     = risk.AlertDeliveryDigest
-	AlertDeliveryPage       = risk.AlertDeliveryPage
+	AlertPresentationCanaryPortfolioStress            = risk.AlertPresentationCanaryPortfolioStress
+	AlertPresentationRegimeMarketStress               = risk.AlertPresentationRegimeMarketStress
+	AlertPresentationRulebookSingleNameExposure       = risk.AlertPresentationRulebookSingleNameExposure
+	AlertPresentationRulebookOptionLinePremium        = risk.AlertPresentationRulebookOptionLinePremium
+	AlertPresentationRulebookCashSellOnly             = risk.AlertPresentationRulebookCashSellOnly
+	AlertPresentationRulebookExtrinsicBudget          = risk.AlertPresentationRulebookExtrinsicBudget
+	AlertPresentationRulebookExpiryRunway             = risk.AlertPresentationRulebookExpiryRunway
+	AlertPresentationRulebookCatalystCoverage         = risk.AlertPresentationRulebookCatalystCoverage
+	AlertPresentationRulebookOverwriteEarnings        = risk.AlertPresentationRulebookOverwriteEarnings
+	AlertPresentationRulebookEarningsSizeFreeze       = risk.AlertPresentationRulebookEarningsSizeFreeze
+	AlertPresentationRulebookRedOnGreen               = risk.AlertPresentationRulebookRedOnGreen
+	AlertPresentationRulebookWinnerTrim               = risk.AlertPresentationRulebookWinnerTrim
+	AlertPresentationRulebookGreenDayAction           = risk.AlertPresentationRulebookGreenDayAction
+	AlertPresentationRulebookHedgeIntegrity           = risk.AlertPresentationRulebookHedgeIntegrity
+	AlertPresentationRulebookExitDiscipline           = risk.AlertPresentationRulebookExitDiscipline
+	AlertPresentationRulebookFXExposure               = risk.AlertPresentationRulebookFXExposure
+	AlertPresentationProtectionOrphanedOrder          = risk.AlertPresentationProtectionOrphanedOrder
+	AlertPresentationProtectionReconciliationRequired = risk.AlertPresentationProtectionReconciliationRequired
+	AlertPresentationOrderIntegrityMismatch           = risk.AlertPresentationOrderIntegrityMismatch
+	AlertPresentationDataHealthGateway                = risk.AlertPresentationDataHealthGateway
+	AlertPresentationDataHealthStorage                = risk.AlertPresentationDataHealthStorage
+	AlertPresentationDataHealthProposals              = risk.AlertPresentationDataHealthProposals
+	AlertPresentationDataHealthOpportunities          = risk.AlertPresentationDataHealthOpportunities
+	AlertPresentationDataHealthDataFarms              = risk.AlertPresentationDataHealthDataFarms
+	AlertPresentationDataHealthRegime                 = risk.AlertPresentationDataHealthRegime
+	AlertPresentationDataHealthGamma                  = risk.AlertPresentationDataHealthGamma
+	AlertPresentationDataHealthQuality                = risk.AlertPresentationDataHealthQuality
+	AlertPresentationRiskPolicyLimitWouldBlock        = risk.AlertPresentationRiskPolicyLimitWouldBlock
+	AlertPresentationRiskPolicyDrawdownLatched        = risk.AlertPresentationRiskPolicyDrawdownLatched
+	AlertPresentationRiskPolicyDrift                  = risk.AlertPresentationRiskPolicyDrift
+	AlertPresentationReconciliationDue                = risk.AlertPresentationReconciliationDue
+	AlertPresentationReconciliationException          = risk.AlertPresentationReconciliationException
+	AlertPresentationReconciliationConfirmedFlow      = risk.AlertPresentationReconciliationConfirmedFlow
+	AlertPresentationGovernanceMonthlyPulse           = risk.AlertPresentationGovernanceMonthlyPulse
+	AlertPresentationDeliveryHealth                   = risk.AlertPresentationDeliveryHealth
+	AlertPresentationRulebookLegacyCondition          = risk.AlertPresentationRulebookLegacyCondition
+	AlertPresentationRiskPolicyLegacyCondition        = risk.AlertPresentationRiskPolicyLegacyCondition
+	AlertPresentationReconciliationLegacyCondition    = risk.AlertPresentationReconciliationLegacyCondition
+	AlertPresentationGovernanceLegacyCondition        = risk.AlertPresentationGovernanceLegacyCondition
 
 	AlertEvidenceCurrent     = risk.AlertEvidenceCurrent
 	AlertEvidencePartial     = risk.AlertEvidencePartial

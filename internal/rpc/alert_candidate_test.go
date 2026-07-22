@@ -22,9 +22,9 @@ func TestAlertCandidateRPCTypesAreLosslessAliases(t *testing.T) {
 		EvidenceFingerprint: "sha256:" + strings.Repeat("a", 64),
 		Source:              risk.AlertSourceRegime,
 		Kind:                risk.AlertKindMarketState,
+		PresentationCode:    risk.AlertPresentationRegimeMarketStress,
 		State:               risk.AlertEpisodeOpen,
 		Severity:            risk.AlertSeverityWatch,
-		DeliveryPreference:  risk.AlertDeliveryUnapproved,
 		EvidenceHealth:      risk.AlertEvidenceCurrent,
 		Destination:         risk.AlertDestinationMonitor,
 		EvidenceAsOf:        now.Add(-time.Minute),
@@ -56,9 +56,9 @@ func TestAlertCandidateRPCJSONUsesRiskValidation(t *testing.T) {
 		EvidenceFingerprint: "sha256:" + strings.Repeat("b", 64),
 		Source:              AlertSourceRegime,
 		Kind:                AlertKindMarketState,
+		PresentationCode:    AlertPresentationRegimeMarketStress,
 		State:               AlertEpisodeOpen,
 		Severity:            AlertSeverityWatch,
-		DeliveryPreference:  AlertDeliveryUnapproved,
 		EvidenceHealth:      AlertEvidenceCurrent,
 		Destination:         AlertDestinationMonitor,
 		EvidenceAsOf:        now.Add(-time.Minute),
@@ -83,6 +83,10 @@ func TestAlertCandidateRPCJSONUsesRiskValidation(t *testing.T) {
 			ExpectedSources: []AlertSource{AlertSourceRegime},
 			CoveredSources:  []AlertSource{AlertSourceRegime},
 		},
+		Sources: []AlertSourceCoverage{{
+			Source: AlertSourceRegime, Status: "current", Reason: "current", EvidenceHealth: AlertEvidenceCurrent,
+			InputAsOf: now, ObservedAt: now, EvidenceAsOf: now, FreshUntil: now.Add(time.Minute), Covered: true,
+		}},
 		Candidates: []AlertCandidate{candidate},
 	}
 	raw, err := json.Marshal(snapshot)

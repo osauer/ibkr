@@ -15,8 +15,6 @@ const (
 	alertShadowDataHealthPendingTransitions = 256
 )
 
-const alertShadowAuthority = "shadow"
-
 type alertShadowDataHealthPending struct {
 	Input       alertShadowDataHealthInput
 	Fingerprint string
@@ -46,11 +44,11 @@ func (s *Server) handleAlertCandidates(ctx context.Context, req *rpc.Request) (*
 		}
 	}
 	if s == nil || s.alertShadow == nil {
-		return nil, errors.New("alert shadow authority is unavailable")
+		return nil, errors.New("alert authority is unavailable")
 	}
 	scope, err := newAlertShadowBrokerScope(s.currentBrokerStateScope())
 	if err != nil {
-		return nil, errors.New("alert shadow authority scope is unavailable")
+		return nil, errors.New("alert authority scope is unavailable")
 	}
 	snapshot, ok, err := s.alertShadow.Snapshot(scope)
 	if err != nil {
@@ -78,43 +76,43 @@ func unavailableAlertCandidateSnapshot(asOf time.Time, authorityScope string) rp
 			State: rpc.AlertCoverageUnavailable, Freshness: rpc.AlertCoverageUnknown, AsOf: asOf,
 			ExpectedSources: alertShadowExpectedSourceSlice(), CoveredSources: []rpc.AlertSource{},
 		},
+		Sources:    unavailableAlertSourceCoverage(alertShadowExpectedSourceSlice()),
 		Candidates: []rpc.AlertCandidate{},
 	}
 }
 
-func (s *Server) handleAlertShadowStatus(ctx context.Context, req *rpc.Request) (*rpc.AlertShadowStatusResult, error) {
+func (s *Server) handleAlertStatus(ctx context.Context, req *rpc.Request) (*rpc.AlertStatusResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(req.Params) > 0 {
-		var params rpc.AlertShadowStatusParams
+		var params rpc.AlertStatusParams
 		if err := decodeParams(req.Params, &params); err != nil {
 			return nil, err
 		}
 	}
 	if s == nil || s.alertShadow == nil {
-		return nil, errors.New("alert shadow authority is unavailable")
+		return nil, errors.New("alert authority is unavailable")
 	}
 	scope, err := newAlertShadowBrokerScope(s.currentBrokerStateScope())
 	if err != nil {
-		return nil, errors.New("alert shadow authority scope is unavailable")
+		return nil, errors.New("alert authority scope is unavailable")
 	}
 	status := s.alertShadow.Status(scope)
-	result := &rpc.AlertShadowStatusResult{
-		AsOf: status.AsOf, Authority: alertShadowAuthority, DeliveryActive: false,
+	result := &rpc.AlertStatusResult{
+		AsOf:            status.AsOf,
 		ExpectedSources: append([]rpc.AlertSource(nil), status.ExpectedSources...),
 		Evaluations:     status.Evaluations, RegistryApplyFailures: status.RegistryApplyFailures,
 		Equivocations: status.Equivocations, LastErrorCode: status.LastErrorCode,
-		HumanPrecision: status.HumanPrecision, HumanRecall: status.HumanRecall,
-		Sources: make([]rpc.AlertShadowSourceStatus, 0, len(status.Sources)),
+		Sources: make([]rpc.AlertSourceStatus, 0, len(status.Sources)),
 	}
 	for _, source := range status.Sources {
 		m := source.Measurements
-		result.Sources = append(result.Sources, rpc.AlertShadowSourceStatus{
+		result.Sources = append(result.Sources, rpc.AlertSourceStatus{
 			Source: source.Source, Status: source.Status, Reason: source.Reason,
 			AuthorityUniverse: source.AuthorityUniverse,
 			InputAsOf:         source.InputAsOf, ObservedAt: source.ObservedAt, Covered: source.Covered, Active: source.Active,
-			Measurements: rpc.AlertShadowMeasurements{
+			Measurements: rpc.AlertMeasurements{
 				Evaluations: m.Evaluations, CoveredEvaluations: m.CoveredEvaluations,
 				ActiveEvaluations: m.ActiveEvaluations, ActiveObservations: m.ActiveObservations,
 				EpisodesOpened: m.EpisodesOpened, EpisodesEscalated: m.EpisodesEscalated,

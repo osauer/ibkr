@@ -2625,8 +2625,8 @@ func (s *Server) dispatch(ctx context.Context, req *rpc.Request, enc *json.Encod
 		s.unary(req, enc, func() (any, error) { return s.handleRegimeSnapshot(ctx, req) })
 	case rpc.MethodAlertCandidates:
 		s.unary(req, enc, func() (any, error) { return s.handleAlertCandidates(ctx, req) })
-	case rpc.MethodAlertShadowStatus:
-		s.unary(req, enc, func() (any, error) { return s.handleAlertShadowStatus(ctx, req) })
+	case rpc.MethodAlertStatus:
+		s.unary(req, enc, func() (any, error) { return s.handleAlertStatus(ctx, req) })
 	case rpc.MethodRegimeHistory:
 		s.unary(req, enc, func() (any, error) { return s.handleRegimeHistory(req) })
 	case rpc.MethodRulesHistory:
@@ -2790,7 +2790,7 @@ func unaryDeadline(method string) time.Duration {
 		return 30 * time.Second
 	case rpc.MethodTechnical:
 		return 75 * time.Second
-	case rpc.MethodMarketCalendar, rpc.MethodBreadthSPX, rpc.MethodAlertCandidates, rpc.MethodAlertShadowStatus:
+	case rpc.MethodMarketCalendar, rpc.MethodBreadthSPX, rpc.MethodAlertCandidates, rpc.MethodAlertStatus:
 		// 2 s — both handlers are pure projections of in-process data.
 		// handleMarketCalendar reads embedded official schedules;
 		// handleBreadthSPX reads in-memory engine state (Get() +
