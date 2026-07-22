@@ -538,6 +538,9 @@ func TestRulebookAccountSourceHealthMissingDailyPnLPostCloseIsNotDue(t *testing.
 	completedAt := time.Date(2026, 7, 21, 21, 0, 2, 0, time.UTC) // Tuesday 17:00 ET.
 	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
 	account := &rpc.AccountResult{AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: 10000}
+	account.DailyPnLObservation = &rpc.DailyPnLObservation{
+		Status: rpc.DailyPnLObservationNotDue, SessionKey: "2026-07-21", AsOf: completedAt,
+	}
 	authority := accountSummaryAuthority{
 		Provenance: ibkrlib.AccountSummaryProvenanceRequest, AsOf: completedAt.Add(-time.Second),
 		NetLiquidationAvailable: true, TotalCashAvailable: true, BaseCurrencyAvailable: true,
@@ -565,6 +568,25 @@ func TestRulebookAccountSourceHealthMissingDailyPnLPostCloseIsNotDue(t *testing.
 	}
 	if greenDay == nil || greenDay.Status != risk.RuleStatusNotEvaluated || greenDay.Reason != risk.RuleReasonPnLUnavailable {
 		t.Fatalf("P&L-only rule = %+v, want localized not_evaluated/%s", greenDay, risk.RuleReasonPnLUnavailable)
+	}
+}
+
+func TestRulebookAccountSourceHealthRetainsDailyPnLFailurePostClose(t *testing.T) {
+	completedAt := time.Date(2026, 7, 21, 21, 0, 2, 0, time.UTC)
+	scope := brokerStateScope{Account: "DU123", Mode: rpc.AccountModePaper}
+	account := &rpc.AccountResult{
+		AccountID: "DU123", BaseCurrency: "EUR", NetLiquidation: 100000, TotalCash: 10000,
+		DailyPnLObservation: &rpc.DailyPnLObservation{
+			Status: rpc.DailyPnLObservationMissing, SessionKey: "2026-07-21", AsOf: completedAt.Add(-time.Hour),
+		},
+	}
+	authority := accountSummaryAuthority{
+		Provenance: ibkrlib.AccountSummaryProvenanceRequest, AsOf: completedAt.Add(-time.Second),
+		NetLiquidationAvailable: true, TotalCashAvailable: true, BaseCurrencyAvailable: true,
+	}
+	state, health := rulebookAccountSourceHealth(scope, account, authority, false, completedAt)
+	if state.Healthy || state.Reason != "account_incomplete" || health.Status != rpc.SourceStatusDegraded || health.RefreshState == rpc.SourceRefreshNotDue {
+		t.Fatalf("state=%+v health=%+v, want retained degraded Daily P&L failure", state, health)
 	}
 }
 

@@ -117,6 +117,9 @@ type Server struct {
 	// shared by Rulebook, Canary, brief, app, and CLI reads. Its zero value is
 	// ready for use; connector session and broker scope are part of every key.
 	accountSnapshots accountSnapshotAuthority
+	// dailyPnLObservations keeps an observed same-session feed failure visible
+	// after the close until a newer valid frame proves recovery.
+	dailyPnLObservations dailyPnLObservationAuthority
 
 	listener net.Listener
 

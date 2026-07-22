@@ -1367,7 +1367,10 @@ func canaryInputHealth(in CanaryInput, m CanaryMarketSummary, sourceIssues []can
 	switch {
 	case in.Account.NetLiquidation <= 0:
 		return canaryInputFailed
-	case in.Account.DailyPnL == nil && canaryDailyPnLDue(now):
+	case canaryAccountDailyPnLFailed(in.Account, now):
+		if in.Account.DailyPnLObservation != nil {
+			return canaryInputDegraded
+		}
 		return canaryInputWarming
 	case len(sourceIssues) > 0 || canaryHasMarketDataIssue(m):
 		return canaryInputDegraded
@@ -2758,9 +2761,16 @@ func canaryRegimeSourceHealth(regime rpc.RegimeSnapshotResult, now time.Time, fp
 
 func canaryAccountSourceHealth(acct rpc.AccountResult, now time.Time, fp rpc.Fingerprint) rpc.SourceHealth {
 	health := canaryTimedSourceHealth("account", acct.AsOf, now, fp, canaryAccountSourceStatus(acct, now), canaryAccountSourceConfidence(acct, now))
-	if acct.DailyPnL == nil && !canaryDailyPnLDue(now) && health.Status == rpc.SourceStatusOK {
+	failed, notDue := canaryAccountDailyPnLState(acct, now)
+	if notDue && health.Status == rpc.SourceStatusOK {
 		health.RefreshState = rpc.SourceRefreshNotDue
 		health.Notes = []string{"daily P&L is not due outside the US equity regular session"}
+	} else if failed {
+		note := "daily P&L feed has not recovered"
+		if acct.DailyPnLObservation != nil && acct.DailyPnLObservation.SessionKey != "" {
+			note += " for session " + acct.DailyPnLObservation.SessionKey
+		}
+		health.Notes = append(health.Notes, note)
 	}
 	return health
 }
@@ -2769,8 +2779,14 @@ func canaryAccountSourceStatus(acct rpc.AccountResult, now time.Time) string {
 	if acct.NetLiquidation <= 0 {
 		return "partial"
 	}
-	if acct.AsOf.IsZero() || (acct.DailyPnL == nil && canaryDailyPnLDue(now)) {
+	if acct.AsOf.IsZero() {
 		return "partial"
+	}
+	if failed, _ := canaryAccountDailyPnLState(acct, now); failed {
+		if acct.DailyPnLObservation == nil {
+			return "partial"
+		}
+		return rpc.SourceStatusDegraded
 	}
 	if canarySourceAgeSeconds(now, acct.AsOf) > canarySourceMaxAgeSeconds(now) {
 		return rpc.RegimeStatusStale
@@ -2779,10 +2795,41 @@ func canaryAccountSourceStatus(acct rpc.AccountResult, now time.Time) string {
 }
 
 func canaryAccountSourceConfidence(acct rpc.AccountResult, now time.Time) string {
-	if acct.NetLiquidation <= 0 || acct.AsOf.IsZero() || (acct.DailyPnL == nil && canaryDailyPnLDue(now)) {
+	failed, _ := canaryAccountDailyPnLState(acct, now)
+	if acct.NetLiquidation <= 0 || acct.AsOf.IsZero() || failed {
 		return "medium-low"
 	}
 	return "high"
+}
+
+func canaryAccountDailyPnLFailed(acct rpc.AccountResult, now time.Time) bool {
+	failed, _ := canaryAccountDailyPnLState(acct, now)
+	return failed
+}
+
+func canaryAccountDailyPnLState(acct rpc.AccountResult, now time.Time) (failed, notDue bool) {
+	if observation := acct.DailyPnLObservation; observation != nil {
+		switch observation.Status {
+		case rpc.DailyPnLObservationNotDue:
+			return false, true
+		case rpc.DailyPnLObservationMissing, rpc.DailyPnLObservationInvalid, rpc.DailyPnLObservationStale:
+			return true, false
+		case rpc.DailyPnLObservationOK:
+			if acct.DailyPnL == nil || math.IsNaN(*acct.DailyPnL) || math.IsInf(*acct.DailyPnL, 0) {
+				return true, false
+			}
+			return false, false
+		default:
+			return true, false
+		}
+	}
+	if acct.DailyPnL == nil || math.IsNaN(*acct.DailyPnL) || math.IsInf(*acct.DailyPnL, 0) {
+		if canaryDailyPnLDue(now) {
+			return true, false
+		}
+		return false, true
+	}
+	return false, false
 }
 
 // canaryDailyPnLDue follows the same official US-equity session authority as

@@ -784,6 +784,9 @@ func TestComputeCanaryMissingDailyPnLPostCloseIsExpected(t *testing.T) {
 	acct := baseCanaryAccount()
 	acct.AsOf = now
 	acct.DailyPnL = nil
+	acct.DailyPnLObservation = &rpc.DailyPnLObservation{
+		Status: rpc.DailyPnLObservationNotDue, SessionKey: "2026-06-01", AsOf: now,
+	}
 	res := ComputeCanary(CanaryInput{
 		Now:       now,
 		Account:   acct,
@@ -799,6 +802,27 @@ func TestComputeCanaryMissingDailyPnLPostCloseIsExpected(t *testing.T) {
 	}
 	if len(health.Notes) != 1 || !strings.Contains(health.Notes[0], "not due") {
 		t.Fatalf("account source health note = %+v, want expected off-session explanation", health.Notes)
+	}
+}
+
+func TestComputeCanaryDailyPnLFailureRemainsDegradedPostClose(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 1, 20, 5, 0, 0, time.UTC) // Monday 16:05 ET.
+	acct := baseCanaryAccount()
+	acct.AsOf = now
+	acct.DailyPnL = nil
+	acct.DailyPnLObservation = &rpc.DailyPnLObservation{
+		Status: rpc.DailyPnLObservationMissing, SessionKey: "2026-06-01", AsOf: now.Add(-10 * time.Minute),
+	}
+	res := ComputeCanary(CanaryInput{
+		Now: now, Account: acct, Positions: rpc.PositionsResult{AsOf: now}, Regime: healthyCanaryRegime(),
+	})
+	if res.InputHealth != canaryInputDegraded {
+		t.Fatalf("input health = %q, want degraded", res.InputHealth)
+	}
+	health := findSourceHealth(res.SourceHealth, "account")
+	if health == nil || health.Status != rpc.SourceStatusDegraded || health.RefreshState == rpc.SourceRefreshNotDue {
+		t.Fatalf("account source health = %+v, want degraded and still due", health)
 	}
 }
 

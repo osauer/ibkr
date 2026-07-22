@@ -2467,30 +2467,33 @@ type UnderlyingExposure struct {
 // emit PnL for unentitled accounts), or "DBL_MAX sentinel" (gateway
 // hasn't computed the slice). Never zero-substituted. PnLUnrealizedTotal
 // / PnLRealizedTotal stay nil on older server versions that emit only
-// the bare dailyPnL field.
+// the bare dailyPnL field. DailyPnLObservation carries the redacted source
+// state so a regular-session failure cannot become healthy merely because
+// the market closed.
 type AccountResult struct {
-	AccountID            string             `json:"account_id"`
-	AccountType          string             `json:"account_type,omitempty"`
-	BaseCurrency         string             `json:"base_currency"`
-	NetLiquidation       float64            `json:"net_liquidation"`
-	BuyingPower          float64            `json:"buying_power"`
-	AvailableFunds       float64            `json:"available_funds"`
-	ExcessLiquidity      float64            `json:"excess_liquidity"`
-	TotalCash            float64            `json:"total_cash"`
-	MaintenanceMargin    float64            `json:"maintenance_margin"`
-	InitialMargin        float64            `json:"initial_margin"`
-	GrossPositionValue   float64            `json:"gross_position_value"`
-	UnrealizedPnL        float64            `json:"unrealized_pnl"`
-	RealizedPnL          float64            `json:"realized_pnl"`
-	Cushion              float64            `json:"cushion"`
-	LookAheadInitMargin  float64            `json:"look_ahead_init_margin"`
-	LookAheadMaintMargin float64            `json:"look_ahead_maint_margin"`
-	LookAheadAvailable   float64            `json:"look_ahead_available_funds"`
-	LookAheadExcess      float64            `json:"look_ahead_excess_liquidity"`
-	DailyPnL             *float64           `json:"daily_pnl,omitempty"`
-	PnLUnrealizedTotal   *float64           `json:"pnl_unrealized_total,omitempty"`
-	PnLRealizedTotal     *float64           `json:"pnl_realized_total,omitempty"`
-	CurrencyExposure     []CurrencyExposure `json:"currency_exposure,omitempty"`
+	AccountID            string               `json:"account_id"`
+	AccountType          string               `json:"account_type,omitempty"`
+	BaseCurrency         string               `json:"base_currency"`
+	NetLiquidation       float64              `json:"net_liquidation"`
+	BuyingPower          float64              `json:"buying_power"`
+	AvailableFunds       float64              `json:"available_funds"`
+	ExcessLiquidity      float64              `json:"excess_liquidity"`
+	TotalCash            float64              `json:"total_cash"`
+	MaintenanceMargin    float64              `json:"maintenance_margin"`
+	InitialMargin        float64              `json:"initial_margin"`
+	GrossPositionValue   float64              `json:"gross_position_value"`
+	UnrealizedPnL        float64              `json:"unrealized_pnl"`
+	RealizedPnL          float64              `json:"realized_pnl"`
+	Cushion              float64              `json:"cushion"`
+	LookAheadInitMargin  float64              `json:"look_ahead_init_margin"`
+	LookAheadMaintMargin float64              `json:"look_ahead_maint_margin"`
+	LookAheadAvailable   float64              `json:"look_ahead_available_funds"`
+	LookAheadExcess      float64              `json:"look_ahead_excess_liquidity"`
+	DailyPnL             *float64             `json:"daily_pnl,omitempty"`
+	DailyPnLObservation  *DailyPnLObservation `json:"daily_pnl_observation,omitempty"`
+	PnLUnrealizedTotal   *float64             `json:"pnl_unrealized_total,omitempty"`
+	PnLRealizedTotal     *float64             `json:"pnl_realized_total,omitempty"`
+	CurrencyExposure     []CurrencyExposure   `json:"currency_exposure,omitempty"`
 	// DataType is reserved for account-feed state; the account-summary
 	// path is gateway-direct with no live/delayed dimension and the field
 	// is currently left empty (omitted). Kept for shape parity with the
@@ -2498,6 +2501,25 @@ type AccountResult struct {
 	DataType string    `json:"data_type,omitempty"`
 	AsOf     time.Time `json:"as_of"`
 }
+
+// DailyPnLObservation is the value-free health record for the account Daily
+// P&L feed. SessionKey is the official US-equity session the state belongs to.
+type DailyPnLObservation struct {
+	Status     DailyPnLObservationStatus `json:"status"`
+	SessionKey string                    `json:"session_key,omitempty"`
+	AsOf       time.Time                 `json:"as_of,omitempty"`
+}
+
+// DailyPnLObservationStatus is the closed set of Daily P&L feed states.
+type DailyPnLObservationStatus string
+
+const (
+	DailyPnLObservationOK      DailyPnLObservationStatus = "ok"
+	DailyPnLObservationMissing DailyPnLObservationStatus = "missing"
+	DailyPnLObservationInvalid DailyPnLObservationStatus = "invalid"
+	DailyPnLObservationStale   DailyPnLObservationStatus = "stale"
+	DailyPnLObservationNotDue  DailyPnLObservationStatus = "not_due"
+)
 
 // CurrencyExposure is one row in AccountResult.CurrencyExposure.
 // Values are reported in the named currency (the "Ccy" suffix); the

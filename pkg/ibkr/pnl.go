@@ -22,7 +22,19 @@ type AccountDailyPnL struct {
 	UnrealizedTotalPnL *float64
 	RealizedTotalPnL   *float64
 	AsOf               time.Time
+	DailyPnLStatus     DailyPnLFrameStatus
 }
+
+// DailyPnLFrameStatus distinguishes a usable Daily P&L value from a gateway
+// placeholder and from malformed wire data. Callers must not infer those
+// states from a nil value alone.
+type DailyPnLFrameStatus string
+
+const (
+	DailyPnLFrameAvailable   DailyPnLFrameStatus = "available"
+	DailyPnLFrameUnavailable DailyPnLFrameStatus = "unavailable"
+	DailyPnLFrameMalformed   DailyPnLFrameStatus = "malformed"
+)
 
 // PositionDailyPnL is the most recent per-contract frame from an IBKR
 // reqPnLSingle subscription. Monetary values are expressed in the account's
@@ -86,6 +98,20 @@ func parsePnLFloat(s string) *float64 {
 		return nil
 	}
 	return &v
+}
+
+func parseDailyPnLFloat(s string) (*float64, DailyPnLFrameStatus) {
+	if s == "" {
+		return nil, DailyPnLFrameUnavailable
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil, DailyPnLFrameMalformed
+	}
+	if math.Abs(v) >= dblMaxNotSent {
+		return nil, DailyPnLFrameUnavailable
+	}
+	return &v, DailyPnLFrameAvailable
 }
 
 // RequestPnL starts a reqPnL stream for account using reqID. modelCode is empty
@@ -186,7 +212,7 @@ func parseAccountPnLFields(fields []string) (reqID int, snap AccountDailyPnL, ok
 	if err != nil {
 		return 0, AccountDailyPnL{}, false
 	}
-	snap.DailyPnL = parsePnLFloat(fields[2])
+	snap.DailyPnL, snap.DailyPnLStatus = parseDailyPnLFloat(fields[2])
 	if len(fields) > 3 {
 		snap.UnrealizedTotalPnL = parsePnLFloat(fields[3])
 	}
@@ -444,6 +470,13 @@ func (c *Connector) SeedAccountDailyPnLForTest(account string, snap AccountDaily
 	c.pnl.accountReqID = -1
 	c.pnl.accountAcct = account
 	c.pnl.accountStartedAt = snap.AsOf.UTC()
+	if snap.DailyPnLStatus == "" {
+		if snap.DailyPnL == nil {
+			snap.DailyPnLStatus = DailyPnLFrameUnavailable
+		} else {
+			snap.DailyPnLStatus = DailyPnLFrameAvailable
+		}
+	}
 	c.pnl.account = snap
 }
 

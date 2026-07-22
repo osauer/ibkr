@@ -27,6 +27,9 @@ func TestParseAccountPnL_FullPayload(t *testing.T) {
 	if snap.DailyPnL == nil || *snap.DailyPnL != 621.30 {
 		t.Errorf("DailyPnL = %v, want 621.30", snap.DailyPnL)
 	}
+	if snap.DailyPnLStatus != DailyPnLFrameAvailable {
+		t.Errorf("DailyPnLStatus = %q, want available", snap.DailyPnLStatus)
+	}
 	if snap.UnrealizedTotalPnL == nil || *snap.UnrealizedTotalPnL != -44485.00 {
 		t.Errorf("UnrealizedTotalPnL = %v, want -44485.00", snap.UnrealizedTotalPnL)
 	}
@@ -73,6 +76,9 @@ func TestParseAccountPnL_DBLMAXSentinel(t *testing.T) {
 	if snap.DailyPnL != nil {
 		t.Errorf("DailyPnL = %v, want nil (DBL_MAX sentinel)", snap.DailyPnL)
 	}
+	if snap.DailyPnLStatus != DailyPnLFrameUnavailable {
+		t.Errorf("DailyPnLStatus = %q, want unavailable", snap.DailyPnLStatus)
+	}
 	if snap.UnrealizedTotalPnL == nil || *snap.UnrealizedTotalPnL != 5.00 {
 		t.Errorf("UnrealizedTotalPnL = %v, want 5.00", snap.UnrealizedTotalPnL)
 	}
@@ -92,6 +98,12 @@ func TestParseAccountPnL_Malformed(t *testing.T) {
 	t.Run("BadReqID", func(t *testing.T) {
 		if _, _, ok := parseAccountPnLFields([]string{"94", "not-a-number", "100"}); ok {
 			t.Errorf("expected ok=false for bad reqID")
+		}
+	})
+	t.Run("BadDailyPnL", func(t *testing.T) {
+		_, snap, ok := parseAccountPnLFields([]string{"94", "1", "not-a-number"})
+		if !ok || snap.DailyPnLStatus != DailyPnLFrameMalformed || snap.DailyPnL != nil {
+			t.Fatalf("snapshot = %+v ok=%v, want malformed Daily P&L frame", snap, ok)
 		}
 	})
 }

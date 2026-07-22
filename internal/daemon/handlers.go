@@ -172,6 +172,8 @@ func (s *Server) buildAccountSummaryWithAuthority(ctx context.Context, observe b
 			}
 			if c.MaybeResubscribeStaleDailyPnL(marketOpen) {
 				if fresh, freshOK := waitForAccountDailyPnL(ctx, c, time.Now().Add(750*time.Millisecond)); freshOK {
+					snap = fresh
+					ok = true
 					res.DailyPnL = fresh.DailyPnL
 					res.PnLUnrealizedTotal = fresh.UnrealizedTotalPnL
 					res.PnLRealizedTotal = fresh.RealizedTotalPnL
@@ -179,6 +181,20 @@ func (s *Server) buildAccountSummaryWithAuthority(ctx context.Context, observe b
 			}
 		}
 	}
+	pnlNow := s.nowUTC()
+	pnlDue := true
+	pnlSessionKey := nySessionKey(pnlNow)
+	if session, sessionErr := marketcal.New().SessionAt(marketcal.MarketUSEquity, pnlNow); sessionErr == nil && session.State != marketcal.StateUnknown {
+		pnlDue = session.IsOpen
+		pnlSessionKey = session.Date
+	}
+	scope := s.currentBrokerStateScope()
+	pnlSource := string(scope.Mode) + "|" + strings.TrimSpace(scope.Account)
+	pnlObservation, pnlObservationErr := s.dailyPnLObservations.observe(context.Background(), pnlSource, pnlSessionKey, pnlNow, pnlDue, snap, ok || !snap.AsOf.IsZero())
+	if pnlObservationErr != nil {
+		s.logger.Warnf("Daily P&L observation authority degraded: %v", pnlObservationErr)
+	}
+	res.DailyPnLObservation = &pnlObservation
 	// Feed the risk-constitution capital state: observation cadence is
 	// usage cadence — every successful account read updates the cash-flow-
 	// adjusted peak and drawdown tier; there is deliberately no scheduler

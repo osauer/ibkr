@@ -610,9 +610,8 @@ func rulebookAccountSourceHealth(scope brokerStateScope, account *rpc.AccountRes
 	if !authority.TotalCashAvailable || math.IsNaN(account.TotalCash) || math.IsInf(account.TotalCash, 0) {
 		missing = append(missing, "total cash")
 	}
-	if account.DailyPnL == nil && dailyPnLDue {
-		missing = append(missing, "daily P&L")
-	} else if account.DailyPnL != nil && (math.IsNaN(*account.DailyPnL) || math.IsInf(*account.DailyPnL, 0)) {
+	pnlFailed, pnlNotDue := rulebookDailyPnLState(account, dailyPnLDue)
+	if pnlFailed {
 		missing = append(missing, "daily P&L")
 	}
 	if len(missing) > 0 {
@@ -621,11 +620,33 @@ func rulebookAccountSourceHealth(scope brokerStateScope, account *rpc.AccountRes
 		return risk.SourceState{Reason: "account_incomplete"}, health
 	}
 	health.Status = rpc.SourceStatusOK
-	if account.DailyPnL == nil {
+	if pnlNotDue {
 		health.RefreshState = rpc.SourceRefreshNotDue
 		health.Notes = []string{"daily P&L is not due outside the US equity regular session"}
 	}
 	return risk.SourceState{Healthy: true}, health
+}
+
+func rulebookDailyPnLState(account *rpc.AccountResult, dailyPnLDue bool) (failed, notDue bool) {
+	if account == nil {
+		return true, false
+	}
+	if observation := account.DailyPnLObservation; observation != nil {
+		switch observation.Status {
+		case rpc.DailyPnLObservationNotDue:
+			return false, true
+		case rpc.DailyPnLObservationMissing, rpc.DailyPnLObservationInvalid, rpc.DailyPnLObservationStale:
+			return true, false
+		case rpc.DailyPnLObservationOK:
+			return account.DailyPnL == nil || math.IsNaN(*account.DailyPnL) || math.IsInf(*account.DailyPnL, 0), false
+		default:
+			return true, false
+		}
+	}
+	if account.DailyPnL == nil {
+		return dailyPnLDue, !dailyPnLDue
+	}
+	return math.IsNaN(*account.DailyPnL) || math.IsInf(*account.DailyPnL, 0), false
 }
 
 func rulebookBaseCurrency(raw string) (string, bool) {
