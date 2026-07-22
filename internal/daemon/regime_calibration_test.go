@@ -259,8 +259,9 @@ func TestStreakStoreEligibilityLatch(t *testing.T) {
 func TestPopulateStreaksExitHysteresisHoldsRed(t *testing.T) {
 	t.Parallel()
 	s := &Server{streaks: NewStreakStore(t.TempDir())}
+	asOf := time.Date(2026, time.June, 5, 14, 0, 0, 0, time.UTC)
 	mk := func(ratio float64) *rpc.RegimeSnapshotResult {
-		r := &rpc.RegimeSnapshotResult{AsOf: time.Now()}
+		r := &rpc.RegimeSnapshotResult{AsOf: asOf}
 		r.VIXTermStructure = rpc.RegimeVIXTerm{
 			Status: rpc.RegimeStatusOK, Ratio: new(ratio),
 			VIXQuality:   &rpc.Quality{AsOf: r.AsOf, FreshnessClass: rpc.FreshnessLive, Confidence: rpc.ConfidenceFirm},

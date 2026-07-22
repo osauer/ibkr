@@ -122,6 +122,7 @@ app-syntax-check: ## Embedded PWA assets parse: all web/app/*.js (node --check) 
 	done; \
 	[ "$$found" -eq 1 ] || { echo "app-syntax-check: no web/app/*.js files found" >&2; exit 1; }
 	@node -e 'JSON.parse(require("fs").readFileSync("web/app/manifest.webmanifest","utf8"))'
+	@node scripts/check-app-icons.mjs
 
 app-governance-check: ## Execute governance refresh, cutover, and attempt-redaction contracts in a Node VM
 	@command -v node >/dev/null 2>&1 || { echo "app-governance-check: node not found — this gate is binding, install Node.js" >&2; exit 1; }
@@ -434,6 +435,7 @@ modernize: ## Apply go fix + modernize rewrites in place
 docs-regen: ## Regenerate docs/reference/*.md and their public HTML derivatives
 	go run ./scripts/docgen/config-ref
 	go run ./scripts/docgen/mcp-tools
+	go run ./scripts/check-mcp-server-card -write
 	go run ./scripts/docgen/docs-html
 
 # docs-check is the CI gate: regenerate to a tempfile, diff against the
@@ -443,6 +445,7 @@ docs-regen: ## Regenerate docs/reference/*.md and their public HTML derivatives
 # the recipe runs under /bin/sh on every host.
 docs-check: ## Verify checked-in docs/reference/*.md match what the generators emit
 	@go test ./scripts/docgen/config-ref
+	@go run ./scripts/check-mcp-server-card
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 	fail=0; \
 	for gen in config-ref mcp-tools; do \

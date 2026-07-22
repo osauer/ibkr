@@ -136,17 +136,33 @@ func TestAssetForHost(t *testing.T) {
 		if !ok {
 			t.Fatalf("AssetForHost ok=false for supported host %q", want)
 		}
-		if !strings.HasSuffix(name, ".tar.gz") {
-			t.Fatalf("AssetForHost name = %q, want .tar.gz suffix", name)
-		}
-		if !strings.Contains(name, want) {
-			t.Fatalf("AssetForHost name = %q, want substring %q", name, want)
+		wantName := "ibkr-v1.0.0-" + want + ".tar.gz"
+		if name != wantName {
+			t.Fatalf("AssetForHost name = %q, want %q", name, wantName)
 		}
 		if url == "" {
 			t.Fatalf("AssetForHost url is empty")
 		}
 	} else if ok {
 		t.Fatalf("AssetForHost ok=true for unsupported host %q (name=%q)", want, name)
+	}
+}
+
+func TestAssetForHostNeverSelectsTradingVariant(t *testing.T) {
+	t.Parallel()
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	standard := "ibkr-v1.0.0-" + platform + ".tar.gz"
+	trading := "ibkr-trading-v1.0.0-" + platform + ".tar.gz"
+	rel := &Release{
+		TagName: "v1.0.0",
+		Assets: []Asset{
+			{Name: trading, URL: "https://example/trading"},
+			{Name: standard, URL: "https://example/standard"},
+		},
+	}
+	name, url, ok := rel.AssetForHost()
+	if !ok || name != standard || url != "https://example/standard" {
+		t.Fatalf("AssetForHost = (%q, %q, %v), want standard read-only archive", name, url, ok)
 	}
 }
 

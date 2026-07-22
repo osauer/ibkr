@@ -22,6 +22,7 @@ export default {
     if (url.pathname === "/api/connect") {
       const routeID = url.searchParams.get("route_id") || "";
       if (!routeID) return json({ error: "route_id required" }, 400);
+      if (!ROUTE_ID_RE.test(routeID)) return json({ error: "invalid route_id" }, 400);
       return routeStub(env, routeID).fetch(request);
     }
 
@@ -34,6 +35,7 @@ export default {
       if (wantsHTML(request)) return recoveryPage();
       return json({ error: "remote route required" }, 400);
     }
+    if (!ROUTE_ID_RE.test(routeID)) return json({ error: "invalid remote route" }, 400);
     let response = await routeStub(env, routeID).fetch(request);
     // While the Mac connector is down or the route aged out, a navigation
     // must keep polling instead of stranding the user on raw JSON: the Mac
@@ -161,15 +163,32 @@ export class RelaySession {
   async forward(request) {
     if (await this.expired()) return json({ error: "route expired" }, 410);
     if (!this.connector) return json({ error: "Mac relay connector offline" }, 503);
+    if (request.signal?.aborted) return json({ error: "client disconnected" }, 499);
     const id = crypto.randomUUID();
     const body = await request.arrayBuffer();
+    if (request.signal?.aborted) return json({ error: "client disconnected" }, 499);
     const { readable, writable } = new TransformStream();
     const writer = writable.getWriter();
+    const connector = this.connector;
     const start = new Promise((resolve) => {
-      this.inflight.set(id, { resolve, readable, writer, started: false });
+      const abortHandler = () => {
+        this.failInflight(id, 499, "client disconnected", true);
+      };
+      this.inflight.set(id, {
+        resolve,
+        readable,
+        writer,
+        started: false,
+        sent: false,
+        connector,
+        signal: request.signal,
+        abortHandler,
+      });
+      request.signal?.addEventListener("abort", abortHandler, { once: true });
+      if (request.signal?.aborted) abortHandler();
     });
     try {
-      this.connector.send(JSON.stringify({
+      connector.send(JSON.stringify({
         type: "request",
         id,
         method: request.method,
@@ -177,9 +196,10 @@ export class RelaySession {
         headers: headerMap(request.headers),
         body: bytesToBase64(new Uint8Array(body)),
       }));
+      const pending = this.inflight.get(id);
+      if (pending) pending.sent = true;
     } catch {
-      this.inflight.delete(id);
-      return json({ error: "Mac relay connector unavailable" }, 503);
+      this.failInflight(id, 503, "Mac relay connector unavailable", false);
     }
     return start;
   }
@@ -194,6 +214,7 @@ export class RelaySession {
     const pending = this.inflight.get(frame.id);
     if (!pending) return;
     if (frame.type === "response_start") {
+      if (pending.started) return;
       const headers = new Headers();
       for (const [key, values] of Object.entries(frame.headers || {})) {
         for (const value of values) headers.append(key, value);
@@ -206,38 +227,74 @@ export class RelaySession {
       return;
     }
     if (frame.type === "response_chunk") {
-      await pending.writer.write(base64ToBytes(frame.body || ""));
+      if (!pending.started) return;
+      try {
+        await pending.writer.write(base64ToBytes(frame.body || ""));
+      } catch {
+        // The phone may have disconnected while this write was pending.
+      }
       return;
     }
     if (frame.type === "response_end") {
-      await pending.writer.close();
-      this.inflight.delete(frame.id);
+      const finished = this.takeInflight(frame.id);
+      if (!finished) return;
+      try {
+        await finished.writer.close();
+      } catch {
+        // A concurrent phone disconnect already aborted the stream.
+      }
       return;
     }
     if (frame.type === "response_error") {
+      const failed = this.takeInflight(frame.id);
+      if (!failed) return;
       const status = frame.status || 502;
       const body = JSON.stringify({ error: frame.error || "relay error" });
-      if (!pending.started) {
-        pending.resolve(new Response(body, {
+      if (!failed.started) {
+        failed.resolve(new Response(body, {
           status,
           headers: { "Content-Type": "application/json" },
         }));
       } else {
-        await pending.writer.abort(frame.error || "relay error");
+        try {
+          await failed.writer.abort(frame.error || "relay error");
+        } catch {
+          // A concurrent phone disconnect already aborted the stream.
+        }
       }
-      this.inflight.delete(frame.id);
     }
   }
 
   connectorClosed(connector) {
     if (this.connector === connector) this.connector = null;
-    for (const [id, pending] of this.inflight) {
-      if (!pending.started) {
-        pending.resolve(json({ error: "Mac relay connector disconnected" }, 503));
-      } else {
-        pending.writer.abort("Mac relay connector disconnected");
+    for (const [id, pending] of [...this.inflight.entries()]) {
+      if (pending.connector !== connector) continue;
+      this.failInflight(id, 503, "Mac relay connector disconnected", false);
+    }
+  }
+
+  takeInflight(id) {
+    const pending = this.inflight.get(id);
+    if (!pending) return null;
+    this.inflight.delete(id);
+    pending.signal?.removeEventListener("abort", pending.abortHandler);
+    return pending;
+  }
+
+  failInflight(id, status, error, notifyConnector) {
+    const pending = this.takeInflight(id);
+    if (!pending) return;
+    if (notifyConnector && pending.sent) {
+      try {
+        pending.connector.send(JSON.stringify({ type: "request_cancel", id }));
+      } catch {
+        // Connector failure is handled by its close/error listener.
       }
-      this.inflight.delete(id);
+    }
+    if (!pending.started) {
+      pending.resolve(json({ error }, status));
+    } else {
+      pending.writer.abort(error).catch(() => {});
     }
   }
 

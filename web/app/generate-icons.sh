@@ -6,6 +6,15 @@ cd "$(dirname "$0")"
 master="${IBKR_CANARY_ICON_MASTER:-icon-512.png}"
 source_sheet="${IBKR_CANARY_ICON_SOURCE_SHEET:-}"
 crop_geometry="${IBKR_CANARY_ICON_CROP:-}"
+tmp_dir="$(mktemp -d -t ibkr-canary-icons)"
+tmp_crop="$tmp_dir/crop.png"
+tmp_512="$tmp_dir/icon-512.png"
+
+cleanup() {
+  rm -f "$tmp_crop" "$tmp_512"
+  rmdir "$tmp_dir"
+}
+trap cleanup EXIT
 
 require_sips() {
   if ! command -v sips >/dev/null 2>&1; then
@@ -38,11 +47,8 @@ if [[ -n "$source_sheet" ]]; then
   fi
 
   require_sips
-  tmp="$(mktemp -t ibkr-canary-icon.XXXXXX.png)"
-  trap 'rm -f "$tmp"' EXIT
-  sips -c "$crop_h" "$crop_w" --cropOffset "$crop_y" "$crop_x" "$source_sheet" --out "$tmp" >/dev/null
-  resize_png 512 "$tmp" icon-512.png
-  master="icon-512.png"
+  sips -c "$crop_h" "$crop_w" --cropOffset "$crop_y" "$crop_x" "$source_sheet" --out "$tmp_crop" >/dev/null
+  master="$tmp_crop"
 fi
 
 if [[ ! -f "$master" ]]; then
@@ -51,9 +57,12 @@ if [[ ! -f "$master" ]]; then
 fi
 
 require_sips
+resize_png 512 "$master" "$tmp_512"
+mv "$tmp_512" icon-512.png
+master="icon-512.png"
 resize_png 192 "$master" icon-192.png
 resize_png 64 "$master" favicon-64.png
 resize_png 32 "$master" favicon-32.png
 resize_png 16 "$master" favicon-16.png
 
-echo "generated ibkr canary PNG icons from $master"
+echo "generated canonical 512px and derived ibkr canary PNG icons"

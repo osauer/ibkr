@@ -313,10 +313,6 @@ func opportunityAuthoritySnapshotValid(snap rpc.OpportunitySnapshot) bool {
 	return true
 }
 
-func (s *proposalStore) SaveCurrent(snap rpc.TradeProposalSnapshot) error {
-	return s.SaveCurrentWithEvents(context.Background(), snap, nil)
-}
-
 func (s *proposalStore) SaveCurrentWithEvents(ctx context.Context, snap rpc.TradeProposalSnapshot, events []proposalEvent) error {
 	// LoadedFromState describes this process's adapter cache, not the durable
 	// proposal document. It is restored only after a successful attach.
@@ -430,33 +426,6 @@ func (s *proposalStore) LoadCurrent() (rpc.TradeProposalSnapshot, error) {
 	}
 	if !proposalAuthoritySnapshotValid(snap) {
 		return snap, errors.New("proposal state row is malformed")
-	}
-	return snap, nil
-}
-
-func (s *opportunityStore) LoadCurrent() (rpc.OpportunitySnapshot, error) {
-	if s == nil {
-		return rpc.OpportunitySnapshot{}, errors.New("opportunity store is not attached")
-	}
-	s.mu.Lock()
-	core := s.core
-	s.mu.Unlock()
-	if core == nil {
-		return rpc.OpportunitySnapshot{}, errors.New("opportunity store is not attached")
-	}
-	doc, ok, err := core.GetStateDocument(context.Background(), daemonStateScope, opportunityStateKind)
-	if err != nil {
-		return rpc.OpportunitySnapshot{}, err
-	}
-	if !ok {
-		return rpc.OpportunitySnapshot{}, errors.New("opportunity state row is missing")
-	}
-	var snap rpc.OpportunitySnapshot
-	if err := json.Unmarshal(doc.JSON, &snap); err != nil {
-		return snap, err
-	}
-	if !opportunityAuthoritySnapshotValid(snap) {
-		return snap, errors.New("opportunity state row is malformed")
 	}
 	return snap, nil
 }

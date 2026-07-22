@@ -1,6 +1,6 @@
 # Privacy
 
-Last reviewed: 2026-07-10 08:35 CEST
+Last reviewed: 2026-07-22
 
 `ibkr` is a local Interactive Brokers client. The default/read-only binary and
 the MCP surface cannot submit broker orders. A separately published
@@ -55,10 +55,40 @@ These files can contain account-sensitive information. Protect your local user a
 
 ## Network access
 
-Normal operation requires access to your local IB Gateway or TWS API socket. Additional network access is used only for explicit update or refresh paths:
+Normal operation requires access to your configured IB Gateway or TWS API
+socket. The project makes these additional outbound connections:
 
-- `install.sh` and `ibkr update` contact GitHub releases to download release artifacts.
-- the S&P 500 constituent refresher fetches Wikipedia's public S&P 500 company list unless disabled in config.
+- `install.sh` and `ibkr update` contact GitHub Releases when the user asks
+  to install or update. They disclose release/platform request metadata, not
+  broker account data.
+- The rulebook's automatic earnings refresh queries Nasdaq once per held or
+  requested underlying that needs current evidence. Each request discloses the
+  normalized ticker symbol, so a third party can infer that the name is being
+  evaluated and it may be a current holding. The request does not include
+  account identifiers, quantities, balances, cost basis, or P&L. The
+  subscription-gated Wall Street Horizon corroboration path remains inside the
+  configured IBKR connection.
+- Market-event refreshes download Nasdaq Reg SHO and trading-halt feeds and
+  IBKR's public short-stock inventory. Those are whole-market files or feeds;
+  held symbols are matched locally and are not sent as query parameters.
+- Regime refreshes download public series from FRED, CBOE, the Federal Reserve,
+  and the US Treasury. The requests contain no portfolio or account fields.
+- The S&P 500 constituent refresher downloads Wikipedia's public constituent
+  list on its schedule unless disabled in config. Holdings are matched locally.
+- Configured IBKR Flex reconciliation contacts IBKR's Flex Statement service
+  using the user's query credential and receives the requested broker report.
+  That report is exchanged with IBKR, not with this project's maintainer.
+- When the user enables `ibkr app --remote`, authenticated app HTTP and SSE
+  traffic passes through the configured Cloudflare relay. This can include
+  portfolio/account fields returned to the paired phone; the relay does not own
+  the local device grant, daemon credentials, or broker credentials.
+- When Web Push is enabled, the browser's push service receives a redacted
+  alert payload plus normal delivery metadata. Web Push does not use the remote
+  relay.
+
+Like any HTTPS/FTP client, these connections also disclose ordinary network
+metadata such as source IP, timing, user agent, and the requested endpoint to
+the destination and intervening infrastructure.
 
 ## Deleting data
 

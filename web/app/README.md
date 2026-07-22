@@ -55,15 +55,15 @@ the SPA is embedded in the installed `ibkr` binary. The detailed development
 playbook lives in
 [`docs/guides/canary-spa-dev.md`](../../docs/guides/canary-spa-dev.md).
 
-App icons are generated PNGs. Regenerate the smaller PWA/favicon sizes from
-the checked-in cropped master with:
+App icons are generated PNGs. The checked-in `icon-512.png` is the canonical
+512×512 asset; regenerate it and the smaller PWA/favicon sizes with:
 
 ```sh
 web/app/generate-icons.sh
 ```
 
-If the original canary source sheet is available locally, recrop the 512px
-master and regenerate all derived sizes with:
+If the original canary source sheet is available locally, recrop the canonical
+512px asset and regenerate all derived sizes with:
 
 ```sh
 IBKR_CANARY_ICON_SOURCE_SHEET=/path/to/source.png \

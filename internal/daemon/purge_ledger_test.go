@@ -22,7 +22,7 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	store := newTestPurgeLedgerStore(t, filepath.Join(t.TempDir(), "purge-ledger.json"), func() time.Time { return now })
 	contract := purgeLedgerTestStockContract()
 
-	if err := store.ApplyOrderFill(purgeLedgerEventWithContract(orderJournalEvent{
+	if err := commitTestPurgeLedgerEvent(store, purgeLedgerEventWithContract(orderJournalEvent{
 		Type:     orderJournalEventSendAttempted,
 		Source:   purgeExecuteSource,
 		OrderRef: "purge-1",
@@ -32,7 +32,7 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 		Action:   rpc.OrderActionSell,
 		Quantity: 4,
 	}, contract)); err != nil {
-		t.Fatalf("send attempt ApplyOrderFill: %v", err)
+		t.Fatalf("send attempt CommitOrderLifecycle: %v", err)
 	}
 	rows, totals, err := store.Snapshot(brokerStateScope{}, "")
 	if err != nil {
@@ -43,10 +43,10 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	}
 
 	purgePartial := purgeLedgerFillEvent(purgeExecuteSource, "purge-1", "purge-test", "leg-aapl", contract, rpc.OrderActionSell, 4, 2, 100)
-	if err := store.ApplyOrderFill(purgePartial); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, purgePartial); err != nil {
 		t.Fatalf("partial purge fill: %v", err)
 	}
-	if err := store.ApplyOrderFill(purgePartial); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, purgePartial); err != nil {
 		t.Fatalf("duplicate purge fill: %v", err)
 	}
 	rows, _, err = store.Snapshot(brokerStateScope{}, "")
@@ -58,7 +58,7 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	}
 
 	purgeFull := purgeLedgerFillEvent(purgeExecuteSource, "purge-1", "purge-test", "leg-aapl", contract, rpc.OrderActionSell, 4, 4, 101)
-	if err := store.ApplyOrderFill(purgeFull); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, purgeFull); err != nil {
 		t.Fatalf("full purge fill: %v", err)
 	}
 	rows, _, err = store.Snapshot(brokerStateScope{}, "")
@@ -70,10 +70,10 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	}
 
 	restorePartial := purgeLedgerFillEvent(purgeRestoreSource, "restore-1", "purge-test", "leg-aapl", contract, rpc.OrderActionBuy, 4, 1, 95)
-	if err := store.ApplyOrderFill(restorePartial); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, restorePartial); err != nil {
 		t.Fatalf("partial restore fill: %v", err)
 	}
-	if err := store.ApplyOrderFill(restorePartial); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, restorePartial); err != nil {
 		t.Fatalf("duplicate restore fill: %v", err)
 	}
 	rows, _, err = store.Snapshot(brokerStateScope{}, "")
@@ -85,7 +85,7 @@ func TestPurgeLedgerFillDeltasAreIdempotentAndRowsAreRetained(t *testing.T) {
 	}
 
 	restoreFull := purgeLedgerFillEvent(purgeRestoreSource, "restore-2", "purge-test", "leg-aapl", contract, rpc.OrderActionBuy, 3, 3, 96)
-	if err := store.ApplyOrderFill(restoreFull); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, restoreFull); err != nil {
 		t.Fatalf("full restore fill: %v", err)
 	}
 	rows, totals, err = store.Snapshot(brokerStateScope{}, "")
@@ -113,10 +113,10 @@ func TestPurgeLedgerShadowPnLForShortRows(t *testing.T) {
 
 	purgeFill := purgeLedgerFillEvent(purgeExecuteSource, "purge-short", "purge-test", "leg-aapl-short", contract, rpc.OrderActionBuy, 2, 2, 50)
 	restoreFill := purgeLedgerFillEvent(purgeRestoreSource, "restore-short", "purge-test", "leg-aapl-short", contract, rpc.OrderActionSell, 2, 2, 45)
-	if err := store.ApplyOrderFill(purgeFill); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, purgeFill); err != nil {
 		t.Fatalf("short purge fill: %v", err)
 	}
-	if err := store.ApplyOrderFill(restoreFill); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, restoreFill); err != nil {
 		t.Fatalf("short restore fill: %v", err)
 	}
 	rows, totals, err := store.Snapshot(brokerStateScope{}, "")
@@ -141,10 +141,10 @@ func TestPurgeLedgerSnapshotFiltersByBrokerScopeMode(t *testing.T) {
 	live := purgeLedgerFillEvent(purgeExecuteSource, "live-purge", "purge-live", "leg-aapl", contract, rpc.OrderActionSell, 2, 2, 101)
 	live.Account = "U1234567"
 	live.Mode = rpc.AccountModeLive
-	if err := store.ApplyOrderFill(paper); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, paper); err != nil {
 		t.Fatalf("paper fill: %v", err)
 	}
-	if err := store.ApplyOrderFill(live); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, live); err != nil {
 		t.Fatalf("live fill: %v", err)
 	}
 
@@ -387,6 +387,39 @@ func purgeLedgerFillEvent(source, orderRef, purgeID, legID string, contract rpc.
 		AvgFillPrice: avgFillPrice,
 		SendState:    orderSendStateTerminal,
 	}, contract)
+}
+
+func commitTestPurgeLedgerEvent(store *purgeLedgerStore, ev orderJournalEvent) error {
+	if ev.At.IsZero() {
+		ev.At = store.currentTime()
+	}
+	if ev.Endpoint == "" {
+		ev.Endpoint = "127.0.0.1:4002"
+	}
+	if ev.ClientID == 0 {
+		ev.ClientID = 31
+	}
+	if ev.Mode == "" {
+		ev.Mode = rpc.AccountModePaper
+	}
+	if ev.OrderType == "" {
+		ev.OrderType = rpc.OrderTypeLMT
+	}
+	if ev.TIF == "" {
+		ev.TIF = rpc.OrderTIFDay
+	}
+	if ev.SendState == "" {
+		ev.SendState = orderSendStateSendAttempted
+	}
+	authority, err := store.coreStore()
+	if err != nil {
+		return err
+	}
+	journal := newOrderJournalStore("")
+	if err := journal.UseCoreStore(authority); err != nil {
+		return err
+	}
+	return store.CommitOrderLifecycle(journal, ev)
 }
 
 func purgeLedgerEventWithContract(ev orderJournalEvent, contract rpc.ContractParams) orderJournalEvent {

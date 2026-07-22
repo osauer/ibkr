@@ -34,9 +34,9 @@ For the v1 stable line, only the latest minor release receives security fixes. O
 
 ## Threat model
 
-`ibkr` default builds are structurally no-broker-write: the order surface is limited to local preview/status reads, and the daemon cannot place, modify, cancel, or transmit broker orders unless built with the trading capability (see [README §Safety](README.md#safety)). The daemon listens only on a Unix-domain socket in the user's runtime directory, never on a TCP port. It speaks to a locally-running IB Gateway or TWS over loopback. No market data, credentials, or account state leave the local machine via this code.
+`ibkr` default builds are structurally no-broker-write: the order surface is limited to local preview/status reads, and the daemon cannot place, modify, cancel, or transmit broker orders unless built with the trading capability (see [README §Safety](README.md#safety)). The daemon listens only on a Unix-domain socket in the user's runtime directory, never on a TCP port. It speaks to a locally-running IB Gateway or TWS over loopback. The project sends no telemetry or account data to the maintainer, but configured features do make outbound requests: in particular, automatic earnings refresh can disclose held ticker symbols to Nasdaq, and optional remote access carries app traffic through the configured relay. [PRIVACY.md](PRIVACY.md#network-access) inventories the destinations, triggers, and disclosed data classes.
 
-Reports that demonstrate a deviation from any of those properties — a successful place / modify / cancel / trade reaching the gateway, a daemon listener on a non-loopback or non-Unix socket, or data egress beyond the local IB Gateway — take priority.
+Reports that demonstrate a deviation from those properties — a successful place / modify / cancel / trade reaching the gateway, a daemon listener on a non-loopback or non-Unix socket, or undocumented or broader-than-documented data egress — take priority.
 
 ### Agent-origin write gating (trading builds)
 

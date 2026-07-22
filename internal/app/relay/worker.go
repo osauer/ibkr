@@ -122,6 +122,51 @@ type frame struct {
 
 type frameSender func(context.Context, frame) error
 
+type requestCancelSet struct {
+	mu     sync.Mutex
+	active map[string]*requestCancelEntry
+}
+
+type requestCancelEntry struct {
+	cancel context.CancelFunc
+}
+
+func newRequestCancelSet() *requestCancelSet {
+	return &requestCancelSet{active: make(map[string]*requestCancelEntry)}
+}
+
+func (s *requestCancelSet) start(parent context.Context, id string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	entry := &requestCancelEntry{cancel: cancel}
+	s.mu.Lock()
+	previous := s.active[id]
+	s.active[id] = entry
+	s.mu.Unlock()
+	if previous != nil {
+		previous.cancel()
+	}
+	return ctx, func() {
+		s.mu.Lock()
+		if s.active[id] == entry {
+			delete(s.active, id)
+		}
+		s.mu.Unlock()
+		cancel()
+	}
+}
+
+func (s *requestCancelSet) cancel(id string) {
+	s.mu.Lock()
+	entry := s.active[id]
+	if entry != nil {
+		delete(s.active, id)
+	}
+	s.mu.Unlock()
+	if entry != nil {
+		entry.cancel()
+	}
+}
+
 // NewWorker validates opts and constructs a stopped Worker without performing
 // network I/O. An empty BaseURL uses [DefaultWorkerURL], OriginURL is required,
 // and resume route ID and connector token must be either both present or both
@@ -397,6 +442,7 @@ func (w *Worker) connectOnce(ctx context.Context) error {
 	}
 
 	var wg sync.WaitGroup
+	requests := newRequestCancelSet()
 	for connCtx.Err() == nil {
 		typ, data, err := conn.Read(connCtx)
 		if err != nil {
@@ -412,12 +458,20 @@ func (w *Worker) connectOnce(ctx context.Context) error {
 		if err := json.Unmarshal(data, &f); err != nil {
 			continue
 		}
-		if f.Type != "request" || f.ID == "" {
+		if f.ID == "" {
 			continue
 		}
-		wg.Go(func() {
-			_ = w.serveRequest(connCtx, f, send)
-		})
+		switch f.Type {
+		case "request":
+			requestFrame := f
+			requestCtx, finish := requests.start(connCtx, f.ID)
+			wg.Go(func() {
+				defer finish()
+				_ = w.serveRequest(requestCtx, requestFrame, send)
+			})
+		case "request_cancel":
+			requests.cancel(f.ID)
+		}
 	}
 	wg.Wait()
 	return connCtx.Err()

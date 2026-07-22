@@ -16,7 +16,9 @@
     {
       "type": "stdio",
       "command": "ibkr",
-      "args": ["mcp"]
+      "args": [
+        "mcp"
+      ]
     }
   ],
   "requirements": [
@@ -35,227 +37,63 @@
     {
       "name": "ibkr_status",
       "description": "Daemon, gateway, account, and subsystem health for troubleshooting data freshness or connectivity.",
-      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
-    },
-    {
-      "name": "ibkr_account",
-      "description": "Account-level net liquidation, buying power, cash, margin, daily P&L, and currency exposure.",
-      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
-    },
-    {
-      "name": "ibkr_positions",
-      "description": "Open positions, option legs, Greeks, quote context, and exposure grouped by underlying.",
       "inputSchema": {
         "type": "object",
-        "properties": {
-          "symbol": {"type": "string"},
-          "type": {"type": "string", "enum": ["stock", "option"]}
-        },
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_quote",
-      "description": "Snapshot stock and ETF quotes with close context, freshness, spread, liquidity, and session warnings.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-          "market": {"type": "string"},
-          "exchange": {"type": "string"},
-          "primary_exchange": {"type": "string"},
-          "currency": {"type": "string"}
-        },
-        "required": ["symbols"],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_watch",
-      "description": "Saved local watchlist symbols with optional enriched quotes and held-position context.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "include_positions": {"type": "boolean"},
-          "include_quotes": {"type": "boolean"},
-          "timeout_ms": {"type": "integer"}
-        },
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_calendar",
-      "description": "Official market-session calendars for supported US equity, US option, and Xetra markets.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "market": {"type": "string"},
-          "date": {"type": "string"},
-          "days": {"type": "integer"}
-        },
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_chain",
-      "description": "Option expiries, implied volatility, expected move, strike grids, deltas, open interest, and liquidity gates.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "symbol": {"type": "string"},
-          "expiry": {"type": "string"},
-          "width": {"type": "integer"},
-          "side": {"type": "string"},
-          "min_dte": {"type": "integer"},
-          "max_dte": {"type": "integer"},
-          "target_dte": {"type": "integer"},
-          "all_expiries": {"type": "boolean"},
-          "no_iv": {"type": "boolean"},
-          "require_live_iv": {"type": "boolean"}
-        },
-        "required": ["symbol"],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_history",
-      "description": "Daily equity or ETF OHLCV history for lookback, range, and moving-average analysis.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "symbol": {"type": "string"},
-          "days": {"type": "integer"}
-        },
-        "required": ["symbol"],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_technical",
-      "description": "One-call trend, moving-average, relative-strength, ATR, and liquidity screen for stocks and ETFs.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-          "benchmark": {"type": "string"},
-          "lookback_days": {"type": "integer"},
-          "market": {"type": "string"},
-          "exchange": {"type": "string"},
-          "primary_exchange": {"type": "string"},
-          "currency": {"type": "string"}
-        },
-        "required": ["symbols"],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_scan",
-      "description": "Configured or ad-hoc IBKR market scanners with enriched quote and liquidity context.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "preset": {"type": "string"},
-          "type": {"type": "string"},
-          "exchange": {"type": "string"},
-          "instrument": {"type": "string"},
-          "limit": {"type": "integer"},
-          "min_price": {"type": "number"},
-          "min_volume": {"type": "integer"},
-          "min_dollar_volume": {"type": "number"},
-          "exclude_penny": {"type": "boolean"},
-          "require_live": {"type": "boolean"}
-        },
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_scan_params",
-      "description": "Scanner catalog discovery for gateway-supported scan codes, locations, and instruments.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "instrument": {"type": "string"},
-          "include_raw_xml": {"type": "boolean"}
-        },
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_breadth",
-      "description": "S&P 500 breadth readings for participation, moving-average, and new-high/new-low context.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "history_days": {"type": "integer"},
-          "timeout_ms": {"type": "integer"}
-        },
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_gamma",
-      "description": "SPY, SPX, or combined dealer-gamma market-structure snapshot and zero-gamma regime hint.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "scope": {"type": "string", "enum": ["spy+spx", "spy", "spx"]},
-          "wait_ms": {"type": "integer"},
-          "force": {"type": "boolean"},
-          "include_profiles": {"type": "boolean"}
-        },
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_regime",
-      "description": "Risk-regime dashboard across volatility, credit, funding, FX carry, dealer gamma, and breadth.",
-      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
-    },
-    {
-      "name": "ibkr_canary",
-      "description": "Portfolio-aware stress check for scheduled review, readiness, source health, and attention states.",
-      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
-    },
-    {
-      "name": "ibkr_size",
-      "description": "Fixed-fractional position sizing math against live net liquidation value; never an order ticket.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "symbol": {"type": "string"},
-          "entry": {"type": "number"},
-          "stop": {"type": "number"},
-          "risk_pct": {"type": "number"},
-          "side": {"type": "string"},
-          "target": {"type": "number"},
-          "lot": {"type": "integer"},
-          "fx": {"type": "number"}
-        },
-        "required": ["symbol", "entry", "stop"],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "ibkr_market_events",
-      "description": "Observed market-event flags for held or requested symbols: borrow tightness, extreme borrow fee, Reg SHO threshold membership, LULD and regulatory halts.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "symbols": {"type": "array", "items": {"type": "string"}},
-          "symbol": {"type": "string"}
-        },
-        "additionalProperties": false
+        "properties": {}
       }
     },
     {
       "name": "ibkr_trading_status",
       "description": "Read-only local order-entry readiness: disabled, paper-ready, live-ready, or blocked, with pinned-session evidence and concrete blockers.",
-      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "ibkr_settings",
+      "description": "Read platform settings and observed state: feature enablement, trading mode/account/build capability, safety limits, and market-data quality; cannot change settings.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
     },
     {
       "name": "ibkr_orders_open",
       "description": "Read-only open-order lifecycle state for the connected broker account and mode; reports journal and broker-callback state only.",
-      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "ibkr_orders_history",
+      "description": "Read bounded local order-journal history for the current broker account/mode without placing, modifying, cancelling, or transmitting any broker order. Use for recent trade-review forensics when the user asks what locally journaled order lifecycle/fill callbacks occurred over a date range. This read-only tool does not place orders; it only reports local journal evidence. Results are bounded by grouped-order limit and per-order event_limit so callback-heavy trailing stops do not flood the context; inspect events_truncated/total_events_count before treating event samples as complete. This is a local daemon journal view only, not an IBKR Activity Statement, trade confirmation, execution report, commission ledger, closed-position ledger, or broker-grade historical audit; it may miss manual orders, other-client orders, and rows outside the selected account/mode; broker activity missed while the daemon was offline no longer strands open rows (the journal reconciles against broker open-order snapshots and closes absent rows as `closed_reconciled`), though per-event history for the offline window stays unavailable locally. For currently working orders use `ibkr_orders_open`; for one order's full audit use `ibkr_order_status`. Official broker history now flows into the local reconciliation surface when Flex ingestion is configured — ask the user to run `ibkr recon` — or ask them for an IBKR Activity Statement/Flex export directly.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "event_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "description": "maximum lifecycle events returned per grouped order row; default 20, max 200. When truncated, rows carry events_truncated and total_events_count."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "description": "maximum grouped order rows to return; default 50, max 500"
+          },
+          "since": {
+            "type": "string",
+            "description": "optional inclusive lower boundary as YYYY-MM-DD UTC date or RFC3339 timestamp; default is 7 days before until"
+          },
+          "until": {
+            "type": "string",
+            "description": "optional upper boundary as RFC3339 timestamp, or YYYY-MM-DD UTC date to include that whole UTC day; default is now"
+          }
+        }
+      }
     },
     {
       "name": "ibkr_order_status",
@@ -263,10 +101,14 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "id": {"type": "string"}
+          "id": {
+            "type": "string",
+            "description": "order identifier to inspect: local order_ref such as ibkr-20260528-093000, IBKR order ID, or permanent ID"
+          }
         },
-        "required": ["id"],
-        "additionalProperties": false
+        "required": [
+          "id"
+        ]
       }
     },
     {
@@ -275,28 +117,616 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "action": {"type": "string", "enum": ["buy", "sell"]},
-          "symbol": {"type": "string"},
-          "quantity": {"type": "integer", "minimum": 1},
-          "sec_type": {"type": "string", "enum": ["STK", "ETF", "OPT"]},
-          "expiry": {"type": "string"},
-          "right": {"type": "string", "enum": ["C", "P"]},
-          "strike": {"type": "number"},
-          "order_type": {"type": "string", "enum": ["LMT", "TRAIL", "TRAIL LIMIT"]},
-          "limit": {"type": "number"},
-          "strategy": {"type": "string", "enum": ["patient-limit", "explicit-limit", "broker-trail"]},
-          "trail_offset_type": {"type": "string", "enum": ["percent", "amount"]},
-          "trailing_percent": {"type": "number"},
-          "trailing_amount": {"type": "number"},
-          "initial_stop_price": {"type": "number"},
-          "limit_offset": {"type": "number"},
-          "tif": {"type": "string", "enum": ["DAY", "GTC"]},
-          "outside_rth": {"type": "boolean"},
-          "timeout_ms": {"type": "integer"},
-          "market": {"type": "string", "enum": ["us", "de"]}
+          "action": {
+            "type": "string",
+            "enum": [
+              "buy",
+              "sell"
+            ],
+            "description": "order side; buy increases or closes short exposure, sell reduces/closes long exposure unless the local policy allows the opening effect"
+          },
+          "currency": {
+            "type": "string",
+            "description": "optional contract currency override, such as USD or EUR"
+          },
+          "exchange": {
+            "type": "string",
+            "description": "optional IBKR exchange or venue override, such as SMART or IBIS"
+          },
+          "expiry": {
+            "type": "string",
+            "description": "option expiry as YYYYMMDD. Required for sec_type OPT."
+          },
+          "initial_stop_price": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "optional initial trail stop price. Omit to bind the stop from fresh bid/ask during preview."
+          },
+          "limit": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "optional explicit LMT price. Do not send with TRAIL or TRAIL LIMIT; use limit_offset for TRAIL LIMIT."
+          },
+          "limit_offset": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "TRAIL LIMIT offset from the dynamic stop. Required for TRAIL LIMIT and rejected for plain TRAIL."
+          },
+          "market": {
+            "type": "string",
+            "enum": [
+              "us",
+              "de"
+            ],
+            "description": "optional stock routing shortcut; omit or use \"us\" for SMART/USD, use \"de\" for German/Xetra EUR equities via SMART with primary_exchange=IBIS"
+          },
+          "order_type": {
+            "type": "string",
+            "enum": [
+              "LMT",
+              "TRAIL",
+              "TRAIL LIMIT"
+            ],
+            "description": "broker order type. Defaults to LMT, or TRAIL/TRAIL LIMIT when trail fields are supplied."
+          },
+          "outside_rth": {
+            "type": "boolean",
+            "description": "whether the draft allows outside regular trading hours. Default false; option protection previews should keep this false."
+          },
+          "primary_exchange": {
+            "type": "string",
+            "description": "optional IBKR primary-exchange hint when routing through SMART, such as IBIS for German/Xetra listings"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "share or option-contract quantity; must be positive"
+          },
+          "replace_id": {
+            "type": "string",
+            "description": "optional existing open order ref, order ID, or permanent ID to preview a replacement draft"
+          },
+          "right": {
+            "type": "string",
+            "enum": [
+              "C",
+              "P"
+            ],
+            "description": "option right. Required for sec_type OPT."
+          },
+          "sec_type": {
+            "type": "string",
+            "enum": [
+              "STK",
+              "ETF",
+              "OPT"
+            ],
+            "description": "security type. Defaults to STK unless option fields are present."
+          },
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "patient-limit",
+              "explicit-limit",
+              "broker-trail"
+            ],
+            "description": "pricing strategy. Defaults to patient-limit for LMT and broker-trail for TRAIL/TRAIL LIMIT."
+          },
+          "strike": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "option strike. Required for sec_type OPT."
+          },
+          "symbol": {
+            "type": "string",
+            "description": "underlying ticker symbol"
+          },
+          "tif": {
+            "type": "string",
+            "enum": [
+              "DAY",
+              "GTC"
+            ],
+            "description": "time in force. DAY (default) expires at the session close; GTC persists until filled or cancelled and is accepted for TRAIL and TRAIL LIMIT orders only."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "description": "quote snapshot timeout; default 5000 ms"
+          },
+          "trail_offset_type": {
+            "type": "string",
+            "enum": [
+              "percent",
+              "amount"
+            ],
+            "description": "trail offset unit. Usually omit and let trailing_percent/trailing_amount choose it."
+          },
+          "trailing_amount": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "absolute broker trail amount in the contract currency."
+          },
+          "trailing_percent": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "IBKR trailing percent in percent units: 2 means 2%, 0.50 means 0.50%."
+          },
+          "trigger_method": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              3,
+              4,
+              7,
+              8
+            ],
+            "description": "IBKR stop trigger method for TRAIL/TRAIL LIMIT drafts; omit for the daemon default. Stock/ETF protective trails default to 2 (LAST). Useful values include 1 double bid/ask, 2 last, 3 double last, 4 bid/ask, 7 last or bid/ask, 8 midpoint."
+          }
         },
-        "required": ["action", "symbol", "quantity"],
-        "additionalProperties": false
+        "required": [
+          "action",
+          "symbol",
+          "quantity"
+        ]
+      }
+    },
+    {
+      "name": "ibkr_account",
+      "description": "Account-level net liquidation, buying power, cash, margin, daily P\u0026L, and currency exposure.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "ibkr_positions",
+      "description": "Open positions, option legs, Greeks, quote context, and exposure grouped by underlying.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "filter to a single underlying symbol (case-insensitive)"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "stk",
+              "opt"
+            ],
+            "description": "filter to stock or option positions"
+          },
+          "view": {
+            "type": "string",
+            "enum": [
+              "full",
+              "risk"
+            ],
+            "description": "response shape: full returns existing stocks/options/by_underlying detail plus protection_coverage; risk returns compact portfolio aggregates, top exposures, option-health counts, protection coverage, and flagged option legs"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_quote",
+      "description": "Snapshot stock and ETF quotes with close context, freshness, spread, liquidity, and session warnings.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "currency": {
+            "type": "string",
+            "description": "optional ISO currency override for stocks, e.g. USD or EUR"
+          },
+          "exchange": {
+            "type": "string",
+            "description": "optional IBKR exchange/venue override for stocks, e.g. SMART or IBIS; omit unless the default market route fails"
+          },
+          "market": {
+            "type": "string",
+            "enum": [
+              "us",
+              "de"
+            ],
+            "description": "optional stock routing shortcut; omit or use \"us\" for SMART/USD, use \"de\" for German/Xetra EUR equities via SMART with primary_exchange=IBIS"
+          },
+          "primary_exchange": {
+            "type": "string",
+            "description": "optional IBKR primary-exchange hint when routing a stock through SMART, e.g. NASDAQ or IBIS"
+          },
+          "symbols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "ticker symbols, e.g. [\"AAPL\",\"MSFT\"] or [\"MBG\"] with market=\"de\""
+          }
+        },
+        "required": [
+          "symbols"
+        ]
+      }
+    },
+    {
+      "name": "ibkr_watch",
+      "description": "Saved local watchlist symbols with optional enriched quotes and held-position context.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_positions": {
+            "type": "boolean",
+            "description": "when include_quotes is true, attach compact held-stock context where available; default true"
+          },
+          "include_quotes": {
+            "type": "boolean",
+            "description": "return enriched quote rows for saved symbols; default true. Set false only for the daemon-reachable list-only symbol inventory"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "description": "per-symbol quote timeout when include_quotes is true; default 5000 ms"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_calendar",
+      "description": "Official market-session calendars for supported US equity, US option, and Xetra markets.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "optional local market date YYYY-MM-DD; omit to use now"
+          },
+          "days": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 400,
+            "description": "number of calendar days to include in sessions (default 14, capped at 400)"
+          },
+          "market": {
+            "type": "string",
+            "enum": [
+              "us",
+              "us-equity",
+              "us-options",
+              "de",
+              "de-xetra"
+            ],
+            "description": "which official calendar to query: us/us-equity for U.S. stocks and ETFs, us-options for U.S. listed options regular sessions, de/de-xetra for Xetra cash equities"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_chain",
+      "description": "Option expiries, implied volatility, expected move, strike grids, deltas, open interest, and liquidity gates.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "all_expiries": {
+            "type": "boolean",
+            "description": "when listing expiries, return every listed date (default: nearest 12 with IV)"
+          },
+          "expiry": {
+            "type": "string",
+            "description": "expiry date YYYY-MM-DD; omit to list available expiries"
+          },
+          "max_dte": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "expiry-list filter: maximum calendar days to expiration, applied before IV fan-out"
+          },
+          "min_dte": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "expiry-list filter: minimum calendar days to expiration, applied before IV fan-out; useful for 3-6 month option screening"
+          },
+          "no_iv": {
+            "type": "boolean",
+            "description": "when listing expiries, skip ATM IV (faster)"
+          },
+          "require_live_iv": {
+            "type": "boolean",
+            "description": "expiry-list preflight guard; when true, skip slow IV fan-out outside U.S. option regular hours and return warning_details code live_option_iv_unavailable"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "calls",
+              "puts",
+              "both"
+            ],
+            "description": "filter strike legs (default both)"
+          },
+          "symbol": {
+            "type": "string",
+            "description": "underlying ticker"
+          },
+          "target_dte": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "expiry-list filter: return the listed expiry closest to this calendar DTE, after min/max DTE filters when present"
+          },
+          "trading_class": {
+            "type": "string",
+            "enum": [
+              "SPX",
+              "SPXW"
+            ],
+            "description": "exact-expiry SPX class selector; omit for auto-selection from IBKR classed sec-def data"
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "strikes ATM ± this count (default 5; 0 returns ATM only)"
+          }
+        },
+        "required": [
+          "symbol"
+        ]
+      }
+    },
+    {
+      "name": "ibkr_history",
+      "description": "Daily equity or ETF OHLCV history for lookback, range, and moving-average analysis.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "days": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "calendar-day lookback (default 90); the returned row count is smaller because non-trading days are skipped"
+          },
+          "symbol": {
+            "type": "string",
+            "description": "equity / ETF ticker, case-insensitive (e.g. \"AAPL\", \"spy\")"
+          }
+        },
+        "required": [
+          "symbol"
+        ]
+      }
+    },
+    {
+      "name": "ibkr_technical",
+      "description": "One-call trend, moving-average, relative-strength, ATR, and liquidity screen for stocks and ETFs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "benchmark": {
+            "type": "string",
+            "description": "relative-strength benchmark, default SPY"
+          },
+          "currency": {
+            "type": "string",
+            "description": "optional ISO currency override for symbols, e.g. USD or EUR"
+          },
+          "exchange": {
+            "type": "string",
+            "description": "optional IBKR exchange override for symbols, e.g. SMART or IBIS"
+          },
+          "lookback_days": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 800,
+            "description": "calendar-day history lookback; default 420, enough for 200-DMA and 126 trading-bar returns"
+          },
+          "market": {
+            "type": "string",
+            "enum": [
+              "us",
+              "de"
+            ],
+            "description": "optional route for symbols, not the benchmark; omit/use us for SMART/USD, use de for Xetra/IBIS EUR equities"
+          },
+          "primary_exchange": {
+            "type": "string",
+            "description": "optional primary-exchange hint for symbols, e.g. ARCA for ETFs or IBIS for Xetra"
+          },
+          "symbols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "ticker symbols, e.g. [\"AAPL\",\"MSFT\",\"NVDA\"]"
+          }
+        },
+        "required": [
+          "symbols"
+        ]
+      }
+    },
+    {
+      "name": "ibkr_market_events",
+      "description": "Observed market-event flags for held or requested symbols: borrow tightness, extreme borrow fee, Reg SHO threshold membership, LULD and regulatory halts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "optional single symbol or comma-separated symbols; equivalent to symbols for simple calls"
+          },
+          "symbols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "optional stock/ETF symbols to evaluate, e.g. [\"AAPL\",\"GME\"]; omit to use held underlyings from the daemon positions snapshot"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_scan",
+      "description": "Configured or ad-hoc IBKR market scanners with enriched quote and liquidity context.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "exchange": {
+            "type": "string",
+            "description": "ad-hoc locationCode (e.g. \"STK.US.MAJOR\" or \"STK.EU.IBIS\") — required with `type` when no `preset` is given"
+          },
+          "exclude_penny": {
+            "type": "boolean",
+            "description": "drop enriched rows below $5, equivalent to min_price at least 5"
+          },
+          "instrument": {
+            "type": "string",
+            "description": "IBKR scanner instrument for ad-hoc scans; defaults to STK for US stocks, use STOCK.EU for European stock locations such as STK.EU.IBIS"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "max rows; preset default when omitted; ad-hoc capped at 50"
+          },
+          "min_dollar_volume": {
+            "type": "number",
+            "minimum": 0,
+            "description": "drop enriched rows whose last×volume dollar-volume is below this value; rows without last or volume fail this filter"
+          },
+          "min_price": {
+            "type": "number",
+            "minimum": 0,
+            "description": "drop enriched rows whose last price is below this value; rows without last price fail this filter"
+          },
+          "min_volume": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "drop enriched rows whose current share volume is below this value; rows without volume fail this filter"
+          },
+          "preset": {
+            "type": "string",
+            "description": "preset name from `ibkr_scan` with no args (e.g. \"top-movers\"); omit for ad-hoc or list mode"
+          },
+          "require_live": {
+            "type": "boolean",
+            "description": "drop rows whose quote context is off-hours, stale, previous-close-only, or otherwise not a usable live quote"
+          },
+          "type": {
+            "type": "string",
+            "description": "ad-hoc scanCode (e.g. \"HIGH_LAST_VS_EMA50\", \"HIGH_VS_52W_HL\", \"MOST_ACTIVE_USD\") — required with `exchange` when no `preset` is given"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_scan_params",
+      "description": "Scanner catalog discovery for gateway-supported scan codes, locations, and instruments.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_raw_xml": {
+            "type": "boolean",
+            "description": "include the gateway's raw XML payload (~200 KB); default false"
+          },
+          "instrument": {
+            "type": "string",
+            "description": "filter scan_types to those valid for this instrument (e.g. \"STK\", \"STOCK.EU\", \"OPT\", \"ETF\"); empty returns all"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_breadth",
+      "description": "S\u0026P 500 breadth readings for participation, moving-average, and new-high/new-low context.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "history_days": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 90,
+            "description": "trailing daily-series length (default 30)"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "description": "per-snapshot wait budget when the engine has a fresh value but the wire envelope is still being assembled (default 5000 ms); does not affect the multi-minute cold-start fan-out"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_gamma",
+      "description": "SPY, SPX, or combined dealer-gamma market-structure snapshot and zero-gamma regime hint.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "force": {
+            "type": "boolean",
+            "description": "diagnostics-only: start a fresh refresh; when a good cached value is already serving, keep serving it and promote the forced run only on success; default false"
+          },
+          "include_profiles": {
+            "type": "boolean",
+            "description": "include full sweep profile arrays for charting; default false keeps the response compact for agents and tooling"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "spy",
+              "spx",
+              "spy+spx"
+            ],
+            "description": "which underlying(s) to compute: 'spy+spx' (default request; SPX/SPXW is canonical and SPY is added when fresh/rankable, so SPY throttling does not block a rankable SPX result); 'spx' (canonical SPX-only production signal); 'spy' (SPY-only proxy/context, not the canonical S\u0026P dealer-gamma signal). Omit for the default view. Mirrors the CLI's --only flag."
+          },
+          "wait_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "block up to this many ms for the result; 0 (default) returns the current status immediately"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_regime",
+      "description": "Risk-regime dashboard across volatility, credit, funding, FX carry, dealer gamma, and breadth.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "enum": [
+              "detail",
+              "monitor"
+            ],
+            "description": "response shape: detail returns the existing compact regime snapshot (default); monitor returns posture, lifecycle, summary, source health, warnings, and compact indicator rows only"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_canary",
+      "description": "Portfolio-aware stress check for scheduled review, readiness, source health, and attention states.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "enum": [
+              "full",
+              "alert"
+            ],
+            "description": "response shape: full returns the existing canary evidence payload (default); alert returns compact monitor headline, source health, portfolio/market summaries including held_stress, protection_coverage, option health, hedge offset, warnings, and non-observe flags"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_rules",
+      "description": "Advisory 14-rule daily trading checklist evaluated daemon-side against the live book: per-name exposure cap (with disclosed lower-bound breaches under Greeks gaps), single option-line premium cap (hedge lines get their own higher tier), negative-cash sell-only mode, portfolio extrinsic (theta-rent) budget excluding classified hedge legs, expiry runway on long options, catalyst coverage vs earnings, short options spanning earnings (short calls act; short puts watch, act on assignment notional), pre-earnings size freeze, red-on-green-tape relative weakness, winner-trim into strength, green-day execution nudge, hedge-band integrity (act past twice the band top), exit discipline on long-option loss fences, and non-base-currency FX exposure (watch-only). Rules 3/4/12 thresholds are regime-conditional (calm/early_warning/confirmed sets from the latched regime lifecycle stage; a carried stage evaluates worse-of carried/calm, a never-seen stage uses calm thresholds — both disclosed in row notes). Use when the user asks \"what should I fix today?\", \"which rules am I breaking?\", \"is my book within my own risk rules?\", or wants a daily discipline review. Rows are ranked hardest-first (`ranked` indexes: act \u003e watch \u003e unknown, then base-currency impact); statuses are pass/info/watch/act/unknown/not_evaluated where `unknown` means an input was missing (positions pending, earnings unknown, Greeks gaps, FX report absent) — never treat unknown as pass; `observed_is_lower_bound` marks a breach proven from partial data (\"at least X%\"). `earnings[]` shows each name's next earnings date with source (fetched/override/unknown, with estimated and stale flags); `input_health[]` is the result-level gate (includes the regime_stage row). Advisory only: verdicts never block orders; order previews may carry matching advisory `rule_*` warnings. NOT for the market-regime × portfolio alert verdict (use `ibkr_canary`), NOT for executable protective-stop candidates (use `ibkr_proposals`), and NOT a data source for positions themselves (use `ibkr_positions`).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "optional underlying symbol (case-insensitive) to narrow per-rule offender lists; portfolio verdicts are unaffected"
+          }
+        }
       }
     },
     {
@@ -305,16 +735,90 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "refresh": {"type": "boolean"},
-          "show": {"type": "boolean"}
-        },
-        "additionalProperties": false
+          "refresh": {
+            "type": "boolean",
+            "description": "when true, ask the daemon to recompute proposals before returning; otherwise returns the latest daemon snapshot"
+          },
+          "show": {
+            "type": "boolean",
+            "description": "when true, records a shown audit event for returned proposal rows"
+          }
+        }
       }
     },
     {
-      "name": "ibkr_settings",
-      "description": "Read platform settings and observed state: feature enablement, trading mode/account/build capability, safety limits, and market-data quality; cannot change settings.",
-      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+      "name": "ibkr_opportunities",
+      "description": "Read daemon-owned opportunities for existing positions. Use when the user asks whether ibkr sees mechanical portfolio opportunities, especially long option exercise candidates where exercise may beat selling the option bid or reduce an illiquid risk position. Option-exercise rows include `post_exercise_risk`: before/after underlying share exposure, whether exercise opens/increases/flips/reduces/closes risk, current protection coverage state when available, and whether a protection review is needed after exercise. That context is advisory and does not authorize exercise. This tool can return the latest snapshot or request a refresh, but it is read-only: it does NOT preview exercise, submit exercise, place, modify, cancel, transmit, or expose submit-capable tokens. For holdings and current protection coverage use `ibkr_positions`; for candidate protective stops use `ibkr_proposals`; for local broker-write readiness use `ibkr_trading_status`.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "refresh": {
+            "type": "boolean",
+            "description": "when true, ask the daemon to recompute opportunities before returning; otherwise returns the latest daemon snapshot"
+          },
+          "show": {
+            "type": "boolean",
+            "description": "when true, records a shown audit event for returned opportunity rows"
+          }
+        }
+      }
+    },
+    {
+      "name": "ibkr_size",
+      "description": "Fixed-fractional position sizing math against live net liquidation value; never an order ticket.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "entry": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "planned entry price per share, quote currency"
+          },
+          "fx": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "quote-currency units per 1 base-currency unit (default 1.0 for same-currency trades)"
+          },
+          "lot": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "round shares down to this multiple (default 1; use 100 for one option contract's worth of stock)"
+          },
+          "risk_pct": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 100,
+            "description": "percent of NLV to risk (default 1.0)"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "long",
+              "short"
+            ],
+            "description": "trade direction (default long)"
+          },
+          "stop": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "planned stop price per share, quote currency"
+          },
+          "symbol": {
+            "type": "string",
+            "description": "ticker the trade plan applies to (for reporting only)"
+          },
+          "target": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "optional take-profit price; when set, response includes r (reward:risk multiple) and breakeven_win_rate"
+          }
+        },
+        "required": [
+          "symbol",
+          "entry",
+          "stop"
+        ]
+      }
     }
   ],
   "resources": [

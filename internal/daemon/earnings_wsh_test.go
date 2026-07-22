@@ -22,7 +22,13 @@ func TestParseWSHEarningsPayloadSelectsNextDateAndNormalizesFields(t *testing.T)
 		estimated bool
 	}{
 		{
-			name:      "direct WSH fields",
+			name:      "documented nested WSH event data",
+			payload:   `[{"event_type":"wshe_ed","data":{"earnings_date":"20260731","time_of_day":"AFTER MARKET","wshe_earnings_date_status":"CONFIRMED"}}]`,
+			date:      "2026-07-31",
+			timeOfDay: "amc",
+		},
+		{
+			name:      "legacy flattened callback fields",
 			payload:   `[{"event_type":"wshe_ed","earnings_date":"20260731","time_of_day":"AFTER MARKET","wshe_earnings_date_status":"CONFIRMED"}]`,
 			date:      "2026-07-31",
 			timeOfDay: "amc",
@@ -119,6 +125,9 @@ func TestParseWSHEarningsPayloadSchemaFailuresStayTypedAndRedacted(t *testing.T)
 		{"null events", `{"events":null}`},
 		{"events not array", `{"events":{}}`},
 		{"null event", `[null]`},
+		{"null event data", `[{"event_type":"wshe_ed","data":null}]`},
+		{"event data not object", `[{"event_type":"wshe_ed","data":[]}]`},
+		{"nested data does not fall back to outer fields", `[{"event_type":"wshe_ed","earnings_date":"20260730","data":{}}]`},
 		{"missing date", `[{"time_of_day":"AFTER MARKET"}]`},
 		{"date is not string", `[{"earnings_date":20260730}]`},
 		{"invalid date", `[{"earnings_date":"20260230"}]`},

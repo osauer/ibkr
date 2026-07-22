@@ -93,6 +93,67 @@ func TestAssembleEarningsPropagatesTypedUnknownAndSourceHealth(t *testing.T) {
 	}
 }
 
+func TestAssembleEarningsRetriesDueProviderBehindFreshAggregate(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	primaryNext := now.Add(earningsFreshWindow)
+	secondaryDue := now.Add(-time.Minute)
+	entry := earningsEntry{Date: "2026-07-30", TimeOfDay: "amc", ObservedAt: now}
+	providers := map[string]earningsProviderState{
+		earningsNasdaqProvider: {
+			LastAttempt: earningsProviderAttempt{
+				Status: rpc.EarningsStatusDate, Entry: &entry,
+				AttemptedAt: now, CompletedAt: now, NextAttempt: &primaryNext,
+			},
+			LastGood: &entry,
+		},
+		earningsWSHProvider: {
+			LastAttempt: earningsProviderAttempt{
+				Status:      rpc.EarningsStatusTransportFailure,
+				AttemptedAt: now.Add(-earningsFailureRetry), CompletedAt: now.Add(-earningsFailureRetry),
+				NextAttempt: &secondaryDue,
+				LastFailure: &rpc.SourceFailure{
+					Code: rpc.SourceFailureTimeout, Stage: rpc.SourceFailureStageWSHEvent,
+					FailedAt: now.Add(-earningsFailureRetry), Retryable: true,
+				},
+			},
+		},
+	}
+	cache := newEarningsCache(t.TempDir(), nil)
+	cache.clock = func() time.Time { return now }
+	cache.symbols["AAPL"] = earningsSymbolState{
+		Resolution: resolveEarningsProviders(providers, now),
+		Providers:  providers,
+		UpdatedAt:  now,
+	}
+	called := make(chan struct{}, 1)
+	if err := cache.setSecondaryProvider(earningsWSHProvider, func(context.Context, string) (earningsProviderFetchResult, error) {
+		called <- struct{}{}
+		return earningsProviderFetchResult{Status: rpc.EarningsStatusDate, Entry: entry}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{earnings: cache}
+	srv.assembleEarnings(t.Context(), []risk.NameInput{{Symbol: "AAPL"}}, risk.DefaultRulebookPolicy(), marketcal.New(), now, true)
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("due WSH retry was suppressed by the fresh single-source aggregate")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		view, ok := cache.resolution("AAPL")
+		if ok && view.Reason == earningsReasonConsensus {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("due WSH retry did not commit provider agreement: %+v", view)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestSessionsUntilCountsTradingDays(t *testing.T) {
 	cal := marketcal.New()
 	loc, _ := time.LoadLocation("America/New_York")

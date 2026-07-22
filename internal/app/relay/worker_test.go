@@ -144,6 +144,83 @@ func TestWorkerServeRequestForwardsAllowedPath(t *testing.T) {
 	}
 }
 
+func TestWorkerRequestCancellationIsPerRequest(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/events" {
+			close(started)
+			<-r.Context().Done()
+			close(cancelled)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	worker := &Worker{
+		originURL:  srv.URL,
+		publicURL:  "https://remote.osauer.dev",
+		httpClient: srv.Client(),
+	}
+	requests := newRequestCancelSet()
+	streamCtx, finishStream := requests.start(t.Context(), "stream")
+	defer finishStream()
+	otherCtx, finishOther := requests.start(t.Context(), "other")
+	defer finishOther()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = worker.serveRequest(streamCtx, frame{
+			Type: "request",
+			ID:   "stream",
+			Path: "/api/events",
+		}, func(ctx context.Context, _ frame) error {
+			return ctx.Err()
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream request did not reach the local app")
+	}
+	requests.cancel("stream")
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request_cancel did not cancel the local app request")
+	}
+	select {
+	case <-otherCtx.Done():
+		t.Fatal("cancelling one request cancelled its sibling")
+	default:
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled relay request did not return")
+	}
+
+	var frames []frame
+	if err := worker.serveRequest(otherCtx, frame{
+		Type: "request",
+		ID:   "other",
+		Path: "/api/bootstrap",
+	}, func(_ context.Context, f frame) error {
+		frames = append(frames, f)
+		return nil
+	}); err != nil {
+		t.Fatalf("second request over the same connector context: %v", err)
+	}
+	if len(frames) != 2 || frames[0].Type != "response_start" || frames[1].Type != "response_end" {
+		t.Fatalf("second request frames = %#v, want start/end", frames)
+	}
+}
+
 // fakeRegisterJSON mimics the relay's /api/register response, pointing the
 // connector websocket URL back at the fake relay server.
 func fakeRegisterJSON(baseURL, routeID string, expiresAt time.Time) []byte {

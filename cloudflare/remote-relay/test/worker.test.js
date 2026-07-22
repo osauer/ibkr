@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import worker, { RelaySession, __test } from "../src/worker.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const VALID_ROUTE = "r_abcdefghijklmnop";
 
 function fakeState(initial = {}) {
   const data = new Map(Object.entries(initial));
@@ -36,6 +38,14 @@ function fakeEnv() {
   };
 }
 
+async function waitFor(predicate) {
+  for (let i = 0; i < 100; i++) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail("condition was not reached");
+}
+
 test("requestPath preserves path and query", () => {
   assert.equal(
     __test.requestPath("https://remote.osauer.dev/pair.html?remote=r1&pair=p1"),
@@ -44,10 +54,16 @@ test("requestPath preserves path and query", () => {
 });
 
 test("route cookie round trips route id", () => {
-  const cookie = __test.routeCookie("r_abc123");
+  const cookie = __test.routeCookie(VALID_ROUTE);
   assert.match(cookie, /Secure/);
   assert.match(cookie, /HttpOnly/);
-  assert.equal(__test.readCookie(cookie, "ibkr_remote_route"), "r_abc123");
+  assert.equal(__test.readCookie(cookie, "ibkr_remote_route"), VALID_ROUTE);
+});
+
+test("production config carries request cancellation through the Worker-to-DO hop", () => {
+  const config = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
+  assert.match(config, /enable_request_signal/);
+  assert.match(config, /request_signal_passthrough/);
 });
 
 test("headerMap removes hop by hop headers", () => {
@@ -117,13 +133,126 @@ test("cookie-addressed requests refresh the route cookie", async () => {
     },
   };
   const req = new Request("https://relay.example/api/bootstrap", {
-    headers: { Cookie: "ibkr_remote_route=r_abc" },
+    headers: { Cookie: `ibkr_remote_route=${VALID_ROUTE}` },
   });
   const res = await worker.fetch(req, env);
   assert.equal(res.status, 200);
   const setCookie = res.headers.get("Set-Cookie") || "";
-  assert.match(setCookie, /ibkr_remote_route=r_abc/);
+  assert.match(setCookie, new RegExp(`ibkr_remote_route=${VALID_ROUTE}`));
   assert.match(setCookie, /Max-Age=34560000/);
+});
+
+test("invalid route selectors never address a Durable Object", async () => {
+  const addressed = [];
+  const env = {
+    RELAY_SESSION: {
+      idFromName: (name) => {
+        addressed.push(name);
+        return name;
+      },
+      get: () => ({ fetch: async () => new Response("unexpected") }),
+    },
+  };
+  const requests = [
+    new Request("https://relay.example/api/connect?route_id=bad"),
+    new Request("https://relay.example/api/bootstrap?remote=bad"),
+    new Request("https://relay.example/api/bootstrap", {
+      headers: { Cookie: "ibkr_remote_route=bad" },
+    }),
+  ];
+  for (const request of requests) {
+    const response = await worker.fetch(request, env);
+    assert.equal(response.status, 400);
+  }
+  assert.deepEqual(addressed, []);
+});
+
+test("client abort cancels one request without changing durable route state", async () => {
+  const expiry = new Date(Date.now() + DAY_MS).toISOString();
+  const state = fakeState({ connector_token: "tok", expires_at: expiry });
+  const session = new RelaySession(state, {});
+  const frames = [];
+  let closeCalls = 0;
+  const connector = {
+    send(raw) {
+      frames.push(JSON.parse(raw));
+    },
+    close() {
+      closeCalls++;
+    },
+  };
+  session.connector = connector;
+  const before = [...state.data.entries()];
+  const controller = new AbortController();
+  const forwarded = session.fetch(new Request("https://relay.example/api/events", {
+    signal: controller.signal,
+  }));
+  await waitFor(() => session.inflight.size === 1);
+  const requestID = frames.find((frame) => frame.type === "request")?.id;
+  controller.abort();
+  const response = await forwarded;
+
+  assert.equal(response.status, 499);
+  assert.equal(session.inflight.size, 0);
+  assert.deepEqual(frames.at(-1), { type: "request_cancel", id: requestID });
+  assert.equal(session.connector, connector);
+  assert.equal(closeCalls, 0);
+  assert.deepEqual([...state.data.entries()], before);
+});
+
+test("stream abort leaves the connector usable for the next phone request", async () => {
+  const state = fakeState({ expires_at: new Date(Date.now() + DAY_MS).toISOString() });
+  const session = new RelaySession(state, {});
+  const frames = [];
+  const connector = {
+    send(raw) {
+      frames.push(JSON.parse(raw));
+    },
+    close() {
+      assert.fail("request cancellation must not close the shared connector");
+    },
+  };
+  session.connector = connector;
+
+  const controller = new AbortController();
+  const streaming = session.fetch(new Request("https://relay.example/api/events", {
+    signal: controller.signal,
+  }));
+  await waitFor(() => session.inflight.size === 1);
+  const streamID = frames.find((frame) => frame.type === "request").id;
+  await session.handleConnectorMessage(JSON.stringify({
+    type: "response_start",
+    id: streamID,
+    status: 200,
+    headers: { "content-type": ["text/event-stream"] },
+  }));
+  const streamResponse = await streaming;
+  const streamBody = streamResponse.text();
+  controller.abort();
+  await assert.rejects(streamBody);
+  assert.equal(session.inflight.size, 0);
+  await session.handleConnectorMessage(JSON.stringify({ type: "response_end", id: streamID }));
+
+  const nextController = new AbortController();
+  const next = session.fetch(new Request("https://relay.example/api/bootstrap", {
+    signal: nextController.signal,
+  }));
+  await waitFor(() => session.inflight.size === 1);
+  const nextID = frames.filter((frame) => frame.type === "request").at(-1).id;
+  await session.handleConnectorMessage(JSON.stringify({
+    type: "response_start",
+    id: nextID,
+    status: 200,
+    headers: {},
+  }));
+  const nextResponse = await next;
+  await session.handleConnectorMessage(JSON.stringify({ type: "response_end", id: nextID }));
+  assert.equal(nextResponse.status, 200);
+  assert.equal(session.inflight.size, 0);
+  assert.equal(session.connector, connector);
+  const frameCount = frames.length;
+  nextController.abort();
+  assert.equal(frames.length, frameCount, "completed request retained an abort listener");
 });
 
 test("register can resume an existing route with the connector token", async () => {
@@ -219,10 +348,10 @@ test("navigation to an offline route serves the auto-retry page with cookie refr
     },
   };
   const res = await worker.fetch(new Request("https://relay.example/", {
-    headers: { Accept: "text/html", Cookie: "ibkr_remote_route=r_abc" },
+    headers: { Accept: "text/html", Cookie: `ibkr_remote_route=${VALID_ROUTE}` },
   }), env);
   assert.equal(res.status, 503);
   assert.match(res.headers.get("Content-Type") || "", /text\/html/);
   assert.match(await res.text(), /Retrying automatically/);
-  assert.match(res.headers.get("Set-Cookie") || "", /ibkr_remote_route=r_abc/);
+  assert.match(res.headers.get("Set-Cookie") || "", new RegExp(`ibkr_remote_route=${VALID_ROUTE}`));
 });

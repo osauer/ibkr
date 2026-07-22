@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/xdgcache"
@@ -92,15 +91,14 @@ func FetchLatestRelease(ctx context.Context) (*Release, error) {
 // for your platform" — we don't synthesise an error here to keep the
 // branching at the call site explicit.
 //
-// Match shape: substring "<GOOS>-<GOARCH>" anywhere in the asset name,
-// AND the name ends with ".tar.gz". The release pipeline names assets
-// exactly "ibkr-vX.Y.Z-darwin-arm64.tar.gz"; we match by suffix shape
-// rather than full filename so a future rename of the version segment
-// (e.g. dropping the "v") doesn't silently break matching.
+// The release pipeline also publishes an explicit opt-in
+// "ibkr-trading-..." archive for the same host. Match the standard
+// read-only archive by its complete release-derived filename so asset
+// ordering can never broaden the installed binary's broker authority.
 func (r *Release) AssetForHost() (name, url string, ok bool) {
-	want := runtime.GOOS + "-" + runtime.GOARCH
+	want := fmt.Sprintf("ibkr-%s-%s-%s.tar.gz", r.TagName, runtime.GOOS, runtime.GOARCH)
 	for _, a := range r.Assets {
-		if strings.HasSuffix(a.Name, ".tar.gz") && strings.Contains(a.Name, want) {
+		if a.Name == want {
 			return a.Name, a.URL, true
 		}
 	}

@@ -155,42 +155,6 @@ func (s *purgeLedgerStore) AllRows() ([]purgeLedgerRow, error) {
 	return slices.Clone(ledger.Rows), nil
 }
 
-func (s *purgeLedgerStore) ApplyOrderFill(ev orderJournalEvent) error {
-	if s == nil {
-		return nil
-	}
-	if ev.Filled <= 0 || ev.OrderRef == "" {
-		return nil
-	}
-	switch ev.Source {
-	case purgeExecuteSource, purgeRestoreSource:
-	default:
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for range 3 {
-		ledger, revision, err := s.loadLocked()
-		if err != nil {
-			return err
-		}
-		now := s.currentTime()
-		changed := applyPurgeLedgerFill(&ledger, ev, now)
-		if !changed {
-			return nil
-		}
-		ledger.UpdatedAt = now
-		if err := s.saveLocked(ledger, revision); err != nil {
-			if errors.Is(err, corestore.ErrRevisionConflict) {
-				continue
-			}
-			return err
-		}
-		return nil
-	}
-	return fmt.Errorf("purge ledger revision changed repeatedly")
-}
-
 // CommitOrderLifecycle makes the append-only lifecycle event and the purge
 // cumulative-fill cursor one SQLite transaction. A duplicate cumulative fill
 // still records its legitimate lifecycle event but carries no state CAS.
@@ -697,30 +661,6 @@ func (s *purgeLedgerStore) loadLocked() (purgeLedgerFile, int64, error) {
 		return purgeLedgerFile{}, 0, fmt.Errorf("purge ledger is %q/%q, want %q/%q", ledger.Kind, ledger.SchemaVersion, purgeLedgerKind, purgeLedgerSchemaVersion)
 	}
 	return ledger, doc.Revision, nil
-}
-
-func (s *purgeLedgerStore) saveLocked(ledger purgeLedgerFile, expectedRevision int64) error {
-	store, err := s.coreStore()
-	if err != nil {
-		return err
-	}
-	ledger.Kind = purgeLedgerKind
-	ledger.SchemaVersion = purgeLedgerSchemaVersion
-	if ledger.UpdatedAt.IsZero() {
-		ledger.UpdatedAt = s.currentTime()
-	}
-	raw, err := marshalPurgeLedger(ledger)
-	if err != nil {
-		return err
-	}
-	_, err = store.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
-		ScopeKey: purgeLedgerStateScope, Kind: purgeLedgerStateKind,
-		ExpectedRevision: expectedRevision, JSON: raw,
-	})
-	if err != nil {
-		return fmt.Errorf("write authoritative purge ledger: %w", err)
-	}
-	return nil
 }
 
 func marshalPurgeLedger(ledger purgeLedgerFile) ([]byte, error) {

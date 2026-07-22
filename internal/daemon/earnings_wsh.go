@@ -286,23 +286,39 @@ func decodeWSHEarningsEvent(raw json.RawMessage) (wshEarningsEvent, error) {
 		return wshEarningsEvent{}, errors.New("WSH event code is not earnings-date")
 	}
 
-	date, err := coalescedNormalizedWSHString(fields, normalizeWSHEarningsDate, "earnings_date", "date")
+	// IBKR's documented WSH event record keeps identity fields on the outer
+	// object and event-specific values beneath "data". Accept the historical
+	// flattened callback shape only when "data" is absent; never merge the two
+	// namespaces or guess across conflicting provider formats.
+	eventFields := fields
+	if rawData, ok := fields["data"]; ok {
+		if bytes.Equal(bytes.TrimSpace(rawData), []byte("null")) {
+			return wshEarningsEvent{}, errors.New("WSH event data is null")
+		}
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(rawData, &nested); err != nil || nested == nil {
+			return wshEarningsEvent{}, errors.New("WSH event data is not an object")
+		}
+		eventFields = nested
+	}
+
+	date, err := coalescedNormalizedWSHString(eventFields, normalizeWSHEarningsDate, "earnings_date", "date")
 	if err != nil || date == "" {
 		return wshEarningsEvent{}, errors.New("WSH event has no valid earnings date")
 	}
 
-	timeOfDay, err := coalescedNormalizedWSHString(fields, normalizeWSHEarningsTime, "time_of_day", "time")
+	timeOfDay, err := coalescedNormalizedWSHString(eventFields, normalizeWSHEarningsTime, "time_of_day", "time")
 	if err != nil {
 		return wshEarningsEvent{}, err
 	}
 
 	estimated := false
-	if rawEstimated, ok := fields["estimated"]; ok {
+	if rawEstimated, ok := eventFields["estimated"]; ok {
 		if err := json.Unmarshal(rawEstimated, &estimated); err != nil {
 			return wshEarningsEvent{}, errors.New("WSH estimated field is not boolean")
 		}
 	}
-	if status, ok, err := optionalWSHString(fields, "wshe_earnings_date_status"); err != nil {
+	if status, ok, err := optionalWSHString(eventFields, "wshe_earnings_date_status"); err != nil {
 		return wshEarningsEvent{}, err
 	} else if ok && status != "" {
 		switch strings.ToUpper(strings.TrimSpace(status)) {

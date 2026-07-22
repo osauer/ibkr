@@ -492,9 +492,10 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 		if _, ok := earnings[sym]; !ok {
 			earnings[sym] = risk.EarningsInput{Known: false, Source: "unknown", Reason: info.Reason}
 		}
-		if info.Source != "override" && (info.Source == "unknown" || info.Stale) {
-			toFetch = append(toFetch, sym)
-		}
+		// Aggregate freshness and provider retry readiness are different
+		// clocks. Always hand non-override names to the cache; kickRefresh
+		// cheaply filters them by each provider's durable NextAttempt.
+		toFetch = append(toFetch, sym)
 		infos = append(infos, info)
 	}
 	// Async, bounded, off the snapshot path — this call returns immediately.

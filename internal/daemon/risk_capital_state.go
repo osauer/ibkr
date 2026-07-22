@@ -1303,21 +1303,6 @@ func (st *riskCapitalStore) EnsureLoaded() {
 	st.loadLocked()
 }
 
-// PreviewVerdict is the cheap in-memory evaluation for advisory preview
-// causes: persisted last equity only, never an account fetch (a preview
-// must stay a preview-priced call; rulebook precedent).
-func (st *riskCapitalStore) PreviewVerdict(c *risk.Constitution) risk.CapitalVerdict {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.loadLocked()
-	var obs *risk.CapitalObservation
-	if st.state.LastEquityBase > 0 {
-		obs = &risk.CapitalObservation{EquityBase: st.state.LastEquityBase, AsOf: st.state.LastEquityAsOf}
-	}
-	now := st.now()
-	return risk.EvaluateCapital(c, st.runtimeLocked(c, now), obs, now)
-}
-
 func artefactDeclaredClass(c *risk.Constitution, pick func(*risk.Constitution) string) string {
 	if c == nil {
 		return ""

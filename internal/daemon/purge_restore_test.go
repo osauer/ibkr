@@ -263,7 +263,7 @@ func seedPurgeLedgerFill(t *testing.T, store *purgeLedgerStore, purgeID, legID s
 	ev.ClientID = 31
 	ev.Account = "DU1234567"
 	ev.Mode = rpc.AccountModePaper
-	if err := store.ApplyOrderFill(ev); err != nil {
+	if err := commitTestPurgeLedgerEvent(store, ev); err != nil {
 		t.Fatalf("seed purge ledger %s: %v", legID, err)
 	}
 }

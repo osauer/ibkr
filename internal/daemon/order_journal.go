@@ -312,36 +312,6 @@ func (s *orderJournalStore) LoadEvents(limit int) ([]orderJournalEvent, error) {
 	return events, nil
 }
 
-func (s *orderJournalStore) ConfirmPreviewTokenUse(ev orderJournalEvent) error {
-	return s.ConfirmPreviewTokenUseAndAppend(ev)
-}
-
-func (s *orderJournalStore) ConfirmPreviewTokenUseAndAppend(ev orderJournalEvent, after ...orderJournalEvent) error {
-	if ev.PreviewTokenID == "" {
-		return fmt.Errorf("preview token id is required")
-	}
-	if ev.Type == "" {
-		ev.Type = orderJournalEventTokenConfirmed
-	}
-	if ev.Type != orderJournalEventTokenConfirmed {
-		return fmt.Errorf("preview token confirmation event type must be %q", orderJournalEventTokenConfirmed)
-	}
-	store, err := s.coreStore()
-	if err != nil {
-		return err
-	}
-	head, err := store.AuthorityHead(context.Background())
-	if err != nil {
-		return fmt.Errorf("read order authority head: %w", err)
-	}
-	events := append([]orderJournalEvent{ev}, after...)
-	action := corestore.ActionPlace
-	if len(after) > 0 && after[0].Type == orderJournalEventModifyRequested {
-		action = corestore.ActionModify
-	}
-	return s.StagePreTransmit(ev.PreviewTokenID, head.AuthorityEpoch, head.SignerGeneration, ev.ReservedOrderID, action, corestore.OriginDaemon, events)
-}
-
 // StagePreTransmit atomically consumes the global preview-token tombstone (if
 // present), binds the complete route, advances global and scoped floors, and
 // appends every ordered intent event before the caller may touch the broker.
