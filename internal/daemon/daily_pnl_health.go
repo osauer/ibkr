@@ -46,7 +46,7 @@ type dailyPnLObservationAuthority struct {
 // falsely healthy state.
 func (a *dailyPnLObservationAuthority) bindCore(ctx context.Context, core *corestore.Store) error {
 	if a == nil || core == nil {
-		return fmt.Errorf("Daily P&L observation SQLite authority is unavailable")
+		return fmt.Errorf("daily P&L observation SQLite authority is unavailable")
 	}
 	doc, ok, err := core.GetStateDocument(ctx, daemonStateScope, dailyPnLObservationStateKind)
 	if err != nil {
@@ -193,25 +193,25 @@ func (a *dailyPnLObservationAuthority) persistLocked(ctx context.Context, state 
 
 func validateDailyPnLObservationDocument(doc dailyPnLObservationDocument) error {
 	if doc.Version != 1 {
-		return fmt.Errorf("Daily P&L observation authority has unsupported version %d", doc.Version)
+		return fmt.Errorf("daily P&L observation authority has unsupported version %d", doc.Version)
 	}
 	if doc.Failure == nil {
 		return nil
 	}
 	failure := doc.Failure
 	if len(failure.SourceKey) != sha256.Size*2 || strings.TrimSpace(failure.SessionKey) == "" || failure.AsOf.IsZero() {
-		return fmt.Errorf("Daily P&L observation authority failure is incomplete")
+		return fmt.Errorf("daily P&L observation authority failure is incomplete")
 	}
 	if _, err := hex.DecodeString(failure.SourceKey); err != nil {
-		return fmt.Errorf("Daily P&L observation authority has invalid source key")
+		return fmt.Errorf("daily P&L observation authority has invalid source key")
 	}
 	if _, err := time.Parse(time.DateOnly, failure.SessionKey); err != nil {
-		return fmt.Errorf("Daily P&L observation authority has invalid session key")
+		return fmt.Errorf("daily P&L observation authority has invalid session key")
 	}
 	switch failure.Status {
 	case rpc.DailyPnLObservationMissing, rpc.DailyPnLObservationInvalid, rpc.DailyPnLObservationStale:
 		return nil
 	default:
-		return fmt.Errorf("Daily P&L observation authority has invalid failure status")
+		return fmt.Errorf("daily P&L observation authority has invalid failure status")
 	}
 }
