@@ -195,16 +195,17 @@ const policyPrimerStyles = `${referenceDiagramStyles}      .primer-title { font-
       .primer-note { font-size: 11px; font-weight: 650; fill: ${C.greenDark}; }
 `;
 
-const policyReadableStyles = `${referenceDiagramStyles}      .card-title { font-size: 16px; }
-      .card-sub { font-size: 14px; }
-      .node-title { font-size: 17px; }
-      .node-sub { font-size: 14px; }
-      .mono-small { font-size: 12.5px; }
-      .layer { font-size: 13px; }
-      .policy-callout { font-size: 15px; font-weight: 750; fill: ${C.ink}; }
-      .policy-table-head { font-size: 13px; font-weight: 750; fill: ${C.muted}; letter-spacing: .5px; }
-      .policy-table-text { font-size: 14px; fill: ${C.ink}; }
-      .policy-table-sub { font-size: 13px; fill: ${C.muted}; }
+const policyReadableStyles = `${referenceDiagramStyles}      .card-title { font-size: 14.5px; font-weight: 700; }
+      .card-sub { font-size: 13px; }
+      .card-note { font-size: 11.5px; fill: ${C.muted}; }
+      .node-title { font-size: 15px; font-weight: 700; }
+      .node-sub { font-size: 13px; }
+      .mono-small { font-size: 11.5px; }
+      .layer { font-size: 12.5px; }
+      .policy-callout { font-size: 14px; font-weight: 750; fill: ${C.ink}; }
+      .policy-table-head { font-size: 12.5px; font-weight: 750; fill: ${C.muted}; letter-spacing: .35px; }
+      .policy-table-text { font-size: 12.75px; fill: ${C.ink}; }
+      .policy-table-sub { font-size: 12.5px; fill: ${C.muted}; }
 `;
 
 const storageOverviewStyles = `${policyPrimerStyles}      .card-title { font-size: 16px; }
@@ -459,7 +460,7 @@ function persistenceArchitecture() {
   });
 }
 
-function policyCard({ x, y, width, height, iconName, color, title, lines, format, dark = false }) {
+function policyCard({ x, y, width, height, iconName, color, title, lines, format, formatClass = "mono-small", dark = false }) {
   const fill = dark ? C.terminal : C.panel;
   const titleFill = dark ? "#ffffff" : C.ink;
   const subClass = dark ? "node-sub on-dark" : "card-sub";
@@ -469,62 +470,62 @@ function policyCard({ x, y, width, height, iconName, color, title, lines, format
     ${iconTile(iconName, x + 16, y + 16, color, 38)}
     <text x="${x + 66}" y="${y + 35}" class="card-title" style="fill:${titleFill}">${esc(title)}</text>
     ${textLines(x + 18, y + 72, lines, subClass, 16)}
-    <text x="${x + 18}" y="${y + height - 15}" class="mono-small" style="fill:${formatFill}">${esc(format)}</text>
+    ${format ? `<text x="${x + 18}" y="${y + height - 15}" class="${formatClass}" style="fill:${formatFill}">${esc(format)}</text>` : ""}
   </g>`;
 }
 
 function policyPrimer() {
   const body = `
-  ${header("From Risk Decision to Human Action", "A person chooses the boundary; the daemon applies current facts consistently; a person decides what happens next.")}
+  ${header("How Policy Informs a Trading Decision", "You set the boundary. ibkr checks current evidence. You decide what happens next.")}
 
-  <text x="36" y="140" class="layer">CHOICES MADE BEFORE PRESSURE</text>
-  <text x="290" y="204" class="layer">IBKR EVALUATES</text>
-  <text x="526" y="204" class="layer">EFFECT TODAY</text>
-  <text x="750" y="164" class="layer">HUMAN ACTION</text>
+  <text x="36" y="140" class="layer">Boundary Set in Advance</text>
+  <text x="290" y="204" class="layer">ibkr Evaluation</text>
+  <text x="526" y="204" class="layer">Current Effect</text>
+  <text x="750" y="164" class="layer">Human Decision</text>
 
-  ${policyCard({ x: 36, y: 164, width: 210, height: 138, iconName: "fileText", color: C.greenDark, title: "Human boundary", lines: ["capital · risk · evidence", "chosen while calm"], format: "human-owned policy" })}
-  ${policyCard({ x: 36, y: 336, width: 210, height: 138, iconName: "worldDownload", color: C.blue, title: "Current evidence", lines: ["account · market · statement", "freshness and quality included"], format: "observed facts" })}
-  ${policyCard({ x: 290, y: 228, width: 196, height: 196, iconName: "serverCog", color: C.green, title: "ibkr checks", lines: ["policy + usable evidence", "unknown stays unknown", "one structured result"], format: "no risk appetite of its own", dark: true })}
-  ${policyCard({ x: 526, y: 228, width: 196, height: 196, iconName: "bell", color: C.slate, title: "Advice / shadow", lines: ["status · explanation", "warning · proposal", "no submit permission"], format: "personal policy today" })}
+  ${policyCard({ x: 36, y: 164, width: 210, height: 138, iconName: "fileText", color: C.greenDark, title: "Risk Boundary", lines: ["capital at risk", "evidence required"], format: "Set by the trader", formatClass: "card-note" })}
+  ${policyCard({ x: 36, y: 336, width: 210, height: 138, iconName: "worldDownload", color: C.blue, title: "Current Evidence", lines: ["account · market", "broker statement"], format: "Freshness included", formatClass: "card-note" })}
+  ${policyCard({ x: 290, y: 228, width: 196, height: 196, iconName: "serverCog", color: C.green, title: "Policy Check", lines: ["policy + current evidence", "missing stays unknown", "one consistent result"], format: "No trading discretion", formatClass: "card-note", dark: true })}
+  ${policyCard({ x: 526, y: 228, width: 196, height: 196, iconName: "bell", color: C.slate, title: "Advice Today", lines: ["status + explanation", "warning or proposal", "cannot submit"], format: "Advisory / shadow", formatClass: "card-note" })}
 
   <rect x="750" y="188" width="174" height="260" rx="16" fill="${C.amberSoft}" stroke="${C.amber}" stroke-width="1.5"/>
   ${iconTile("user", 766, 206, C.amber, 40)}
-  <text x="814" y="216" class="node-title"><tspan x="814">Human</tspan><tspan x="814" dy="20">decides</tspan></text>
+  <text x="814" y="216" class="node-title"><tspan x="814">Human</tspan><tspan x="814" dy="19">Decision</tspan></text>
   <text x="766" y="270" class="card-sub"><tspan x="766">wait · investigate</tspan><tspan x="766" dy="20">reduce risk · act</tspan></text>
   <rect x="766" y="330" width="142" height="94" rx="11" fill="${C.panel}" stroke="${C.amber}"/>
   ${icon("lock", 829, 340, 16, C.amber, 2)}
-  <text x="837" y="374" text-anchor="middle" class="policy-callout"><tspan x="837">Only a human</tspan><tspan x="837" dy="18">authorizes</tspan><tspan x="837" dy="18">an order.</tspan></text>
+  <text x="837" y="374" text-anchor="middle" class="policy-callout"><tspan x="837">Only a human</tspan><tspan x="837" dy="17">authorizes</tspan><tspan x="837" dy="17">an order.</tspan></text>
 
-  ${line("M252 233H274V276H284", "green")}
-  ${line("M252 405H274V376H284", "blue", { dashed: true })}
-  ${line("M492 326H520", "slate")}
-  ${line("M728 326H744", "slate")}
+  ${line("M246 233H274V276H290", "green")}
+  ${line("M246 405H274V376H290", "blue", { dashed: true })}
+  ${line("M486 326H526", "slate")}
+  ${line("M722 326H750", "slate")}
 
   <rect x="290" y="500" width="260" height="118" rx="14" fill="${C.panel}" stroke="${C.slate}"/>
   ${iconTile("database", 306, 516, C.slate, 34)}
-  <text x="354" y="536" class="node-title">Local decision record</text>
-  <text x="306" y="574" class="card-sub"><tspan x="306">what ibkr observed and decided</tspan><tspan x="306" dy="20">not proof of execution</tspan></text>
+  <text x="354" y="536" class="node-title">Local Decision Record</text>
+  <text x="306" y="574" class="card-sub"><tspan x="306">what ibkr saw and concluded</tspan><tspan x="306" dy="19">not execution evidence</tspan></text>
 
   <rect x="580" y="500" width="344" height="118" rx="14" fill="${C.panel}" stroke="${C.blue}"/>
   ${iconTile("worldDownload", 596, 516, C.blue, 34)}
-  <text x="644" y="536" class="node-title">Broker confirmation + statement</text>
-  <text x="596" y="574" class="card-sub"><tspan x="596">what actually executed</tspan><tspan x="596" dy="20">independent broker evidence</tspan></text>
+  <text x="644" y="536" class="node-title">Broker Evidence</text>
+  <text x="596" y="574" class="card-sub"><tspan x="596">confirmation + statement</tspan><tspan x="596" dy="19">what actually executed</tspan></text>
 
-  ${line("M624 430V474H420V500", "slate")}
+  ${line("M624 424V474H420V500", "slate")}
   <path d="M837 448V486H752V500" fill="none" stroke="${C.amber}" stroke-width="1.6" stroke-dasharray="2 5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-amber)"/>
-  <text x="846" y="478" class="mono-small" style="fill:${C.amber}">if sent</text>
+  <text x="846" y="478" class="card-note" style="fill:${C.amber}">If sent</text>
 
-  <path d="M752 618V656H140V474" fill="none" stroke="${C.green}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-green)"/>
-  <text x="446" y="650" text-anchor="middle" class="card-sub">Review evidence; publish a higher version deliberately.</text>
+  <path d="M752 618V656H20V233H36" fill="none" stroke="${C.green}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-green)"/>
+  <text x="446" y="650" text-anchor="middle" class="card-sub">Review broker outcomes before publishing a new policy version.</text>
 
-  <text x="924" y="686" text-anchor="end" class="footnote">one trader may hold every responsibility · ibkr does not enforce named roles</text>
+  <text x="924" y="686" text-anchor="end" class="footnote">One trader may hold every role. ibkr does not assign named roles.</text>
   `;
 
   return svgFrame({
     width: 960,
     height: 706,
-    title: "From Risk Decision to Human Action (ibkr canary)",
-    description: "A human sets a risk boundary and current evidence enters the daemon. The daemon returns an advisory or shadow result, but only a human decides whether to act. Local decision records remain separate from broker confirmations and statements, and any policy revision is deliberate.",
+    title: "How Policy Informs a Trading Decision (ibkr canary)",
+    description: "A trader sets the risk boundary, ibkr checks it against current evidence, and the trader decides what happens next. Policy output is advisory or shadow, local decision records are not proof of execution, and only a human authorizes an order.",
     body,
     extraStyles: policyReadableStyles,
   });
@@ -540,58 +541,58 @@ function policyArchitecture() {
   </g>`;
   const flowBox = (x, y, width, height, title, lines, accent, fill = C.panel, dark = false) => `<g role="group" aria-label="${esc([title, ...lines].join(". "))}">
     <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="12" fill="${fill}" stroke="${accent}" stroke-width="1.3"/>
-    <text x="${x + 16}" y="${y + 30}" class="node-title" style="fill:${dark ? "#ffffff" : C.ink}">${esc(title)}</text>
-    ${textLines(x + 16, y + 58, lines, dark ? "node-sub on-dark" : "card-sub", 20)}
+    <text x="${x + width / 2}" y="${y + 30}" text-anchor="middle" class="node-title" style="fill:${dark ? "#ffffff" : C.ink}">${esc(title)}</text>
+    <text x="${x + width / 2}" y="${y + 58}" text-anchor="middle" class="${dark ? "node-sub on-dark" : "card-sub"}">${lines.map((line, index) => `<tspan x="${x + width / 2}" dy="${index ? 19 : 0}">${esc(line)}</tspan>`).join("")}</text>
   </g>`;
 
   const body = `
-  ${header("Where Each Control Comes From", "Policy, settings, models, evidence, and broker gates have different owners and different effects.")}
+  ${header("Who Controls What", "Policies, settings, software, and broker gates each have a different job.")}
 
-  <text x="36" y="138" class="layer">CONTROL SOURCE</text>
+  <text x="36" y="138" class="layer">Sources of Control</text>
   <rect x="36" y="154" width="888" height="44" fill="${C.panelAlt}" stroke="${C.line}"/>
-  <text x="52" y="181" class="policy-table-head">CONTROL</text>
-  <text x="298" y="181" class="policy-table-head">PROVENANCE</text>
-  <text x="502" y="181" class="policy-table-head">EFFECT TODAY</text>
-  <text x="714" y="181" class="policy-table-head">HOW IT CHANGES</text>
-  ${controlRow(198, C.panel, "Personal risk policy", "operator-authored", "advisory / shadow", "higher-version TOML")}
-  ${controlRow(252, C.greenSoft, "Protection / opportunity", "default or custom", "advisory outputs", "reviewed TOML")}
-  ${controlRow(306, C.panel, "Runtime settings", "runtime setting", "product behavior", "allowlisted human action")}
-  ${controlRow(360, C.blueSoft, "Analytical models", "code-owned", "evaluation context", "reviewed release")}
-  ${controlRow(414, C.amberSoft, "Broker safety controls", "code + human", "blocking gate", "exact human decision")}
-  <text x="36" y="490" class="policy-table-sub">An embedded default is system-provided, not human approval. Settings are not policy files.</text>
+  <text x="52" y="181" class="policy-table-head">Control</text>
+  <text x="298" y="181" class="policy-table-head">Set By</text>
+  <text x="502" y="181" class="policy-table-head">What It Does Now</text>
+  <text x="714" y="181" class="policy-table-head">How It Changes</text>
+  ${controlRow(198, C.panel, "Personal Risk Policy", "trader", "advice / shadow", "new policy version")}
+  ${controlRow(252, C.greenSoft, "Protection & Opportunity", "project or trader", "advisory output", "reviewed policy file")}
+  ${controlRow(306, C.panel, "Runtime Settings", "trader", "product behavior", "allowlisted setting")}
+  ${controlRow(360, C.blueSoft, "Analytical Models", "maintainer", "analysis context", "reviewed release")}
+  ${controlRow(414, C.amberSoft, "Broker Safety Controls", "maintainer", "can block submission", "explicit guardrail change")}
+  <text x="36" y="490" class="policy-table-sub">A built-in default is software-provided, not human approval. Settings are not policies.</text>
 
-  <text x="36" y="536" class="layer">TWO DISTINCT RUNTIME LANES</text>
-  ${flowBox(36, 564, 210, 128, "Control + evidence", ["relevant policy or model", "current facts + quality"], C.blue)}
-  ${flowBox(36, 744, 210, 128, "Explicit human decision", ["one transaction", "never inferred from a preview"], C.amber, C.amberSoft)}
+  <text x="36" y="536" class="layer">Two Separate Paths</text>
+  ${flowBox(36, 564, 210, 128, "Policy + Evidence", ["risk boundary or model", "current facts + data quality"], C.blue)}
+  ${flowBox(36, 744, 210, 128, "Human Authorization", ["one specific transaction", "never inferred from a preview"], C.amber, C.amberSoft)}
 
   <rect x="280" y="526" width="400" height="386" rx="18" fill="${C.panel}" stroke="${C.greenLine}" stroke-width="1.5"/>
   <path d="M280 566h400v-22a18 18 0 0 0 -18 -18h-364a18 18 0 0 0 -18 18z" fill="${C.greenSoft}"/>
-  <text x="300" y="552" class="boundary" style="fill:${C.greenDark}">IBKR DAEMON OWNS BOTH LANES</text>
-  <text x="304" y="604" class="layer">ADVISORY DECISION PATH</text>
-  ${flowBox(304, 622, 152, 128, "Evaluate", ["unknown stays", "unknown"], C.green, C.terminal, true)}
-  ${flowBox(492, 622, 164, 128, "Structured result", ["status · explanation", "local record"], C.slate)}
-  <text x="304" y="792" class="layer">BROKER-WRITE PATH</text>
-  ${flowBox(380, 810, 200, 82, "Non-overridable gates", ["pins · freeze · token · journal"], C.amber, C.amberSoft)}
+  <text x="300" y="552" class="boundary" style="fill:${C.greenDark}">Owned by the ibkr Daemon</text>
+  <text x="304" y="604" class="layer">Policy Advice</text>
+  ${flowBox(304, 622, 152, 128, "Check", ["missing evidence", "stays unknown"], C.green, C.terminal, true)}
+  ${flowBox(492, 622, 164, 128, "Decision Record", ["status + reasons", "saved locally"], C.slate)}
+  <text x="304" y="790" class="layer">Broker Submission</text>
+  ${flowBox(380, 806, 200, 94, "Safety Gates", ["account · route · freeze", "preview token · journal"], C.amber, C.amberSoft)}
 
-  ${flowBox(714, 564, 210, 128, "Product surfaces", ["CLI · app · MCP", "render, never reinterpret"], C.slate)}
-  ${flowBox(714, 744, 210, 92, "IBKR broker", ["execution venue"], C.greenDark)}
-  ${flowBox(714, 856, 210, 92, "Execution evidence", ["confirmation · statement"], C.blue)}
+  ${flowBox(714, 564, 210, 128, "Read-Only Views", ["CLI · app · MCP", "show the same result"], C.slate)}
+  ${flowBox(714, 744, 210, 92, "IBKR Broker", ["execution venue"], C.greenDark)}
+  ${flowBox(714, 856, 210, 92, "Broker Evidence", ["confirmation · statement"], C.blue)}
 
-  ${line("M246 628H304", "blue", { dashed: true })}
+  ${line("M246 628H270V686H304", "blue", { dashed: true })}
   ${line("M456 686H492", "slate")}
   ${line("M656 686H714", "slate")}
-  ${line("M246 808H380", "amber", { dotted: true })}
-  ${line("M580 851H690V790H714", "amber", { dotted: true })}
+  ${line("M246 808H272V853H380", "amber", { dotted: true })}
+  ${line("M580 853H690V790H714", "amber", { dotted: true })}
   ${line("M819 836V856", "blue", { dashed: true })}
 
-  <text x="924" y="982" text-anchor="end" class="footnote">personal risk policy: advisory/shadow today · broker evidence establishes execution</text>
+  <text x="924" y="982" text-anchor="end" class="footnote">Personal policy advises today. Broker records establish execution.</text>
   `;
 
   return svgFrame({
     width: 960,
     height: 1002,
-    title: "Where Each Control Comes From (ibkr canary)",
-    description: "A compact matrix separates operator-authored policy, embedded or custom advisory policy, runtime settings, code-owned models, and broker safety controls. Below it, the daemon keeps advisory evaluation separate from the explicitly human-authorized broker-write lane, while broker evidence remains outside as execution truth.",
+    title: "Who Controls What (ibkr canary)",
+    description: "A compact matrix separates trader-authored policy, built-in or custom advisory policy, runtime settings, reviewed models, and broker safety controls. Below it, the daemon keeps policy advice separate from the human-authorized broker path, while broker records remain the evidence of execution.",
     body,
     extraStyles: policyReadableStyles,
   });

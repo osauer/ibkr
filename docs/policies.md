@@ -15,9 +15,9 @@ One person may own the capital, trade it, and review the result. `ibkr` does not
 implement named-user roles or maker/checker approval. A larger desk can reuse
 the decision concepts, but it needs an additional identity and approval layer.
 
-## From Risk Decision to Human Action
+## How Policy Informs a Trading Decision
 
-[![From a human risk decision and current evidence to an advisory result and human action](diagrams/policy-lifecycle.svg)](diagrams/policy-lifecycle.svg)
+[![How a risk boundary and current evidence inform advice while the human retains the trading decision](diagrams/policy-lifecycle.svg)](diagrams/policy-lifecycle.svg)
 
 [PNG fallback](diagrams/policy-lifecycle.png) ·
 [SVG source generator](diagrams/render-architecture.mjs) ·
@@ -53,7 +53,7 @@ decision boundary.
 
 ## Where Controls Live and Who Changes Them
 
-[![Where each trading control comes from and how advisory evaluation differs from broker safety](diagrams/policy-authority.svg)](diagrams/policy-authority.svg)
+[![Who controls policy, settings, analytical models, and the broker safety path](diagrams/policy-authority.svg)](diagrams/policy-authority.svg)
 
 [PNG fallback](diagrams/policy-authority.png) ·
 [SVG source generator](diagrams/render-architecture.mjs) ·
