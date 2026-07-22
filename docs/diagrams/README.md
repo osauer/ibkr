@@ -10,7 +10,9 @@ Regenerate the SVG files and high-resolution PNG fallbacks from this directory:
 node render-architecture.mjs
 rsvg-convert --zoom=2 system-architecture.svg --output system-architecture.png
 rsvg-convert --zoom=2 data-and-persistence.svg --output data-and-persistence.png
+rsvg-convert --zoom=2 policy-lifecycle.svg --output policy-lifecycle.png
 rsvg-convert --zoom=2 policy-authority.svg --output policy-authority.png
+rsvg-convert --zoom=2 storage-overview.svg --output storage-overview.png
 rsvg-convert --zoom=2 sqlite-data-model.svg --output sqlite-data-model.png
 rsvg-convert --zoom=2 sqlite-update-lifecycle.svg --output sqlite-update-lifecycle.png
 ```

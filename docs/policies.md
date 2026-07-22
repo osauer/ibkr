@@ -1,80 +1,129 @@
-# Policies
+# Trading Policy in ibkr: Who Decides and What the System Does
 
-`ibkr` uses several policy-shaped controls, but they do not all have the same
-owner or authority. The desk should start with one rule:
+You decide how much capital may be at risk, which evidence must be current,
+and when uncertainty requires attention. Today, `ibkr`'s personal risk policy
+observes, explains, and records those decisions; it does not block or authorize
+an order. Every submission remains a transaction-specific human decision and
+must pass separate, code-owned safety controls.
 
-> A policy declares approved choices. Measurements report what is true now,
-> enforcement decides what may happen, and reporting preserves what happened.
-> A setting, warning, or dashboard label must not silently become policy.
+That separation matters. A local record explains what `ibkr` observed and
+decided. Broker confirmations and statements establish what actually executed.
+Missing or unusable evidence remains unknown rather than being treated as safe.
 
-## Policy System Overview
+For one trader, policy is a promise made while calm and applied under pressure.
+One person may own the capital, trade it, and review the result. `ibkr` does not
+implement named-user roles or maker/checker approval. A larger desk can reuse
+the decision concepts, but it needs an additional identity and approval layer.
 
-[![ibkr policy authority and execution lifecycle](diagrams/policy-authority.svg)](diagrams/policy-authority.svg)
+## From Risk Decision to Human Action
+
+[![From a human risk decision and current evidence to an advisory result and human action](diagrams/policy-lifecycle.svg)](diagrams/policy-lifecycle.svg)
+
+[PNG fallback](diagrams/policy-lifecycle.png) ·
+[SVG source generator](diagrams/render-architecture.mjs) ·
+[Tabler Icons license](diagrams/ICON-LICENSE.txt)
+
+The human chooses the boundary before the market creates pressure. The daemon
+combines that policy with current evidence and returns a structured advisory or
+shadow result. The human decides what to do. Outcomes may justify a deliberate
+higher policy version, but they never rewrite the active policy by themselves.
+
+> A policy result, proposal, or preview is never permission to submit an
+> order.
+
+## A Concrete Example
+
+Suppose the last accepted equity reading is near a declared drawdown boundary,
+but the evidence needed to rely on the current result has become stale. `ibkr`
+must disclose stale or unknown input rather than report a pass. In shadow mode
+it can record the condition and show what the declared response would mean; the
+personal risk policy still does not change submit eligibility.
+
+The trader decides whether to wait, investigate, reduce risk, or take another
+explicitly authorized action. Separate broker-write controls—route and account
+pins, freeze state, preview-token checks, broker WhatIf/eligibility, journal
+health, daemon authorization, and origin gating—remain binding. If an order is
+submitted, the broker confirmation and later statement establish what
+executed. The local policy record explains the context; it is not execution
+evidence.
+
+This one situation shows the point of policy: consistent treatment of a known
+boundary, honest uncertainty when evidence is unusable, and a clear human
+decision boundary.
+
+## Where Controls Live and Who Changes Them
+
+[![Where each trading control comes from and how advisory evaluation differs from broker safety](diagrams/policy-authority.svg)](diagrams/policy-authority.svg)
 
 [PNG fallback](diagrams/policy-authority.png) ·
 [SVG source generator](diagrams/render-architecture.mjs) ·
 [Tabler Icons license](diagrams/ICON-LICENSE.txt)
 
-The daemon is the policy executor. Operator-authored TOML, embedded engine
-defaults, daemon-owned runtime preferences, and code-owned invariants enter
-through different authority paths. The daemon validates and fingerprints the
-applicable policy, combines it with typed evidence, calls pure semantics in
-`internal/risk`, persists the resulting state or event where required, and
-publishes one typed result through RPC. CLI, MCP, app, and Canary render that
-result; they do not reinterpret policy.
+Policy, settings, analytical models, and broker safety controls are different
+sources of control. Current evidence is an input, not another policy. The
+daemon owns evaluation and publishes one structured interpretation wherever a
+surface exposes that decision.
 
-## Four Policy Classes
-
-| Class | Authority | Default if absent | How it changes | What it can do |
+| Source of control | Decision owner and source of record | If absent | Effect today | How it changes |
 |---|---|---|---|---|
-| Personal risk constitution | `~/.config/ibkr/policies/risk-policy.toml` | None. Missing material values remain `unapproved`. | Edit the TOML and raise `policy_version`. | Defines capital, drawdown, reconciliation, exception, cadence, and sibling-policy approval choices. Current schema is advisory/shadow. |
-| Advisory engine policy | Protection and opportunity policy TOML, or their embedded defaults | Conservative embedded policy. | Generate the current default, save a file, edit it, and raise `policy_version`. | Shapes protection proposals and option-exercise opportunity detection. It never submits an order by itself. |
-| Runtime preference | Versioned platform-settings document in `daemon.db` | Code/config default, reported with provenance. | `ibkr settings set`, the Settings UI, or the typed API, subject to access rules. | Enables product features, records earnings overrides, and applies the human-owned trading freeze or experimental limits. It is not a second policy-file system. |
-| Code-owned invariant or model | Versioned code and typed contracts | Always present in that binary. | Reviewed code/release change; guardrail changes require an explicit human decision. | Owns broker-write gates, validation, calculations, the rulebook/regime/Canary model, and constraints policy files are forbidden to weaken. |
+| Personal risk policy | Human-owned `~/.config/ibkr/policies/risk-policy.toml`; called the risk constitution in code and schema | Material choices remain `unapproved` | Advisory or shadow capital, drawdown, evidence, reconciliation, cadence, and exception results | Edit approved values and raise `policy_version` |
+| Protection and opportunity policy | Human-customizable TOML, otherwise a system-provided embedded default | The embedded default is usable, but it is not evidence of human approval | Shapes defensive proposals and option-exercise opportunity detection | Print the default, review it, save a custom file, and raise `policy_version` |
+| Runtime settings | Human-operated typed settings stored by the daemon in `daemon.db` | The reported config or build default remains visible | Controls product features and allowlisted overrides; settings are not policy files | `ibkr settings set`, Settings UI, or typed API; freeze and trading-limit changes remain human-only |
+| Analytical models | Reviewed code and typed contracts | Present in the installed binary | Calculates Rulebook, Regime, Canary, and related results | Reviewed code and release change |
+| Broker safety controls | Explicit human transaction decision plus non-overridable daemon/code checks | The path stays unavailable | Can block a broker write; cannot be weakened by policy or settings | Exact human decision plus reviewed guardrail change where applicable |
 
-Policy and semantic fingerprints also identify the compiled rulebook, Regime,
-Canary, alert producers, and other models. Those identities make decisions
-reproducible and allow the constitution to pin approved sibling versions. They
-are not extra operator-editable TOML files unless this page or the
-[configuration reference](reference/config.md) names one.
+MCP exposes research and preview surfaces, not broker-write tools. An agent may
+use the gated CLI only after an explicit transaction-specific instruction from
+the user in that turn. Apps and dashboards render daemon results; they do not
+create policy or submission authority.
 
-## Risk Constitution
+## How Policy Versions Behave
 
-The personal risk constitution is the desk's machine-readable approval record.
-Its fixed path is `~/.config/ibkr/policies/risk-policy.toml`; it has no embedded
-default and no path override. The schema lives in `internal/risk`, while the
-operator owns the material values.
+Within one running daemon, policy managers apply a simple rule:
 
-The main sections are:
+1. A valid first file or a valid higher `policy_version` is accepted.
+2. Identical content at the accepted version continues unchanged.
+3. Different content at the same or a lower version reports drift and keeps the
+   last accepted in-memory version.
+4. Invalid syntax, unknown keys, or failed validation report an error and keep
+   the last accepted in-memory version where one exists.
+5. Removing an active personal risk-policy file reports `absent`; deletion is
+   not a retirement command.
 
-| Section | Decision owned by the operator |
-|---|---|
-| `[capital]` | Account base currency, protected equity floor, declared risk capital, and evidence-age limits. Effective risk capital is the lesser of the declared amount and equity above the protected floor. |
-| `[drawdown]` | Warning and block-consumption thresholds and the declared enforcement class. Schema v1 rejects `hard`; the implemented choices are `shadow` and `advisory`. |
-| `[override]` | Maximum lifetime of one human-only, reasoned, expiring exception. The code owns origin gating and audit. |
-| `[recon]` | Statement-flow match tolerances, date window, report age, and the same-day statement/runtime equity divergence allowed for clean-report auto-extension. |
-| `[cadence]` | Advisory morning, end-of-day, weekly, and version-dependent nudge/monthly operating cadence. Missing material cadence remains explicit rather than receiving a model-chosen value. |
-| `[inventory]` | The rulebook, protection, and Canary identities against which this constitution was approved. These are pins, not copies of sibling thresholds. |
+There is an important restart boundary: accepted policy heads and exact policy
+content are not currently persisted as durable policy artifacts. A new daemon
+starts with no in-memory accepted version. A valid same-version file changed
+while the daemon was stopped can therefore be accepted on startup. If a custom
+protection or opportunity file is absent at startup, its engine can use the
+embedded default.
 
-Use [the checked-in template](../examples/risk-policy.toml) to see every field.
-It intentionally leaves material numerical decisions commented out. `nil` or
-an omitted key means unapproved, never zero and never an invitation for an
-agent to choose a number.
+Drift detection is consequently runtime-local today. Always raise the version
+for a material edit and retain the exact applied TOML outside `ibkr`. The
+daemon's status tells you what it currently loaded; the human-owned TOML
+remains the policy source.
 
-The risk-policy manager checks the file on a short interval and applies this
-version discipline:
+A content fingerprint is a deterministic ID of the normalized policy fields.
+It supports semantic equality checks; comments and formatting do not affect
+it. It does not reconstruct historical policy by itself: current durable
+events retain policy identity, version, and fingerprint, not the complete
+normalized policy body. Historical replay therefore also requires the exact
+archived policy content.
 
-1. A valid first policy or a higher `policy_version` becomes active.
-2. Identical content at the active version remains active.
-3. Changed content at the same or a lower version reports `drift`; the last
-   good policy remains the executable context.
-4. Invalid TOML, unknown keys, or failed validation report `error`; the last
-   good policy remains visible and the error is not normalized away.
-5. Removing a previously active file is not retirement. Status becomes
-   `absent`, the last loaded policy remains active, and the operator must
-   restore the file or publish a deliberate revision.
+## Configure the Available Controls
 
-Inspect the applied constitution with:
+### Personal risk policy
+
+The personal risk policy has no embedded default and no path override. Start
+from [the checked-in template](../examples/risk-policy.toml); material numerical
+choices are intentionally commented out so software cannot invent them.
+
+Its main sections cover capital and the protected floor, drawdown response,
+bounded human exceptions, statement reconciliation, operating cadence, and
+approved sibling model identities. Schema version 1 accepts `advisory` and
+`shadow`; it rejects hard drawdown enforcement. Effective risk capital is the
+lesser of declared risk capital and equity above the protected floor.
+
+Inspect the current result with:
 
 ```sh
 ibkr policy show
@@ -82,19 +131,15 @@ ibkr policy show --explain
 ibkr policy show --json
 ```
 
-`--explain` is the operator reference for units, effective values, evidence
-health, drawdown state, reconciliation, active overrides, cadence, sibling
-pins, and the policy fingerprint. The write verbs under `ibkr policy` record
-human governance actions; they are not configuration shortcuts and are
-rejected for agent origins.
+`--explain` shows units, effective values, input health, drawdown state,
+reconciliation, active exceptions, cadence, referenced model identities, and
+the current content fingerprint. Mutating governance commands under
+`ibkr policy` are human-only actions, not agent configuration shortcuts.
 
-## Protection and Opportunity Policies
+### Protection and opportunity policies
 
-Protection and opportunity policies are bounded advisory-engine policies. They
-have embedded defaults because the engines need a complete conservative
-parameter set even when the operator has not customized them.
-
-Print, review, and customize them as follows:
+These advisory engines ship with conservative embedded defaults. To customize
+one, print the exact current schema, review it, and save a higher-version file:
 
 ```sh
 mkdir -p ~/.config/ibkr/policies
@@ -102,35 +147,14 @@ ibkr policy default protection > ~/.config/ibkr/policies/protection-policy.toml
 ibkr policy default opportunity > ~/.config/ibkr/policies/opportunity-policy.toml
 ```
 
-The protection path defaults to
-`~/.config/ibkr/policies/protection-policy.toml` and can be changed with
-`[auto_trade].policy_file`. The opportunity path defaults to
-`~/.config/ibkr/policies/opportunity-policy.toml` and can be changed with
-`[opportunities].policy_file`. Their complete generated key tables live in the
-[configuration reference](reference/config.md).
+The default paths and every editable key are in the
+[configuration reference](reference/config.md). A proposal or opportunity
+remains evidence for a human decision. `authority.auto_submit` must remain
+false.
 
-For both files:
+### Runtime settings
 
-- `kind`, `schema_version`, `policy_id`, and `policy_version` identify the
-  contract; `profile` is a descriptive label.
-- Unknown keys and invalid combinations fail validation.
-- Every material edit needs a higher `policy_version`; same-version changes
-  report drift rather than silently changing behavior.
-- The current fingerprint travels with snapshots and previews so a proposal or
-  opportunity can be tied to the policy that produced it.
-- `authority.auto_submit` must remain false. A proposal, opportunity, or
-  preview is evidence, not broker-write authority.
-
-Read the loaded identities and blockers on the proposal and opportunity status
-surfaces after editing. A restart is not normally required when hot reload is
-enabled, but an operator may use the normal restart path when commissioning a
-new version.
-
-## Runtime Settings Are Not Policy Files
-
-Platform settings are live preferences stored as one compare-and-swap document
-in `daemon.db`. They can reveal a config or build default, but they do not copy
-TOML into SQLite and they cannot create a new enforcement rule.
+Settings control live product behavior; they do not create a new policy rule:
 
 ```sh
 ibkr settings show
@@ -139,79 +163,88 @@ ibkr settings set <key>=<value>
 ibkr settings set <key>=null
 ```
 
-`null` removes the runtime override and exposes the underlying default or TOML
-value. Every typed field reports whether it is writable, its source, and any
-read-only reason. `trading.freeze` and trading-limit changes are human-only.
-No setting can bypass gateway/account/client pins, preview-token checks,
-WhatIf/eligibility, journal health, daemon authorization, or origin gating.
-See [Platform Settings](design/platform-settings.md) for the exact ownership
-contract.
+`null` removes an override and exposes the underlying config or build default.
+Every typed setting reports its source and whether it is writable. No setting
+can bypass the non-overridable broker controls. See
+[Platform Settings](design/platform-settings.md) for the ownership contract.
 
-## From Policy to Decision
+## Read Status and Commissioning Correctly
 
-Every policy-backed decision should preserve five separate facts:
+These words describe different facts:
 
-1. **Identity:** kind, schema version, policy ID/version, and semantic
-   fingerprint.
-2. **Evidence:** typed account, position, market, statement, calendar, or
-   broker input with provenance, freshness, and completeness.
-3. **Evaluation:** pure semantics that return pass, watch, breach, unknown, or
-   unapproved without doing I/O.
-4. **Enforcement:** advisory, shadow, pre-trade gate, or post-trade exception,
-   including the risk-reducing and unavailable-data posture.
-5. **Reporting:** the durable event or state revision and the typed result
-   rendered to the operator.
+| State | Meaning |
+|---|---|
+| Human-approved | A person with the desk's decision responsibility accepted the choice. Structural validity or an embedded default does not prove this. |
+| Valid | The file matches its schema and internal rules. |
+| Active | The running daemon is using that version now. |
+| Commissioned | The complete evidence, evaluator, reporting, and operator path has been proven for its intended use. |
+| Enforced | The result actually constrains a path. The personal risk policy is advisory/shadow today; separate broker controls are enforced. |
+| Delivered | A result reached its intended surface or alert channel. An evaluator can be active while delivery is inactive. |
 
-Missing, stale, partial, or contradictory required evidence is not a weak
-warning. It is an explicit unknown or data-quality condition. Likewise, a
-policy can be valid but incomplete: `unapproved` is a useful state and must not
-be converted into an implicit default.
+Do not infer enforcement or delivery merely because a schema, evaluator, or UI
+label exists. Typed status is operational evidence about what the daemon has
+loaded, evaluated, or commissioned; it is not the source of human policy.
+Missing, stale, partial, or contradictory required evidence is an explicit
+unknown or data-quality state, never an implicit zero or pass.
 
-## Commissioning and Work in Progress
+## Single Trader Now, Family Office Later
 
-Code availability, policy approval, activation, and reliable delivery are
-separate milestones. The constitution's statement-backed reconciliation and
-clean-report automation are implemented. Later cadence and governance-nudge
-fields may be present in the binary while the installed desk policy is still
-on an earlier approved version. Unified alert producers may also be collecting
-shadow evidence while delivery remains inactive.
+For one trader, capital owner, trader, and reviewer are responsibilities held
+by the same person. That keeps the workflow direct without weakening the human
+submission boundary.
 
-Do not infer that a control pages, blocks, or owns a workflow merely because
-its schema or evaluator exists. Treat the installed typed status and
-fingerprint as current truth, and keep any explicit `shadow`, `unapproved`, or
-`delivery_active=false` boundary intact. The detailed commissioning records
-are [Risk Governance Nudges](design/risk-governance-nudges.md) and
-[Alerts and Regime Production](design/alert-regime-production.md).
+The decision model can inform a family office, but the current implementation
+cannot become one merely by assigning the labels to several people. It lacks
+named principals, role permissions, maker/checker approval, multi-account and
+book semantics, and consolidated reporting. A larger desk needs authenticated
+identities, scoped approvals, durable actor records, and a separate control
+layer before those responsibilities become system-enforced governance.
 
-## Operator Change Procedure
+## Change a Policy Safely
 
-For a policy-file change:
+For a material policy-file change:
 
-1. Read the current typed status and record the active identity/fingerprint.
-2. Edit the authoritative file, changing only approved values.
+1. Read the current typed status and retain the exact current file, version,
+   and fingerprint.
+2. Change only values the human decision owner has approved.
 3. Raise `policy_version`; never reuse a version for different content.
 4. Wait for reload or use the normal operator restart path.
-5. Re-read the typed status and confirm `active`, the new version/fingerprint,
-   expected effective values, and no drift/error/blocker.
-6. Exercise the affected read or preview surface. For a new enforcement rule,
-   retain shadow/replay evidence before any separately approved promotion.
+5. Re-read status and confirm the expected source, active version, fingerprint,
+   effective values, input health, and absence of drift or error.
+6. Exercise the affected read or preview path. A new enforcement rule needs
+   replay or shadow evidence and a separate explicit promotion decision.
 
-For a runtime-setting change, read `access` and `source`, update one allowlisted
-key, then re-read the settings result. For a code-owned guardrail or policy
-schema change, use the policy and daemon contract templates and treat the
-change as a reviewed release change, not an operator configuration edit.
+For a setting, inspect its access and source, change one allowlisted key, and
+read it back. For a code-owned model or safety control, use a reviewed release
+change. Routine clean cases should be automated; only exceptions should return
+to the human.
 
-## Reference Map
+## Glossary and References
 
-- [Configuration Reference](reference/config.md): every config, protection
-  policy, opportunity policy, runtime-setting, and environment key.
-- [Risk Constitution Design](design/risk-policy.md): capital and reconciliation
-  authority, safety invariants, and phase history.
-- [Trading Rulebook](design/trading-rulebook.md): compiled discipline checks
-  and policy identity.
+- **Advisory:** guidance that does not block or submit an order.
+- **Shadow:** evaluation and recording without enforcing the result.
+- **Submit authority:** an explicit human decision for one transaction; a
+  policy result, proposal, preview, or token is not that authority.
+- **Content fingerprint:** an ID derived from normalized policy fields; it
+  deliberately ignores comments and formatting and must accompany retained
+  content when historical reconstruction matters.
+- **Freshness:** whether evidence is recent enough for the decision.
+  **Finality:** whether its source can still revise it.
+- **Local decision record:** what `ibkr` observed, evaluated, or attempted.
+  **Broker execution evidence:** confirmations and statements describing what
+  the broker executed.
+- **Unapproved:** a material human choice has not been made; it is not zero,
+  safe, or default.
+
+Detailed references:
+
+- [Configuration Reference](reference/config.md): every configuration,
+  advisory-policy, runtime-setting, and environment key.
+- [Risk Constitution Design](design/risk-policy.md): capital,
+  reconciliation, safety invariants, and implementation history.
+- [Trading Rulebook](design/trading-rulebook.md): compiled discipline checks.
 - [Trading Harness Development](guides/trading-harness-development.md): how to
-  design, shadow, promote, and reconcile a new policy-backed control.
-- [Architecture](architecture.md): daemon, RPC, adapter, and persistence
-  ownership.
-- [Database](database.md): where policy state, events, and typed projections
-  are stored without making SQLite the policy-authoring surface.
+  design, shadow, promote, and reconcile a new control.
+- [Architecture](architecture.md): daemon, RPC, adapter, and broker ownership.
+- [Storage](database.md): how applied policy state and local events are stored
+  without making SQLite the policy-authoring surface.

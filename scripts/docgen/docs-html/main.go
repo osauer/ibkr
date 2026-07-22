@@ -46,15 +46,15 @@ var pages = []pageSpec{
 	},
 	{
 		Source:      "docs/policies.md",
-		Description: "Operator reference for ibkr policy authority, configuration, versioning, fingerprints, enforcement, and commissioning.",
+		Description: "Who decides trading policy in ibkr, what the daemon does today, how controls change, and what remains an explicit human decision.",
 		Layout:      "architecture",
-		SocialImage: "diagrams/policy-authority.png",
+		SocialImage: "diagrams/policy-lifecycle.png",
 	},
 	{
 		Source:      "docs/database.md",
-		Description: "Reference for the ibkr daemon SQLite data model, query boundaries, transactional mechanics, durability, and schema upgrades.",
+		Description: "How the ibkr daemon preserves state and evidence with SQLite, why the model exists, how data moves, and where the design must evolve.",
 		Layout:      "architecture",
-		SocialImage: "diagrams/sqlite-data-model.png",
+		SocialImage: "diagrams/storage-overview.png",
 	},
 	{
 		Source:      "docs/concepts.md",

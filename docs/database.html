@@ -4,16 +4,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Database | ibkr</title>
-  <meta name="description" content="Reference for the ibkr daemon SQLite data model, query boundaries, transactional mechanics, durability, and schema upgrades.">
+  <title>Storage: State, Evidence, and Recovery | ibkr</title>
+  <meta name="description" content="How the ibkr daemon preserves state and evidence with SQLite, why the model exists, how data moves, and where the design must evolve.">
   <link rel="canonical" href="https://osauer.dev/ibkr/database.html">
   <link rel="icon" type="image/png" href="social/canary-icon.png">
 <meta property="og:type" content="article">
-  <meta property="og:title" content="Database | ibkr">
-  <meta property="og:description" content="Reference for the ibkr daemon SQLite data model, query boundaries, transactional mechanics, durability, and schema upgrades.">
-  <meta property="og:image" content="https://osauer.dev/ibkr/diagrams/sqlite-data-model.png">
+  <meta property="og:title" content="Storage: State, Evidence, and Recovery | ibkr">
+  <meta property="og:description" content="How the ibkr daemon preserves state and evidence with SQLite, why the model exists, how data moves, and where the design must evolve.">
+  <meta property="og:image" content="https://osauer.dev/ibkr/diagrams/storage-overview.png">
   <meta name="twitter:card" content="summary_large_image">
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","author":{"@type":"Person","name":"Oliver Sauer","url":"https://github.com/osauer"},"description":"Reference for the ibkr daemon SQLite data model, query boundaries, transactional mechanics, durability, and schema upgrades.","headline":"Database","isPartOf":{"@type":"SoftwareApplication","name":"ibkr","url":"https://osauer.dev/ibkr/"},"url":"https://osauer.dev/ibkr/database.html"}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","author":{"@type":"Person","name":"Oliver Sauer","url":"https://github.com/osauer"},"description":"How the ibkr daemon preserves state and evidence with SQLite, why the model exists, how data moves, and where the design must evolve.","headline":"Storage: State, Evidence, and Recovery","isPartOf":{"@type":"SoftwareApplication","name":"ibkr","url":"https://osauer.dev/ibkr/"},"url":"https://osauer.dev/ibkr/database.html"}</script>
   <link rel="stylesheet" href="shared.css">
 </head>
 <body class="layout-architecture">
@@ -28,375 +28,563 @@
     </nav>
   </header>
   <main class="wrap doc">
-<h1 id="database">Database</h1>
-<p><code>daemon.db</code> is the daemon's embedded SQLite authority. It stores mutable
-runtime state, append-only events, order-safety continuity, retained
-observations, and broker-statement projections without introducing a database
-service or a second writer.</p>
+<h1 id="storage-state-evidence-and-recovery">Storage: State, Evidence, and Recovery</h1>
+<p><code>ibkr</code> needs to remember more than preferences. After a restart, the daemon
+must still know which state was current, which evidence supported a decision,
+which preview tokens have already been consumed, how far broker order IDs have
+advanced, and which broker statements were incorporated.</p>
+<p>The daemon solves that problem with one local storage layer, implemented as a
+SQLite file named <code>daemon.db</code>. SQLite is the tool. The design is the ownership
+rule around it:</p>
 <blockquote>
-<p>The daemon is the only live database writer. Product surfaces query typed
-daemon contracts; operator policy remains in TOML, original Flex XML remains
-broker evidence, and backups are recovery artifacts rather than read replicas.</p>
+<p>One daemon writes durable runtime state. Other product surfaces ask the
+daemon through typed RPC. Human-authored policy and original broker evidence
+remain outside the database because they are different kinds of truth.</p>
 </blockquote>
+<p>This page explains why that design fits the current single-trader desk, how the
+data model follows from the questions the product must answer, how it fails and
+recovers, and where it must improve before it can support a family-office data
+platform.</p>
 <nav class="toc" aria-label="On this page">
 <span class="toc-label">On this page</span>
 <ul>
-<li><a href="#logical-data-model"><span class="n">01</span>Logical Data Model</a></li>
-<li><a href="#authority-boundary"><span class="n">02</span>Authority Boundary</a></li>
-<li><a href="#table-families"><span class="n">03</span>Table Families</a></li>
-<li><a href="#indexes-and-immutability"><span class="n">04</span>Indexes and Immutability</a></li>
-<li><a href="#mutation-and-upgrade-lifecycle"><span class="n">05</span>Mutation and Upgrade Lifecycle</a></li>
-<li><a href="#three-independent-version-domains"><span class="n">06</span>Three Independent Version Domains</a></li>
-<li><a href="#query-and-analytics-contract"><span class="n">07</span>Query and Analytics Contract</a></li>
-<li><a href="#reference-map"><span class="n">08</span>Reference Map</a></li>
+<li><a href="#what-the-storage-layer-protects"><span class="n">01</span>What the Storage Layer Protects</a></li>
+<li><a href="#why-sqlite"><span class="n">02</span>Why SQLite</a></li>
+<li><a href="#where-each-kind-of-truth-lives"><span class="n">03</span>Where Each Kind of Truth Lives</a></li>
+<li><a href="#storage-layer-in-one-view"><span class="n">04</span>Storage Layer in One View</a></li>
+<li><a href="#how-the-data-model-follows-from-the-questions"><span class="n">05</span>How the Data Model Follows from the Questions</a></li>
+<li><a href="#physical-data-model"><span class="n">06</span>Physical Data Model</a></li>
+<li><a href="#what-a-write-looks-like"><span class="n">07</span>What a Write Looks Like</a></li>
+<li><a href="#how-data-is-read-today"><span class="n">08</span>How Data Is Read Today</a></li>
+<li><a href="#durability-startup-and-recovery"><span class="n">09</span>Durability, Startup, and Recovery</a></li>
+<li><a href="#known-limits-and-design-debt"><span class="n">10</span>Known Limits and Design Debt</a></li>
+<li><a href="#when-the-architecture-must-evolve"><span class="n">11</span>When the Architecture Must Evolve</a></li>
+<li><a href="#glossary"><span class="n">12</span>Glossary</a></li>
+<li><a href="#reference-map"><span class="n">13</span>Reference Map</a></li>
 </ul>
 </nav>
-<h2 id="logical-data-model"><span class="secno" aria-hidden="true">01</span>Logical Data Model</h2>
-<p><a href="diagrams/sqlite-data-model.svg"><img src="diagrams/sqlite-data-model.svg" alt="ibkr daemon.db logical data model"></a></p>
-<p><a href="diagrams/sqlite-data-model.png">PNG fallback</a> ·
-<a href="diagrams/render-architecture.mjs">SVG source generator</a> ·
-<a href="diagrams/ICON-LICENSE.txt">Tabler Icons license</a></p>
-<p>The diagram is a logical ER view of schema version 1. It shows the durable
-relationships that matter to readers while grouping similar event projections.
-The canonical DDL remains <code>internal/daemon/corestore/schema.go</code>; migrations,
-not this picture, define the exact columns, constraints, indexes, and triggers.</p>
-<h2 id="authority-boundary"><span class="secno" aria-hidden="true">02</span>Authority Boundary</h2>
+<h2 id="what-the-storage-layer-protects"><span class="secno" aria-hidden="true">01</span>What the Storage Layer Protects</h2>
+<p>The storage layer gives the running system continuity across process exits,
+machine restarts, and software upgrades. Its durable responsibilities are:</p>
+<ul>
+<li><strong>Current daemon state:</strong> settings, risk-capital state, readiness, purge
+state, current proposals and opportunities, alert episodes, and last-good
+market or model publications.</li>
+<li><strong>Local decision history:</strong> events that explain what the software observed,
+evaluated, or attempted. These records explain local intent and lifecycle;
+they do not prove what executed at the broker.</li>
+<li><strong>Measured evidence:</strong> retained market, gamma, membership, contract, and
+other source observations with timestamps, provenance, and an explicit flag
+saying whether they were allowed to support a live decision.</li>
+<li><strong>Order safety continuity:</strong> exact broker-route bindings, consumed preview
+tokens, conservative order-ID floors, and pre-transmit order events.</li>
+<li><strong>Statement-derived views:</strong> an inventory and daily equity view rebuilt from
+the complete retained set of original Flex XML statements.</li>
+</ul>
+<p>The database is deliberately not a container for every file. Configuration,
+policy, original broker statements, secrets, app credentials, and recovery
+artifacts have different owners and remain separate.</p>
+<h2 id="why-sqlite"><span class="secno" aria-hidden="true">02</span>Why SQLite</h2>
+<p>The decisive fact is not that SQLite is convenient. It is that this deployment
+has one application writer on one machine.</p>
 <div class="tblwrap">
 <table>
 <thead>
 <tr>
-<th>Data class</th>
-<th>Live authority</th>
-<th>Access rule</th>
+<th>Requirement</th>
+<th>Why SQLite fits</th>
+<th>Accepted trade-off</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Daemon state, events, order continuity, retained observations, and statement projections</td>
-<td><code>$XDG_STATE_HOME/ibkr/daemon.db</code>, normally <code>~/.local/state/ibkr/daemon.db</code></td>
-<td>Daemon owns writes. CLI, MCP, app, and dashboards use typed daemon RPC.</td>
+<td>One daemon owns writes</td>
+<td>A local SQLite file needs no database service, credentials, or administrator. The project uses a pure-Go SQLite driver, so the storage engine ships inside the <code>ibkr</code> binary.</td>
+<td>It is not a shared network database and must not be opened by several writers.</td>
 </tr>
 <tr>
-<td>Operator configuration and policy</td>
+<td>Related facts must change together</td>
+<td>Transactions can commit current state, evidence, token tombstones, order floors, and lifecycle events as one unit.</td>
+<td>Writers must use the daemon's typed transaction APIs rather than editing files or rows directly.</td>
+</tr>
+<tr>
+<td>Reads need more structure than JSON files</td>
+<td>Tables and indexes can support bounded current-state, event, order, observation, and statement queries.</td>
+<td>The current implementation has not yet moved every history path onto those indexes.</td>
+</tr>
+<tr>
+<td>Installation should stay local and quiet</td>
+<td>There is no server process, port, backup agent, or database account to operate.</td>
+<td>High availability, multi-host writes, and centralized concurrent analytics are outside the present topology.</td>
+</tr>
+<tr>
+<td>Schema changes must be recoverable</td>
+<td>The daemon can inspect a database, upgrade a copy, verify it, and publish the copy only after it passes checks.</td>
+<td>The upgrade machinery is substantial, while routine backup and restore operations are not yet complete.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>SQLite is therefore a good fit for the current desk, not a universal database
+choice. If the product needs several writer hosts, automatic failover, or many
+concurrent analytical users, the topology must change. Pointing those users at
+the live file would not turn SQLite into that architecture.</p>
+<h2 id="where-each-kind-of-truth-lives"><span class="secno" aria-hidden="true">03</span>Where Each Kind of Truth Lives</h2>
+<p>“Source of truth” means the place the software is allowed to treat as current
+for one particular kind of fact. There is intentionally more than one because
+human intent, broker evidence, and daemon state are not interchangeable.</p>
+<div class="tblwrap">
+<table>
+<thead>
+<tr>
+<th>Kind of fact</th>
+<th>Owning location</th>
+<th>Why it stays there</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Human intent and approved limits</td>
 <td><code>config.toml</code> and <code>policies/*.toml</code></td>
-<td>Authored outside SQLite. The database may retain applied state, fingerprints, and audit events but never becomes the policy-editing surface.</td>
+<td>People author these declarations. SQLite may retain applied identities and resulting events, but it is not the editing surface.</td>
 </tr>
 <tr>
 <td>Original broker statement evidence</td>
 <td><code>$XDG_STATE_HOME/ibkr/statements/flex-*.xml</code></td>
-<td>Immutable external evidence. SQLite stores a complete inventory, immutable versions, and current derived day winners.</td>
+<td>The XML is what the broker supplied. SQLite stores inventory, versions, and derived daily views; those projections do not replace the original evidence claim.</td>
 </tr>
 <tr>
-<td>Preview signer and Flex token</td>
-<td>Private files in config/state roots</td>
-<td>Secrets are deliberately outside ordinary database rows.</td>
+<td>Daemon working state and local evidence</td>
+<td><code>$XDG_STATE_HOME/ibkr/daemon.db</code></td>
+<td>One daemon can update related facts transactionally and serve one typed interpretation to the rest of the product.</td>
 </tr>
 <tr>
-<td>App grants, push subscriptions, inbox, and relay credentials</td>
+<td>Preview signer and Flex credentials</td>
+<td>Private config/state files</td>
+<td>Secrets and signing material have a different lifecycle from ordinary database rows.</td>
+</tr>
+<tr>
+<td>Device grants, push subscriptions, and relay credentials</td>
 <td>App-owned state directory</td>
-<td>Separate authority. The app never opens <code>daemon.db</code>.</td>
+<td>The app is a separate process with separate authentication responsibilities and never opens <code>daemon.db</code>.</td>
 </tr>
 <tr>
-<td><code>daemon.db.head</code>, verified backups, and sealed legacy files</td>
-<td>State-root recovery directories</td>
-<td>Anti-rollback or recovery only. Never a fallback business-state reader.</td>
-</tr>
-</tbody>
-</table>
-</div>
-<p>Changing only <code>IBKR_SOCKET</code> does not isolate persistence. Each isolated daemon
-stack needs distinct config, socket, account/client pins, and XDG state roots.
-A persistence lock beside the database prevents alternate sockets from writing
-one authority concurrently.</p>
-<h2 id="table-families"><span class="secno" aria-hidden="true">03</span>Table Families</h2>
-<h3 id="store-and-mutable-state">Store and mutable state</h3>
-<div class="tblwrap">
-<table>
-<thead>
-<tr>
-<th>Table</th>
-<th>Grain and purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>schema_migrations</code></td>
-<td>One immutable row per applied SQL migration: version, name, checksum, and application time. <code>PRAGMA user_version</code> must agree with it.</td>
-</tr>
-<tr>
-<td><code>store_meta</code></td>
-<td>Singleton authority identity and monotonic counters: epoch, head generation, event sequence, signer generation, and timestamps. SQL triggers prevent deletion, epoch replacement, or counter rollback.</td>
-</tr>
-<tr>
-<td><code>legacy_imports</code></td>
-<td>One recorded import result per scope/source kind. It proves what the clean cutover imported or skipped; it is not a live fallback.</td>
-</tr>
-<tr>
-<td><code>state_documents</code></td>
-<td>One current JSON document per <code>(scope_key, kind)</code>, with compare-and-swap revision, SHA-256, and update time. Payload shape is owned by the document kind and its typed version.</td>
+<td>Recovery state</td>
+<td><code>daemon.db.head</code>, verified backups, and sealed legacy artifacts</td>
+<td>These help detect rollback or support offline recovery. They are not live read replicas or fallback business-state stores.</td>
 </tr>
 </tbody>
 </table>
 </div>
-<p><code>state_documents</code> holds current versions of settings, risk-capital state,
-trading readiness, purge state, proposal/opportunity snapshots, Regime and
-gamma last-good state, membership/contract caches, alert episodes, and other
-daemon-owned documents. Consumers must not treat the JSON column as one global
-schema: always select by kind, validate the kind-specific payload version, and
-use the owning typed reader.</p>
-<h3 id="event-spine-and-typed-projections">Event spine and typed projections</h3>
-<p><code>event_log</code> is the append-only event spine. Each event has a scope, unique
-event key, type, action, origin, occurrence and record times, a JSON payload,
-and a stored payload digest. Domain tables share the same <code>event_seq</code> primary
-key and project the fields needed for bounded, indexed reads:</p>
+<p>Changing only <code>IBKR_SOCKET</code> does not isolate storage. A separately isolated
+daemon needs its own config, socket, broker/account/client pins, and XDG state
+roots. A lock beside <code>daemon.db</code> prevents alternate socket paths from becoming
+concurrent writers of the same file.</p>
+<h2 id="storage-layer-in-one-view"><span class="secno" aria-hidden="true">04</span>Storage Layer in One View</h2>
+<p><a href="diagrams/storage-overview.svg"><img src="diagrams/storage-overview.svg" alt="What the daemon storage layer owns and what remains outside it"></a></p>
+<p><a href="diagrams/storage-overview.png">PNG fallback</a> ·
+<a href="diagrams/render-architecture.mjs">SVG source generator</a> ·
+<a href="diagrams/ICON-LICENSE.txt">Tabler Icons license</a></p>
+<p>The left side of the diagram contains truths owned outside SQLite: human
+declarations, original broker evidence, and secrets. The daemon is the only
+component that turns those inputs and live observations into durable SQLite
+state. Product surfaces on the right receive typed results; they do not become
+database readers or second writers.</p>
+<h2 id="how-the-data-model-follows-from-the-questions"><span class="secno" aria-hidden="true">05</span>How the Data Model Follows from the Questions</h2>
+<p>The model is easier to understand as five questions than as a list of tables.</p>
 <div class="tblwrap">
 <table>
 <thead>
 <tr>
-<th>Projection</th>
-<th>Purpose</th>
+<th>Product question</th>
+<th>Storage structure</th>
+<th>What one row means</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>regime_decisions</code> → <code>regime_indicators</code></td>
-<td>Market-regime decision header and zero-or-more per-indicator rows. Indicators reference their owning regime decision.</td>
+<td>What is true now?</td>
+<td><code>state_documents</code>, <code>statement_files</code>, <code>statement_equity_days</code></td>
+<td>The current revision or selected current statement-derived record for a defined scope and kind.</td>
 </tr>
 <tr>
-<td><code>rule_transitions</code></td>
-<td>Rule ID, current/previous status, and policy identity.</td>
+<td>What did the software observe or decide?</td>
+<td><code>event_log</code></td>
+<td>One immutable local lifecycle event with its original JSON payload and payload digest.</td>
 </tr>
 <tr>
-<td><code>canary_transitions</code></td>
-<td>Portfolio action, severity/direction, market stage, input health, and alert relevance.</td>
+<td>What was measured?</td>
+<td><code>observations</code></td>
+<td>One retained source measurement, including when it was observed and whether it could support a live decision.</td>
 </tr>
 <tr>
-<td><code>capital_events</code></td>
-<td>Capital flow, reconciliation, reset, and related risk-capital event fields.</td>
+<td>What must never be reused or move backwards?</td>
+<td><code>broker_scopes</code>, <code>consumed_preview_tokens</code>, <code>order_id_floors</code>, <code>order_events</code></td>
+<td>Route identity, a spent capability, a conservative ID lower bound, or an order-lifecycle fact.</td>
 </tr>
 <tr>
-<td><code>risk_policy_events</code></td>
-<td>Policy lifecycle/governance event identity and fingerprint.</td>
+<td>What did the broker originally report?</td>
+<td>Retained Flex XML plus the four statement tables</td>
+<td>XML remains original evidence; SQLite records exact file versions and current or historical derived equity rows.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>This is selective normalization. Safety-critical identities and irreversible
+facts get dedicated columns, keys, foreign keys, and triggers. Heterogeneous
+current state stays in versioned JSON documents so every cache or snapshot does
+not require a new table. Immutable events retain their original payload while
+some frequently queried fields are copied into relational projection tables.</p>
+<p>That last part is incomplete today: projection rows are written, but the main
+Regime, rules, Canary, and capital history readers still scan matching
+<code>event_log</code> JSON and filter it in Go. The extra projection tables therefore do
+not yet earn all of their complexity. They should either become the bounded,
+indexed read path or be removed when compatibility permits.</p>
+<h2 id="physical-data-model"><span class="secno" aria-hidden="true">06</span>Physical Data Model</h2>
+<p><a href="diagrams/sqlite-data-model.svg"><img src="diagrams/sqlite-data-model.svg" alt="Physical entity relationships in daemon.db schema version 1"></a></p>
+<p><a href="diagrams/sqlite-data-model.png">PNG fallback</a> ·
+<a href="diagrams/render-architecture.mjs">SVG source generator</a> ·
+<a href="https://github.com/osauer/ibkr/blob/main/internal/daemon/corestore/schema.go">Canonical DDL</a></p>
+<p>This is a physical ER view of schema version 1. A solid relationship in the
+diagram corresponds to a declared SQLite foreign key. A dashed relationship is
+explicitly labelled as a convention enforced by Go code rather than by SQL.
+Shared names such as <code>scope_key</code> are namespaces, not automatic foreign keys.</p>
+<p>The declared foreign-key relationships are:</p>
+<div class="tblwrap">
+<table>
+<thead>
+<tr>
+<th>Parent</th>
+<th>Child</th>
+<th>Cardinality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>event_log</code></td>
+<td>Each individual event projection: <code>regime_decisions</code>, <code>rule_transitions</code>, <code>canary_transitions</code>, <code>capital_events</code>, <code>risk_policy_events</code>, <code>proposal_outcomes</code>, and <code>order_events</code></td>
+<td>One event to zero or one row in each individual child table.</td>
 </tr>
 <tr>
-<td><code>proposal_outcomes</code></td>
-<td>Proposal state transitions keyed by proposal identity and revision.</td>
+<td><code>regime_decisions</code></td>
+<td><code>regime_indicators</code></td>
+<td>One decision to zero or more indicator rows.</td>
 </tr>
 <tr>
+<td><code>broker_scopes</code></td>
+<td><code>consumed_preview_tokens</code></td>
+<td>One exact broker route to zero or more consumed tokens.</td>
+</tr>
+<tr>
+<td><code>broker_scopes</code></td>
 <td><code>order_events</code></td>
-<td>Order lifecycle details tied to a broker scope, including safe local/broker/token identifiers.</td>
+<td>One exact broker route to zero or more order events.</td>
 </tr>
-</tbody>
-</table>
-</div>
-<p>Projection rows do not replace the immutable event payload. New query shapes
-should add a typed projection or version-aware reader rather than rewrite old
-events to look current.</p>
-<h3 id="broker-scope-and-order-safety">Broker scope and order safety</h3>
-<p><code>broker_scopes</code> binds endpoint, client ID, account, and mode into one immutable
-scope identity. <code>order_events</code> and <code>consumed_preview_tokens</code> reference that
-scope, so equal order IDs or references on different routes cannot alias.</p>
-<p><code>consumed_preview_tokens</code> is a unique tombstone table. Token consumption,
-order-ID floor advancement, and the durable pre-transmit order event commit in
-one transaction before broker transmission. <code>order_id_floors</code> stores global or
-broker-scoped lower bounds; a trigger forbids decreases. A failed critical
-transaction blocks the broker send rather than falling back to an unjournaled
-path.</p>
-<h3 id="observations">Observations</h3>
-<p><code>observations</code> retains source payloads with source, kind, observed/recorded
-times, content type, payload digest, optional metadata JSON, and a non-null
-<code>decision_eligible</code> flag. Current code can couple eligible observations to a
-state revision in one transaction. Imported legacy market/gamma payloads are
-immutable research evidence with <code>decision_eligible=false</code>; generic history
-must never seed a current verdict or last-good state.</p>
-<p>An analytics reader must preserve source, method/version, as-of, quality,
-eligibility, and provenance. A row existing in this table does not mean it was
-eligible for a live decision.</p>
-<h3 id="broker-statements">Broker statements</h3>
-<p>The statement family separates mutable current inventory from immutable
-restatement evidence:</p>
-<div class="tblwrap">
-<table>
-<thead>
-<tr>
-<th>Table</th>
-<th>Role</th>
-</tr>
-</thead>
-<tbody>
 <tr>
 <td><code>statement_files</code></td>
-<td>Current complete inventory, one row per <code>(scope_key, file_key)</code> and current SHA-256.</td>
+<td><code>statement_equity_days</code></td>
+<td>One current statement file identity to zero or more current daily equity rows.</td>
 </tr>
 <tr>
 <td><code>statement_file_versions</code></td>
-<td>Immutable versions of each retained XML file, keyed by scope, file key, and content hash.</td>
-</tr>
-<tr>
-<td><code>statement_equity_days</code></td>
-<td>Current winner for one account/day, derived from the complete current inventory.</td>
-</tr>
-<tr>
 <td><code>statement_equity_day_versions</code></td>
-<td>Immutable derived versions tied by foreign key to the exact statement-file version.</td>
+<td>One immutable statement-file version to zero or more immutable daily equity versions.</td>
 </tr>
 </tbody>
 </table>
 </div>
-<p>The daemon parses the complete retained XML set and replaces the current file
-inventory and daily winners transactionally. A parse/read failure leaves the
-previous complete projection intact. Same-name/same-size restatements are
-detected by content hash; removed files retract only their current winners,
-while immutable versions retain what was previously observed.</p>
-<h2 id="indexes-and-immutability"><span class="secno" aria-hidden="true">04</span>Indexes and Immutability</h2>
-<p>Time-ordered indexes support event, observation, order, and statement-history
-reads without turning table order into semantics. Partial indexes accelerate
-order lookup by reference, reserved ID, permanent ID, and preview token only
-when those fields exist.</p>
-<p>SQL triggers reject update and delete on the migration ledger, broker scopes,
-event/evidence tables, event projections, token tombstones, and immutable
-statement versions. Mutable current tables use explicit replace/CAS semantics.
-Startup validates the exact table/index/trigger manifest; a migration ledger
-alone is not proof that the schema is trustworthy.</p>
-<h2 id="mutation-and-upgrade-lifecycle"><span class="secno" aria-hidden="true">05</span>Mutation and Upgrade Lifecycle</h2>
-<p><a href="diagrams/sqlite-update-lifecycle.svg"><img src="diagrams/sqlite-update-lifecycle.svg" alt="ibkr SQLite mutation, startup, and upgrade lifecycle"></a></p>
-<p><a href="diagrams/sqlite-update-lifecycle.png">PNG fallback</a> ·
-<a href="diagrams/render-architecture.mjs">SVG source generator</a> ·
-<a href="diagrams/ICON-LICENSE.txt">Tabler Icons license</a></p>
-<h3 id="normal-writes">Normal writes</h3>
-<p>The store uses WAL, foreign keys, <code>synchronous=FULL</code>, supported full-fsync,
-a bounded busy timeout, and one serialized database connection. Each committed
-mutation advances <code>store_meta.head_generation</code>; event transactions also
-advance the event sequence. The daemon then fsyncs the external
-<code>daemon.db.head</code> watermark. If that post-commit observer fails, the SQLite
-transaction is already durable, but the store returns an error, latches
-unhealthy, and does not publish the corresponding in-memory/RPC success.
-Critical persistence failure is typed health and a trading blocker, not
-permission to write a legacy file or fall back to another authority.</p>
-<p>State writers use compare-and-swap revisions. Several store APIs atomically
-couple a state document with event or observation rows, which prevents the
-current view and its durable evidence from describing different decisions.
-Append-only producers insert once; statement ingestion publishes a whole
-inventory/projection transaction; order staging binds its safety rows before
-transmit.</p>
-<h3 id="startup-validation">Startup validation</h3>
-<p>Database readiness completes before state adapters attach, RPC serves, a
-scheduler runs, or a broker connection starts. The daemon verifies:</p>
+<p><code>store_meta</code>, <code>schema_migrations</code>, <code>legacy_imports</code>, <code>state_documents</code>,
+<code>observations</code>, and <code>order_id_floors</code> have no declared foreign key to another
+table. Several useful relationships are application conventions instead:</p>
 <ul>
-<li>application ID, schema version, and the checksummed contiguous migration
-ledger;</li>
-<li>the canonical tables, indexes, constraints, and triggers;</li>
-<li>SQLite integrity and foreign keys;</li>
-<li>stored SHA-256 values for state documents and append-only evidence;</li>
-<li>authority epoch, monotonic counters, and the external minimum head;</li>
-<li>private file modes, regular-file/directory types, and the expected
-WAL/sidecar state.</li>
+<li>a state revision may commit in the same transaction as an event or
+observation, but it stores no lineage key to that row;</li>
+<li>the writer intends at most one event-projection family per event, but SQL
+permits the same <code>event_seq</code> to appear in several projection tables;</li>
+<li>current statement rows and immutable statement versions are written together,
+but the current file table does not reference the version table;</li>
+<li>broker-scoped order-ID floors are associated with a broker scope by validated
+values, not by a foreign key.</li>
 </ul>
-<p>An equal supported version opens only after validation. A newer database
-refuses downgrade. An older valid database enters the out-of-place upgrade
-coordinator. Corruption, missing watermark, tampered schema/content, ambiguous
-recovery state, or future version fails closed; the daemon does not delete,
-recreate, repair, or automatically restore the authority.</p>
-<h3 id="out-of-place-schema-upgrade">Out-of-place schema upgrade</h3>
+<p>The exact columns, constraints, indexes, and triggers live in
+<code>internal/daemon/corestore/schema.go</code>. The diagram renderer checks its table and
+foreign-key inventory against that source so schema drift fails the diagram
+gate instead of silently changing the picture's meaning.</p>
+<p>JSON inside <code>state_documents</code>, events, and observations is not one universal
+schema. Every reader must select the expected kind, validate its payload
+version, and preserve scope, time basis, provenance, eligibility, and data
+quality.</p>
+<h2 id="what-a-write-looks-like"><span class="secno" aria-hidden="true">07</span>What a Write Looks Like</h2>
+<h3 id="publishing-a-market-observation">Publishing a market observation</h3>
 <ol>
-<li>Inspect and validate the published source at its exact authority head.</li>
-<li>Create and reopen a standalone immutable pre-upgrade backup at that head.</li>
-<li>Copy to an unpublished same-directory candidate and apply ordered,
-checksummed migrations transactionally.</li>
-<li>Fully validate the candidate and advance the authority head exactly once
-for the schema transition.</li>
-<li>Fsync a recovery manifest binding the source, backup, candidate, versions,
-fingerprints, heads, and durable phase.</li>
-<li>Advance the anti-rollback watermark, quiesce the old WAL, atomically publish
-the candidate, fsync the directory, reopen, and verify.</li>
-<li>Durably remove the transient manifest. The verified backup remains
-recovery-only.</li>
+<li>The daemon validates the scope, payload, source metadata, and expected
+current revision.</li>
+<li>One SQLite transaction updates the current <code>state_documents</code> row and appends
+the immutable <code>observations</code> row.</li>
+<li>The transaction advances an ever-increasing committed-write counter and
+commits under SQLite WAL with foreign keys and full synchronization enabled.</li>
+<li>The daemon updates and fsyncs <code>daemon.db.head</code>, an external record of the
+newest accepted counter, before publishing the new in-memory/RPC view.</li>
 </ol>
-<p>Restart resumes from the manifest's last verified phase. Any mismatched or
-missing artifact fails closed instead of guessing from filenames or modification
-times. Recovery and backup restore remain an explicit offline operator
-procedure because signer generation, broker-open orders, and conservative
-order-ID floors must be reconciled before writes resume.</p>
-<h2 id="three-independent-version-domains"><span class="secno" aria-hidden="true">06</span>Three Independent Version Domains</h2>
-<p>Do not use one version number as a proxy for another:</p>
-<ol>
-<li><strong>SQL schema migrations</strong> change tables, indexes, constraints, and triggers.</li>
-<li><strong>State-document payload versions</strong> change one <code>(scope, kind)</code> JSON shape and
-use a typed migration/validator owned by that document.</li>
-<li><strong>Append-only event or observation payload versions</strong> retain immutable rows
-and evolve through compatible readers or new projections.</li>
-</ol>
-<p>Policy versions and semantic fingerprints are a fourth business domain. They
-may be stored in events and projections, but changing policy does not imply a
-SQL migration.</p>
-<h2 id="query-and-analytics-contract"><span class="secno" aria-hidden="true">07</span>Query and Analytics Contract</h2>
-<p>The supported access path depends on the question:</p>
+<p>If step 4 fails, the SQLite transaction is already committed. The store returns
+an error, marks itself unhealthy, and does not claim success through the
+in-memory or RPC surface. The state and observation were committed together,
+but the schema does not retain a direct observation ID on the state row.</p>
+<h3 id="staging-a-broker-transmission">Staging a broker transmission</h3>
+<p>Before the daemon may send an order, one transaction binds the exact broker
+route, records the consumed preview token, advances the conservative order-ID
+floor, and appends the durable pre-transmit event. If that critical transaction
+fails, the broker send does not happen. No policy, dashboard, or alternate file
+path can substitute for that evidence.</p>
+<h2 id="how-data-is-read-today"><span class="secno" aria-hidden="true">08</span>How Data Is Read Today</h2>
+<p>The supported product boundary is the daemon, not the SQLite file.</p>
 <div class="tblwrap">
 <table>
 <thead>
 <tr>
 <th>Question</th>
-<th>Supported path</th>
-<th>Why</th>
+<th>Current path</th>
+<th>Current limitation</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>Current operator or dashboard state</td>
-<td>Add/use a typed daemon RPC in <code>internal/rpc</code> with a daemon-owned query.</td>
-<td>Preserves authority, scope, freshness, access control, and forward compatibility.</td>
+<td>A typed daemon RPC and daemon-owned reader.</td>
+<td>New dashboard needs a defined typed contract; direct SQL is not a product API.</td>
 </tr>
 <tr>
-<td>Existing decision history</td>
-<td><code>ibkr regime history</code>, <code>ibkr rules history</code>, <code>ibkr canary history</code>, and <code>ibkr recon equity</code>, all through typed daemon RPC.</td>
-<td>Uses the intended indexed projections and preserves result semantics.</td>
+<td>Regime, rules, Canary, or capital history</td>
+<td>Existing CLI commands call typed daemon RPC.</td>
+<td>The daemon currently loads matching canonical event JSON and filters in Go instead of using most projection tables. This is not yet a scalable analytical read model.</td>
 </tr>
 <tr>
 <td>Orders</td>
 <td><code>ibkr orders open</code>, <code>ibkr orders history</code>, and <code>ibkr order status</code>.</td>
-<td>The local journal is lifecycle evidence, not a broker Activity Statement.</td>
+<td>The local order lifecycle is intent/evidence, not a broker Activity Statement. Some reads still fold substantial event history.</td>
 </tr>
 <tr>
-<td>Research over retained observations</td>
-<td>A bounded, typed eligible-only or explicitly research-only daemon query.</td>
-<td>Forces callers to preserve <code>decision_eligible</code>, provenance, quality, and scope.</td>
+<td>Statement-derived equity</td>
+<td>Typed reconciliation/equity paths over the current statement projection.</td>
+<td>The current reader has a fixed result ceiling rather than a general paginated analytical API.</td>
+</tr>
+<tr>
+<td>Retained observations</td>
+<td>Narrow daemon-owned readers for their product purpose.</td>
+<td>There is no supported general observation-research API. The existing pagination cursor also needs correction before it is advertised as an analytics contract.</td>
 </tr>
 <tr>
 <td>Offline forensic SQL</td>
-<td>A separately verified, consistent backup under an explicit offline procedure.</td>
-<td>Opening or copying the live main file can miss WAL state; recovery artifacts are not normal dashboard replicas.</td>
+<td>Stop the daemon and open <code>daemon.db</code> read-only, or use a separately verified consistent backup.</td>
+<td>SQL shapes are implementation details, not stable public contracts.</td>
 </tr>
 </tbody>
 </table>
 </div>
-<p>There is no supported general-purpose read replica or direct-SQL dashboard API.
-Do not point Grafana, notebooks, an ORM, or a second process at the live
-<code>daemon.db</code>, and never write it outside the daemon. A new analytics feature
-should define:</p>
+<p>Opening the file through SQLite while stopped is different from copying only
+the main file while WAL changes may exist. Do not copy <code>daemon.db</code> alone from a
+running daemon, mutate it with <code>sqlite3</code>, or point Grafana, notebooks, an ORM,
+or another service at the live file.</p>
+<p>A new dashboard or analytical feature should first define the question's
+scope, row meaning, time basis, freshness, eligibility, ordering, pagination,
+and redaction. Then add a bounded daemon query or typed export backed by the
+index or projection that makes that contract efficient.</p>
+<h2 id="durability-startup-and-recovery"><span class="secno" aria-hidden="true">09</span>Durability, Startup, and Recovery</h2>
+<h3 id="normal-durability">Normal durability</h3>
+<p>The store uses SQLite WAL, foreign keys, <code>synchronous=FULL</code>, supported
+full-fsync controls, a bounded busy timeout, and one serialized connection.
+One connection makes writer ordering simple, but a long unbounded read can also
+delay a broker-critical write. Bounded and indexed reads are therefore a safety
+property, not merely a performance improvement.</p>
+<h3 id="startup-checks">Startup checks</h3>
+<p>Storage readiness completes before the daemon serves RPC, runs schedulers, or
+connects to the broker. Startup checks private file types and modes, the SQLite
+application ID and schema version, the checksummed migration ledger, the exact
+table/index/trigger inventory, SQLite <code>quick_check</code>, foreign keys, the external
+minimum write counter, and stored digests for selected payload columns.</p>
+<p>Those checks detect schema drift, structural damage, rollback, and selected
+payload-byte changes. They are not a claim of comprehensive tamper detection:
+event headers, observation metadata and eligibility, typed projections, broker
+bindings, and current statement winners are not all covered by a canonical
+whole-record digest.</p>
+<h3 id="schema-upgrades">Schema upgrades</h3>
+<p>An older valid schema is upgraded as a copy, not in place. Under the persistence
+lock, the daemon creates a verified backup, migrates an unpublished
+same-directory candidate, validates it, records coarse recovery state, and then
+atomically swaps the candidate into place. A newer schema refuses downgrade;
+an ambiguous recovery state fails closed rather than guessing.</p>
+<p>The detailed crash-boundary protocol belongs in the
+<a href="https://github.com/osauer/ibkr/blob/main/docs/design/daemon-sqlite-authority.md">SQLite implementation contract</a>. Schema
+version 1 is still the only production migration, so the general upgrade path
+has not yet carried a released schema transition.</p>
+<h3 id="backup-and-restore-today">Backup and restore today</h3>
+<p>The code can create and verify a standalone database backup, and upgrades or
+cutovers use that primitive. There is not yet a supported scheduled-current
+backup, backup-status, restore command, retention policy, off-host copy policy,
+RPO/RTO, or rehearsed restore runbook. Recovery remains a deliberate offline
+procedure because the database head, preview signer generation, broker-open
+orders, and conservative order-ID floors must agree before writes resume.</p>
+<p>That is an operational gap, not a feature hidden behind documentation. Until it
+is closed, this page must not present backups as a complete operator recovery
+system.</p>
+<h2 id="known-limits-and-design-debt"><span class="secno" aria-hidden="true">10</span>Known Limits and Design Debt</h2>
+<p>These are current implementation boundaries, not speculative concerns:</p>
+<div class="tblwrap">
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Current state</th>
+<th>Consequence or required decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Event projections</td>
+<td>Projection rows are written, while most non-order histories still read canonical event JSON.</td>
+<td>Route bounded reads through indexed projections or remove redundant projections when compatibility allows.</td>
+</tr>
+<tr>
+<td>Read concurrency</td>
+<td>One SQLite connection serves reads and critical writes; several histories scan and filter broadly.</td>
+<td>Bound and index reads before adding a separate read-only handle or pool.</td>
+</tr>
+<tr>
+<td>Observation pagination</td>
+<td>Results order by observation time plus ID, while the cursor carries only ID.</td>
+<td>Backfilled or out-of-order rows can be skipped; fix the cursor before exposing general research queries.</td>
+</tr>
+<tr>
+<td>Original Flex durability</td>
+<td>Retained XML publication closes and renames but does not currently fsync the file and statements directory before the SQLite projection may commit.</td>
+<td>A power-loss window can leave the projection without the claimed original file; repair the publication boundary.</td>
+</tr>
+<tr>
+<td>Integrity coverage</td>
+<td>Structural checks and selected payload hashes do not cover every semantic field or current statement winner.</td>
+<td>State exactly what is protected; extend canonical validation where audit requirements demand it.</td>
+</tr>
+<tr>
+<td>Backup and lifecycle</td>
+<td>No scheduled backup, restore, retention, archive, size budget, or restore drill exists.</td>
+<td>Define and operate the lifecycle before retained evidence grows without bound.</td>
+</tr>
+<tr>
+<td>Desk identity</td>
+<td>Most business state assumes one isolated daemon/account context; entity, portfolio, book, currency, and actor identity are not a general relational model.</td>
+<td>Add explicit opaque identities before claiming consolidated family-office support.</td>
+</tr>
+<tr>
+<td>Migration layout</td>
+<td>Append-only triggers are appended dynamically to migration 1.</td>
+<td>Future table triggers must live in the migration that creates them so migration-1 checksums remain immutable.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The database contains 21 tables, but table count is not the main complexity
+measure. Dedicated order-safety and statement-version tables earn their cost.
+Write-only projections, unbounded duplicate snapshots, and application-only
+relationships do not automatically earn theirs.</p>
+<h2 id="when-the-architecture-must-evolve"><span class="secno" aria-hidden="true">11</span>When the Architecture Must Evolve</h2>
+<p>Keep one authoritative writer per daemon/account stack while that remains the
+operational shape. Reconsider the topology when any of these becomes real:</p>
 <ul>
-<li>the authoritative grain and scope key;</li>
-<li>current state versus event history versus observation evidence;</li>
-<li>time basis (<code>occurred_at</code>, <code>observed_at</code>, <code>recorded_at</code>, or update time);</li>
-<li>eligibility, provenance, freshness, and finality;</li>
-<li>bounded filters, ordering, pagination, and redaction;</li>
-<li>the typed RPC result and the projection/index that makes it efficient;</li>
-<li>behavior for missing, stale, partial, future-clock, or corrupt evidence.</li>
+<li>writers must run on several hosts or support automatic failover;</li>
+<li>many analytical readers need concurrent access;</li>
+<li>several entities, accounts, portfolios, books, or currencies must be
+consolidated with durable actor and command identity;</li>
+<li>retained data makes startup validation or current full-history scans
+operationally unsafe;</li>
+<li>the desk needs centralized retention, legal hold, audit anchoring, or
+recovery objectives that a device-local store cannot meet.</li>
 </ul>
-<p>Avoid <code>SELECT *</code> as a contract, row counts as proof of coverage, and JSON field
-extraction without a kind/version guard. Never join across <code>scope_key</code> values
-unless the product contract explicitly defines cross-scope aggregation.</p>
-<h2 id="reference-map"><span class="secno" aria-hidden="true">08</span>Reference Map</h2>
+<p>The likely next step is not to let dashboards read each live database. Keep the
+per-daemon transactional store for local safety, then publish typed, redacted,
+versioned exports or a change feed into a central read-only analytical and
+control plane.</p>
+<h2 id="glossary"><span class="secno" aria-hidden="true">12</span>Glossary</h2>
+<div class="tblwrap">
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Plain-language meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Storage layer</td>
+<td>The code and operating rules that preserve state, evidence, and recovery continuity. SQLite is the engine used by this layer.</td>
+</tr>
+<tr>
+<td>Source of truth</td>
+<td>The location the software is allowed to treat as current for one particular kind of fact.</td>
+</tr>
+<tr>
+<td>Current state</td>
+<td>The latest accepted version used by the running product.</td>
+</tr>
+<tr>
+<td>Event</td>
+<td>An immutable record of something the software observed, decided, or attempted.</td>
+</tr>
+<tr>
+<td>Observation</td>
+<td>A retained measurement from a named source, separate from the current conclusion derived from it.</td>
+</tr>
+<tr>
+<td>Projection</td>
+<td>Selected fields copied from a richer payload into searchable columns.</td>
+</tr>
+<tr>
+<td>Revision check</td>
+<td>Update only when the caller's expected revision is still current; otherwise reject the stale write.</td>
+</tr>
+<tr>
+<td>Transaction</td>
+<td>A group of database changes that all commit or all fail together.</td>
+</tr>
+<tr>
+<td>WAL</td>
+<td>SQLite's write-ahead log, which can hold committed changes not yet folded into the main database file.</td>
+</tr>
+<tr>
+<td>Write counter</td>
+<td>An ever-increasing number identifying the newest committed storage change. The external <code>daemon.db.head</code> file records the minimum accepted value.</td>
+</tr>
+<tr>
+<td>Verified backup</td>
+<td>A standalone copy tied to one known committed write counter and reopened for validation.</td>
+</tr>
+<tr>
+<td>Upgrade a copy</td>
+<td>Apply schema changes to an unpublished candidate, verify it, then atomically replace the old file.</td>
+</tr>
+<tr>
+<td>Decision eligible</td>
+<td>Allowed to support a live decision. Imported historical observations can be retained for research while remaining ineligible.</td>
+</tr>
+<tr>
+<td>Broker route</td>
+<td>The exact endpoint, client ID, account, and mode combination to which an order lifecycle belongs.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="reference-map"><span class="secno" aria-hidden="true">13</span>Reference Map</h2>
 <ul>
-<li><a href="architecture.html">Architecture</a>: process, persistence, and authority
-ownership.</li>
-<li><a href="https://github.com/osauer/ibkr/blob/main/docs/design/daemon-sqlite-authority.md">Daemon SQLite Authority</a>: cutover,
-recovery, durability, and threat-model decision record.</li>
-<li><code>internal/daemon/corestore/schema.go</code>: canonical DDL and immutable migration
-plan.</li>
-<li><code>internal/daemon/corestore</code>: store transactions, events, observations,
-statements, backup, validation, and upgrade implementation.</li>
-<li><a href="policies.html">Policies</a>: why policy authoring stays outside the database even
-though applied state and audit evidence live inside it.</li>
+<li><a href="architecture.html">Architecture</a>: process, broker, RPC, and state ownership.</li>
+<li><a href="https://github.com/osauer/ibkr/blob/main/docs/design/daemon-sqlite-authority.md">SQLite Implementation Contract</a>: cutover,
+durability, upgrade, and fail-closed recovery mechanics.</li>
+<li><a href="https://github.com/osauer/ibkr/blob/main/docs/design/platform-settings.md">Platform Settings</a>: why live preferences are a
+typed daemon document rather than a second configuration system.</li>
+<li><code>internal/daemon/corestore/schema.go</code>: canonical tables, indexes, constraints,
+triggers, and migration ledger.</li>
+<li><code>internal/daemon/corestore</code>: typed transactions, events, observations,
+statements, backup, validation, and upgrade code.</li>
+<li><a href="policies.html">Trading Policy</a>: why human-authored limits remain outside SQLite even
+when applied state and resulting evidence are retained inside it.</li>
 </ul>
   </main>
   <footer>

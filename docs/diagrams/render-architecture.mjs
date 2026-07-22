@@ -183,9 +183,45 @@ const referenceDiagramStyles = `      .card-title { font-size: 14px; font-weight
       .er-title { font-size: 13px; font-weight: 700; fill: ${C.ink}; }
       .er-key { font: 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; fill: ${C.greenDark}; }
       .er-field { font: 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: ${C.muted}; }
+      .er-cardinality { font: 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; fill: ${C.slate}; }
+      .er-semantic { font: 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: ${C.blue}; }
       .step-no { font-size: 12px; font-weight: 800; fill: #ffffff; }
       .step-title { font-size: 12.5px; font-weight: 700; fill: ${C.ink}; }
       .step-sub { font-size: 10.8px; fill: ${C.muted}; }
+`;
+
+const policyPrimerStyles = `${referenceDiagramStyles}      .primer-title { font-size: 13px; font-weight: 700; fill: ${C.ink}; }
+      .primer-sub { font-size: 11.2px; fill: ${C.muted}; }
+      .primer-note { font-size: 11px; font-weight: 650; fill: ${C.greenDark}; }
+`;
+
+const policyReadableStyles = `${referenceDiagramStyles}      .card-title { font-size: 16px; }
+      .card-sub { font-size: 14px; }
+      .node-title { font-size: 17px; }
+      .node-sub { font-size: 14px; }
+      .mono-small { font-size: 12.5px; }
+      .layer { font-size: 13px; }
+      .policy-callout { font-size: 15px; font-weight: 750; fill: ${C.ink}; }
+      .policy-table-head { font-size: 13px; font-weight: 750; fill: ${C.muted}; letter-spacing: .5px; }
+      .policy-table-text { font-size: 14px; fill: ${C.ink}; }
+      .policy-table-sub { font-size: 13px; fill: ${C.muted}; }
+`;
+
+const storageOverviewStyles = `${policyPrimerStyles}      .card-title { font-size: 16px; }
+      .card-sub { font-size: 14px; }
+      .mono-small { font-size: 12.5px; }
+      .module-title { font-size: 15px; }
+      .module-sub { font-size: 13.5px; }
+      .layer { font-size: 13px; }
+`;
+
+const storageERStyles = `${referenceDiagramStyles}      .er-title { font-size: 15px; }
+      .er-key { font-size: 14px; }
+      .er-field { font-size: 14px; }
+      .er-cardinality { font-size: 14px; }
+      .er-semantic { font-size: 14px; }
+      .er-note { font-size: 14px; fill: ${C.muted}; }
+      .layer { font-size: 13px; }
 `;
 
 function stripNode(x, y, width, label, iconName = "") {
@@ -437,156 +473,331 @@ function policyCard({ x, y, width, height, iconName, color, title, lines, format
   </g>`;
 }
 
-function policyArchitecture() {
+function policyPrimer() {
   const body = `
-  ${header("Policy Authority and Execution", "Approved choices enter through typed boundaries; evidence, enforcement, and reporting stay separate.")}
+  ${header("From Risk Decision to Human Action", "A person chooses the boundary; the daemon applies current facts consistently; a person decides what happens next.")}
 
-  ${legendItem(1028, 40, "green", "Operator authority")}
-  ${legendItem(1182, 40, "blue", "Observed evidence", { dashed: true })}
-  ${legendItem(1028, 64, "slate", "Typed decision flow")}
-  ${legendItem(1182, 64, "amber", "Human-only boundary", { dotted: true })}
+  <text x="36" y="140" class="layer">CHOICES MADE BEFORE PRESSURE</text>
+  <text x="290" y="204" class="layer">IBKR EVALUATES</text>
+  <text x="526" y="204" class="layer">EFFECT TODAY</text>
+  <text x="750" y="164" class="layer">HUMAN ACTION</text>
 
-  <text x="36" y="138" class="layer">1 · AUTHORITY INPUTS</text>
-  <text x="392" y="138" class="layer">2 · DAEMON POLICY BOUNDARY</text>
-  <text x="744" y="138" class="layer">3 · EVIDENCE &amp; SEMANTICS</text>
-  <text x="1090" y="138" class="layer">4 · TYPED SURFACES</text>
+  ${policyCard({ x: 36, y: 164, width: 210, height: 138, iconName: "fileText", color: C.greenDark, title: "Human boundary", lines: ["capital · risk · evidence", "chosen while calm"], format: "human-owned policy" })}
+  ${policyCard({ x: 36, y: 336, width: 210, height: 138, iconName: "worldDownload", color: C.blue, title: "Current evidence", lines: ["account · market · statement", "freshness and quality included"], format: "observed facts" })}
+  ${policyCard({ x: 290, y: 228, width: 196, height: 196, iconName: "serverCog", color: C.green, title: "ibkr checks", lines: ["policy + usable evidence", "unknown stays unknown", "one structured result"], format: "no risk appetite of its own", dark: true })}
+  ${policyCard({ x: 526, y: 228, width: 196, height: 196, iconName: "bell", color: C.slate, title: "Advice / shadow", lines: ["status · explanation", "warning · proposal", "no submit permission"], format: "personal policy today" })}
 
-  ${policyCard({ x: 36, y: 160, width: 310, height: 126, iconName: "fileText", color: C.greenDark, title: "Risk Constitution", lines: ["operator-authored material limits", "missing values stay unapproved"], format: "policies/risk-policy.toml · no default" })}
-  ${policyCard({ x: 36, y: 306, width: 310, height: 126, iconName: "shieldCheck", color: C.green, title: "Advisory Engine Policies", lines: ["protection proposals · opportunities", "custom file or conservative default"], format: "versioned TOML · embedded defaults" })}
-  ${policyCard({ x: 36, y: 452, width: 310, height: 126, iconName: "settings", color: C.blue, title: "Runtime Preferences", lines: ["feature switches · overrides", "freeze / limits remain human-owned"], format: "daemon.db state document · CAS" })}
-  ${policyCard({ x: 36, y: 598, width: 310, height: 126, iconName: "lock", color: C.slate, title: "Code-Owned Invariants", lines: ["schema · validation · broker gates", "rulebook · Regime · Canary models"], format: "reviewed code + typed contracts", dark: true })}
+  <rect x="750" y="188" width="174" height="260" rx="16" fill="${C.amberSoft}" stroke="${C.amber}" stroke-width="1.5"/>
+  ${iconTile("user", 766, 206, C.amber, 40)}
+  <text x="814" y="216" class="node-title"><tspan x="814">Human</tspan><tspan x="814" dy="20">decides</tspan></text>
+  <text x="766" y="270" class="card-sub"><tspan x="766">wait · investigate</tspan><tspan x="766" dy="20">reduce risk · act</tspan></text>
+  <rect x="766" y="330" width="142" height="94" rx="11" fill="${C.panel}" stroke="${C.amber}"/>
+  ${icon("lock", 829, 340, 16, C.amber, 2)}
+  <text x="837" y="374" text-anchor="middle" class="policy-callout"><tspan x="837">Only a human</tspan><tspan x="837" dy="18">authorizes</tspan><tspan x="837" dy="18">an order.</tspan></text>
 
-  <rect x="386" y="120" width="326" height="632" rx="18" fill="${C.panel}" stroke="${C.greenLine}" stroke-width="1.4"/>
-  <path d="M386 156h326v-18a18 18 0 0 0 -18 -18h-290a18 18 0 0 0 -18 18z" fill="${C.greenSoft}"/>
-  <text x="406" y="143" class="boundary" style="fill:${C.greenDark}">ONE EXECUTABLE POLICY CONTEXT</text>
+  ${line("M252 233H274V276H284", "green")}
+  ${line("M252 405H274V376H284", "blue", { dashed: true })}
+  ${line("M492 326H520", "slate")}
+  ${line("M728 326H744", "slate")}
 
-  ${policyCard({ x: 410, y: 178, width: 278, height: 126, iconName: "fileText", color: C.greenDark, title: "Strict Load & Validate", lines: ["known keys · units · combinations", "no material value is invented"], format: "internal/risk + daemon managers" })}
-  ${policyCard({ x: 410, y: 326, width: 278, height: 126, iconName: "refresh", color: C.green, title: "Version & Fingerprint", lines: ["higher version adopts new content", "same-version change reports drift"], format: "kind · schema · id · version · sha256" })}
-  ${policyCard({ x: 410, y: 474, width: 278, height: 126, iconName: "database", color: C.slate, title: "Last-Good Runtime Context", lines: ["active · absent · drift · error", "state and events commit before publish"], format: "daemon-owned · scope-bound" })}
+  <rect x="290" y="500" width="260" height="118" rx="14" fill="${C.panel}" stroke="${C.slate}"/>
+  ${iconTile("database", 306, 516, C.slate, 34)}
+  <text x="354" y="536" class="node-title">Local decision record</text>
+  <text x="306" y="574" class="card-sub"><tspan x="306">what ibkr observed and decided</tspan><tspan x="306" dy="20">not proof of execution</tspan></text>
 
-  <rect x="410" y="626" width="278" height="98" rx="12" fill="${C.amberSoft}" stroke="${C.amber}" stroke-dasharray="7 5"/>
-  ${icon("lock", 426, 642, 24, C.amber, 2)}
-  <text x="462" y="656" class="card-title">Non-overridable gates</text>
-  <text x="426" y="681" class="card-sub"><tspan x="426">pins · freeze · preview token · WhatIf</tspan><tspan x="426" dy="16">journal · daemon auth · agent origin</tspan></text>
+  <rect x="580" y="500" width="344" height="118" rx="14" fill="${C.panel}" stroke="${C.blue}"/>
+  ${iconTile("worldDownload", 596, 516, C.blue, 34)}
+  <text x="644" y="536" class="node-title">Broker confirmation + statement</text>
+  <text x="596" y="574" class="card-sub"><tspan x="596">what actually executed</tspan><tspan x="596" dy="20">independent broker evidence</tspan></text>
 
-  ${line("M352 223H404", "green")}
-  ${line("M352 369H378V241H404", "green")}
-  ${line("M352 515H378V538H404", "blue", { dashed: true })}
-  ${line("M352 661H404", "slate")}
+  ${line("M624 430V474H420V500", "slate")}
+  <path d="M837 448V486H752V500" fill="none" stroke="${C.amber}" stroke-width="1.6" stroke-dasharray="2 5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-amber)"/>
+  <text x="846" y="478" class="mono-small" style="fill:${C.amber}">if sent</text>
 
-  ${policyCard({ x: 744, y: 178, width: 302, height: 132, iconName: "worldDownload", color: C.blue, title: "Typed Evidence", lines: ["account · position · market · statement", "freshness · quality · finality · scope"], format: "missing / stale / partial ≠ zero" })}
-  ${policyCard({ x: 744, y: 338, width: 302, height: 132, iconName: "shieldCheck", color: C.green, title: "Pure Evaluation", lines: ["pass · watch · breach", "unknown · unapproved"], format: "internal/risk · no I/O" })}
-  ${policyCard({ x: 744, y: 498, width: 302, height: 132, iconName: "route", color: C.slate, title: "Declared Enforcement", lines: ["advisory · shadow · hard gate", "post-trade exception · reductions"], format: "typed result · never UI inference" })}
-  ${policyCard({ x: 744, y: 658, width: 302, height: 112, iconName: "database", color: C.greenDark, title: "Durable Reporting", lines: ["state revision + event / evidence"], format: "daemon.db · fingerprinted" })}
+  <path d="M752 618V656H140V474" fill="none" stroke="${C.green}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-green)"/>
+  <text x="446" y="650" text-anchor="middle" class="card-sub">Review evidence; publish a higher version deliberately.</text>
 
-  ${line("M718 404H738", "slate")}
-  ${line("M895 316V332", "blue", { dashed: true })}
-  ${line("M895 476V492", "slate")}
-  ${line("M895 636V652", "slate")}
-
-  ${policyCard({ x: 1090, y: 178, width: 314, height: 112, iconName: "terminal", color: C.slate, title: "CLI / JSON", lines: ["policy show · settings · proposals"], format: "operator actions stay explicit" })}
-  ${policyCard({ x: 1090, y: 316, width: 314, height: 112, iconName: "plugConnected", color: C.slate, title: "MCP / Agent Hosts", lines: ["read, research, and preview only"], format: "no policy or broker-write tools" })}
-  ${policyCard({ x: 1090, y: 454, width: 314, height: 112, iconName: "mobileCode", color: C.yellow, title: "Canary App / PWA", lines: ["renders daemon result and health"], format: "no second verdict", dark: false })}
-  ${policyCard({ x: 1090, y: 592, width: 314, height: 112, iconName: "bell", color: C.amber, title: "Alerts & Governance", lines: ["commissioned source and delivery state"], format: "shadow ≠ active delivery" })}
-
-  ${line("M1052 404H1072V234H1084", "slate")}
-  ${line("M1072 372H1084", "slate")}
-  ${line("M1072 510H1084", "slate")}
-  ${line("M1072 648H1084", "slate")}
-
-  <text x="1404" y="786" text-anchor="end" class="footnote">deterministic SVG · docs/diagrams/render-architecture.mjs · icons: Tabler 3.45 (MIT)</text>
+  <text x="924" y="686" text-anchor="end" class="footnote">one trader may hold every responsibility · ibkr does not enforce named roles</text>
   `;
 
   return svgFrame({
-    width: 1440,
-    height: 820,
-    title: "Policy Authority and Execution (ibkr canary)",
-    description: "Four policy authority classes enter the daemon through distinct validation paths, combine with typed evidence in pure risk semantics, and emerge as declared enforcement, durable reporting, and typed operator surfaces.",
+    width: 960,
+    height: 706,
+    title: "From Risk Decision to Human Action (ibkr canary)",
+    description: "A human sets a risk boundary and current evidence enters the daemon. The daemon returns an advisory or shadow result, but only a human decides whether to act. Local decision records remain separate from broker confirmations and statements, and any policy revision is deliberate.",
     body,
-    extraStyles: referenceDiagramStyles,
+    extraStyles: policyReadableStyles,
+  });
+}
+
+function policyArchitecture() {
+  const controlRow = (y, fill, control, provenance, effect, change) => `<g role="group" aria-label="${esc(`${control}. ${provenance}. ${effect}. ${change}`)}">
+    <rect x="36" y="${y}" width="888" height="54" fill="${fill}" stroke="${C.line}"/>
+    <text x="52" y="${y + 33}" class="policy-table-text" font-weight="700">${esc(control)}</text>
+    <text x="298" y="${y + 33}" class="policy-table-text">${esc(provenance)}</text>
+    <text x="502" y="${y + 33}" class="policy-table-text">${esc(effect)}</text>
+    <text x="714" y="${y + 33}" class="policy-table-text">${esc(change)}</text>
+  </g>`;
+  const flowBox = (x, y, width, height, title, lines, accent, fill = C.panel, dark = false) => `<g role="group" aria-label="${esc([title, ...lines].join(". "))}">
+    <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="12" fill="${fill}" stroke="${accent}" stroke-width="1.3"/>
+    <text x="${x + 16}" y="${y + 30}" class="node-title" style="fill:${dark ? "#ffffff" : C.ink}">${esc(title)}</text>
+    ${textLines(x + 16, y + 58, lines, dark ? "node-sub on-dark" : "card-sub", 20)}
+  </g>`;
+
+  const body = `
+  ${header("Where Each Control Comes From", "Policy, settings, models, evidence, and broker gates have different owners and different effects.")}
+
+  <text x="36" y="138" class="layer">CONTROL SOURCE</text>
+  <rect x="36" y="154" width="888" height="44" fill="${C.panelAlt}" stroke="${C.line}"/>
+  <text x="52" y="181" class="policy-table-head">CONTROL</text>
+  <text x="298" y="181" class="policy-table-head">PROVENANCE</text>
+  <text x="502" y="181" class="policy-table-head">EFFECT TODAY</text>
+  <text x="714" y="181" class="policy-table-head">HOW IT CHANGES</text>
+  ${controlRow(198, C.panel, "Personal risk policy", "operator-authored", "advisory / shadow", "higher-version TOML")}
+  ${controlRow(252, C.greenSoft, "Protection / opportunity", "default or custom", "advisory outputs", "reviewed TOML")}
+  ${controlRow(306, C.panel, "Runtime settings", "runtime setting", "product behavior", "allowlisted human action")}
+  ${controlRow(360, C.blueSoft, "Analytical models", "code-owned", "evaluation context", "reviewed release")}
+  ${controlRow(414, C.amberSoft, "Broker safety controls", "code + human", "blocking gate", "exact human decision")}
+  <text x="36" y="490" class="policy-table-sub">An embedded default is system-provided, not human approval. Settings are not policy files.</text>
+
+  <text x="36" y="536" class="layer">TWO DISTINCT RUNTIME LANES</text>
+  ${flowBox(36, 564, 210, 128, "Control + evidence", ["relevant policy or model", "current facts + quality"], C.blue)}
+  ${flowBox(36, 744, 210, 128, "Explicit human decision", ["one transaction", "never inferred from a preview"], C.amber, C.amberSoft)}
+
+  <rect x="280" y="526" width="400" height="386" rx="18" fill="${C.panel}" stroke="${C.greenLine}" stroke-width="1.5"/>
+  <path d="M280 566h400v-22a18 18 0 0 0 -18 -18h-364a18 18 0 0 0 -18 18z" fill="${C.greenSoft}"/>
+  <text x="300" y="552" class="boundary" style="fill:${C.greenDark}">IBKR DAEMON OWNS BOTH LANES</text>
+  <text x="304" y="604" class="layer">ADVISORY DECISION PATH</text>
+  ${flowBox(304, 622, 152, 128, "Evaluate", ["unknown stays", "unknown"], C.green, C.terminal, true)}
+  ${flowBox(492, 622, 164, 128, "Structured result", ["status · explanation", "local record"], C.slate)}
+  <text x="304" y="792" class="layer">BROKER-WRITE PATH</text>
+  ${flowBox(380, 810, 200, 82, "Non-overridable gates", ["pins · freeze · token · journal"], C.amber, C.amberSoft)}
+
+  ${flowBox(714, 564, 210, 128, "Product surfaces", ["CLI · app · MCP", "render, never reinterpret"], C.slate)}
+  ${flowBox(714, 744, 210, 92, "IBKR broker", ["execution venue"], C.greenDark)}
+  ${flowBox(714, 856, 210, 92, "Execution evidence", ["confirmation · statement"], C.blue)}
+
+  ${line("M246 628H304", "blue", { dashed: true })}
+  ${line("M456 686H492", "slate")}
+  ${line("M656 686H714", "slate")}
+  ${line("M246 808H380", "amber", { dotted: true })}
+  ${line("M580 851H690V790H714", "amber", { dotted: true })}
+  ${line("M819 836V856", "blue", { dashed: true })}
+
+  <text x="924" y="982" text-anchor="end" class="footnote">personal risk policy: advisory/shadow today · broker evidence establishes execution</text>
+  `;
+
+  return svgFrame({
+    width: 960,
+    height: 1002,
+    title: "Where Each Control Comes From (ibkr canary)",
+    description: "A compact matrix separates operator-authored policy, embedded or custom advisory policy, runtime settings, code-owned models, and broker safety controls. Below it, the daemon keeps advisory evaluation separate from the explicitly human-authorized broker-write lane, while broker evidence remains outside as execution truth.",
+    body,
+    extraStyles: policyReadableStyles,
+  });
+}
+
+function storageOverview() {
+  const storeModule = (x, y, width, iconName, title, sub) => `<g role="group" aria-label="${esc(`${title}. ${sub}`)}">
+    <rect x="${x}" y="${y}" width="${width}" height="84" rx="10" fill="${C.terminal2}"/>
+    ${icon(iconName, x + 14, y + 16, 24, C.textOnDark, 1.8)}
+    <text x="${x + 50}" y="${y + 28}" class="module-title">${esc(title)}</text>
+    <text x="${x + 14}" y="${y + 61}" class="module-sub">${esc(sub)}</text>
+  </g>`;
+
+  const body = `
+  ${header("Storage Layer: Ownership and Truth", "SQLite is the local engine; one daemon owns the meaning, writes, and typed access path.")}
+
+  <text x="36" y="138" class="layer">1 · OUTSIDE SQLITE</text>
+  <text x="726" y="138" class="layer">3 · PRODUCT SURFACES</text>
+
+  ${policyCard({ x: 36, y: 164, width: 210, height: 116, iconName: "fileText", color: C.greenDark, title: "Human TOML", lines: ["config · policy", "approved limits"], format: "people edit" })}
+  ${policyCard({ x: 36, y: 300, width: 210, height: 132, iconName: "worldDownload", color: C.blue, title: "Original evidence", lines: ["Flex XML · broker data", "source observations"], format: "measured outside" })}
+  ${policyCard({ x: 36, y: 452, width: 210, height: 116, iconName: "lock", color: C.amber, title: "Daemon secrets", lines: ["Flex token", "preview signer"], format: "private files" })}
+  ${policyCard({ x: 36, y: 588, width: 210, height: 132, iconName: "mobileCode", color: C.slate, title: "App identity", lines: ["device grants · push", "relay credentials"], format: "separate app state" })}
+
+  <rect x="276" y="118" width="420" height="620" rx="18" fill="${C.panel}" stroke="${C.greenLine}" stroke-width="1.5"/>
+  <path d="M276 158h420v-22a18 18 0 0 0 -18 -18h-384a18 18 0 0 0 -18 18z" fill="${C.greenSoft}"/>
+  <text x="296" y="144" class="boundary" style="fill:${C.greenDark}">THE DAEMON IS THE ONLY WRITER</text>
+
+  ${iconTile("serverCog", 296, 178, C.green, 44)}
+  <text x="354" y="196" class="node-title">ibkr daemon</text>
+  <text x="354" y="218" class="card-sub">validates · commits · serves structured results</text>
+
+  <rect x="296" y="248" width="380" height="322" rx="16" fill="${C.terminal}"/>
+  ${icon("database", 316, 268, 30, C.green, 1.8)}
+  <text x="360" y="286" style="fill:#ffffff;font-size:20px;font-weight:700">daemon.db</text>
+  <text x="316" y="316" class="module-sub">SQLite · WAL · transactional state and evidence</text>
+  ${storeModule(316, 338, 166, "fileText", "Current state", "settings · risk · views")}
+  ${storeModule(490, 338, 166, "route", "Events", "local decisions · lifecycle")}
+  ${storeModule(316, 442, 166, "worldDownload", "Observations", "measured evidence")}
+  ${storeModule(490, 442, 166, "shieldCheck", "Order safety", "routes · tokens · ID floors")}
+
+  <rect x="296" y="592" width="380" height="118" rx="12" fill="${C.amberSoft}" stroke="${C.amber}" stroke-dasharray="7 5"/>
+  ${icon("database", 316, 612, 26, C.amber, 1.8)}
+  <text x="356" y="624" class="primer-title">Recovery is a separate boundary</text>
+  <text x="316" y="654" class="card-sub"><tspan x="316">daemon.db.head · verified backups</tspan><tspan x="316" dy="20">sealed legacy artifacts</tspan></text>
+
+  ${policyCard({ x: 726, y: 164, width: 198, height: 140, iconName: "exchange", color: C.slate, title: "CLI · app · MCP", lines: ["structured RPC", "no direct DB access"], format: "product API" })}
+  ${policyCard({ x: 726, y: 332, width: 198, height: 140, iconName: "browser", color: C.blue, title: "Analytics", lines: ["bounded query", "or versioned export"], format: "never live-file SQL" })}
+  ${policyCard({ x: 726, y: 500, width: 198, height: 140, iconName: "databaseImport", color: C.amber, title: "Offline review", lines: ["stopped daemon", "or verified backup"], format: "read-only" })}
+
+  ${line("M252 222H270", "green")}
+  ${line("M252 366H270", "blue", { dashed: true })}
+  ${line("M252 510H270", "amber", { dotted: true })}
+  ${line("M702 234H720", "slate")}
+  ${line("M702 402H720", "blue", { dashed: true })}
+  ${line("M702 570H720", "amber", { dotted: true })}
+
+  <text x="924" y="780" text-anchor="end" class="footnote">app identity has its own owner · original broker evidence stays outside SQLite</text>
+  `;
+
+  return svgFrame({
+    width: 960,
+    height: 804,
+    title: "Storage Layer Ownership and Truth (ibkr canary)",
+    description: "Human-authored TOML, original broker and source evidence, daemon secrets, and app identity remain separate from SQLite. The daemon alone writes daemon.db and exposes structured product access. Recovery artifacts are a distinct boundary, not an output of secrets or app state.",
+    body,
+    extraStyles: storageOverviewStyles,
   });
 }
 
 function dbTable({ x, y, width, title, rows, accent = C.green, fill = C.panel }) {
-  const height = 42 + rows.length * 18 + 14;
+  const height = 44 + rows.length * 22 + 16;
   const content = rows.map((row, index) => {
     const [key, field] = row;
-    const yy = y + 54 + index * 18;
-    return `<text x="${x + 14}" y="${yy}" class="er-key">${esc(key)}</text><text x="${x + 58}" y="${yy}" class="er-field">${esc(field)}</text>`;
+    const yy = y + 58 + index * 22;
+    return `<text x="${x + 12}" y="${yy}" class="er-key">${esc(key)}</text><text x="${x + 64}" y="${yy}" class="er-field">${esc(field)}</text>`;
   }).join("");
-  return `<g role="group" aria-label="Table ${esc(title)}">
+  return `<g role="group" data-table="${esc(title)}" aria-label="Table ${esc(title)}">
     <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="10" fill="${fill}" stroke="${accent}" stroke-width="1.2"/>
-    <path d="M${x} ${y + 34}h${width}" stroke="${accent}" stroke-width="1.2"/>
-    <text x="${x + 14}" y="${y + 23}" class="er-title">${esc(title)}</text>
+    <path d="M${x} ${y + 38}h${width}" stroke="${accent}" stroke-width="1.2"/>
+    <text x="${x + 12}" y="${y + 26}" class="er-title">${esc(title)}</text>
     ${content}
   </g>`;
 }
 
+function erFK({ parent, child, d, parentLabel = "", childLabel = "", parentX = 0, parentY = 0, childX = 0, childY = 0 }) {
+  return `<g data-fk="${esc(child)}->${esc(parent)}">
+    <path d="${d}" fill="none" stroke="${C.slate}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    ${parentLabel ? `<text x="${parentX}" y="${parentY}" class="er-cardinality">${esc(parentLabel)}</text>` : ""}
+    ${childLabel ? `<text x="${childX}" y="${childY}" class="er-cardinality">${esc(childLabel)}</text>` : ""}
+  </g>`;
+}
+
+function erSemantic(d, label, labelX, labelY) {
+  return `<g><path d="${d}" fill="none" stroke="${C.blue}" stroke-width="1.4" stroke-dasharray="7 6" stroke-linecap="round" stroke-linejoin="round"/><text x="${labelX}" y="${labelY}" class="er-semantic">${esc(label)}</text></g>`;
+}
+
+function coreStoreSchemaInventory() {
+  const source = fs.readFileSync(path.join(here, "../../internal/daemon/corestore/schema.go"), "utf8");
+  const tables = [];
+  const foreignKeys = [];
+  const tablePattern = /`CREATE TABLE\s+([a-z_]+)\s+\(([\s\S]*?)\n\) STRICT`/g;
+  for (const match of source.matchAll(tablePattern)) {
+    const child = match[1];
+    tables.push(child);
+    for (const reference of match[2].matchAll(/REFERENCES\s+([a-z_]+)\s*\(/g)) {
+      foreignKeys.push(`${child}->${reference[1]}`);
+    }
+  }
+  return {
+    tables: tables.sort(),
+    foreignKeys: foreignKeys.sort(),
+  };
+}
+
+function validateSQLiteER(svg) {
+  const expected = coreStoreSchemaInventory();
+  const rendered = {
+    tables: [...svg.matchAll(/data-table="([a-z_]+)"/g)].map((match) => match[1]).sort(),
+    foreignKeys: [...svg.matchAll(/data-fk="([a-z_]+->[a-z_]+)"/g)].map((match) => match[1]).sort(),
+  };
+  const compare = (name, actual, wanted) => {
+    if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+      throw new Error(`sqlite ER ${name} drift: rendered=${actual.join(",")} schema=${wanted.join(",")}`);
+    }
+  };
+  compare("tables", rendered.tables, expected.tables);
+  compare("foreign keys", rendered.foreignKeys, expected.foreignKeys);
+}
+
 function sqliteDataModel() {
   const body = `
-  ${header("daemon.db Logical Data Model", "Current state, immutable evidence, order safety, and statement truth in one daemon-owned SQLite authority.")}
+  ${header("daemon.db: Physical Relationships", "Every solid line is a declared SQLite foreign key. Dashed lines are application conventions.")}
 
-  ${legendItem(978, 40, "green", "Current / authoritative")}
-  ${legendItem(1168, 40, "slate", "Append-only evidence")}
-  ${legendItem(978, 64, "blue", "External evidence link", { dashed: true })}
-  ${legendItem(1168, 64, "amber", "Monotonic safety", { dotted: true })}
+  ${legendItem(610, 40, "slate", "Declared foreign key")}
+  ${legendItem(790, 40, "blue", "Application convention", { dashed: true })}
+  <text x="610" y="68" class="legend">Cardinality: 1 · 0..1 · 0..*</text>
 
-  <text x="36" y="132" class="layer">CONTROL &amp; CURRENT STATE</text>
-  ${dbTable({ x: 36, y: 150, width: 252, title: "store_meta", rows: [["PK", "singleton"], ["", "authority_epoch"], ["", "head / event / signer"]], accent: C.amber })}
-  ${dbTable({ x: 36, y: 278, width: 252, title: "schema_migrations", rows: [["PK", "version"], ["", "name · checksum"], ["", "applied_at"]], accent: C.slate })}
-  ${dbTable({ x: 36, y: 406, width: 252, title: "state_documents", rows: [["PK", "scope_key + kind"], ["", "revision · document_json"], ["", "sha256 · updated_at"]], accent: C.green })}
-  ${dbTable({ x: 36, y: 534, width: 252, title: "legacy_imports", rows: [["PK", "scope + source + hash"], ["", "status · details_json"], ["", "imported_through"]], accent: C.slate })}
+  <text x="36" y="138" class="layer">STANDALONE STATE, EVIDENCE &amp; STORE CONTROL</text>
+  ${dbTable({ x: 36, y: 156, width: 170, title: "store_meta", rows: [["PK", "singleton"], ["", "head counters"]], accent: C.amber })}
+  ${dbTable({ x: 218, y: 156, width: 170, title: "schema_migrations", rows: [["PK", "version"], ["", "checksum"]], accent: C.slate })}
+  ${dbTable({ x: 400, y: 156, width: 170, title: "legacy_imports", rows: [["PK", "scope/src/fp"], ["UQ", "scope/source"]], accent: C.slate })}
+  ${dbTable({ x: 582, y: 156, width: 170, title: "state_documents", rows: [["PK", "scope/kind"], ["", "rev · JSON"], ["", "sha256"]], accent: C.green })}
+  ${dbTable({ x: 764, y: 156, width: 170, title: "observations", rows: [["PK", "id"], ["", "source/kind"], ["", "payload/elig"]], accent: C.blue })}
 
-  <text x="330" y="132" class="layer">APPEND-ONLY EVENT SPINE &amp; PROJECTIONS</text>
-  ${dbTable({ x: 330, y: 150, width: 348, title: "event_log", rows: [["PK", "event_seq"], ["UQ", "scope_key + event_key"], ["", "type · action · origin"], ["", "occurred_at · recorded_at"], ["", "payload_json · sha256"]], accent: C.slate })}
-  ${dbTable({ x: 330, y: 320, width: 252, title: "regime_decisions", rows: [["PK/FK", "event_seq"], ["", "stage · readiness"], ["", "verdict · fingerprint"]], accent: C.slate })}
-  ${dbTable({ x: 596, y: 320, width: 252, title: "regime_indicators", rows: [["PK/FK", "decision_seq + indicator"], ["", "status · band · value"], ["", "freshness · eligible"]], accent: C.slate })}
-  ${dbTable({ x: 330, y: 448, width: 252, title: "rule_transitions", rows: [["PK/FK", "event_seq"], ["", "rule_id · status"], ["", "policy identity"]], accent: C.slate })}
-  ${dbTable({ x: 596, y: 448, width: 252, title: "canary_transitions", rows: [["PK/FK", "event_seq"], ["", "action · market_stage"], ["", "input_health · relevance"]], accent: C.slate })}
-  ${dbTable({ x: 330, y: 576, width: 252, title: "capital / policy events", rows: [["PK/FK", "event_seq"], ["", "capital_events"], ["", "risk_policy_events"]], accent: C.slate })}
-  ${dbTable({ x: 596, y: 576, width: 252, title: "proposal_outcomes", rows: [["PK/FK", "event_seq"], ["", "proposal_key · revision"], ["", "bucket · action · state"]], accent: C.slate })}
+  <text x="36" y="326" class="layer">CANONICAL EVENT AND OPTIONAL SEARCH PROJECTIONS</text>
+  ${dbTable({ x: 36, y: 354, width: 270, title: "event_log", rows: [["PK", "event_seq"], ["UQ", "scope + event_key"], ["", "type · action · origin"], ["", "payload JSON · sha256"]], accent: C.slate })}
+  ${dbTable({ x: 350, y: 354, width: 270, title: "regime_decisions", rows: [["PK/FK", "event_seq"], ["", "stage · verdict"]], accent: C.slate })}
+  ${dbTable({ x: 654, y: 354, width: 270, title: "rule_transitions", rows: [["PK/FK", "event_seq"], ["", "rule · status"]], accent: C.slate })}
+  ${dbTable({ x: 350, y: 480, width: 270, title: "canary_transitions", rows: [["PK/FK", "event_seq"], ["", "action · health"]], accent: C.slate })}
+  ${dbTable({ x: 654, y: 480, width: 270, title: "capital_events", rows: [["PK/FK", "event_seq"], ["", "kind · amount"]], accent: C.slate })}
+  ${dbTable({ x: 350, y: 606, width: 270, title: "risk_policy_events", rows: [["PK/FK", "event_seq"], ["", "policy identity"]], accent: C.slate })}
+  ${dbTable({ x: 654, y: 606, width: 270, title: "proposal_outcomes", rows: [["PK/FK", "event_seq"], ["", "proposal · state"]], accent: C.slate })}
+  ${dbTable({ x: 350, y: 732, width: 270, title: "order_events", rows: [["PK/FK", "event_seq"], ["FK", "scope_key"]], accent: C.slate })}
+  ${dbTable({ x: 654, y: 732, width: 270, title: "regime_indicators", rows: [["PK", "decision + indicator"], ["FK", "decision_event_seq"], ["", "value · status"]], accent: C.slate })}
 
-  ${line("M510 282V314", "slate")}
-  ${line("M510 282H722V314", "slate")}
-  ${line("M510 282V442", "slate")}
-  ${line("M510 282H722V442", "slate")}
-  ${line("M510 282V570", "slate")}
-  ${line("M510 282H722V570", "slate")}
-  ${line("M588 384H590", "slate")}
+  ${erFK({ parent: "event_log", child: "regime_decisions", d: "M306 420H326V406H350", parentLabel: "1", childLabel: "0..1", parentX: 312, parentY: 410, childX: 330, childY: 398 })}
+  ${erFK({ parent: "event_log", child: "canary_transitions", d: "M306 420H326V532H350", childLabel: "0..1", childX: 330, childY: 524 })}
+  ${erFK({ parent: "event_log", child: "risk_policy_events", d: "M306 420H326V658H350", childLabel: "0..1", childX: 330, childY: 650 })}
+  ${erFK({ parent: "event_log", child: "order_events", d: "M306 420H326V784H350", childLabel: "0..1", childX: 330, childY: 776 })}
+  ${erFK({ parent: "event_log", child: "rule_transitions", d: "M171 354V336H940V406H924", childLabel: "0..1", childX: 878, childY: 398 })}
+  ${erFK({ parent: "event_log", child: "capital_events", d: "M171 354V336H940V532H924", childLabel: "0..1", childX: 878, childY: 524 })}
+  ${erFK({ parent: "event_log", child: "proposal_outcomes", d: "M171 354V336H940V658H924", childLabel: "0..1", childX: 878, childY: 650 })}
+  ${erFK({ parent: "regime_decisions", child: "regime_indicators", d: "M620 406H634V795H654", parentLabel: "1", childLabel: "0..*", parentX: 624, parentY: 426, childX: 602, childY: 788 })}
 
-  <text x="890" y="132" class="layer">BROKER SCOPE, ORDER SAFETY &amp; OBSERVATIONS</text>
-  ${dbTable({ x: 890, y: 150, width: 246, title: "broker_scopes", rows: [["PK", "scope_key"], ["UQ", "binding_sha256"], ["", "endpoint · client · acct · mode"]], accent: C.greenDark })}
-  ${dbTable({ x: 1154, y: 150, width: 250, title: "order_events", rows: [["PK/FK", "event_seq"], ["FK", "scope_key"], ["", "type · refs · ids · status"]], accent: C.slate })}
-  ${dbTable({ x: 890, y: 278, width: 246, title: "consumed_preview_tokens", rows: [["PK", "token_digest"], ["FK", "scope_key"], ["", "epoch · signer · head"]], accent: C.amber })}
-  ${dbTable({ x: 1154, y: 278, width: 250, title: "order_id_floors", rows: [["PK", "floor_scope + scope_key"], ["", "floor · updated_at"], ["", "trigger: never decrease"]], accent: C.amber })}
-  ${dbTable({ x: 890, y: 406, width: 514, title: "observations", rows: [["PK", "observation_id"], ["", "scope · source · kind · observed_at"], ["", "payload · sha256 · metadata_json"], ["", "decision_eligible (required)"]], accent: C.blue })}
+  <rect x="36" y="548" width="270" height="290" rx="14" fill="${C.blueSoft}" stroke="${C.blue}" stroke-dasharray="7 6"/>
+  <text x="56" y="578" class="boundary" style="fill:${C.blue}"><tspan x="56">APPLICATION CONVENTIONS</tspan><tspan x="56" dy="18">NOT FOREIGN KEYS</tspan></text>
+  <text x="56" y="634" class="er-note"><tspan x="56">• current state may commit</tspan><tspan x="56" dy="22">  beside an event or observation</tspan><tspan x="56" dy="32">• one projection family per event</tspan><tspan x="56" dy="22">  is a Go-writer rule</tspan><tspan x="56" dy="32">• shared scope names do not</tspan><tspan x="56" dy="22">  create a relationship</tspan></text>
 
-  ${line("M1142 214H1148", "green")}
-  ${line("M1279 282V264H684", "slate")}
-  ${line("M1013 264V272", "green")}
+  <text x="350" y="886" class="layer">BROKER ROUTE AND IRREVERSIBLE SAFETY</text>
+  ${dbTable({ x: 36, y: 908, width: 270, title: "broker_scopes", rows: [["PK", "scope_key"], ["UQ", "binding_sha256"], ["", "endpoint · client · account"]], accent: C.greenDark })}
+  ${dbTable({ x: 350, y: 908, width: 270, title: "consumed_preview_tokens", rows: [["PK", "token_digest"], ["FK", "scope_key"]], accent: C.amber })}
+  ${dbTable({ x: 654, y: 908, width: 270, title: "order_id_floors", rows: [["PK", "floor_scope + scope"], ["", "floor never decreases"]], accent: C.amber })}
 
-  <rect x="322" y="716" width="1082" height="180" rx="16" fill="${C.panel}" stroke="${C.blue}" stroke-width="1.2"/>
-  <text x="342" y="744" class="boundary" style="fill:${C.blue}">BROKER STATEMENT PROJECTION · ORIGINAL FLEX XML REMAINS EXTERNAL EVIDENCE</text>
-  ${dbTable({ x: 342, y: 764, width: 242, title: "statement_files", rows: [["PK", "scope + file_key"], ["UQ", "+ current sha256"], ["", "status · generated_at"]], accent: C.green })}
-  ${dbTable({ x: 604, y: 764, width: 242, title: "statement_equity_days", rows: [["UQ", "scope + account + day"], ["FK", "current file + sha256"], ["", "equity · raw_json"]], accent: C.green })}
-  ${dbTable({ x: 866, y: 764, width: 242, title: "statement_file_versions", rows: [["PK", "scope + file + sha256"], ["", "size · status"], ["", "generated · recorded"]], accent: C.slate })}
-  ${dbTable({ x: 1128, y: 764, width: 256, title: "statement_equity_day_versions", rows: [["PK", "equity_version_id"], ["FK", "immutable file version"], ["", "day · equity · raw sha256"]], accent: C.slate })}
+  ${erFK({ parent: "broker_scopes", child: "consumed_preview_tokens", d: "M306 960H350", parentLabel: "1", childLabel: "0..*", parentX: 312, parentY: 950, childX: 310, childY: 982 })}
+  ${erFK({ parent: "broker_scopes", child: "order_events", d: "M171 908V876H336V784H350", parentLabel: "1", childLabel: "0..*", parentX: 180, parentY: 896, childX: 330, childY: 802 })}
+  ${erSemantic("M654 984H638V1050H171V1034", "broker association enforced by code; no FK", 390, 1072)}
 
-  ${line("M590 828H598", "green")}
-  ${line("M1114 828H1122", "blue", { dashed: true })}
-  ${line("M318 806H296V470H294", "blue", { dashed: true })}
+  <rect x="36" y="1100" width="888" height="330" rx="16" fill="${C.panel}" stroke="${C.greenLine}"/>
+  <text x="56" y="1132" class="layer">BROKER STATEMENTS · CURRENT VIEW AND IMMUTABLE RESTATEMENTS</text>
+  ${policyCard({ x: 56, y: 1152, width: 190, height: 128, iconName: "fileText", color: C.blue, title: "Original Flex XML", lines: ["broker evidence"], format: "outside SQLite" })}
+  ${dbTable({ x: 278, y: 1152, width: 280, title: "statement_files", rows: [["PK", "scope + file_key"], ["UQ", "+ current sha256"]], accent: C.green })}
+  ${dbTable({ x: 590, y: 1152, width: 314, title: "statement_equity_days", rows: [["PK", "equity_day_id"], ["UQ", "scope + account + day"], ["FK", "current file + sha256"]], accent: C.green })}
+  ${dbTable({ x: 278, y: 1300, width: 280, title: "statement_file_versions", rows: [["PK", "scope + file + sha256"], ["", "immutable file version"]], accent: C.slate })}
+  ${dbTable({ x: 590, y: 1300, width: 314, title: "statement_equity_day_versions", rows: [["PK", "equity_version_id"], ["FK", "file version + sha256"]], accent: C.slate })}
 
-  <text x="1404" y="934" text-anchor="end" class="footnote">logical view of schema v1 · canonical DDL: internal/daemon/corestore/schema.go</text>
+  ${erFK({ parent: "statement_files", child: "statement_equity_days", d: "M558 1204H590", parentLabel: "1", childLabel: "0..*", parentX: 562, parentY: 1194, childX: 558, childY: 1226 })}
+  ${erFK({ parent: "statement_file_versions", child: "statement_equity_day_versions", d: "M558 1352H590", parentLabel: "1", childLabel: "0..*", parentX: 562, parentY: 1342, childX: 558, childY: 1374 })}
+  ${erSemantic("M246 1216H272", "parsed from", 174, 1206)}
+  ${erSemantic("M246 1232H260V1352H272", "retained versions", 96, 1344)}
+  ${erSemantic("M418 1256V1294", "written together; no FK", 430, 1282)}
+  ${erSemantic("M747 1278V1294", "", 0, 0)}
+
+  <text x="924" y="1466" text-anchor="end" class="footnote">schema v1 · 21 tables · inventory checked against internal/daemon/corestore/schema.go</text>
   `;
 
-  return svgFrame({
-    width: 1440,
-    height: 968,
-    title: "daemon.db Logical Data Model (ibkr canary)",
-    description: "A logical entity relationship view groups SQLite control and state tables, the append-only event spine and domain projections, broker scope and order safety tables, retained observations, and current plus immutable broker statement projections.",
+  const svg = svgFrame({
+    width: 960,
+    height: 1490,
+    title: "daemon.db Physical Relationships (ibkr canary)",
+    description: "A physical entity relationship diagram for SQLite schema version 1. Solid lines represent declared foreign keys with cardinalities. Dashed lines identify application-level relationships that are not enforced by SQLite. Standalone state, observation, migration, import, and order-floor tables have no invented relationships.",
     body,
-    extraStyles: referenceDiagramStyles,
+    extraStyles: storageERStyles,
   });
+  validateSQLiteER(svg);
+  return svg;
 }
 
 function stepCard({ x, y, width, number, title, lines, color = C.slate }) {
@@ -667,7 +878,9 @@ const cleanGeneratedSVG = (svg) => svg.replace(/^[ \t]+$/gm, "");
 const outputs = new Map([
   ["system-architecture.svg", systemArchitecture()],
   ["data-and-persistence.svg", persistenceArchitecture()],
+  ["policy-lifecycle.svg", cleanGeneratedSVG(policyPrimer())],
   ["policy-authority.svg", cleanGeneratedSVG(policyArchitecture())],
+  ["storage-overview.svg", cleanGeneratedSVG(storageOverview())],
   ["sqlite-data-model.svg", cleanGeneratedSVG(sqliteDataModel())],
   ["sqlite-update-lifecycle.svg", cleanGeneratedSVG(sqliteUpdateLifecycle())],
 ]);
