@@ -60,18 +60,25 @@ func (s *Server) buildAccountSummaryWithAuthority(ctx context.Context, observe b
 	if c == nil {
 		return nil, accountSummaryAuthority{}, s.gatewayUnavailableError()
 	}
-	raw, provenance, err := c.RequestAccountSummaryWithProvenance(ctx, 8*time.Second)
+	snapshot, err := s.readAccountSnapshot(ctx, c)
+	raw := snapshot.raw
+	provenance := snapshot.provenance
+	observedAt := snapshot.observedAt
 	if err != nil {
 		if cached := c.CachedAccountSummary(); cached != nil {
 			s.logger.Debugf("account summary one-shot failed; using cached account update snapshot: %v", err)
 			raw = cached
 			provenance = ibkrlib.AccountSummaryProvenanceCachedFallback
+			observedAt = time.Time{}
 		} else {
 			return nil, accountSummaryAuthority{}, err
 		}
 	}
+	if raw == nil {
+		return nil, accountSummaryAuthority{}, errors.New("account summary unavailable")
+	}
 	authority := accountSummaryAuthority{
-		Provenance: provenance, AsOf: raw.AsOf.UTC(),
+		Provenance: provenance, AsOf: observedAt.UTC(),
 		NetLiquidationAvailable: raw.NetLiquidation != nil,
 		TotalCashAvailable:      raw.TotalCashValue != nil,
 		BaseCurrencyAvailable:   strings.TrimSpace(raw.Currency) != "",

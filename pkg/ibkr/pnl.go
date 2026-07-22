@@ -43,7 +43,10 @@ type pnlCache struct {
 
 	accountReqID int // 0 means no active subscription
 	accountAcct  string
-	account      AccountDailyPnL
+	// accountStartedAt distinguishes a healthy subscription still awaiting
+	// its first frame from one that has been silent beyond the repair window.
+	accountStartedAt time.Time
+	account          AccountDailyPnL
 
 	// positionReqIDs maps conId -> reqID. positionByReqID is the
 	// reverse map so the inbound handler (which sees reqID, not
@@ -274,6 +277,7 @@ func (c *Connector) SubscribeAccountPnL(account string) error {
 	}
 	c.pnl.accountReqID = reqID
 	c.pnl.accountAcct = account
+	c.pnl.accountStartedAt = c.pnlResubClock().UTC()
 	c.pnl.account = AccountDailyPnL{}
 	c.pnl.mu.Unlock()
 
@@ -282,6 +286,7 @@ func (c *Connector) SubscribeAccountPnL(account string) error {
 		if c.pnl.accountReqID == reqID {
 			c.pnl.accountReqID = 0
 			c.pnl.accountAcct = ""
+			c.pnl.accountStartedAt = time.Time{}
 			c.pnl.account = AccountDailyPnL{}
 		}
 		c.pnl.mu.Unlock()
@@ -438,6 +443,7 @@ func (c *Connector) SeedAccountDailyPnLForTest(account string, snap AccountDaily
 	defer c.pnl.mu.Unlock()
 	c.pnl.accountReqID = -1
 	c.pnl.accountAcct = account
+	c.pnl.accountStartedAt = snap.AsOf.UTC()
 	c.pnl.account = snap
 }
 
@@ -460,6 +466,7 @@ func (c *Connector) cancelAllPnL() {
 	}
 	c.pnl.accountReqID = 0
 	c.pnl.accountAcct = ""
+	c.pnl.accountStartedAt = time.Time{}
 	c.pnl.positionReqIDs = make(map[int]int)
 	c.pnl.positionByReqID = make(map[int]int)
 	c.pnl.positionSnapshot = make(map[int]PositionDailyPnL)
@@ -477,12 +484,13 @@ func (c *Connector) cancelAllPnL() {
 	}
 }
 
-// dailyPnLStaleResubscribe bounds how long the account daily-P&L frame may go
-// without an update, during market hours, before MaybeResubscribeStaleDailyPnL
-// treats the reqPnL stream as silently dead and force-rebuilds it. It also
-// doubles as the throttle window between rebuild attempts. reqPnL pushes on
-// change and, during regular hours on an active book, ticks every few seconds,
-// so a frame this old is a genuine anomaly rather than a quiet market.
+// dailyPnLStaleResubscribe bounds how long the account daily-P&L stream may go
+// without its first frame or a later update, during market hours, before
+// MaybeResubscribeStaleDailyPnL treats it as silently dead and force-rebuilds
+// it. It also doubles as the throttle window between rebuild attempts. reqPnL
+// pushes on change and, during regular hours on an active book, ticks every
+// few seconds, so silence this old is a genuine anomaly rather than a quiet
+// market.
 const dailyPnLStaleResubscribe = 90 * time.Second
 
 func (c *Connector) pnlResubClock() time.Time {
@@ -493,10 +501,11 @@ func (c *Connector) pnlResubClock() time.Time {
 }
 
 // MaybeResubscribeStaleDailyPnL rebuilds all Daily P&L streams when marketOpen
-// is true and the account-level snapshot is stale. The caller owns the market
-// calendar; off-hours inactivity is not treated as stale. It returns true when
-// a rebuild attempt is issued, not when a replacement frame is received.
-// Attempts are throttled to one per internal staleness window.
+// is true and the account stream has not produced its first frame or its last
+// frame is stale. The caller owns the market calendar; off-hours inactivity is
+// not treated as stale. It returns true when a rebuild attempt is issued, not
+// when a replacement frame is received. Attempts are throttled to one per
+// internal staleness window.
 func (c *Connector) MaybeResubscribeStaleDailyPnL(marketOpen bool) bool {
 	if !marketOpen || !c.isConnected() {
 		return false
@@ -504,14 +513,19 @@ func (c *Connector) MaybeResubscribeStaleDailyPnL(marketOpen bool) bool {
 	c.pnl.mu.RLock()
 	reqID := c.pnl.accountReqID
 	asOf := c.pnl.account.AsOf
+	startedAt := c.pnl.accountStartedAt
 	c.pnl.mu.RUnlock()
-	if reqID == 0 || asOf.IsZero() {
-		// Never subscribed, or no frame yet — the startup/lazy-kick path in
-		// SubscribeAccountPnL owns that case; nothing to revive here.
+	if reqID == 0 {
+		// The startup/lazy-kick path in SubscribeAccountPnL owns a stream that
+		// has never been requested.
 		return false
 	}
 	now := c.pnlResubClock()
-	if now.Sub(asOf) < dailyPnLStaleResubscribe {
+	referenceAt := asOf
+	if referenceAt.IsZero() {
+		referenceAt = startedAt
+	}
+	if referenceAt.IsZero() || now.Sub(referenceAt) < dailyPnLStaleResubscribe {
 		return false
 	}
 	c.pnlResubMu.Lock()
@@ -522,7 +536,7 @@ func (c *Connector) MaybeResubscribeStaleDailyPnL(marketOpen bool) bool {
 	c.pnlResubLastAt = now
 	c.pnlResubMu.Unlock()
 
-	connectorLogger.Warnf("account daily P&L frame stale for %s during market hours; rebuilding reqPnL subscriptions", now.Sub(asOf).Round(time.Second))
+	connectorLogger.Warnf("account daily P&L stream silent for %s during market hours; rebuilding reqPnL subscriptions", now.Sub(referenceAt).Round(time.Second))
 	c.forceResubscribeDailyPnL()
 	return true
 }
@@ -553,6 +567,7 @@ func (c *Connector) forceResubscribeDailyPnL() {
 	}
 	c.pnl.accountReqID = 0
 	c.pnl.accountAcct = ""
+	c.pnl.accountStartedAt = time.Time{}
 	c.pnl.account = AccountDailyPnL{}
 	c.pnl.positionReqIDs = make(map[int]int)
 	c.pnl.positionByReqID = make(map[int]int)

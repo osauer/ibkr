@@ -90,6 +90,32 @@ func TestMaybeResubscribeStaleDailyPnL_NoopWhenNeverSubscribed(t *testing.T) {
 	}
 }
 
+func TestMaybeResubscribeStaleDailyPnL_HealsSilentFirstFrame(t *testing.T) {
+	c := newPnLResubRig(t)
+	now := time.Date(2026, 7, 1, 15, 0, 0, 0, time.UTC)
+	c.pnlResubNow = func() time.Time { return now }
+	c.pnl.mu.Lock()
+	c.pnl.accountReqID = -1
+	c.pnl.accountAcct = "DU1234567"
+	c.pnl.accountStartedAt = now.Add(-10 * time.Minute)
+	c.pnl.account = AccountDailyPnL{}
+	c.pnl.mu.Unlock()
+
+	if !c.MaybeResubscribeStaleDailyPnL(true) {
+		t.Fatal("silent first frame during market hours: want rebuild (true), got false")
+	}
+	c.pnl.mu.RLock()
+	gotReq := c.pnl.accountReqID
+	gotStartedAt := c.pnl.accountStartedAt
+	c.pnl.mu.RUnlock()
+	if gotReq <= 0 {
+		t.Fatalf("account reqID after repair = %d, want fresh positive id", gotReq)
+	}
+	if !gotStartedAt.Equal(now) {
+		t.Fatalf("account subscription start = %s, want %s", gotStartedAt, now)
+	}
+}
+
 func TestMaybeResubscribeStaleDailyPnL_Throttle(t *testing.T) {
 	c := newPnLResubRig(t)
 	now := time.Date(2026, 7, 1, 15, 0, 0, 0, time.UTC)

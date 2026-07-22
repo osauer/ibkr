@@ -113,6 +113,11 @@ type Server struct {
 	// repairCurrencyLedgerFXRatesCached in fx_cache.go).
 	fxRates *fxRateCache
 
+	// accountSnapshots owns the short-lived, request-authored account summary
+	// shared by Rulebook, Canary, brief, app, and CLI reads. Its zero value is
+	// ready for use; connector session and broker scope are part of every key.
+	accountSnapshots accountSnapshotAuthority
+
 	listener net.Listener
 
 	mu               sync.Mutex
@@ -1341,6 +1346,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// so that read-side demand cannot launch reconnectFlow alongside cold start.
 	s.startRegimeRefreshLoop(serverCtx)
 	s.startAlertShadowObservationLoops(serverCtx)
+	go s.runAccountPnLAuthorityLoop(serverCtx)
 	go s.acceptLoop(ctx, s.listener)
 	if s.initialAcceptLoopStartedForTest != nil {
 		s.initialAcceptLoopStartedForTest()

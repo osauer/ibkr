@@ -1502,6 +1502,7 @@ func (c *Connector) onConnectionLost(conn *Connection) {
 		c.pnl.mu.Lock()
 		c.pnl.accountReqID = 0
 		c.pnl.accountAcct = ""
+		c.pnl.accountStartedAt = time.Time{}
 		c.pnl.account = AccountDailyPnL{}
 		c.pnl.positionReqIDs = make(map[int]int)
 		c.pnl.positionByReqID = make(map[int]int)
