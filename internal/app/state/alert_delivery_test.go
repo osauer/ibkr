@@ -23,7 +23,7 @@ var defaultTestAlertAuthorityScope = func() string {
 	return scope
 }()
 
-func TestAlertDeliveryShadowIdentityRedactionAndLegacyIsolation(t *testing.T) {
+func TestAlertDeliveryCutoverIdentityRedactionAndLegacyIsolation(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)
 	if err != nil {
@@ -53,13 +53,13 @@ func TestAlertDeliveryShadowIdentityRedactionAndLegacyIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !view.Initialized || view.Generation != 1 || len(view.Occurrences) != 1 || view.Attention.HighWaterSeq != 1 || view.Attention.UnreadCount != 1 {
-		t.Fatalf("unexpected shadow view: %+v", view)
+		t.Fatalf("unexpected cutover view: %+v", view)
 	}
-	if view.DeliveryHealth.State != AlertDeliveryHealthShadow || view.DeliveryHealth.Class != AlertDeliveryHealthClassShadow || view.Occurrences[0].TransportEligible {
-		t.Fatalf("new ledger must default to non-transport shadow: %+v", view)
+	if view.DeliveryHealth.State != AlertDeliveryHealthHealthy || view.DeliveryHealth.Class != "" || view.Occurrences[0].Disposition != AlertDispositionCutoverExisting {
+		t.Fatalf("new ledger must preserve visible cutover state without arming transport: %+v", view)
 	}
 	if got := store.AlertDeliveriesDue(at); len(got) != 0 {
-		t.Fatalf("shadow observation produced transport work: %+v", got)
+		t.Fatalf("cutover observation produced transport work: %+v", got)
 	}
 	if !reflect.DeepEqual(store.Attention(), legacyAttention) || !reflect.DeepEqual(store.AlertHistory(0), legacyHistory) || !reflect.DeepEqual(store.Governance(at), legacyGovernance) {
 		t.Fatal("source-neutral observation changed legacy Canary/Governance state or attention")
@@ -131,8 +131,8 @@ func TestAlertDeliveryAuthorityScopeChangeRetiresPreviousContextWithoutRecoveryO
 		t.Fatalf("dormant live occurrence escaped instead of one previous-context row: %+v", view.Occurrences)
 	}
 	previous := view.Occurrences[0]
-	if previous.DisplayID == oldDisplay || previous.AttentionSeq != 0 || view.Attention.HighWaterSeq != oldAttentionHighWater {
-		t.Fatalf("scope archive changed live identity or v2 attention: occurrence=%+v attention=%+v", previous, view.Attention)
+	if previous.DisplayID == oldDisplay || previous.AttentionSeq != oldAttentionHighWater || view.Attention.HighWaterSeq != oldAttentionHighWater {
+		t.Fatalf("scope archive lost the unread cursor or reused live identity: occurrence=%+v attention=%+v", previous, view.Attention)
 	}
 	if previous.State != rpc.AlertEpisodeOpen || previous.EndReason != AlertDeliveryEndAuthorityScopeChanged || !previous.EndedAt.Equal(changedAt) {
 		t.Fatalf("previous scope was recovered/cleared instead of archived: %+v", previous)
@@ -257,6 +257,7 @@ func TestAlertDeliveryAuthorityRecoveryReopenAndEscalation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	view = store.AlertDelivery(recoveredAt)
 	if occurrenceBySource(t, view, rpc.AlertSourceRegime).EndReason != AlertDeliveryEndRecovered || view.CurrentState != rpc.AlertSnapshotClear {
 		t.Fatalf("exact recovery was not applied: %+v", view)
 	}
@@ -404,7 +405,7 @@ func TestAlertDeliveryPersistenceFailureAndDurableOverflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recoveredView.Generation <= failed.Generation || recoveredView.DeliveryHealth.State != AlertDeliveryHealthShadow {
+	if recoveredView.Generation <= failed.Generation || recoveredView.DeliveryHealth.State != AlertDeliveryHealthHealthy {
 		t.Fatalf("persistence recovery did not advance past volatile health generation: %+v", recoveredView)
 	}
 
@@ -445,7 +446,7 @@ func TestAlertDeliveryPersistenceFailureAndDurableOverflow(t *testing.T) {
 	if err := overflowStore.CompactAlertDelivery(firstRecoveredAt.Add(100 * 24 * time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if recoveredCapacity := overflowStore.AlertDelivery(firstRecoveredAt.Add(100 * 24 * time.Hour)); recoveredCapacity.DeliveryHealth.State != AlertDeliveryHealthShadow || len(recoveredCapacity.Occurrences) != 0 {
+	if recoveredCapacity := overflowStore.AlertDelivery(firstRecoveredAt.Add(100 * 24 * time.Hour)); recoveredCapacity.DeliveryHealth.State != AlertDeliveryHealthHealthy || len(recoveredCapacity.Occurrences) != 0 {
 		t.Fatalf("proven below-capacity compaction did not automate overflow recovery: %+v", recoveredCapacity)
 	}
 }
@@ -456,10 +457,9 @@ func TestAlertDeliveryHealthAggregatesTargetsAndOverflowDominatesRestart(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 20, 15, 30, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceOrderIntegrity, rpc.AlertKindOrderIntegrity, "orders", "open-1", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -543,10 +543,9 @@ func TestAlertDeliveryRetiredFailuresRemainHistoryButLeaveCurrentHealth(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+			enableTestAlertDelivery(t, store)
 			base := time.Date(2026, 7, 20, 16, 30, 0, 0, time.UTC)
 			candidate := testAlertCandidate(t, rpc.AlertSourceOrderIntegrity, rpc.AlertKindOrderIntegrity, "orders", "open-1", base)
-			candidate.DeliveryPreference = rpc.AlertDeliveryPage
 			if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 				t.Fatal(err)
 			}
@@ -598,10 +597,9 @@ func TestAlertDeliveryConfirmBindsCurrentCandidateAfterDueScanRevision(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 20, 16, 45, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceCanary, rpc.AlertKindPortfolioRisk, "book", "open-1", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -642,10 +640,9 @@ func TestAlertDeliveryReserveConfirmRetryReceiptAndActiveRecheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 20, 16, 0, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceOrderIntegrity, rpc.AlertKindOrderIntegrity, "order-integrity", "open-1", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	snapshot := testAlertSnapshot(base, []rpc.AlertSource{rpc.AlertSourceOrderIntegrity}, []rpc.AlertSource{rpc.AlertSourceOrderIntegrity}, rpc.AlertCoverageCurrent, candidate)
 	if _, err := store.ObserveAlertSnapshot(snapshot); err != nil {
 		t.Fatal(err)
@@ -711,12 +708,14 @@ func TestAlertDeliveryReserveConfirmRetryReceiptAndActiveRecheck(t *testing.T) {
 	if len(store.data.AlertDelivery.Receipts) != 1 {
 		t.Fatalf("receipt count=%d", len(store.data.AlertDelivery.Receipts))
 	}
-	store.alertDeliveryEligible = nil
-	shadow := store.AlertDelivery(acceptedAt)
-	if shadow.DeliveryHealth.State != AlertDeliveryHealthShadow || shadow.AttemptTotals.Accepted != 1 || !shadow.DeliveryHealth.LastAcceptedAt.Equal(acceptedAt) || len(store.AlertDeliveriesDue(acceptedAt)) != 0 {
-		t.Fatalf("runtime policy removal lost history or retained transport: %+v", shadow)
+	if err := store.SetAlertMode(AlertModeNone); err != nil {
+		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	suppressed := store.AlertDelivery(acceptedAt)
+	if suppressed.DeliveryHealth.State != AlertDeliveryHealthHealthy || suppressed.AttemptTotals.Accepted != 1 || !suppressed.DeliveryHealth.LastAcceptedAt.Equal(acceptedAt) || len(store.AlertDeliveriesDue(acceptedAt)) != 0 {
+		t.Fatalf("mode downgrade lost history or retained transport: %+v", suppressed)
+	}
+	enableTestAlertDelivery(t, store)
 	receipt := store.data.AlertDelivery.Receipts[0]
 	if receipt.ReceiptKey != alertDeliveryReceiptKey(defaultTestAlertAuthorityScope, candidate.OccurrenceKey, target) || strings.Contains(receipt.ReceiptKey, alertDeliveryDisplayID(defaultTestAlertAuthorityScope, candidate.OccurrenceKey)) {
 		t.Fatalf("receipt was not internally keyed by private occurrence+target: %+v", receipt)
@@ -804,10 +803,9 @@ func TestAlertDeliveryReservedRestartDueSweepAndTargetRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Now().UTC().Add(-time.Minute)
 	candidate := testAlertCandidate(t, rpc.AlertSourceProtection, rpc.AlertKindProtectionGap, "protection", "open-1", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -824,15 +822,11 @@ func TestAlertDeliveryReservedRestartDueSweepAndTargetRetirement(t *testing.T) {
 	if got := restarted.data.AlertDelivery.Attempts[0]; got.ID != reservation.AttemptID || got.Class != AlertDeliveryAttemptRetry || got.RetryAt.IsZero() {
 		t.Fatalf("restart did not recover reserved no-send attempt as retryable: %+v", got)
 	}
-	if due := restarted.AlertDeliveriesDue(time.Now().UTC()); len(due) != 0 {
-		t.Fatalf("restart without an approved runtime policy reactivated transport: %+v", due)
-	}
-	if view := restarted.AlertDelivery(time.Now().UTC()); view.DeliveryHealth.State != AlertDeliveryHealthShadow || view.DeliveryHealth.Class != AlertDeliveryHealthClassShadow || view.Occurrences[0].TransportEligible {
-		t.Fatalf("restart did not demote transport posture to shadow: %+v", view)
-	}
-	restarted.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
 	if due := restarted.AlertDeliveriesDue(time.Now().UTC()); len(due) != 1 || due[0].OccurrenceKey != candidate.OccurrenceKey {
-		t.Fatalf("explicit test policy did not restore due-work scan: %+v", due)
+		t.Fatalf("persisted active mode did not preserve retry work: %+v", due)
+	}
+	if view := restarted.AlertDelivery(time.Now().UTC()); view.DeliveryHealth.State != AlertDeliveryHealthDegraded || view.DeliveryHealth.Class != AlertDeliveryHealthClassRetry || view.Occurrences[0].Disposition != AlertDispositionEligible {
+		t.Fatalf("restart lost active retry posture: %+v", view)
 	}
 	retryAt := restarted.data.AlertDelivery.Attempts[0].RetryAt
 	retry, send, err := restarted.BeginAlertDelivery(candidate.OccurrenceKey, target, retryAt)
@@ -856,10 +850,9 @@ func TestAlertDeliveryFailedConfirmRestartHealsAfterSuccessfulRetry(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 20, 18, 0, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "failed-confirm-restart", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -881,7 +874,13 @@ func TestAlertDeliveryFailedConfirmRestartHealsAfterSuccessfulRetry(t *testing.T
 	if recovered.Class != AlertDeliveryAttemptRetry || recovered.RetryAt.IsZero() {
 		t.Fatalf("failed confirm restart inferred transport uncertainty: %+v", recovered)
 	}
-	restarted.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	if due := restarted.AlertDeliveriesDue(recovered.RetryAt); len(due) != 0 {
+		t.Fatalf("restart retry bypassed stale exact-source evidence: %+v", due)
+	}
+	refreshed := reviseAlertCandidate(candidate, recovered.RetryAt, "b", candidate.State, candidate.Severity)
+	if _, err := restarted.ObserveAlertSnapshot(testAlertSnapshot(recovered.RetryAt, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, refreshed)); err != nil {
+		t.Fatal(err)
+	}
 	retry, send, err := restarted.BeginAlertDelivery(candidate.OccurrenceKey, target, recovered.RetryAt)
 	if err != nil || !send {
 		t.Fatalf("retry send=%v err=%v", send, err)
@@ -941,10 +940,9 @@ func TestAlertDeliveryPersistenceOrphansRecoverInProcess(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+				enableTestAlertDelivery(t, store)
 				base := time.Date(2026, 7, 20, 19, 0, 0, 0, time.UTC)
 				candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", failurePoint+stage, base)
-				candidate.DeliveryPreference = rpc.AlertDeliveryPage
 				if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 					t.Fatal(err)
 				}
@@ -1020,10 +1018,9 @@ func TestAlertDeliveryVolatileOutageIsStableAndNoOpRecoveryProbesPersistence(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 20, 19, 10, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "volatile", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -1074,7 +1071,7 @@ func TestAlertDeliveryFirstSnapshotSaveFailureIsTypedAndRecoversMonotonically(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !recovered.Initialized || recovered.Generation <= failed.Generation || recovered.DeliveryHealth.State != AlertDeliveryHealthShadow {
+	if !recovered.Initialized || recovered.Generation <= failed.Generation || recovered.DeliveryHealth.State != AlertDeliveryHealthHealthy {
 		t.Fatalf("cold-start recovery was not monotonic: failed=%+v recovered=%+v", failed, recovered)
 	}
 }
@@ -1084,10 +1081,9 @@ func TestAlertDeliveryBeginSaveFailureRecoversOnNextSweepWithoutFreshObservation
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 20, 19, 12, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "begin-liveness", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -1116,10 +1112,9 @@ func TestAlertDeliveryRecoverySkipsOwnedTransportUnderConcurrentSweeps(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 20, 19, 15, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "owned", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -1154,10 +1149,9 @@ func TestAlertDeliveryInactiveFailuresLeaveHealthButInterruptedUncertaintyPersis
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 20, 19, 30, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceRegime, rpc.AlertKindMarketState, "market", "health", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -1229,10 +1223,9 @@ func TestAlertDeliveryPrerequisiteHealthPersistsAndAutoClears(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 20, 20, 0, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "prerequisites", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -1316,10 +1309,9 @@ func TestAlertDeliveryPersistedReceiptAcceptanceCoherence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+			enableTestAlertDelivery(t, store)
 			base := time.Date(2026, 7, 20, 20, 20, 0, 0, time.UTC)
 			candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", mutation, base)
-			candidate.DeliveryPreference = rpc.AlertDeliveryPage
 			if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 				t.Fatal(err)
 			}
@@ -1389,10 +1381,9 @@ func TestAlertDeliveryEveryDurableCollectionHonorsCapacity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+			enableTestAlertDelivery(t, store)
 			base := time.Date(2026, 7, 20, 20, 25, 0, 0, time.UTC)
 			candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", collection, base)
-			candidate.DeliveryPreference = rpc.AlertDeliveryPage
 			if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 				t.Fatal(err)
 			}
@@ -1463,9 +1454,8 @@ func TestAlertDeliveryRetiredTargetCapacityChurnAndAutomaticRecovery(t *testing.
 			t.Fatal(err)
 		}
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "capacity", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -1509,10 +1499,9 @@ func TestAlertDeliveryReceiptCapacityBlocksBeforeTransportReservation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 20, 20, 35, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "receipt-capacity", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -1552,9 +1541,8 @@ func TestAlertDeliveryTombstoneCompactionRequiresNoActiveTargetOrRetainedEvidenc
 			t.Fatal(err)
 		}
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "tombstone-retention", old)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(old, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -1627,7 +1615,7 @@ func TestAlertDeliveryPersistedWriterShapesRoundTripValidator(t *testing.T) {
 		{name: "occurrence inactive later retired", class: AlertDeliveryAttemptInactive, number: 1, disposition: AlertDeliveryCompletionInactive, retired: true},
 		{name: "retry exhausted by completion", class: AlertDeliveryAttemptExhausted, number: 4, disposition: AlertDeliveryCompletionApplied},
 		{name: "retry exhausted by recovery later retired", class: AlertDeliveryAttemptExhausted, number: 4, retired: true},
-		{name: "policy unapproved later retired", class: AlertDeliveryAttemptUnapproved, number: 1, retired: true},
+		{name: "mode suppressed later retired", class: AlertDeliveryAttemptModeSuppressed, number: 1, retired: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, _, _ := newAlertDeliveryAttemptValidationFixture(t, tc.class, tc.number, tc.disposition, tc.retired)
@@ -1644,7 +1632,7 @@ func TestAlertDeliveryPersistedRetryThenTargetRetirementRoundTrip(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	base := time.Date(2026, 7, 21, 9, 0, 0, 0, time.UTC)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "validator", "retired-chain", base)
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
@@ -1716,15 +1704,15 @@ func TestAlertDeliveryPersistedAttemptLifecycleRejectsImpossibleShapes(t *testin
 		{name: "inactive incomplete", class: AlertDeliveryAttemptInactive, number: 1, disposition: AlertDeliveryCompletionInactive, mutate: func(a *alertDeliveryAttempt) { a.CompletedAt = time.Time{} }},
 		{name: "inactive retry", class: AlertDeliveryAttemptInactive, number: 1, disposition: AlertDeliveryCompletionInactive, mutate: func(a *alertDeliveryAttempt) { a.RetryAt = a.CompletedAt.Add(time.Minute) }},
 		{name: "inactive wrong disposition", class: AlertDeliveryAttemptInactive, number: 1, disposition: AlertDeliveryCompletionInactive, mutate: func(a *alertDeliveryAttempt) { a.Disposition = AlertDeliveryCompletionApplied }},
-		{name: "exhausted before fourth attempt", class: AlertDeliveryAttemptUnapproved, number: 1, mutate: func(a *alertDeliveryAttempt) {
+		{name: "exhausted before fourth attempt", class: AlertDeliveryAttemptModeSuppressed, number: 1, mutate: func(a *alertDeliveryAttempt) {
 			a.Class = AlertDeliveryAttemptExhausted
 			a.Disposition = AlertDeliveryCompletionApplied
 		}},
 		{name: "exhausted retry", class: AlertDeliveryAttemptExhausted, number: 4, disposition: AlertDeliveryCompletionApplied, mutate: func(a *alertDeliveryAttempt) { a.RetryAt = a.CompletedAt.Add(time.Minute) }},
 		{name: "exhausted wrong disposition", class: AlertDeliveryAttemptExhausted, number: 4, disposition: AlertDeliveryCompletionApplied, mutate: func(a *alertDeliveryAttempt) { a.Disposition = AlertDeliveryCompletionInactive }},
-		{name: "unapproved incomplete", class: AlertDeliveryAttemptUnapproved, number: 1, mutate: func(a *alertDeliveryAttempt) { a.CompletedAt = time.Time{} }},
-		{name: "unapproved retry", class: AlertDeliveryAttemptUnapproved, number: 1, mutate: func(a *alertDeliveryAttempt) { a.RetryAt = a.CompletedAt.Add(time.Minute) }},
-		{name: "unapproved disposition", class: AlertDeliveryAttemptUnapproved, number: 1, mutate: func(a *alertDeliveryAttempt) { a.Disposition = AlertDeliveryCompletionApplied }},
+		{name: "mode suppressed incomplete", class: AlertDeliveryAttemptModeSuppressed, number: 1, mutate: func(a *alertDeliveryAttempt) { a.CompletedAt = time.Time{} }},
+		{name: "mode suppressed retry", class: AlertDeliveryAttemptModeSuppressed, number: 1, mutate: func(a *alertDeliveryAttempt) { a.RetryAt = a.CompletedAt.Add(time.Minute) }},
+		{name: "mode suppressed disposition", class: AlertDeliveryAttemptModeSuppressed, number: 1, mutate: func(a *alertDeliveryAttempt) { a.Disposition = AlertDeliveryCompletionApplied }},
 		{name: "completion precedes reservation", class: AlertDeliveryAttemptRejected, number: 1, disposition: AlertDeliveryCompletionApplied, mutate: func(a *alertDeliveryAttempt) { a.CompletedAt = a.ReservedAt.Add(-time.Second) }},
 		{name: "retirement mismatches target tombstone", class: AlertDeliveryAttemptRetired, number: 1, disposition: AlertDeliveryCompletionRetired, retired: true, mutate: func(a *alertDeliveryAttempt) { a.RetiredAt = a.RetiredAt.Add(time.Second) }},
 	}
@@ -1802,7 +1790,7 @@ func TestAlertDeliveryPersistedOccurrenceObservationIntervalRejectsCorruption(t 
 		{name: "observed does not equal last seen", mutate: func(o *alertDeliveryOccurrence) { o.ObservedAt = o.LastSeenAt.Add(-time.Second) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, store, _ := newAlertDeliveryAttemptValidationFixture(t, AlertDeliveryAttemptUnapproved, 1, "", false)
+			_, store, _ := newAlertDeliveryAttemptValidationFixture(t, AlertDeliveryAttemptModeSuppressed, 1, "", false)
 			tc.mutate(&store.data.AlertDelivery.Occurrences[0])
 			if err := store.validateAlertDeliveryState(); !errors.Is(err, ErrInvalidPersistedState) {
 				t.Fatalf("corrupt occurrence interval validated: %v", err)
@@ -1925,9 +1913,29 @@ func testAlertCandidate(t *testing.T, source rpc.AlertSource, kind rpc.AlertKind
 	return rpc.AlertCandidate{
 		EpisodeKey: episode, OccurrenceKey: mustAlertOccurrenceKey(t, episode, occurrenceIdentity),
 		EvidenceFingerprint: "sha256:" + strings.Repeat("a", 64), Source: source, Kind: kind,
-		State: rpc.AlertEpisodeOpen, Severity: rpc.AlertSeverityWatch, DeliveryPreference: rpc.AlertDeliveryUnapproved,
+		PresentationCode: legacyAlertPresentationCode(source), State: rpc.AlertEpisodeOpen, Severity: rpc.AlertSeverityWatch,
 		EvidenceHealth: rpc.AlertEvidenceCurrent, Destination: rpc.AlertDestinationAlerts,
 		EvidenceAsOf: at, StateChangedAt: at, ObservedAt: at,
+	}
+}
+
+func enableTestAlertDelivery(t *testing.T, store *Store) {
+	t.Helper()
+	if err := store.SetAlertMode(AlertModeWatchAndAct); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.data.AlertDelivery == nil {
+		store.data.AlertDelivery = newAlertDeliveryData()
+	}
+	if store.data.AlertDelivery.Baselines == nil {
+		store.data.AlertDelivery.Baselines = make(map[string]alertDeliveryBaseline)
+	}
+	baselineAt := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.data.AlertDelivery.Baselines[defaultTestAlertAuthorityScope] = alertDeliveryBaseline{
+		EstablishedAt: baselineAt,
+		SnapshotAsOf:  baselineAt,
 	}
 }
 
@@ -1978,9 +1986,28 @@ func testAlertSnapshot(at time.Time, expected, covered []rpc.AlertSource, freshn
 	if current != rpc.AlertSnapshotActive && state == rpc.AlertCoverageComplete && freshness == rpc.AlertCoverageCurrent {
 		current = rpc.AlertSnapshotClear
 	}
+	sources := make([]rpc.AlertSourceCoverage, 0, len(expected))
+	for _, source := range expected {
+		row := rpc.AlertSourceCoverage{
+			Source: source, Status: "test_unavailable", Reason: "test_unavailable",
+			EvidenceHealth: rpc.AlertEvidenceUnavailable,
+		}
+		if slices.Contains(covered, source) {
+			row.Status, row.Reason, row.Covered = "test_current", "test_current", true
+			row.EvidenceHealth = rpc.AlertEvidenceCurrent
+			if freshness == rpc.AlertCoverageStale {
+				row.Status, row.Reason, row.EvidenceHealth = "test_stale", "test_stale", rpc.AlertEvidenceStale
+			}
+			row.InputAsOf, row.ObservedAt, row.EvidenceAsOf = at, at, at
+			row.FreshUntil = at.Add(time.Hour)
+		}
+		sources = append(sources, row)
+	}
+	slices.SortFunc(sources, func(a, b rpc.AlertSourceCoverage) int { return strings.Compare(string(a.Source), string(b.Source)) })
 	return rpc.AlertCandidateSnapshot{
 		SchemaVersion: rpc.AlertCandidateSnapshotVersion, AuthorityScope: defaultTestAlertAuthorityScope, AsOf: at, CurrentState: current,
 		Coverage:   rpc.AlertCoverage{State: state, Freshness: freshness, AsOf: at, ExpectedSources: append([]rpc.AlertSource{}, expected...), CoveredSources: append([]rpc.AlertSource{}, covered...)},
+		Sources:    sources,
 		Candidates: append([]rpc.AlertCandidate{}, candidates...),
 	}
 }

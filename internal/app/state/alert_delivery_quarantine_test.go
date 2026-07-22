@@ -38,7 +38,7 @@ func TestOpenQuarantinesOnlyAlertDeliveryTypedDecodeFailure(t *testing.T) {
 	assertAlertDeliveryQuarantineArtifact(t, dir, rawAlertDelivery)
 }
 
-func TestOpenArchivesValidLegacyUnscopedLedgerAndRecoversOnlyFromScopedV2(t *testing.T) {
+func TestOpenArchivesValidLegacyUnscopedLedgerAndRecoversFromScopedV3(t *testing.T) {
 	t.Parallel()
 	seedDir := t.TempDir()
 	seed, err := Open(seedDir)
@@ -62,15 +62,34 @@ func TestOpenArchivesValidLegacyUnscopedLedgerAndRecoversOnlyFromScopedV2(t *tes
 	if err := json.Unmarshal(seedTop["alert_delivery"], &legacyLedger); err != nil {
 		t.Fatal(err)
 	}
-	legacyLedger["version"] = json.RawMessage(`"` + legacyAlertDeliveryVersion + `"`)
+	legacyLedger["version"] = json.RawMessage(`"` + legacyAlertDeliveryVersionV1 + `"`)
 	delete(legacyLedger, "source_watermarks_by_scope")
 	delete(legacyLedger, "previous_contexts")
+	delete(legacyLedger, "previous_context_high_water_seq")
+	delete(legacyLedger, "baselines")
+	legacyLedger["attention_v2_high_water_seq"] = legacyLedger["attention_high_water_seq"]
+	legacyLedger["attention_v2_read_through_seq"] = legacyLedger["attention_read_through_seq"]
+	delete(legacyLedger, "attention_high_water_seq")
+	delete(legacyLedger, "attention_read_through_seq")
 	var legacySnapshot map[string]json.RawMessage
 	if err := json.Unmarshal(legacyLedger["snapshot"], &legacySnapshot); err != nil {
 		t.Fatal(err)
 	}
-	legacySnapshot["schema_version"] = json.RawMessage(`"` + legacyAlertSnapshotVersion + `"`)
+	legacySnapshot["schema_version"] = json.RawMessage(`"` + legacyAlertSnapshotVersionV1 + `"`)
 	delete(legacySnapshot, "authority_scope")
+	delete(legacySnapshot, "sources")
+	var legacyCandidates []map[string]json.RawMessage
+	if err := json.Unmarshal(legacySnapshot["candidates"], &legacyCandidates); err != nil {
+		t.Fatal(err)
+	}
+	for i := range legacyCandidates {
+		delete(legacyCandidates[i], "presentation_code")
+		legacyCandidates[i]["delivery_preference"] = json.RawMessage(`"unapproved"`)
+	}
+	legacySnapshot["candidates"], err = json.Marshal(legacyCandidates)
+	if err != nil {
+		t.Fatal(err)
+	}
 	legacyLedger["snapshot"], err = json.Marshal(legacySnapshot)
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +111,12 @@ func TestOpenArchivesValidLegacyUnscopedLedgerAndRecoversOnlyFromScopedV2(t *tes
 	}
 	for i := range legacyOccurrences {
 		delete(legacyOccurrences[i], "authority_scope")
+		delete(legacyOccurrences[i], "presentation_code")
+		delete(legacyOccurrences[i], "disposition")
+		legacyOccurrences[i]["delivery_preference"] = json.RawMessage(`"unapproved"`)
+		legacyOccurrences[i]["transport_eligible"] = json.RawMessage(`false`)
+		legacyOccurrences[i]["attention_v2_seq"] = legacyOccurrences[i]["attention_seq"]
+		delete(legacyOccurrences[i], "attention_seq")
 		var occurrenceKey string
 		if err := json.Unmarshal(legacyOccurrences[i]["occurrence_key"], &occurrenceKey); err != nil {
 			t.Fatal(err)
@@ -117,7 +142,7 @@ func TestOpenArchivesValidLegacyUnscopedLedgerAndRecoversOnlyFromScopedV2(t *tes
 		t.Fatalf("open recognized v1 ledger: %v", err)
 	}
 	if store.alertDeliveryQuarantinedLocked() {
-		t.Fatal("valid recognized v1 ledger remained a permanently blocked live authority")
+		t.Fatal("valid recognized v1 ledger remained blocked instead of being archived")
 	}
 	if view := store.AlertDelivery(at); view.Initialized || view.AuthorityScope != "" || view.CurrentState == rpc.AlertSnapshotClear || len(view.Occurrences) != 0 || len(store.AlertDeliveriesDue(at)) != 0 {
 		t.Fatalf("legacy ledger was silently assigned a scope: %+v", view)
@@ -135,20 +160,20 @@ func TestOpenArchivesValidLegacyUnscopedLedgerAndRecoversOnlyFromScopedV2(t *tes
 		t.Fatal(err)
 	}
 	if _, exists := currentTop["alert_delivery"]; exists {
-		t.Fatalf("legacy unscoped ledger remained live after archival: %s", stateRaw)
+		t.Fatalf("archived legacy ledger remained live: %s", stateRaw)
 	}
 	if history := store.AlertHistory(10); len(history) != 1 || history[0].ID != "legacy-canary" {
 		t.Fatalf("unrelated app authority was not preserved: %+v", history)
 	}
 
 	currentAt := at.Add(time.Minute)
-	currentCandidate := testAlertCandidate(t, rpc.AlertSourceCanary, rpc.AlertKindPortfolioRisk, "scoped-v2", "open", currentAt)
+	currentCandidate := testAlertCandidate(t, rpc.AlertSourceCanary, rpc.AlertKindPortfolioRisk, "scoped-v3", "open", currentAt)
 	view, err := store.ObserveAlertSnapshot(testAlertSnapshot(currentAt, []rpc.AlertSource{currentCandidate.Source}, []rpc.AlertSource{currentCandidate.Source}, rpc.AlertCoverageCurrent, currentCandidate))
 	if err != nil {
-		t.Fatalf("first scoped v2 observation did not recover: %v", err)
+		t.Fatalf("first scoped v3 observation did not recover: %v", err)
 	}
-	if !view.Initialized || view.AuthorityScope == "" || view.CurrentState != rpc.AlertSnapshotActive || len(view.Occurrences) != 1 {
-		t.Fatalf("scoped v2 recovery view=%+v", view)
+	if !view.Initialized || view.AuthorityScope == "" || view.CurrentState != rpc.AlertSnapshotActive || len(view.Occurrences) != 1 || view.Occurrences[0].Disposition != AlertDispositionCutoverExisting {
+		t.Fatalf("scoped v3 recovery view=%+v", view)
 	}
 	assertAlertDeliveryQuarantineArtifact(t, dir, rawLegacy)
 }
@@ -206,7 +231,6 @@ func TestOpenQuarantinesAlertDeliverySemanticCorruptionAndPreservesRawAcrossSave
 		"target retirement":   store.RetireAlertDeliveryTarget(AlertDeliveryTargetRef("device", "subscription"), at),
 		"recovery":            store.RecoverAlertDeliveries(at),
 		"compaction":          store.CompactAlertDelivery(at),
-		"runtime policy":      store.enforceAlertDeliveryRuntimePolicy(at),
 	} {
 		if !errors.Is(err, ErrAlertDeliveryUnavailable) {
 			t.Fatalf("quarantined %s err=%v, want ErrAlertDeliveryUnavailable", name, err)

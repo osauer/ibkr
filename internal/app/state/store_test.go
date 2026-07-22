@@ -2041,9 +2041,8 @@ func TestPushTargetRetirementIsAtomicAcrossEveryTopologyMutation(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+				enableTestAlertDelivery(t, store)
 				candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", strings.ReplaceAll(mutation, " ", "-"), base)
-				candidate.DeliveryPreference = rpc.AlertDeliveryPage
 				if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 					t.Fatal(err)
 				}
@@ -2169,9 +2168,8 @@ func TestCrossDeviceEndpointTransferRotatesIdentityAndRejectsTransferBackReplay(
 	if err := store.AddPushSubscription(PushSubscription{ID: "sub-a", DeviceID: "device-a", Endpoint: endpoint, P256DH: "key-a", Auth: "auth-a", CreatedAt: base}); err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "transfer-back", base)
-	candidate.DeliveryPreference = rpc.AlertDeliveryPage
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)
 	}
@@ -2221,7 +2219,7 @@ func TestPushSubscriptionRejectsDuplicateAndRetiredTargetIdentity(t *testing.T) 
 	if err := store.AddDevice(DeviceGrant{ID: "device", CreatedAt: base}); err != nil {
 		t.Fatal(err)
 	}
-	store.alertDeliveryEligible = func(rpc.AlertCandidate) bool { return true }
+	enableTestAlertDelivery(t, store)
 	candidate := testAlertCandidate(t, rpc.AlertSourceDelivery, rpc.AlertKindDeliveryHealth, "delivery", "target-identity", base)
 	if _, err := store.ObserveAlertSnapshot(testAlertSnapshot(base, []rpc.AlertSource{candidate.Source}, []rpc.AlertSource{candidate.Source}, rpc.AlertCoverageCurrent, candidate)); err != nil {
 		t.Fatal(err)

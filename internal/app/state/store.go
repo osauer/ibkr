@@ -112,7 +112,6 @@ type Store struct {
 	saveObserver                    func()
 	alertDeliveryMaxItems           int
 	alertDeliveryInFlight           map[string]bool
-	alertDeliveryEligible           alertDeliveryEligibilityFunc
 	alertDeliveryVolatile           *AlertDeliveryHealth
 	alertDeliveryVolatileGeneration uint64
 	alertDeliveryQuarantine         *alertDeliveryQuarantine
@@ -473,13 +472,13 @@ func Open(dir string) (*Store, error) {
 	if s.alertDeliveryQuarantinedLocked() {
 		return s, nil
 	}
-	if err := s.RecoverAlertDeliveries(time.Now().UTC()); err != nil {
-		if s.alertDeliveryStateWriteFailure() {
-			return s, nil
+	if s.data.AlertDelivery != nil && s.data.AlertDelivery.migratedV2 {
+		s.data.AlertDelivery.migratedV2 = false
+		if err := s.save(); err != nil {
+			return nil, fmt.Errorf("persist alert delivery v3 migration: %w", err)
 		}
-		return nil, err
 	}
-	if err := s.enforceAlertDeliveryRuntimePolicy(time.Now().UTC()); err != nil {
+	if err := s.RecoverAlertDeliveries(time.Now().UTC()); err != nil {
 		if s.alertDeliveryStateWriteFailure() {
 			return s, nil
 		}
