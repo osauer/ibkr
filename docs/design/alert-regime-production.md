@@ -162,8 +162,8 @@ transport acceptance; it does not claim device display or human attention.
 
 The daemon candidate carries a closed presentation code such as market stress,
 protection reconciliation, reconciliation exception, or data quality. The app
-maps that code and lifecycle state to a fixed title and body. Recovery adds the
-app-owned recovery wording.
+maps that code and lifecycle state to a fixed title and body. The same mapping
+supplies resolved wording for ended inbox history; recovered rows are not sent.
 
 Producer text is never interpolated into a notification. The payload contains
 only the fixed title and body plus allowlisted severity, kind, destination,
