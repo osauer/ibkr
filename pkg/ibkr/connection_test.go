@@ -271,10 +271,19 @@ func TestAccountSummarySnapshotRejectsMixedOrUnscopedRows(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		rowAccount string
+		tag        string
+		currency   string
 	}{
-		{name: "foreign account", rowAccount: "U999"},
-		{name: "blank account", rowAccount: ""},
-		{name: "aggregate account", rowAccount: "All"},
+		{name: "foreign ordinary account", rowAccount: "U999", tag: "BuyingPower", currency: "EUR"},
+		{name: "blank account", rowAccount: "", tag: "BuyingPower", currency: "EUR"},
+		{name: "aggregate ordinary tag", rowAccount: "All", tag: "BuyingPower", currency: "EUR"},
+		{name: "aggregate unknown ledger tag", rowAccount: "All", tag: "AccruedCash", currency: "USD"},
+		{name: "foreign concrete ledger", rowAccount: "U999", tag: "CashBalance", currency: "USD"},
+		{name: "aggregate ledger blank currency", rowAccount: "All", tag: "CashBalance", currency: ""},
+		{name: "aggregate ledger BASE currency", rowAccount: "All", tag: "CashBalance", currency: "BASE"},
+		{name: "aggregate ledger short currency", rowAccount: "All", tag: "CashBalance", currency: "US"},
+		{name: "aggregate ledger non-letter currency", rowAccount: "All", tag: "CashBalance", currency: "US1"},
+		{name: "aggregate ledger lowercase currency", rowAccount: "All", tag: "CashBalance", currency: "usd"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			conn := NewConnection(DefaultConfig())
@@ -285,7 +294,7 @@ func TestAccountSummarySnapshotRejectsMixedOrUnscopedRows(t *testing.T) {
 			conn.account = "U111"
 			conn.registerSummarySnapshot(41, "U111")
 			conn.handleAccountSummary([]string{"63", "2", "41", "U111", "NetLiquidation", "100000", "EUR"})
-			conn.handleAccountSummary([]string{"63", "2", "41", test.rowAccount, "BuyingPower", "200000", "EUR"})
+			conn.handleAccountSummary([]string{"63", "2", "41", test.rowAccount, test.tag, "200000", test.currency})
 			conn.processMessage(conn.encodeMsg(msgAccountSummaryEnd, "1", 41))
 
 			rows, err := conn.awaitAccountSummarySnapshot(41, time.Second)
@@ -299,6 +308,42 @@ func TestAccountSummarySnapshotRejectsMixedOrUnscopedRows(t *testing.T) {
 				t.Fatalf("rejected request rebound account to %q", got)
 			}
 		})
+	}
+}
+
+func TestAccountSummarySnapshotAcceptsAllCurrencyLedgerRows(t *testing.T) {
+	conn := NewConnection(DefaultConfig())
+	if conn == nil {
+		t.Fatal("NewConnection returned nil")
+	}
+	defer conn.rateLimiter.Stop()
+	conn.account = "U111"
+	conn.registerSummarySnapshot(42, "U111")
+
+	conn.handleAccountSummary([]string{"63", "2", "42", "U111", "NetLiquidation", "100000", "EUR"})
+	conn.handleAccountSummary([]string{"63", "2", "42", "All", "CashBalance", "2500", "USD"})
+	conn.processMessage(conn.encodeMsg(msgAccountSummaryEnd, "1", 42))
+
+	rows, err := conn.awaitAccountSummarySnapshot(42, time.Second)
+	if err != nil {
+		t.Fatalf("awaitAccountSummarySnapshot: %v", err)
+	}
+	if got := rows["NetLiquidation_EUR"]; got != "100000" {
+		t.Fatalf("ordinary account row = %q, want 100000", got)
+	}
+	if got := rows["CashBalance_USD"]; got != "2500" {
+		t.Fatalf("aggregate ledger row = %q, want 2500", got)
+	}
+
+	summary := parseAccountSummary(rows, "U111")
+	if summary.NetLiquidation == nil || *summary.NetLiquidation != 100000 {
+		t.Fatalf("parsed NetLiquidation = %v, want 100000", summary.NetLiquidation)
+	}
+	if got := summary.CurrencyLedger["USD"].CashBalance; got != 2500 {
+		t.Fatalf("parsed USD CashBalance = %v, want 2500", got)
+	}
+	if shared := conn.GetAccountSummary(); len(shared) != 0 {
+		t.Fatalf("request rows stamped streaming cache: %+v", shared)
 	}
 }
 

@@ -17,8 +17,9 @@ import (
 var ErrIBKRUnavailable = errors.New("ibkr connection unavailable")
 
 // ErrAccountSummaryScopeConflict means a one-shot account-summary request
-// observed a blank, aggregate, or foreign account row. A mixed row set must
-// never be projected as one account's current state.
+// observed a row outside its expected single-account scope. The only aggregate
+// rows admitted are the modeled per-currency fields emitted by $LEDGER:ALL.
+// Every other blank, aggregate, or foreign row rejects the whole snapshot.
 var ErrAccountSummaryScopeConflict = errors.New("account summary account scope conflict")
 
 // RawAccountSummary is a point-in-time view of the account values returned by
@@ -122,6 +123,25 @@ type CurrencyLedger struct {
 	UnrealizedPnL            float64
 	RealizedPnL              float64
 	ExchangeRate             float64
+}
+
+// currencyLedgerField reports whether tag is one of the closed set of
+// $LEDGER:ALL fields represented by CurrencyLedger. Keep request-scope
+// admission and parsing on this same allowlist: an aggregate row that cannot
+// be projected into the typed ledger must never enter a one-account snapshot.
+func currencyLedgerField(tag string) bool {
+	switch tag {
+	case "NetLiquidationByCurrency",
+		"CashBalance",
+		"StockMarketValue",
+		"OptionMarketValue",
+		"UnrealizedPnL",
+		"RealizedPnL",
+		"ExchangeRate":
+		return true
+	default:
+		return false
+	}
 }
 
 const (
@@ -409,7 +429,7 @@ func (c *Connector) CachedAccountSummary() *RawAccountSummary {
 func extractCurrencyLedger(raw map[string]string) map[string]CurrencyLedger {
 	ledger := map[string]*CurrencyLedger{}
 	assign := func(field, ccy, val string) {
-		if ccy == "" || ccy == "BASE" {
+		if !currencyLedgerField(field) || ccy == "" || ccy == "BASE" {
 			return
 		}
 		parsed, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
