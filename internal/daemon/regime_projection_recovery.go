@@ -635,10 +635,7 @@ func (s *Server) publishRulesRegimeStageProjection(ctx context.Context, publicat
 		return fmt.Errorf("rules regime stage projection does not match receipted snapshot revision %d", publication.Revision)
 	}
 	state = state.withoutProjectionHistory()
-	s.rulesRegimeStageMu.Lock()
-	s.rulesRegimeStage = state
-	s.rulesRegimeStageLoaded = true
-	s.rulesRegimeStageMu.Unlock()
+	s.publishRulesRegimeStageState(state, publication)
 	return nil
 }
 

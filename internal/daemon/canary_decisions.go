@@ -32,11 +32,16 @@ func canaryDecisionsDefaultPath() (string, error) {
 
 const (
 	canaryDecisionHeartbeat = time.Hour
-	// canaryJournalEvery is the cadence loop interval. Pinned at 5 minutes:
-	// each tick includes a buildAccountSummary broker round-trip, so the
-	// app's 1-minute poll cadence would add gateway load whenever the app
-	// is not attached; 5 minutes plus fingerprint dedupe plus the hourly
-	// heartbeat is calibration-sufficient (disclosed in the design doc).
+	// canaryEvaluationEvery is the daemon-owned decision cadence. It matches
+	// the established app refresh without depending on an app process being
+	// present. Journaling is a retention choice and cannot stop evaluation.
+	canaryEvaluationEvery = time.Minute
+	// A cold daemon starts the loop before the gateway handshake. Retry the
+	// cheap prerequisite check promptly; once an evaluation is attempted, the
+	// normal minute cadence resumes even if some inputs are degraded.
+	canaryEvaluationRetryEvery = 5 * time.Second
+	// canaryJournalEvery remains the five-minute Regime authority window used
+	// by regimeSnapshotFreshFor. Canary evaluation no longer runs on it.
 	canaryJournalEvery = 5 * time.Minute
 )
 
@@ -212,40 +217,78 @@ func (j *canaryDecisionJournal) append(now time.Time, account, accountMode strin
 	return f.Close()
 }
 
-// runCanaryJournalLoop is the evidence cadence: every canaryJournalEvery
-// it composes the canary exactly as composeBrief does (account snapshot
-// without capital observation, positions, the cached regime snapshot,
-// held-symbol market events) and journals the result. Skipped while the
-// gateway is disconnected, while the journal is disabled, and until the
-// first daemon regime poll completes.
-func (s *Server) runCanaryJournalLoop(ctx context.Context) {
-	if s == nil || s.canaryDecisions == nil {
+// startCanaryEvaluationLoop starts the daemon-owned Canary evaluator. The
+// immediate first attempt removes the former five-minute startup blind spot;
+// gateway connection and each new Regime publication also wake the loop.
+func (s *Server) startCanaryEvaluationLoop(ctx context.Context) {
+	if s == nil || ctx == nil {
 		return
 	}
-	t := time.NewTicker(canaryJournalEvery)
-	defer t.Stop()
+	s.canaryEvaluationLoopWG.Add(1)
+	go func() {
+		defer s.canaryEvaluationLoopWG.Done()
+		s.runCanaryEvaluationLoop(ctx)
+	}()
+}
+
+func (s *Server) runCanaryEvaluationLoop(ctx context.Context) {
+	if s == nil || ctx == nil {
+		return
+	}
+	runCanaryEvaluationLoopWith(
+		ctx,
+		s.canaryEvaluationWakeChannel(),
+		canaryEvaluationEvery,
+		canaryEvaluationRetryEvery,
+		s.canaryEvaluationTick,
+	)
+}
+
+type canaryEvaluation func(context.Context) bool
+
+// runCanaryEvaluationLoopWith keeps the scheduler deterministic in tests. A
+// capacity-one wake channel coalesces repeated publications while an
+// evaluation is in flight; the evaluation always reads the newest authority.
+func runCanaryEvaluationLoopWith(ctx context.Context, wake <-chan struct{}, every, retry time.Duration, evaluate canaryEvaluation) {
+	if ctx == nil || evaluate == nil || every <= 0 || retry <= 0 {
+		return
+	}
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-wake:
+		case <-timer.C:
 		}
-		s.canaryJournalTick(ctx)
+		// A timer and a publication may become ready together. One evaluation
+		// covers both because it reads the latest immutable Regime publication.
+		select {
+		case <-wake:
+		default:
+		}
+		next := every
+		if !evaluate(ctx) {
+			next = retry
+		}
+		timer.Reset(next)
 	}
 }
 
-// canaryJournalTick composes and journals one canary decision. Split from
-// the loop for tests.
-func (s *Server) canaryJournalTick(ctx context.Context) {
-	if s == nil || s.canaryDecisions == nil || !s.canaryJournalEnabled() {
-		return
+// canaryEvaluationTick composes and publishes one Canary decision exactly as
+// composeBrief does. The journal setting is intentionally absent: it controls
+// only the optional retained event inside journalCanaryDecision.
+func (s *Server) canaryEvaluationTick(ctx context.Context) bool {
+	if s == nil || ctx == nil || ctx.Err() != nil {
+		return false
 	}
 	if s.gatewayConnector() == nil {
-		return
+		return false
 	}
-	regime, err := s.briefRegimeSnapshot()
+	regime, err := s.briefRegimeSnapshotContext(ctx)
 	if err != nil || regime == nil {
-		return // cached snapshot is nil until the first regime poll
+		return false // cached snapshot is nil until the first regime poll
 	}
 	acct, _ := s.buildAccountSummary(ctx, false)
 	pos, _ := s.handlePositionsList(ctx, &rpc.Request{})
@@ -266,4 +309,11 @@ func (s *Server) canaryJournalTick(ctx context.Context) {
 	}
 	can := canary.ComputeCanary(in)
 	s.journalCanaryDecision(&can)
+	return true
+}
+
+// canaryJournalTick remains as a narrow compatibility seam for legacy tests.
+// It now performs an evaluation; the journal setting controls retention only.
+func (s *Server) canaryJournalTick(ctx context.Context) {
+	s.canaryEvaluationTick(ctx)
 }

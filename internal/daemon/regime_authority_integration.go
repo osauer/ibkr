@@ -64,7 +64,9 @@ func (s *Server) stopServerContextAndWait() {
 		cancel()
 	}
 	s.regimeRefreshLoopWG.Wait()
+	s.rulebookRefreshLoopWG.Wait()
 	s.alertShadowLoopWG.Wait()
+	s.canaryEvaluationLoopWG.Wait()
 	s.stopDataHealthAlertShadowWorker()
 	if cache != nil {
 		cache.wait()

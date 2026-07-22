@@ -548,6 +548,14 @@ type Server struct {
 	regimeSnapshots          *regimeSnapshotCache
 	regimeProjectionRepairMu sync.Mutex
 	regimeRefreshLoopWG      sync.WaitGroup
+	// Canary evaluation is daemon-owned and independent of app presence and
+	// decision-journal retention. Regime publications and reconnects share the
+	// buffered wake; the loop drains during daemon shutdown.
+	canaryEvaluationWake   chan struct{}
+	canaryEvaluationLoopWG sync.WaitGroup
+	rulebookRefreshLoopWG  sync.WaitGroup
+	regimeConsumerWakeMu   sync.Mutex
+	regimeConsumerRevision int64
 	// alertShadow is the daemon-owned, record-only alert measurement path.
 	// It persists lifecycle through alertEpisodes but has no sender, delivery
 	// eligibility, page policy, badge, or service-worker authority.
@@ -1345,6 +1353,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// all daemon-owned read loops only after the initial connect slot is claimed
 	// so that read-side demand cannot launch reconnectFlow alongside cold start.
 	s.startRegimeRefreshLoop(serverCtx)
+	s.startRulebookCanonicalRefreshLoop(serverCtx)
 	s.startAlertShadowObservationLoops(serverCtx)
 	go s.runAccountPnLAuthorityLoop(serverCtx)
 	go s.acceptLoop(ctx, s.listener)
@@ -1364,7 +1373,7 @@ func (s *Server) Start(ctx context.Context) error {
 		go s.riskPolicies.Run(serverCtx, s.logger.Infof)
 	}
 	go s.runFlexFetchLoop(serverCtx)
-	go s.runCanaryJournalLoop(serverCtx)
+	s.startCanaryEvaluationLoop(serverCtx)
 	if s.tradeProposals != nil {
 		s.proposalsStarted.Do(func() {
 			go s.tradeProposals.Run(serverCtx)
@@ -1994,6 +2003,11 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	// finishing reports Connected=false — the CLI keeps polling and the
 	// first user-visible response shows the full background-task list.
 	s.postConnectSetupDone.Store(true)
+	// The evaluator starts before the gateway handshake so daemon startup never
+	// depends on an app process. Wake it now that account and portfolio streams
+	// have been requested; a later Regime publication supplies another
+	// coalesced wake after market authority advances.
+	s.wakeCanaryEvaluation()
 }
 
 // prewarmZeroGamma kicks the first dealer zero-gamma compute of a
