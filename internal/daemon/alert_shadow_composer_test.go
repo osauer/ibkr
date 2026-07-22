@@ -238,6 +238,33 @@ func TestAlertShadowRulebookRequiresCanonicalUniverseAndReasons(t *testing.T) {
 	}
 }
 
+func TestAlertShadowRulebookReagesCurrentInputsAtObservation(t *testing.T) {
+	base := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+	for i := range result.InputHealth {
+		if result.InputHealth[i].Source == "positions" {
+			result.InputHealth[i].MaxAgeSeconds = 300
+		}
+	}
+
+	stillCurrent := alertShadowMapRulebook(alertShadowTestBrokerScope(t), result, base.Add(299*time.Second))
+	if !stillCurrent.Covered || stillCurrent.Status != alertShadowStatusCurrent {
+		t.Fatalf("input inside its freshness budget was not trusted: %+v", stillCurrent)
+	}
+	wantFreshUntil := base.Add(300 * time.Second)
+	if !stillCurrent.FreshUntil.Equal(wantFreshUntil) {
+		t.Fatalf("fresh until = %s, want source expiry %s", stillCurrent.FreshUntil, wantFreshUntil)
+	}
+
+	stale := alertShadowMapRulebook(alertShadowTestBrokerScope(t), result, base.Add(301*time.Second))
+	if stale.Covered || stale.EvidenceHealth != rpc.AlertEvidenceStale || stale.Reason != alertShadowReasonSourceHealthStale {
+		t.Fatalf("expired input did not fail closed as stale: %+v", stale)
+	}
+	if !stale.FreshUntil.Equal(wantFreshUntil) {
+		t.Fatalf("stale fresh until = %s, want source expiry %s", stale.FreshUntil, wantFreshUntil)
+	}
+}
+
 func TestAlertShadowComposerOrderIntegrityRequiresConfirmationAndCurrentNegative(t *testing.T) {
 	store := openAlertRegistryTestStore(t, alertRegistryTestPath(t))
 	defer store.Close()

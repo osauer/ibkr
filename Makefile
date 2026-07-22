@@ -51,12 +51,11 @@ SKILL_SRC  ?= skills/ibkr
 
 MAIN_BRANCH ?= main
 RELEASE_TEST_JOBS ?= 3
-MCPB_PACKAGE ?= @anthropic-ai/mcpb@2.1.2
 MCP_PUBLISHER ?= $(if $(wildcard bin/mcp-publisher),bin/mcp-publisher,mcp-publisher)
 MCP_REGISTRY_AUTO_LOGIN ?= 1
 MCP_REGISTRY_LOGIN_METHOD ?= github
 
-.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check go-doc-check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-market-events-check app-service-worker-check remote-relay-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish registry-publish-verify-first release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-regen account-data-check hook-behavior-check agent-config-check
+.PHONY: help build install restart-daemon uninstall test test-pkg test-daemon clean install-plugin install-plugin-refresh install-skill uninstall-skill all check go-doc-check gofmt-check vet-check staticcheck-check govulncheck-check govuln-prewarm-install fmt app-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-market-events-check app-service-worker-check remote-relay-check release-packaging-check app-refresh app-refresh-smoke app-smoke app-screenshots cli-screenshots app-lifecycle-smoke release release-binaries release-mcpb release-checksums release-registry-server registry-login release-auth-preflight registry-publish registry-publish-verify-first release-publish release-verify release-smoke release-site-check smoke smoke-build smoke-only smoke-fast version plugin-check parity-check modernize modernize-check refresh-spx-members hook-version-check registry-version-check changelog-check changelog-lint changelog-stub docs-html-check docs-html-regen account-data-check hook-behavior-check agent-config-check
 
 help: ## List available targets
 	@awk 'BEGIN {FS = ":.*##"; print "Available targets (default: help):\n"} \
@@ -153,6 +152,9 @@ remote-relay-check: ## Cloudflare remote-relay unit tests (node --test, no npm n
 	@command -v node >/dev/null 2>&1 || { echo "remote-relay-check: node not found — this gate is binding, install Node.js" >&2; exit 1; }
 	cd cloudflare/remote-relay && node --test test/*.test.js
 
+release-packaging-check: ## Verify tag-isolated assembly, archive contents, and release-pinned links
+	./scripts/check-release-packaging.sh
+
 # Static drift gate between the Playwright app scripts and the SPA they
 # assert against, plus the other web/app contract tests. Born of the
 # 0574bd3 incident (2026-06-09): risk-plan ids were removed from
@@ -178,12 +180,11 @@ app-refresh-smoke: app-refresh ## Refresh the shared app host, then run the brow
 app-smoke: ## Browser-smoke a running ibkr app without scanning a QR code
 	node scripts/app-browser-smoke.mjs --base-url $(APP_SMOKE_URL) --browser $(APP_SMOKE_BROWSER) --no-notification
 
-# Account id and balances are rewritten to fixture values inside the page
-# before the SPA renders, so no real account data can reach the pixels —
-# the script aborts if any id-shaped string other than the placeholder is
-# visible. See docs/social/canary-app-{mobile,desktop}.png.
-app-screenshots: ## Regenerate the published app screenshots from a running ibkr app (fixture account data)
-	node scripts/app-screenshots.mjs --base-url $(APP_SMOKE_URL) --browser $(APP_SMOKE_BROWSER)
+# The complete monitor snapshot is synthetic before any published image is
+# written, covering positions, symbols, orders, and proposals as well as the
+# account id and balances. See docs/social/canary-app-{mobile,desktop}.png.
+app-screenshots: ## Regenerate the published app screenshots from a running ibkr app (fully synthetic data)
+	node scripts/app-screenshots.mjs --base-url $(APP_SMOKE_URL) --browser $(APP_SMOKE_BROWSER) --synthetic
 
 cli-screenshots: ## Regenerate the published CLI screenshots from cmd/_preview fixtures
 	node scripts/cli-screenshots.mjs
@@ -239,7 +240,7 @@ test: ## Full gate: check + pkg tests + daemon/integration tests (-race), overla
 # review anyway.
 CHECK_DEPS ?= plugin-check parity-check
 CHECK_JOBS ?= 8
-CHECK_TARGETS = $(CHECK_DEPS) agent-config-check modernize-check docs-check docs-html-check changelog-check account-data-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-market-events-check app-service-worker-check remote-relay-check go-doc-check gofmt-check vet-check staticcheck-check govulncheck-check
+CHECK_TARGETS = $(CHECK_DEPS) agent-config-check modernize-check docs-check docs-html-check changelog-check account-data-check release-packaging-check app-contract-check app-syntax-check app-governance-check app-alert-unread-check app-alert-inbox-v2-check app-market-events-check app-service-worker-check remote-relay-check go-doc-check gofmt-check vet-check staticcheck-check govulncheck-check
 CHECK_MAKEFLAGS = $(if $(filter 0,$(MAKELEVEL)),-j$(CHECK_JOBS),)
 check: ## agent config/hooks + Go docs/format/vet/staticcheck/vulns + modernize/plugin/parity/docs/changelog/account/app checks (binding pre-commit gate)
 	$(MAKE) $(CHECK_MAKEFLAGS) $(CHECK_TARGETS)
@@ -436,6 +437,7 @@ docs-regen: ## Regenerate docs/reference/*.md and their public HTML derivatives
 	go run ./scripts/docgen/config-ref
 	go run ./scripts/docgen/mcp-tools
 	go run ./scripts/check-mcp-server-card -write
+	cp docs/mcp-server.json docs/.well-known/mcp/server.json
 	go run ./scripts/docgen/docs-html
 
 # docs-check is the CI gate: regenerate to a tempfile, diff against the
@@ -446,6 +448,11 @@ docs-regen: ## Regenerate docs/reference/*.md and their public HTML derivatives
 docs-check: ## Verify checked-in docs/reference/*.md match what the generators emit
 	@go test ./scripts/docgen/config-ref
 	@go run ./scripts/check-mcp-server-card
+	@cmp -s docs/mcp-server.json docs/.well-known/mcp/server.json || { \
+		echo "docs-check: docs/.well-known/mcp/server.json differs from canonical docs/mcp-server.json" >&2; \
+		echo "            run \`make docs-regen\` to refresh the public discovery copy" >&2; \
+		exit 1; \
+	}
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 	fail=0; \
 	for gen in config-ref mcp-tools; do \
@@ -677,18 +684,13 @@ release-binaries: ## Cross-compile read-only + trading tarballs and the (read-on
 		echo "release-binaries: RELEASE_VERSION is required, e.g. make release-binaries RELEASE_VERSION=v0.6.0" >&2; \
 		exit 1; \
 	fi
-	@if ! git rev-parse --verify --quiet $(RELEASE_VERSION) >/dev/null; then \
+	@if ! git rev-parse --verify --quiet "refs/tags/$(RELEASE_VERSION)^{commit}" >/dev/null; then \
 		echo "release-binaries: tag $(RELEASE_VERSION) does not exist; run \`make release RELEASE_VERSION=$(RELEASE_VERSION)\` first" >&2; \
 		exit 1; \
 	fi
-	$(eval RELEASE_COMMIT := $(shell git rev-parse $(RELEASE_VERSION)^{commit}))
-	$(eval RELEASE_DATE := $(shell git show -s --format=%cI $(RELEASE_VERSION)^{commit}))
-	$(eval RELEASE_LDFLAGS := $(STRIP_LDFLAGS) -X main.version=$(RELEASE_VERSION) -X main.commit=$(RELEASE_COMMIT) -X main.date=$(RELEASE_DATE))
-	rm -rf $(DIST_DIR)
-	mkdir -p $(DIST_DIR)
-	@printf '%s\n' $(RELEASE_TARGETS) | xargs -P $(RELEASE_BUILD_JOBS) -I {} ./scripts/build-release-target.sh {} "$(RELEASE_VERSION)" "$(RELEASE_LDFLAGS)" "$(DIST_DIR)"
-	$(MAKE) release-mcpb RELEASE_VERSION=$(RELEASE_VERSION)
-	$(MAKE) release-checksums RELEASE_VERSION=$(RELEASE_VERSION)
+	./scripts/with-release-tag-checkout.sh "$(RELEASE_VERSION)" \
+		"$(CURDIR)/scripts/build-release-artifacts.sh" all "$(RELEASE_VERSION)" "$(abspath $(DIST_DIR))" \
+		"$(RELEASE_TARGETS)" "$(RELEASE_BUILD_JOBS)" "$(STRIP_LDFLAGS)"
 	@echo
 	@echo "Built artefacts in $(DIST_DIR)/:"
 	@ls -la $(DIST_DIR)
@@ -698,45 +700,18 @@ release-mcpb: ## Build the cross-platform MCP Bundle from release tarballs
 		echo "release-mcpb: RELEASE_VERSION is required, e.g. make release-mcpb RELEASE_VERSION=v1.2.1" >&2; \
 		exit 1; \
 	fi
-	MCPB_PACKAGE=$(MCPB_PACKAGE) ./scripts/build-mcpb.sh "$(RELEASE_VERSION)" "$(DIST_DIR)" "$(RELEASE_TARGETS)"
+	./scripts/with-release-tag-checkout.sh "$(RELEASE_VERSION)" \
+		"$(CURDIR)/scripts/build-release-artifacts.sh" mcpb "$(RELEASE_VERSION)" "$(abspath $(DIST_DIR))" \
+		"$(RELEASE_TARGETS)" "$(RELEASE_BUILD_JOBS)" "$(STRIP_LDFLAGS)"
 
 release-checksums: ## Sign SHA256SUMS for tarballs and MCPB assets
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
 		echo "release-checksums: RELEASE_VERSION is required, e.g. make release-checksums RELEASE_VERSION=v1.2.1" >&2; \
 		exit 1; \
 	fi
-	@if ! ls $(DIST_DIR)/ibkr-$(RELEASE_VERSION)-*.tar.gz >/dev/null 2>&1; then \
-		echo "release-checksums: missing release tarballs in $(DIST_DIR)" >&2; \
-		exit 1; \
-	fi
-	@if ! ls $(DIST_DIR)/ibkr-trading-$(RELEASE_VERSION)-*.tar.gz >/dev/null 2>&1; then \
-		echo "release-checksums: missing trading-variant tarballs in $(DIST_DIR)" >&2; \
-		exit 1; \
-	fi
-	@if [ ! -f "$(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb" ]; then \
-		echo "release-checksums: missing $(DIST_DIR)/ibkr-$(RELEASE_VERSION).mcpb; run make release-mcpb" >&2; \
-		exit 1; \
-	fi
-	@if [ ! -f "$(DIST_DIR)/ibkr.mcpb" ]; then \
-		echo "release-checksums: missing $(DIST_DIR)/ibkr.mcpb; run make release-mcpb" >&2; \
-		exit 1; \
-	fi
-	@( cd $(DIST_DIR) && shasum -a 256 ibkr-$(RELEASE_VERSION)-*.tar.gz ibkr-trading-$(RELEASE_VERSION)-*.tar.gz ibkr-$(RELEASE_VERSION).mcpb ibkr.mcpb > SHA256SUMS )
-	@command -v gpg >/dev/null 2>&1 || { \
-		echo "release-checksums: gpg not on PATH — required to sign SHA256SUMS for v1.0+ releases" >&2; \
-		exit 1; \
-	}
-	@expected_fp=$$(awk -F\" '/ReleaseSigningKeyFingerprint =/{print $$2; exit}' internal/update/keyring.go); \
-	gpg --list-secret-keys --with-colons "$$expected_fp" >/dev/null 2>&1 || { \
-		echo "release-checksums: signing key $$expected_fp is not in the local gpg keyring — see SECURITY.md for setup" >&2; \
-		exit 1; \
-	}; \
-	echo "==> signing SHA256SUMS with $$expected_fp"; \
-	( cd $(DIST_DIR) && gpg --batch --yes --local-user "$$expected_fp" --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS ) || exit 1; \
-	( cd $(DIST_DIR) && gpg --verify SHA256SUMS.asc SHA256SUMS ) >/dev/null 2>&1 || { \
-		echo "release-checksums: produced SHA256SUMS.asc but it failed self-verify — aborting" >&2; \
-		exit 1; \
-	}
+	./scripts/with-release-tag-checkout.sh "$(RELEASE_VERSION)" \
+		"$(CURDIR)/scripts/build-release-artifacts.sh" checksums "$(RELEASE_VERSION)" "$(abspath $(DIST_DIR))" \
+		"$(RELEASE_TARGETS)" "$(RELEASE_BUILD_JOBS)" "$(STRIP_LDFLAGS)"
 
 release-registry-server: ## Generate and validate dist/server.json for MCP Registry publishing
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
@@ -816,9 +791,11 @@ changelog-check: ## Verify CHANGELOG.md has no template or maintainer-process le
 # Born of the 2026-06-11 incident: a root-level scratch page with real
 # margin/net-liq figures shipped in the v1.9.0 tag and needed a history
 # rewrite. Fails on root HTML, *lab*.html / *scratch* names, and IBKR
-# account IDs (U/DU + 6-9 digits) in non-Go files.
+# account IDs (U/DU + 6-9 digits) in every tracked file, including tests
+# and binary blobs.
 account-data-check: ## No IBKR account data or scratch pages in tracked files
 	@./scripts/check-no-account-data.sh
+	@./scripts/check-no-account-data_test.sh
 
 changelog-lint: ## Validate the topmost CHANGELOG.md entry matches RELEASE_VERSION and has required shape
 	@if [ -z "$(RELEASE_VERSION)" ]; then \

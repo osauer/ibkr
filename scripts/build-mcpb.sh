@@ -133,7 +133,7 @@ cat > "$stage/manifest.json" <<JSON
   ],
   "license": "MIT",
   "privacy_policies": [
-    "https://github.com/osauer/ibkr/blob/main/PRIVACY.md"
+    "https://github.com/osauer/ibkr/blob/$version/PRIVACY.md"
   ],
   "compatibility": {
     "platforms": ["darwin", "linux"]

@@ -7,7 +7,7 @@ import { $, blockerText, cleanDetail, compactMoney, compactWholeMoney, firstNumb
 import { currentMarketCalendar, marketSessionLabel } from "./shell.js";
 import { state } from "./state.js";
 
-function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = {}) {
+function renderProtectionPanel(proposals = {}, autoTrade = {}, marketEvents = state.snapshot?.market_events || {}) {
   const panel = $("protectionPanel");
   const detail = $("protectionDetailPanel");
   const toggle = $("protectionToggle");

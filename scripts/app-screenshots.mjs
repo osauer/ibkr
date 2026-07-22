@@ -26,6 +26,9 @@ const baseURL = (args["base-url"] || "http://127.0.0.1:8765").replace(/\/+$/, ""
 const outDir = args["out-dir"] || "docs/social";
 const browserName = args.browser || "chromium";
 const synthetic = args.synthetic === "true";
+if (!synthetic && path.resolve(outDir) === path.resolve("docs/social")) {
+  throw new Error("refusing to write published screenshots without --synthetic");
+}
 
 // Documentation placeholder id (allowlisted by check-no-account-data) and
 // deliberately tidy fixture figures — recognizable as demo data.

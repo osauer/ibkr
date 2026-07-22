@@ -134,7 +134,7 @@ function heldStressMetricRow(stress) {
   return row;
 }
 
-function renderUnderlyings(positions = {}, account = {}, marketEvents = {}) {
+function renderUnderlyings(positions = {}, account = {}, marketEvents = state.snapshot?.market_events || {}) {
   const list = $("underlyingBookList");
   if (!list) return;
 

@@ -10,11 +10,9 @@
 #      web/; root HTML is a scratch page by definition here.
 #   2. No scratch-page names anywhere (*lab*.html, *scratch*).
 #   3. No IBKR account IDs (U / DU followed by 6-9 digits) anywhere,
-#      Go files included — the 2026-06-11 follow-up incident put the live
-#      U-account ID in two Go test files while *.go was still excluded
-#      here. Only the documentation/test placeholders (U1234567-style
-#      dummies) and the DU7654321 paper account (committed by deliberate
-#      policy) are allowlisted.
+#      including Go files and binary blobs. Only conspicuous synthetic
+#      documentation/test placeholders (U1234567-style dummies) are
+#      allowlisted.
 set -eu
 
 # Byte-wise grep: the locale-aware path is ~5x slower over the docs tree.
@@ -53,16 +51,17 @@ fi
 #    here). Boundary classes instead of \b for BSD/GNU regex portability;
 #    the trailing class rejects longer digit runs.
 id_re='(^|[^[:alnum:]_])D?U[0-9]{6,9}([^[:alnum:]]|$)'
-allow_re='D?U1234567|D?U7654321|DU123456|DU0000000|DU7654321'
-candidates=$(git grep --cached -lIE "$id_re" -- ":!$self" || true)
+allow_re='D?U1234567|D?U7654321|DU123456|DU0000000'
+candidates=$(git grep --cached -laEi "$id_re" -- ":!$self" || true)
 for f in $candidates; do
-  ids=$(git grep --cached -hoIE "$id_re" -- "$f" | grep -oE 'D?U[0-9]{6,9}' |
-    grep -vxE "$allow_re" | sort -u || true)
-  if [ -n "$ids" ]; then
-    echo "check-no-account-data: $f contains IBKR account ID(s): $(printf '%s ' $ids)" >&2
-    echo "                       real IDs must never be committed; use the U1234567 / DU1234567 placeholders" >&2
-    status=1
-  fi
+	ids=$(git grep --cached -haoiE "$id_re" -- "$f" | grep -oiE 'D?U[0-9]{6,9}' |
+		tr '[:lower:]' '[:upper:]' | grep -vxE "$allow_re" || true)
+	if [ -n "$ids" ]; then
+		count=$(printf '%s\n' "$ids" | wc -l | tr -d ' ')
+		echo "check-no-account-data: $f contains $count non-placeholder IBKR account ID occurrence(s)" >&2
+		echo "                       real IDs must never be committed; use the U1234567 / DU1234567 placeholders" >&2
+		status=1
+	fi
 done
 
 [ "$status" -eq 0 ] && echo "check-no-account-data: OK"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -149,7 +150,7 @@ func TestWorkerRequestCancellationIsPerRequest(t *testing.T) {
 
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/events" {
 			close(started)
 			<-r.Context().Done()
@@ -158,66 +159,91 @@ func TestWorkerRequestCancellationIsPerRequest(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	t.Cleanup(srv.Close)
+	t.Cleanup(origin.Close)
+
+	relayResult := make(chan error, 1)
+	relay := httptest.NewServer(http.HandlerFunc(func(wr http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(wr, r, nil)
+		if err != nil {
+			relayResult <- err
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "test complete")
+		write := func(f frame) error {
+			raw, err := json.Marshal(f)
+			if err != nil {
+				return err
+			}
+			return conn.Write(r.Context(), websocket.MessageText, raw)
+		}
+		if err := write(frame{Type: "request", ID: "stream", Path: "/api/events"}); err != nil {
+			relayResult <- err
+			return
+		}
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			relayResult <- errors.New("stream request did not reach the local app")
+			return
+		}
+		if err := write(frame{Type: "request", ID: "other", Path: "/api/bootstrap"}); err != nil {
+			relayResult <- err
+			return
+		}
+		if err := write(frame{Type: "request_cancel", ID: "stream"}); err != nil {
+			relayResult <- err
+			return
+		}
+		select {
+		case <-cancelled:
+		case <-time.After(2 * time.Second):
+			relayResult <- errors.New("request_cancel frame did not cancel the local app request")
+			return
+		}
+
+		readCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		for {
+			_, raw, err := conn.Read(readCtx)
+			if err != nil {
+				relayResult <- err
+				return
+			}
+			var got frame
+			if err := json.Unmarshal(raw, &got); err != nil {
+				relayResult <- err
+				return
+			}
+			if got.ID == "other" && got.Type == "response_end" {
+				relayResult <- nil
+				return
+			}
+		}
+	}))
+	t.Cleanup(relay.Close)
 
 	worker := &Worker{
-		originURL:  srv.URL,
-		publicURL:  "https://remote.osauer.dev",
-		httpClient: srv.Client(),
+		originURL:    origin.URL,
+		publicURL:    "https://remote.osauer.dev",
+		connectorURL: "ws" + strings.TrimPrefix(relay.URL, "http"),
+		token:        "test-connector-token",
+		httpClient:   http.DefaultClient,
 	}
-	requests := newRequestCancelSet()
-	streamCtx, finishStream := requests.start(t.Context(), "stream")
-	defer finishStream()
-	otherCtx, finishOther := requests.start(t.Context(), "other")
-	defer finishOther()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = worker.serveRequest(streamCtx, frame{
-			Type: "request",
-			ID:   "stream",
-			Path: "/api/events",
-		}, func(ctx context.Context, _ frame) error {
-			return ctx.Err()
-		})
-	}()
+	connectDone := make(chan error, 1)
+	go func() { connectDone <- worker.connectOnce(t.Context()) }()
 
 	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("stream request did not reach the local app")
-	}
-	requests.cancel("stream")
-	select {
-	case <-cancelled:
-	case <-time.After(2 * time.Second):
-		t.Fatal("request_cancel did not cancel the local app request")
+	case err := <-relayResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("relay cancellation exchange did not finish")
 	}
 	select {
-	case <-otherCtx.Done():
-		t.Fatal("cancelling one request cancelled its sibling")
-	default:
-	}
-	select {
-	case <-done:
+	case <-connectDone:
 	case <-time.After(2 * time.Second):
-		t.Fatal("cancelled relay request did not return")
-	}
-
-	var frames []frame
-	if err := worker.serveRequest(otherCtx, frame{
-		Type: "request",
-		ID:   "other",
-		Path: "/api/bootstrap",
-	}, func(_ context.Context, f frame) error {
-		frames = append(frames, f)
-		return nil
-	}); err != nil {
-		t.Fatalf("second request over the same connector context: %v", err)
-	}
-	if len(frames) != 2 || frames[0].Type != "response_start" || frames[1].Type != "response_end" {
-		t.Fatalf("second request frames = %#v, want start/end", frames)
+		t.Fatal("connector did not return after relay closed")
 	}
 }
 

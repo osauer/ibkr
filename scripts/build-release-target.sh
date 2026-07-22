@@ -21,6 +21,17 @@ dist_dir="${4:?dist dir required}"
 os="${target%-*}"
 arch="${target#*-}"
 
+for source_path in LICENSE README.md SECURITY.md docs/guides/trading-preview.md; do
+	if [ ! -f "$source_path" ]; then
+		echo "release source is missing required file: $source_path" >&2
+		exit 1
+	fi
+done
+if ! grep -Eq '^## Safety([[:space:]]|$)' README.md; then
+	echo "release source README is missing the linked Safety section" >&2
+	exit 1
+fi
+
 build_variant() {
 	local prefix="$1" tags="$2"
 	local base="${prefix}-${version}-${target}"
@@ -51,6 +62,24 @@ WARN
 		done
 	fi
 	( cd "$dist_dir" && tar -czf "$base.tar.gz" "$base" )
+	archive="$dist_dir/$base.tar.gz"
+	for required_path in "$base/ibkr" "$base/LICENSE" "$base/README.md"; do
+		if ! tar -tzf "$archive" | grep -Fqx "$required_path"; then
+			echo "release archive missing required path: $required_path" >&2
+			exit 1
+		fi
+	done
+	if [ -n "$tags" ]; then
+		if ! tar -tzf "$archive" | grep -Fqx "$base/TRADING-WARNING.md"; then
+			echo "trading release archive is missing TRADING-WARNING.md" >&2
+			exit 1
+		fi
+	else
+		if tar -tzf "$archive" | grep -Fq 'TRADING-WARNING.md'; then
+			echo "read-only release archive unexpectedly contains TRADING-WARNING.md" >&2
+			exit 1
+		fi
+	fi
 	rm -rf "$stage"
 }
 

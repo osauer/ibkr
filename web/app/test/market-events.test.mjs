@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { positionsHaveShortStock } from "../exposure-relevance.js";
+import { positionsHaveShortStock, relevantMarketEventHealth } from "../exposure-relevance.js";
 import { unknownEventRuleNote } from "../earnings-relevance.js";
 
 test("borrow source health follows stock exposure across both position projections", () => {
@@ -16,6 +16,20 @@ test("borrow source health follows stock exposure across both position projectio
   assert.equal(positionsHaveShortStock({ stocks: [{ sec_type: "FUT", quantity: -2 }] }), false);
   assert.equal(positionsHaveShortStock({ by_underlying: [{ stock: { sec_type: "IND", quantity: -2 } }] }), false);
   assert.equal(positionsHaveShortStock({ stocks: [{ quantity: -2 }] }), true, "legacy empty sec_type remains stock");
+});
+
+test("rendered source health hides borrow only for a known all-long book", () => {
+  const events = { source_health: [
+    { source: "borrow_fee", status: "unavailable" },
+    { source: "halts", status: "unavailable" },
+  ] };
+  const sources = (positions) => relevantMarketEventHealth(events, positions).map((item) => item.source);
+
+  assert.deepEqual(sources({ stocks: [{ sec_type: "STK", quantity: 10 }] }), ["halts"]);
+
+  assert.deepEqual(sources({ stocks: [{ sec_type: "STK", quantity: -1 }] }), ["borrow_fee", "halts"]);
+
+  assert.deepEqual(sources(undefined), ["borrow_fee", "halts"], "unknown positions must fail visible");
 });
 
 test("a sole unresolved earnings catalyst is rendered explicitly", () => {

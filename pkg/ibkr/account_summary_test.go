@@ -117,9 +117,9 @@ func TestCachedAccountSummaryParsesStreamingCache(t *testing.T) {
 	c.ready = true
 	c.SeedAccountIDForTest("DU7654321")
 	conn.accountMu.Lock()
-	conn.accountSummary["NetLiquidation_EUR"] = "1013214.07"
-	conn.accountSummary["BuyingPower_EUR"] = "500000.00"
-	conn.accountSummary["TotalCashValue_EUR"] = "1000.25"
+	conn.accountSummary["NetLiquidation_EUR"] = "1250000.00"
+	conn.accountSummary["BuyingPower_EUR"] = "4800000.00"
+	conn.accountSummary["TotalCashValue_EUR"] = "250000.00"
 	conn.accountMu.Unlock()
 
 	got := c.CachedAccountSummary()
@@ -132,8 +132,8 @@ func TestCachedAccountSummaryParsesStreamingCache(t *testing.T) {
 	if got.Currency != "EUR" {
 		t.Fatalf("Currency = %q, want EUR", got.Currency)
 	}
-	if got.NetLiquidation == nil || *got.NetLiquidation != 1013214.07 {
-		t.Fatalf("NetLiquidation = %v, want 1013214.07", got.NetLiquidation)
+	if got.NetLiquidation == nil || *got.NetLiquidation != 1250000.00 {
+		t.Fatalf("NetLiquidation = %v, want 1250000.00", got.NetLiquidation)
 	}
 }
 

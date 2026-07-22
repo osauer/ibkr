@@ -23,6 +23,22 @@ func dailyBriefPolicyTOML() string {
 		"[cadence.morning]\nclass = \"advisory\"\n\n[cadence.eod]\nclass = \"advisory\"\n\n[cadence.weekly]\nclass = \"advisory\"", 1)
 }
 
+func TestComposeBriefCapturesBoundaryAfterInputs(t *testing.T) {
+	s := newRiskPolicyTestServer(t, dailyBriefPolicyTOML())
+	brief, rules := s.composeBrief(context.Background())
+	if brief == nil || rules == nil {
+		t.Fatalf("composeBrief returned brief=%v rules=%v", brief, rules)
+	}
+	if brief.AsOf.Before(rules.AsOf) {
+		t.Fatalf("brief boundary %s precedes rulebook snapshot %s", brief.AsOf, rules.AsOf)
+	}
+	for _, source := range rules.InputHealth {
+		if !source.AsOf.IsZero() && brief.AsOf.Before(source.AsOf) {
+			t.Fatalf("brief boundary %s precedes %s input %s", brief.AsOf, source.Source, source.AsOf)
+		}
+	}
+}
+
 func TestBriefAckOriginIdempotenceAndAuditFields(t *testing.T) {
 	s := newRiskPolicyTestServer(t, dailyBriefPolicyTOML())
 	now := time.Date(2026, 7, 18, 8, 30, 0, 0, time.Local)

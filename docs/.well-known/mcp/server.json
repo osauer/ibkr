@@ -48,7 +48,7 @@
     "protection proposal reads",
     "option exercise opportunity reads",
     "trading-readiness and platform-settings reads",
-    "open-order and order-status reads",
+    "open-order, order-history, and order-status reads",
     "preview-only order drafts",
     "stock and ETF quote resources"
   ],

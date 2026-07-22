@@ -30,6 +30,31 @@ case "$head" in
     ;;
 esac
 
+# The heading is the release record, not the day the entry was first drafted.
+# Requiring today's local date makes a delayed cut update the public timestamp
+# instead of publishing a stale preparation date.
+entry_date=$(printf '%s\n' "$head" | sed -n 's/^## v[^ ]* — \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\) .*/\1/p')
+today=$(date +%Y-%m-%d)
+if [ "$entry_date" != "$today" ]; then
+  echo "check-changelog-entry: $ver heading date is $entry_date; release date is $today" >&2
+  echo "                       update the top entry when the release is actually cut" >&2
+  exit 1
+fi
+
+# Storage changed from rebuildable side files to one authoritative daemon.db.
+# These retired phrases carry unsafe deletion/recovery advice and must never
+# return in the current release entry.
+top_entry=$(awk -v ver="$ver" '
+  /^## v[0-9]/ { if (in_ver) exit; in_ver = ($0 ~ "^## "ver" ") }
+  in_ver { print }
+' CHANGELOG.md)
+retired=$(printf '%s\n' "$top_entry" | grep -Ei 'history\.db|\.jsonl|history\.rotation|rotated/|history index|journal scan' || true)
+if [ -n "$retired" ]; then
+  echo "check-changelog-entry: $ver still describes the retired history-file architecture" >&2
+  echo "                       describe daemon.db as the sole live authority instead" >&2
+  exit 1
+fi
+
 # 2) Matching entry must have a non-empty `### What's new` section.
 if ! awk -v ver="$ver" '
   /^## v[0-9]/ { if (in_ver) exit; in_ver = ($0 ~ "^## "ver" "); next }

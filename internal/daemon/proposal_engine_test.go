@@ -1955,7 +1955,7 @@ func scopedTestSnapshot(account, mode string, asOf time.Time) rpc.TradeProposalS
 			Revision:       "sha256:test",
 			State:          rpc.TradeProposalStateGenerated,
 			Bucket:         rpc.TradeProposalBucketThetaHygiene,
-			Symbol:         "SAP",
+			Symbol:         "SYNTH",
 			SecType:        "STK",
 			Action:         rpc.OrderActionSell,
 			Quantity:       1,

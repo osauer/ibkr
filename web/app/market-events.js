@@ -1,6 +1,6 @@
 import { $, labelize, normalizeSymbol, shortTimeWithZone } from "./shared.js";
 import { state } from "./state.js";
-import { positionsHaveShortStock } from "./exposure-relevance.js";
+import { borrowSourceHealth, marketEventHealthVisible, positionsHaveShortStock, relevantMarketEventHealth } from "./exposure-relevance.js";
 
 function renderMarketFlagRail(id, items) {
   const rail = $(id);
@@ -101,11 +101,6 @@ function protectionMarketEventBlocker(proposal = {}, events = {}) {
   return null;
 }
 
-function marketEventHealthVisible(health = {}) {
-  const status = String(health.status || "").toLowerCase();
-  return status === "unknown" || status === "stale" || status === "degraded" || status === "partial" || status === "error" || status === "unavailable";
-}
-
 function underlyingHeroMarketFlags(rows, events = {}) {
   const heldSymbols = new Set(rows.filter((row) => !row.virtual).map((row) => row.symbol));
   const counts = new Map();
@@ -128,13 +123,9 @@ function underlyingHeroMarketFlags(rows, events = {}) {
 }
 
 function marketEventHealthItems(events = {}) {
-  const includeBorrow = bookHasShortStock();
-  return (events.source_health || [])
-    .filter(marketEventHealthVisible)
-    .filter((health) => includeBorrow || !borrowSourceHealth(health))
+  return relevantMarketEventHealth(events, state.snapshot?.positions)
     .map((sourceHealth) => ({ sourceHealth }));
 }
-
 
 // Borrow-inventory / borrow-fee feed health only changes a decision when
 // the book can be forced to cover — i.e. it holds short stock (the only
@@ -142,11 +133,6 @@ function marketEventHealthItems(events = {}) {
 // book a permanently unreachable borrow feed is noise, not risk
 // disclosure, so those health chips stay hidden until a short stock
 // position exists. Active borrow flags on held names still render.
-function borrowSourceHealth(health = {}) {
-  const source = String(health.source || "").toLowerCase();
-  return source.includes("borrow_inventory") || source.includes("borrow_fee");
-}
-
 function bookHasShortStock() {
   return positionsHaveShortStock(state.snapshot?.positions);
 }

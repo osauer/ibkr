@@ -467,7 +467,17 @@ func (w *Worker) connectOnce(ctx context.Context) error {
 			requestCtx, finish := requests.start(connCtx, f.ID)
 			wg.Go(func() {
 				defer finish()
-				_ = w.serveRequest(requestCtx, requestFrame, send)
+				requestSend := func(_ context.Context, response frame) error {
+					if err := requestCtx.Err(); err != nil {
+						return err
+					}
+					// A per-request cancellation must not become the write
+					// context for the shared relay socket. Some WebSocket
+					// clients close the connection after any canceled write,
+					// which would take unrelated requests down with it.
+					return send(connCtx, response)
+				}
+				_ = w.serveRequest(requestCtx, requestFrame, requestSend)
 			})
 		case "request_cancel":
 			requests.cancel(f.ID)

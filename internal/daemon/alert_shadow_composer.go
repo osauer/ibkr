@@ -2142,6 +2142,19 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 		case rpc.SourceStatusOK:
 			if health.AsOf.IsZero() || health.AsOf.After(result.AsOf) {
 				covered, worst, reason = false, rpc.AlertEvidenceError, alertShadowReasonSourceTimeInvalid
+				continue
+			}
+			if health.MaxAgeSeconds > 0 {
+				expiresAt := health.AsOf.UTC().Add(time.Duration(health.MaxAgeSeconds) * time.Second)
+				if expiresAt.Before(batch.FreshUntil) {
+					batch.FreshUntil = expiresAt
+				}
+				if observedAt.UTC().After(expiresAt) {
+					covered = false
+					if alertShadowEvidenceRank(rpc.AlertEvidenceStale) > alertShadowEvidenceRank(worst) {
+						worst, reason = rpc.AlertEvidenceStale, alertShadowReasonSourceHealthStale
+					}
+				}
 			}
 		case rpc.SourceStatusStale:
 			covered = false
