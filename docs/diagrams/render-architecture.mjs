@@ -215,13 +215,13 @@ const storageOverviewStyles = `${policyPrimerStyles}      .card-title { font-siz
       .layer { font-size: 13px; }
 `;
 
-const storageERStyles = `${referenceDiagramStyles}      .er-title { font-size: 15px; }
-      .er-key { font-size: 14px; }
-      .er-field { font-size: 14px; }
-      .er-cardinality { font-size: 14px; }
-      .er-semantic { font-size: 14px; }
-      .er-note { font-size: 14px; fill: ${C.muted}; }
-      .layer { font-size: 13px; }
+const storageERStyles = `${referenceDiagramStyles}      .er-title { font-size: 13.5px; }
+      .er-key { font-size: 12.25px; }
+      .er-field { font-size: 12.25px; }
+      .er-cardinality { font-size: 12.25px; }
+      .er-semantic { font-size: 12px; }
+      .er-note { font-size: 12.5px; fill: ${C.muted}; }
+      .layer { font-size: 12.5px; }
 `;
 
 function stripNode(x, y, width, label, iconName = "") {
@@ -606,10 +606,10 @@ function storageOverview() {
   </g>`;
 
   const body = `
-  ${header("Storage Layer: Ownership and Truth", "SQLite is the local engine; one daemon owns the meaning, writes, and typed access path.")}
+  ${header("What the Daemon Keeps—and Where", "Inputs enter from the left; the daemon stores durable state; supported readers receive structured results.")}
 
-  <text x="36" y="138" class="layer">1 · OUTSIDE SQLITE</text>
-  <text x="726" y="138" class="layer">3 · PRODUCT SURFACES</text>
+  <text x="36" y="138" class="layer">1 · OWNED OUTSIDE SQLITE</text>
+  <text x="726" y="138" class="layer">3 · SUPPORTED READERS</text>
 
   ${policyCard({ x: 36, y: 164, width: 210, height: 116, iconName: "fileText", color: C.greenDark, title: "Human TOML", lines: ["config · policy", "approved limits"], format: "people edit" })}
   ${policyCard({ x: 36, y: 300, width: 210, height: 132, iconName: "worldDownload", color: C.blue, title: "Original evidence", lines: ["Flex XML · broker data", "source observations"], format: "measured outside" })}
@@ -618,7 +618,7 @@ function storageOverview() {
 
   <rect x="276" y="118" width="420" height="620" rx="18" fill="${C.panel}" stroke="${C.greenLine}" stroke-width="1.5"/>
   <path d="M276 158h420v-22a18 18 0 0 0 -18 -18h-384a18 18 0 0 0 -18 18z" fill="${C.greenSoft}"/>
-  <text x="296" y="144" class="boundary" style="fill:${C.greenDark}">THE DAEMON IS THE ONLY WRITER</text>
+  <text x="296" y="144" class="boundary" style="fill:${C.greenDark}">2 · THE DAEMON STORES AND SERVES</text>
 
   ${iconTile("serverCog", 296, 178, C.green, 44)}
   <text x="354" y="196" class="node-title">ibkr daemon</text>
@@ -655,24 +655,24 @@ function storageOverview() {
   return svgFrame({
     width: 960,
     height: 804,
-    title: "Storage Layer Ownership and Truth (ibkr canary)",
-    description: "Human-authored TOML, original broker and source evidence, daemon secrets, and app identity remain separate from SQLite. The daemon alone writes daemon.db and exposes structured product access. Recovery artifacts are a distinct boundary, not an output of secrets or app state.",
+    title: "What the Daemon Keeps and Where (ibkr canary)",
+    description: "Human-authored TOML, original broker and source evidence, daemon secrets, and app identity enter from their own locations. The daemon alone writes daemon.db, product surfaces use structured access, and recovery artifacts keep a separate lifecycle.",
     body,
     extraStyles: storageOverviewStyles,
   });
 }
 
 function dbTable({ x, y, width, title, rows, accent = C.green, fill = C.panel }) {
-  const height = 44 + rows.length * 22 + 16;
+  const height = 52 + rows.length * 19;
   const content = rows.map((row, index) => {
     const [key, field] = row;
-    const yy = y + 58 + index * 22;
-    return `<text x="${x + 12}" y="${yy}" class="er-key">${esc(key)}</text><text x="${x + 64}" y="${yy}" class="er-field">${esc(field)}</text>`;
+    const yy = y + 50 + index * 19;
+    return `<text x="${x + 12}" y="${yy}" class="er-key">${esc(key)}</text><text x="${x + 56}" y="${yy}" class="er-field">${esc(field)}</text>`;
   }).join("");
   return `<g role="group" data-table="${esc(title)}" aria-label="Table ${esc(title)}">
-    <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="10" fill="${fill}" stroke="${accent}" stroke-width="1.2"/>
-    <path d="M${x} ${y + 38}h${width}" stroke="${accent}" stroke-width="1.2"/>
-    <text x="${x + 12}" y="${y + 26}" class="er-title">${esc(title)}</text>
+    <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="8" fill="${fill}" stroke="${accent}" stroke-width="1.1"/>
+    <path d="M${x} ${y + 34}h${width}" stroke="${accent}" stroke-width="1.1"/>
+    <text x="${x + 12}" y="${y + 23}" class="er-title">${esc(title)}</text>
     ${content}
   </g>`;
 }
@@ -724,7 +724,7 @@ function validateSQLiteER(svg) {
 
 function sqliteDataModel() {
   const body = `
-  ${header("daemon.db: Physical Relationships", "Every solid line is a declared SQLite foreign key. Dashed lines are application conventions.")}
+  ${header("daemon.db: How the Tables Relate", "Solid lines are SQLite foreign keys. Dashed lines are relationships enforced by the daemon.")}
 
   ${legendItem(610, 40, "slate", "Declared foreign key")}
   ${legendItem(790, 40, "blue", "Application convention", { dashed: true })}
@@ -751,13 +751,13 @@ function sqliteDataModel() {
   ${erFK({ parent: "event_log", child: "regime_decisions", d: "M306 420H326V406H350", parentLabel: "1", childLabel: "0..1", parentX: 312, parentY: 410, childX: 330, childY: 398 })}
   ${erFK({ parent: "event_log", child: "canary_transitions", d: "M306 420H326V532H350", childLabel: "0..1", childX: 330, childY: 524 })}
   ${erFK({ parent: "event_log", child: "risk_policy_events", d: "M306 420H326V658H350", childLabel: "0..1", childX: 330, childY: 650 })}
-  ${erFK({ parent: "event_log", child: "order_events", d: "M306 420H326V784H350", childLabel: "0..1", childX: 330, childY: 776 })}
+  ${erFK({ parent: "event_log", child: "order_events", d: "M306 420H326V770H350", childLabel: "0..1", childX: 330, childY: 762 })}
   ${erFK({ parent: "event_log", child: "rule_transitions", d: "M171 354V336H940V406H924", childLabel: "0..1", childX: 878, childY: 398 })}
   ${erFK({ parent: "event_log", child: "capital_events", d: "M171 354V336H940V532H924", childLabel: "0..1", childX: 878, childY: 524 })}
   ${erFK({ parent: "event_log", child: "proposal_outcomes", d: "M171 354V336H940V658H924", childLabel: "0..1", childX: 878, childY: 650 })}
   ${erFK({ parent: "regime_decisions", child: "regime_indicators", d: "M620 406H634V795H654", parentLabel: "1", childLabel: "0..*", parentX: 624, parentY: 426, childX: 602, childY: 788 })}
 
-  <rect x="36" y="548" width="270" height="290" rx="14" fill="${C.blueSoft}" stroke="${C.blue}" stroke-dasharray="7 6"/>
+  <rect x="36" y="548" width="270" height="250" rx="14" fill="${C.blueSoft}" stroke="${C.blue}" stroke-dasharray="7 6"/>
   <text x="56" y="578" class="boundary" style="fill:${C.blue}"><tspan x="56">APPLICATION CONVENTIONS</tspan><tspan x="56" dy="18">NOT FOREIGN KEYS</tspan></text>
   <text x="56" y="634" class="er-note"><tspan x="56">• current state may commit</tspan><tspan x="56" dy="22">  beside an event or observation</tspan><tspan x="56" dy="32">• one projection family per event</tspan><tspan x="56" dy="22">  is a Go-writer rule</tspan><tspan x="56" dy="32">• shared scope names do not</tspan><tspan x="56" dy="22">  create a relationship</tspan></text>
 
@@ -767,7 +767,7 @@ function sqliteDataModel() {
   ${dbTable({ x: 654, y: 908, width: 270, title: "order_id_floors", rows: [["PK", "floor_scope + scope"], ["", "floor never decreases"]], accent: C.amber })}
 
   ${erFK({ parent: "broker_scopes", child: "consumed_preview_tokens", d: "M306 960H350", parentLabel: "1", childLabel: "0..*", parentX: 312, parentY: 950, childX: 310, childY: 982 })}
-  ${erFK({ parent: "broker_scopes", child: "order_events", d: "M171 908V876H336V784H350", parentLabel: "1", childLabel: "0..*", parentX: 180, parentY: 896, childX: 330, childY: 802 })}
+  ${erFK({ parent: "broker_scopes", child: "order_events", d: "M171 908V876H336V806H350", parentLabel: "1", childLabel: "0..*", parentX: 180, parentY: 896, childX: 304, childY: 818 })}
   ${erSemantic("M654 984H638V1050H171V1034", "broker association enforced by code; no FK", 390, 1072)}
 
   <rect x="36" y="1100" width="888" height="330" rx="16" fill="${C.panel}" stroke="${C.greenLine}"/>
@@ -782,7 +782,7 @@ function sqliteDataModel() {
   ${erFK({ parent: "statement_file_versions", child: "statement_equity_day_versions", d: "M558 1352H590", parentLabel: "1", childLabel: "0..*", parentX: 562, parentY: 1342, childX: 558, childY: 1374 })}
   ${erSemantic("M246 1216H272", "parsed from", 174, 1206)}
   ${erSemantic("M246 1232H260V1352H272", "retained versions", 96, 1344)}
-  ${erSemantic("M418 1256V1294", "written together; no FK", 430, 1282)}
+  ${erSemantic("M418 1256V1294", "written together · no FK", 286, 1282)}
   ${erSemantic("M747 1278V1294", "", 0, 0)}
 
   <text x="924" y="1466" text-anchor="end" class="footnote">schema v1 · 21 tables · inventory checked against internal/daemon/corestore/schema.go</text>
@@ -791,7 +791,7 @@ function sqliteDataModel() {
   const svg = svgFrame({
     width: 960,
     height: 1490,
-    title: "daemon.db Physical Relationships (ibkr canary)",
+    title: "How daemon.db Tables Relate (ibkr canary)",
     description: "A physical entity relationship diagram for SQLite schema version 1. Solid lines represent declared foreign keys with cardinalities. Dashed lines identify application-level relationships that are not enforced by SQLite. Standalone state, observation, migration, import, and order-floor tables have no invented relationships.",
     body,
     extraStyles: storageERStyles,
