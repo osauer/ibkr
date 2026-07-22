@@ -73,8 +73,8 @@ type alertEpisodeEvaluation struct {
 	PendingApplyFailures uint64
 }
 
-// alertEpisodeRegistry owns producer lifecycle identity and its durable
-// shadow audit. It has no sender, target, page policy, cooldown, or threshold.
+// alertEpisodeRegistry owns producer lifecycle identity and its durable audit.
+// It has no sender, target, page policy, cooldown, or threshold.
 type alertEpisodeRegistry struct {
 	mu            sync.Mutex
 	core          *corestore.Store
@@ -308,7 +308,7 @@ func newAlertEpisodeRegistryWithInactiveLimit(ctx context.Context, core *coresto
 	return r, nil
 }
 
-// Apply evaluates one already-classified shadow batch and atomically persists
+// Apply evaluates one already-classified producer batch and atomically persists
 // both the current registry and its typed, redacted decision event.
 func (r *alertEpisodeRegistry) Apply(ctx context.Context, evaluation alertEpisodeEvaluation) (rpc.AlertCandidateSnapshot, error) {
 	if r == nil || r.core == nil {
@@ -376,19 +376,19 @@ func (r *alertEpisodeRegistry) RecordInputDisposition(ctx context.Context, autho
 		return err
 	}
 	if at.IsZero() {
-		return errors.New("alert shadow input disposition requires as_of")
+		return errors.New("alert registry input disposition requires as_of")
 	}
 	if disposition != alertShadowDispositionDuplicate && disposition != alertShadowDispositionStale && disposition != alertShadowDispositionEquivocation {
-		return errors.New("invalid alert shadow input disposition")
+		return errors.New("invalid alert registry input disposition")
 	}
 	seen := make(map[rpc.AlertSource]struct{}, len(sources))
 	for _, source := range sources {
 		if _, ok := seen[source]; ok {
-			return errors.New("duplicate alert shadow disposition source")
+			return errors.New("duplicate alert registry disposition source")
 		}
 		seen[source] = struct{}{}
 		if !alertCoverageContains(alertShadowExpectedSourceSlice(), source) {
-			return errors.New("invalid alert shadow disposition source")
+			return errors.New("invalid alert registry disposition source")
 		}
 	}
 
@@ -431,7 +431,7 @@ func (r *alertEpisodeRegistry) RecordInputDisposition(ctx context.Context, autho
 		for source := range seen {
 			measurement := alertShadowDurableSourceMetric(metrics, source)
 			if measurement == nil {
-				return errors.New("alert shadow disposition source metric is missing")
+				return errors.New("alert registry disposition source metric is missing")
 			}
 			switch disposition {
 			case alertShadowDispositionDuplicate:
@@ -461,13 +461,13 @@ func (r *alertEpisodeRegistry) RecordInputDisposition(ctx context.Context, autho
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("persist alert shadow input disposition: %w", err)
+			return fmt.Errorf("persist alert registry input disposition: %w", err)
 		}
 		r.revision = saved.Revision
 		r.document = next
 		return nil
 	}
-	return errors.New("persist alert shadow input disposition: repeated revision conflict")
+	return errors.New("persist alert registry input disposition: repeated revision conflict")
 }
 
 // RecordApplyFailure durably accounts for a lifecycle evaluation that could
@@ -483,7 +483,7 @@ func (r *alertEpisodeRegistry) RecordApplyFailure(ctx context.Context, authority
 		return err
 	}
 	if at.IsZero() {
-		return errors.New("alert shadow apply failure requires as_of")
+		return errors.New("alert registry apply failure requires as_of")
 	}
 
 	r.mu.Lock()
@@ -528,7 +528,7 @@ func (r *alertEpisodeRegistry) RecordApplyFailure(ctx context.Context, authority
 		}
 		raw, err := json.Marshal(next)
 		if err != nil {
-			return fmt.Errorf("encode alert shadow apply failure: %w", err)
+			return fmt.Errorf("encode alert registry apply failure: %w", err)
 		}
 		saved, err := r.core.CompareAndSwapStateDocument(ctx, corestore.StateDocumentCAS{
 			ScopeKey: daemonStateScope, Kind: alertEpisodeRegistryStateKind,
@@ -541,13 +541,13 @@ func (r *alertEpisodeRegistry) RecordApplyFailure(ctx context.Context, authority
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("persist alert shadow apply failure: %w", err)
+			return fmt.Errorf("persist alert registry apply failure: %w", err)
 		}
 		r.revision = saved.Revision
 		r.document = next
 		return nil
 	}
-	return errors.New("persist alert shadow apply failure: repeated revision conflict")
+	return errors.New("persist alert registry apply failure: repeated revision conflict")
 }
 
 // Snapshot returns the durable current producer view. The bool is false until
@@ -1915,7 +1915,7 @@ func applyAlertShadowCursor(scopeDocument *alertEpisodeRegistryScopeDocument, ki
 
 func validateAlertShadowInputCursor(cursor alertShadowInputCursor) error {
 	if cursor.AsOf.IsZero() || !validAlertRegistryFingerprint(cursor.Fingerprint) {
-		return errors.New("alert shadow input cursor is invalid")
+		return errors.New("alert registry input cursor is invalid")
 	}
 	return nil
 }

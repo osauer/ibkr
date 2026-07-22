@@ -171,7 +171,7 @@ func (s *Server) publishCanonicalRulebookResult(ctx context.Context, result *rpc
 	if binding.connector == nil {
 		// A real unbound evaluation is necessarily degraded because neither
 		// account nor portfolio authority is available. Preserve that useful
-		// diagnostic and the test seam, but make the shadow copy explicitly
+		// diagnostic and the test seam, but make the candidate copy explicitly
 		// uncovered so an injected/current-looking result can never recover.
 		shadowResult := cloneRulesResult(result)
 		if shadowResult.Status == "ok" {

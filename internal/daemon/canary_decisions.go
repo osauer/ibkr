@@ -101,9 +101,9 @@ func (s *Server) journalCanaryDecision(res *rpc.CanaryResult) {
 	if s == nil || res == nil {
 		return
 	}
-	// Capture the broker authority scope once so the record-only shadow episode
+	// Capture the broker authority scope once so the source-neutral alert episode
 	// and the legacy calibration journal cannot disagree across a reconnect.
-	// Raw scope parts remain inside their owning adapters; the shadow registry
+	// Raw scope parts remain inside their owning adapters; the alert registry
 	// persists only the opaque episode key derived from them.
 	scope := s.currentBrokerStateScope()
 	s.observeCanaryAlertShadow(res, scope)

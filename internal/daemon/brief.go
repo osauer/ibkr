@@ -502,7 +502,7 @@ func (s *Server) composeBrief(ctx context.Context) (*rpc.BriefResult, *rpc.Rules
 	// The brief boundary is captured after its input reads. In particular,
 	// Canary source snapshots are stamped while those reads are in flight; a
 	// boundary captured before them makes healthy evidence look future-dated
-	// and causes the shadow producer to fail closed with source_time_invalid.
+	// and causes the alert producer to fail closed with source_time_invalid.
 	now := s.briefNow()
 	res := &rpc.BriefResult{AsOf: now}
 	cal, calErr := s.handleMarketCalendar(&rpc.Request{Params: briefJSON(rpc.MarketCalendarParams{Market: "us", At: now, Days: 1})})

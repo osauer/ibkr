@@ -339,7 +339,7 @@ func TestAlertShadowObservationLoopsDrainOnDaemonCancellation(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("alert shadow heartbeat loops did not drain after daemon cancellation")
+		t.Fatal("alert producer heartbeat loops did not drain after daemon cancellation")
 	}
 }
 

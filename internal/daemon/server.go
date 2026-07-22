@@ -396,7 +396,7 @@ type Server struct {
 	orderIntegrityBeforeCommit     func()
 	stableBrokerEvidenceForTest    func(daemonBrokerEvidenceBinding, func() error) (bool, error)
 	// protectionOrderSnapshot* retains only a short-lived, complete broker
-	// inventory receipt for the 30-second Protection shadow heartbeat. The
+	// inventory receipt for the 30-second Protection producer heartbeat. The
 	// binding includes scope, connector epoch, and Connector order-lifecycle
 	// generation; any later broker order event makes the receipt ineligible.
 	protectionOrderSnapshotMu     sync.Mutex
@@ -562,13 +562,14 @@ type Server struct {
 	// schedule and signal this capacity-one daemon-owned wake. The prior Regime
 	// authority remains visible until a complete replacement publishes.
 	regimeRefreshWake chan struct{}
-	// alertShadow is the daemon-owned, record-only alert measurement path.
-	// It persists lifecycle through alertEpisodes but has no sender, delivery
-	// eligibility, page policy, badge, or service-worker authority.
+	// alertShadow is the daemon-owned source-neutral alert producer. It persists
+	// lifecycle through alertEpisodes; the app dispatcher owns targets,
+	// delivery attempts, badges, and service-worker transport.
 	alertEpisodes *alertEpisodeRegistry
 	alertShadow   *alertShadowComposer
 	// dataHealthObserveMu keeps the hottest read-only status path independent
-	// from shadow persistence. Only one detached observation may run at once;
+	// from alert registry persistence. Only one detached observation may run at
+	// once;
 	// failures back off in memory so an unhealthy SQLite store cannot turn
 	// status polling into a write storm against itself. Adjacent identical
 	// samples coalesce, but semantic transitions remain ordered so an outage
@@ -1304,7 +1305,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.attachAlertShadowAuthority(ctx); err != nil {
 		s.lock.Release()
 		s.lock = nil
-		return fmt.Errorf("attach alert shadow authority: %w", err)
+		return fmt.Errorf("attach alert registry authority: %w", err)
 	}
 
 	ep, derr := discover.Resolve(serverCtx, partialFromConfig(s.cfg.Gateway))

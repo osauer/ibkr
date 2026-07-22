@@ -432,5 +432,5 @@ func waitForAlertShadowSourceCovered(t *testing.T, composer *alertShadowComposer
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("alert shadow source %s did not become covered: %+v", source, last)
+	t.Fatalf("alert registry source %s did not become covered: %+v", source, last)
 }

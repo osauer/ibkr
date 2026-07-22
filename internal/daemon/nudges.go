@@ -1158,9 +1158,9 @@ func (s *Server) composeNudgesSnapshotContext(ctx context.Context) (rpc.NudgesSn
 
 // composeNudgesSnapshotContextWithAuthority captures the exact policy,
 // nudge-store health, and broker scope used by this composition for the
-// record-only alert hook. This avoids later independent reads racing a policy
-// reload, persistence fault, or account/mode transition after the snapshot was
-// built.
+// source-neutral alert producer. This avoids later independent reads racing a
+// policy reload, persistence fault, or account/mode transition after the
+// snapshot was built.
 func (s *Server) composeNudgesSnapshotContextWithAuthority(ctx context.Context, shadowInput *alertShadowNudgeInput) (rpc.NudgesSnapshotResult, error) {
 	now := time.Now().UTC()
 	if s != nil && s.now != nil {

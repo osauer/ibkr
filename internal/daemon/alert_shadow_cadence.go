@@ -11,7 +11,7 @@ import (
 )
 
 // alertShadowObservationEvery is an engineering heartbeat, not a market or
-// delivery threshold. It keeps record-only producer coverage inside the
+// delivery threshold. It keeps alert producer coverage inside the
 // shortest one-minute silence horizon even when no UI or CLI client is open.
 const alertShadowObservationEvery = 30 * time.Second
 
@@ -59,7 +59,7 @@ func (s *Server) runAlertShadowRegimeLoop(ctx context.Context) {
 		_, err := s.handleRegimeSnapshot(observeCtx, &rpc.Request{})
 		cancel()
 		if err != nil && ctx.Err() == nil {
-			s.logger.Debugf("alert shadow: Regime heartbeat unavailable: %v", err)
+			s.logger.Debugf("alert producer: Regime heartbeat unavailable: %v", err)
 		}
 	}
 }
@@ -127,7 +127,7 @@ func (s *Server) observeNudgesAlertShadowHeartbeatWith(ctx context.Context, comp
 	readErr := observeCtx.Err()
 	cancel()
 	if err != nil && ctx.Err() == nil {
-		s.debugf("alert shadow: Nudge heartbeat unavailable: %v", err)
+		s.debugf("alert producer: Nudge heartbeat unavailable: %v", err)
 		return
 	}
 	if readErr != nil || ctx.Err() != nil || !sameBrokerScope(brokerScope, s.currentBrokerStateScope()) || input.Scope != shadowScope {
@@ -139,12 +139,12 @@ func (s *Server) observeNudgesAlertShadowHeartbeatWith(ctx context.Context, comp
 	// of Nudge copy or validation semantics.
 	wire, err := json.Marshal(result)
 	if err != nil {
-		s.debugf("alert shadow: Nudge heartbeat canonical marshal unavailable: %v", err)
+		s.debugf("alert producer: Nudge heartbeat canonical marshal unavailable: %v", err)
 		return
 	}
 	var canonical rpc.NudgesSnapshotResult
 	if err := json.Unmarshal(wire, &canonical); err != nil {
-		s.debugf("alert shadow: Nudge heartbeat canonical decode unavailable: %v", err)
+		s.debugf("alert producer: Nudge heartbeat canonical decode unavailable: %v", err)
 		return
 	}
 	if ctx.Err() != nil || !sameBrokerScope(brokerScope, s.currentBrokerStateScope()) {
@@ -212,7 +212,7 @@ func (s *Server) observeRulebookAlertShadowHeartbeatWithReadContext(ctx context.
 	}
 	if readErr != nil {
 		if result == nil {
-			s.debugf("alert shadow: Rulebook heartbeat unavailable: %v", readErr)
+			s.debugf("alert producer: Rulebook heartbeat unavailable: %v", readErr)
 			return
 		}
 		unavailable := *result
@@ -224,7 +224,7 @@ func (s *Server) observeRulebookAlertShadowHeartbeatWithReadContext(ctx context.
 			{Source: "positions", Status: "unavailable", AsOf: unavailable.AsOf, Notes: []string{"heartbeat request did not complete"}},
 		}
 		result = &unavailable
-		s.debugf("alert shadow: Rulebook heartbeat unavailable: %v", readErr)
+		s.debugf("alert producer: Rulebook heartbeat unavailable: %v", readErr)
 	}
 	if binding.connector == nil {
 		// A Connector may appear while an unbound evaluation is in flight. Even
@@ -248,9 +248,9 @@ func (s *Server) observeRulebookAlertShadowHeartbeatWithReadContext(ctx context.
 		scope: binding.scope, connector: binding.connector, connectorEpoch: binding.connectorEpoch, broker: binding.broker,
 	}, func() error { return s.commitRulebookAlertShadow(ctx, result, scope) })
 	if commitErr != nil {
-		s.warnf("alert shadow: Rulebook heartbeat commit failed: %v", commitErr)
+		s.warnf("alert producer: Rulebook heartbeat commit failed: %v", commitErr)
 	} else if !committed {
-		s.debugf("alert shadow: Rulebook heartbeat evidence changed before commit")
+		s.debugf("alert producer: Rulebook heartbeat evidence changed before commit")
 	}
 }
 
@@ -313,7 +313,7 @@ func (s *Server) observeOrderIntegrityAlertShadowHeartbeatWithReadContext(ctx co
 			Scope: scope, Orders: []rpc.OrderView{},
 		}
 		s.observeOrderIntegrityAlertShadow(ctx, evaluation)
-		s.debugf("alert shadow: Order Integrity heartbeat unavailable: %v", err)
+		s.debugf("alert producer: Order Integrity heartbeat unavailable: %v", err)
 		return
 	}
 	if !sameBrokerScope(scope, evaluation.Scope) {
@@ -341,7 +341,7 @@ func suppressProtectionAlertShadowObservation(ctx context.Context) context.Conte
 }
 
 // observeProtectionAlertShadowHeartbeat rebuilds only the protection facts
-// needed by the shadow producer. It reads the portfolio cache and SQLite order
+// needed by the alert producer. It reads the portfolio cache and SQLite order
 // journal; it never requests quotes, Greeks, account summaries, or broker
 // writes. The canonical cache read may exercise the connector's existing,
 // throttled account-updates re-subscription when a held account has no cached

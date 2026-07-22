@@ -134,10 +134,11 @@ var alertShadowCanonicalRulebookHealth = [...]string{
 	"tape",
 }
 
-// alertShadowComposer is a record-only producer boundary. It has no sender,
-// pageability, cooldown, dwell, or threshold policy. Producers submit already
-// classified typed snapshots; the composer maintains source-scoped coverage
-// and lets alertEpisodeRegistry own durable lifecycle identity.
+// alertShadowComposer is the source-neutral candidate producer boundary. It
+// has no sender, pageability, cooldown, dwell, or threshold policy. Producers
+// submit already classified typed snapshots; the composer maintains
+// source-scoped coverage and lets alertEpisodeRegistry own durable lifecycle
+// identity.
 type alertShadowComposer struct {
 	mu       sync.Mutex
 	registry *alertEpisodeRegistry
@@ -186,8 +187,8 @@ type alertShadowNudgeInput struct {
 
 // alertShadowProtectionInput binds the complete, unfiltered protection
 // ledger to the portfolio-stream receipt that makes a negative trustworthy.
-// General partial or unprotected rows are context only under the approved v1
-// shadow policy; only orphaned and reconciliation-required facts are active.
+// General partial or unprotected rows are context only under the v1 producer
+// policy; only orphaned and reconciliation-required facts are active.
 type alertShadowProtectionInput struct {
 	AsOf                  time.Time
 	EvidenceAsOf          time.Time
@@ -242,8 +243,8 @@ type alertShadowSourceBatch struct {
 	Observations                []alertEpisodeObservation
 }
 
-// alertShadowStatusReport is the non-delivery operational view. Counts are
-// descriptive shadow measurements only: human precision and recall stay
+// alertShadowStatusReport is the producer operational view. Counts are
+// descriptive registry measurements only: human precision and recall stay
 // explicitly unlabelled until an operator supplies outcome labels.
 type alertShadowStatusReport struct {
 	AsOf                  time.Time                 `json:"as_of,omitzero"`
@@ -311,7 +312,7 @@ func defaultAlertShadowSources(scope alertShadowBrokerScope) map[rpc.AlertSource
 
 func newAlertShadowBrokerScope(scope brokerStateScope) (alertShadowBrokerScope, error) {
 	if !brokerScopeConcrete(scope) {
-		return alertShadowBrokerScope{}, errors.New("alert shadow broker scope is not concrete")
+		return alertShadowBrokerScope{}, errors.New("alert producer broker scope is not concrete")
 	}
 	account := strings.ToUpper(strings.TrimSpace(scope.Account))
 	mode := strings.ToLower(strings.TrimSpace(scope.Mode))
@@ -368,7 +369,7 @@ func (c *alertShadowComposer) scopeStateLocked(scope alertShadowBrokerScope) (*a
 // negative or source coverage.
 func (c *alertShadowComposer) ObserveCanary(ctx context.Context, scope alertShadowBrokerScope, result rpc.CanaryResult) (rpc.AlertCandidateSnapshot, error) {
 	if c == nil || c.registry == nil || ctx == nil {
-		return rpc.AlertCandidateSnapshot{}, errors.New("alert shadow composer is unavailable")
+		return rpc.AlertCandidateSnapshot{}, errors.New("alert producer is unavailable")
 	}
 	if result.AsOf.IsZero() || !scope.valid() {
 		return rpc.AlertCandidateSnapshot{}, errors.New(alertShadowReasonBrokerScopeInvalid)
@@ -409,7 +410,7 @@ func (c *alertShadowComposer) ObserveCanary(ctx context.Context, scope alertShad
 // fingerprint, not candidate copy or rendered text.
 func (c *alertShadowComposer) ObserveNudges(ctx context.Context, input alertShadowNudgeInput) (rpc.AlertCandidateSnapshot, error) {
 	if c == nil || c.registry == nil || ctx == nil {
-		return rpc.AlertCandidateSnapshot{}, errors.New("alert shadow composer is unavailable")
+		return rpc.AlertCandidateSnapshot{}, errors.New("alert producer is unavailable")
 	}
 	result := input.Snapshot
 	if result.AsOf.IsZero() || !input.Scope.valid() {
@@ -466,10 +467,10 @@ func (c *alertShadowComposer) ObserveNudges(ctx context.Context, input alertShad
 // authority health can become stale while the same semantic last-good remains
 // served, and that transition must not be misclassified as timestamp
 // equivocation. Only current early warning, confirmed stress, and panic are
-// active under the approved shadow policy; data_quality is never a warning.
+// active under the producer policy; data_quality is never a warning.
 func (c *alertShadowComposer) ObserveRegime(ctx context.Context, scope alertShadowBrokerScope, result rpc.RegimeSnapshotResult) (rpc.AlertCandidateSnapshot, error) {
 	if c == nil || c.registry == nil || ctx == nil {
-		return rpc.AlertCandidateSnapshot{}, errors.New("alert shadow composer is unavailable")
+		return rpc.AlertCandidateSnapshot{}, errors.New("alert producer is unavailable")
 	}
 	if result.AsOf.IsZero() || !scope.valid() {
 		return rpc.AlertCandidateSnapshot{}, errors.New(alertShadowReasonBrokerScopeInvalid)
@@ -519,7 +520,7 @@ func (c *alertShadowComposer) ObserveRegime(ctx context.Context, scope alertShad
 // Degraded inputs may retain an active breach but can never authorize a clear.
 func (c *alertShadowComposer) ObserveRulebook(ctx context.Context, scope alertShadowBrokerScope, result rpc.RulesResult) (rpc.AlertCandidateSnapshot, error) {
 	if c == nil || c.registry == nil || ctx == nil {
-		return rpc.AlertCandidateSnapshot{}, errors.New("alert shadow composer is unavailable")
+		return rpc.AlertCandidateSnapshot{}, errors.New("alert producer is unavailable")
 	}
 	if result.AsOf.IsZero() || !scope.valid() {
 		return rpc.AlertCandidateSnapshot{}, errors.New(alertShadowReasonBrokerScopeInvalid)
@@ -556,13 +557,13 @@ func (c *alertShadowComposer) ObserveRulebook(ctx context.Context, scope alertSh
 }
 
 // ObserveProtection consumes a complete, unfiltered protection ledger plus
-// the matching portfolio-stream receipt. The approved v1 shadow policy opens
+// the matching portfolio-stream receipt. The v1 producer policy opens
 // only orphaned-order and reconciliation-required episodes. Partial and
 // unprotected rows remain visible context and are authoritative negatives for
 // this deliberately narrow producer; no universal stop obligation is implied.
 func (c *alertShadowComposer) ObserveProtection(ctx context.Context, input alertShadowProtectionInput) (rpc.AlertCandidateSnapshot, error) {
 	if c == nil || c.registry == nil || ctx == nil {
-		return rpc.AlertCandidateSnapshot{}, errors.New("alert shadow composer is unavailable")
+		return rpc.AlertCandidateSnapshot{}, errors.New("alert producer is unavailable")
 	}
 	if input.AsOf.IsZero() || !input.Scope.valid() {
 		return rpc.AlertCandidateSnapshot{}, errors.New(alertShadowReasonBrokerScopeInvalid)
@@ -603,12 +604,12 @@ func (c *alertShadowComposer) ObserveProtection(ctx context.Context, input alert
 }
 
 // ObserveOrderIntegrity mirrors the established two-consecutive-pass mismatch
-// gate inside the record-only lane. The legacy app watch remains the sole
-// delivery owner. A negative is trusted only when the daemon's portfolio
-// stream receipts and scoped order journal were current at the same read.
+// gate inside the source-neutral candidate path. The app dispatcher owns
+// delivery. A negative is trusted only when the daemon's portfolio stream
+// receipts and scoped order journal were current at the same read.
 func (c *alertShadowComposer) ObserveOrderIntegrity(ctx context.Context, scope alertShadowBrokerScope, input orderIntegrityEvaluation) (rpc.AlertCandidateSnapshot, error) {
 	if c == nil || c.registry == nil || ctx == nil {
-		return rpc.AlertCandidateSnapshot{}, errors.New("alert shadow composer is unavailable")
+		return rpc.AlertCandidateSnapshot{}, errors.New("alert producer is unavailable")
 	}
 	if input.AsOf.IsZero() || !scope.valid() {
 		return rpc.AlertCandidateSnapshot{}, errors.New(alertShadowReasonBrokerScopeInvalid)
@@ -649,11 +650,11 @@ func (c *alertShadowComposer) ObserveOrderIntegrity(ctx context.Context, scope a
 }
 
 // ObserveDataHealth consumes the complete typed status projection. It creates
-// one record-only episode per failing root source in the approved allowlist;
+// one source-neutral episode per failing root source in the approved allowlist;
 // not_due, computing, and intentionally disabled states are not outages.
 func (c *alertShadowComposer) ObserveDataHealth(ctx context.Context, input alertShadowDataHealthInput) (rpc.AlertCandidateSnapshot, error) {
 	if c == nil || c.registry == nil || ctx == nil {
-		return rpc.AlertCandidateSnapshot{}, errors.New("alert shadow composer is unavailable")
+		return rpc.AlertCandidateSnapshot{}, errors.New("alert producer is unavailable")
 	}
 	if input.AsOf.IsZero() || !input.Scope.valid() {
 		return rpc.AlertCandidateSnapshot{}, errors.New(alertShadowReasonBrokerScopeInvalid)
@@ -700,7 +701,7 @@ func (c *alertShadowComposer) ObserveDataHealth(ctx context.Context, input alert
 // not committed an evaluation yet; callers must not manufacture a clear.
 func (c *alertShadowComposer) Snapshot(scope alertShadowBrokerScope) (rpc.AlertCandidateSnapshot, bool, error) {
 	if c == nil || c.registry == nil || !scope.valid() {
-		return rpc.AlertCandidateSnapshot{}, false, errors.New("alert shadow composer is unavailable")
+		return rpc.AlertCandidateSnapshot{}, false, errors.New("alert producer is unavailable")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -789,7 +790,7 @@ func (c *alertShadowComposer) handleInputCursorLocked(ctx context.Context, state
 	} else if asOf.Equal(cursor.AsOf) {
 		if fingerprint != cursor.Fingerprint {
 			disposition = alertShadowDispositionEquivocation
-			resultErr = errors.New("alert shadow input timestamp equivocation")
+			resultErr = errors.New("alert producer input timestamp equivocation")
 		} else if alertShadowSourcesNeedObservation(state, sources) {
 			// The first identical producer read after restart is a real process
 			// observation, not a duplicate. Re-evaluate it once so current-process
@@ -834,7 +835,7 @@ func (c *alertShadowComposer) activeSourceSeverityLocked(scope alertShadowBroker
 			continue
 		}
 		if severity != "" {
-			return "", errors.New("alert shadow source has multiple active singleton episodes")
+			return "", errors.New("alert producer source has multiple active singleton episodes")
 		}
 		severity = candidate.Severity
 	}
@@ -862,7 +863,7 @@ func (c *alertShadowComposer) currentSnapshotLocked(scope alertShadowBrokerScope
 	}
 	state := c.scopes[scope.authority]
 	if state == nil {
-		return rpc.AlertCandidateSnapshot{}, errors.New("alert shadow process scope is unavailable")
+		return rpc.AlertCandidateSnapshot{}, errors.New("alert producer process scope is unavailable")
 	}
 	return c.projectProcessSnapshotLocked(snapshot, state, now)
 }
@@ -963,7 +964,7 @@ func (c *alertShadowComposer) nowLocked() time.Time {
 func (c *alertShadowComposer) observationTimeLocked(sourceAsOf time.Time) (time.Time, error) {
 	now := c.nowLocked()
 	if now.Before(sourceAsOf) {
-		return time.Time{}, errors.New("alert shadow producer as_of is in the future")
+		return time.Time{}, errors.New("alert producer as_of is in the future")
 	}
 	return now, nil
 }
@@ -974,7 +975,7 @@ func (c *alertShadowComposer) applyLocked(ctx context.Context, state *alertShado
 	if err != nil {
 		return rpc.AlertCandidateSnapshot{}, err
 	} else if durableOK && evaluationAt.Before(durable.AsOf) {
-		return rpc.AlertCandidateSnapshot{}, errors.New("alert shadow authority clock is behind durable scoped state")
+		return rpc.AlertCandidateSnapshot{}, errors.New("alert registry authority clock is behind durable scoped state")
 	}
 	durablePolicyByEpisode := make(map[string]string, len(durable.Episodes))
 	if durableOK {
@@ -2603,7 +2604,7 @@ func alertShadowMapNudges(input alertShadowNudgeInput, observedAt time.Time) (ma
 		}
 		if previous, duplicate := seen[episodeKey]; duplicate {
 			if !alertShadowObservationsEquivalent(previous, observation) {
-				return nil, nil, errors.New("alert shadow nudge candidate equivocation")
+				return nil, nil, errors.New("alert producer nudge candidate equivocation")
 			}
 			duplicates[source]++
 			continue
@@ -3126,7 +3127,7 @@ func alertShadowObservationsEquivalent(left, right alertEpisodeObservation) bool
 func alertShadowFingerprint(value any) (string, error) {
 	raw, err := json.Marshal(value)
 	if err != nil {
-		return "", fmt.Errorf("fingerprint alert shadow value: %w", err)
+		return "", fmt.Errorf("fingerprint alert producer value: %w", err)
 	}
 	digest := sha256.Sum256(raw)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil

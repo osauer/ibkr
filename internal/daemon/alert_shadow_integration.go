@@ -22,7 +22,7 @@ type alertShadowDataHealthPending struct {
 
 func (s *Server) attachAlertShadowAuthority(ctx context.Context) error {
 	if s == nil || s.coreStore == nil {
-		return errors.New("alert shadow SQLite authority is unavailable")
+		return errors.New("alert registry SQLite authority is unavailable")
 	}
 	registry, err := newAlertEpisodeRegistry(ctx, s.coreStore)
 	if err != nil {
@@ -135,7 +135,7 @@ func (s *Server) observeCanaryAlertShadow(result *rpc.CanaryResult, brokerScope 
 	}
 	scope, err := newAlertShadowBrokerScope(brokerScope)
 	if err != nil {
-		s.warnf("alert shadow: Canary observation skipped: %v", err)
+		s.warnf("alert producer: Canary observation skipped: %v", err)
 		return
 	}
 	ctx := context.Background()
@@ -145,7 +145,7 @@ func (s *Server) observeCanaryAlertShadow(result *rpc.CanaryResult, brokerScope 
 	}
 	s.mu.Unlock()
 	if _, err := s.alertShadow.ObserveCanary(ctx, scope, *result); err != nil {
-		s.warnf("alert shadow: Canary observation failed: %v", err)
+		s.warnf("alert producer: Canary observation failed: %v", err)
 	}
 }
 
@@ -154,7 +154,7 @@ func (s *Server) observeNudgesAlertShadow(ctx context.Context, input alertShadow
 		return
 	}
 	if _, err := s.alertShadow.ObserveNudges(ctx, input); err != nil {
-		s.warnf("alert shadow: Nudge observation failed: %v", err)
+		s.warnf("alert producer: Nudge observation failed: %v", err)
 	}
 }
 
@@ -164,17 +164,17 @@ func (s *Server) observeRegimeAlertShadow(ctx context.Context, result *rpc.Regim
 	}
 	scope, err := newAlertShadowBrokerScope(brokerScope)
 	if err != nil {
-		s.warnf("alert shadow: Regime observation skipped: %v", err)
+		s.warnf("alert producer: Regime observation skipped: %v", err)
 		return
 	}
 	if _, err := s.alertShadow.ObserveRegime(ctx, scope, *result); err != nil {
-		s.warnf("alert shadow: Regime observation failed: %v", err)
+		s.warnf("alert producer: Regime observation failed: %v", err)
 	}
 }
 
 func (s *Server) observeRulebookAlertShadow(ctx context.Context, result *rpc.RulesResult, brokerScope brokerStateScope) {
 	if err := s.commitRulebookAlertShadow(ctx, result, brokerScope); err != nil {
-		s.warnf("alert shadow: Rulebook observation failed: %v", err)
+		s.warnf("alert producer: Rulebook observation failed: %v", err)
 	}
 }
 
@@ -197,7 +197,7 @@ func (s *Server) observeProtectionAlertShadow(ctx context.Context, input alertSh
 		return
 	}
 	if err := s.commitProtectionAlertShadow(ctx, input); err != nil {
-		s.warnf("alert shadow: Protection observation failed: %v", err)
+		s.warnf("alert producer: Protection observation failed: %v", err)
 	}
 }
 
@@ -220,11 +220,11 @@ func (s *Server) observeProtectionAlertShadowStable(ctx context.Context, binding
 		return s.commitProtectionAlertShadow(ctx, input)
 	})
 	if err != nil {
-		s.warnf("alert shadow: Protection observation failed: %v", err)
+		s.warnf("alert producer: Protection observation failed: %v", err)
 		return
 	}
 	if !committed {
-		s.debugf("alert shadow: Protection broker, portfolio, or journal evidence changed before final commit")
+		s.debugf("alert producer: Protection broker, portfolio, or journal evidence changed before final commit")
 	}
 }
 
@@ -234,7 +234,7 @@ func (s *Server) observeOrderIntegrityAlertShadow(ctx context.Context, input ord
 	}
 	scope, err := newAlertShadowBrokerScope(input.Scope)
 	if err != nil {
-		s.warnf("alert shadow: Order Integrity observation skipped: %v", err)
+		s.warnf("alert producer: Order Integrity observation skipped: %v", err)
 		return
 	}
 	if input.connector == nil {
@@ -242,7 +242,7 @@ func (s *Server) observeOrderIntegrityAlertShadow(ctx context.Context, input ord
 		// policy. Production load paths force unbound evidence unavailable, so
 		// this branch can update health but cannot authorize a recovery.
 		if err := s.commitOrderIntegrityAlertShadow(ctx, scope, input); err != nil {
-			s.warnf("alert shadow: Order Integrity observation failed: %v", err)
+			s.warnf("alert producer: Order Integrity observation failed: %v", err)
 		}
 		return
 	}
@@ -256,11 +256,11 @@ func (s *Server) observeOrderIntegrityAlertShadow(ctx context.Context, input ord
 		return s.commitOrderIntegrityAlertShadow(ctx, scope, input)
 	})
 	if err != nil {
-		s.warnf("alert shadow: Order Integrity observation failed: %v", err)
+		s.warnf("alert producer: Order Integrity observation failed: %v", err)
 		return
 	}
 	if !committed {
-		s.debugf("alert shadow: Order Integrity broker or journal evidence changed before final commit")
+		s.debugf("alert producer: Order Integrity broker or journal evidence changed before final commit")
 	}
 }
 
@@ -278,7 +278,7 @@ func (s *Server) observeDataHealthAlertShadow(result *rpc.HealthResult, brokerSc
 	}
 	scope, err := newAlertShadowBrokerScope(brokerScope)
 	if err != nil {
-		s.warnf("alert shadow: Data Health observation skipped: %v", err)
+		s.warnf("alert producer: Data Health observation skipped: %v", err)
 		return
 	}
 	if observedAt.IsZero() {
@@ -312,7 +312,7 @@ func (s *Server) enqueueDataHealthAlertShadow(input alertShadowDataHealthInput) 
 	}
 	fingerprint, err := alertShadowDataHealthInputFingerprint(input)
 	if err != nil {
-		s.warnf("alert shadow: Data Health queue fingerprint failed: %v", err)
+		s.warnf("alert producer: Data Health queue fingerprint failed: %v", err)
 		return
 	}
 	pending := alertShadowDataHealthPending{Input: input, Fingerprint: fingerprint}
@@ -351,7 +351,7 @@ func (s *Server) enqueueDataHealthAlertShadow(input alertShadowDataHealthInput) 
 		// newer clear. The 30-second heartbeat will re-observe current state
 		// after the queue begins draining.
 		s.dataHealthObserveMu.Unlock()
-		s.warnf("alert shadow: Data Health transition queue saturated; retaining older evidence")
+		s.warnf("alert producer: Data Health transition queue saturated; retaining older evidence")
 		return
 	}
 	s.dataHealthObservePending[authority] = queue
@@ -430,7 +430,7 @@ func (s *Server) runDataHealthAlertShadowWorker(ctx context.Context) {
 		}
 		s.dataHealthObserveMu.Unlock()
 		if observeErr != nil {
-			s.warnf("alert shadow: Data Health observation failed: %v", observeErr)
+			s.warnf("alert producer: Data Health observation failed: %v", observeErr)
 		}
 	}
 }

@@ -123,7 +123,7 @@ func (s *Server) cachedProtectionOrderSnapshot(binding protectionOrderSnapshotBi
 }
 
 // protectionSnapshotOpenOrders returns a short-lived complete broker inventory
-// receipt for the Protection shadow heartbeat. The actual reqAllOpenOrders
+// receipt for the Protection producer heartbeat. The actual reqAllOpenOrders
 // flight follows daemon lifetime rather than any one waiter: a short caller
 // cancellation cannot tear down the uncorrelated protocol collector for other
 // waiters. Cache publication requires an exact final scope, connector epoch,

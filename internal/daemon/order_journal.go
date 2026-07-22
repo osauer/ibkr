@@ -48,7 +48,7 @@ var errOrderPreviewTokenAlreadyUsed = errors.New("preview token already used")
 type orderJournalStore struct {
 	Path string
 	mu   sync.RWMutex
-	// evidenceMu linearizes Order Integrity and Protection shadow commits
+	// evidenceMu linearizes Order Integrity and Protection alert-registry commits
 	// against every local mutation of the authoritative order-event frontier.
 	// Broker-derived commits take the write side only after taking the broker
 	// evidence barrier; ordinary journal writers take the read side.
