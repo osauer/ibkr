@@ -75,6 +75,10 @@ type gammaZeroCache struct {
 	// log is the logger used for persistence warnings. nil-safe via
 	// gammaLogf wrapper.
 	log gammaLogger
+	// onPublication is the daemon-owned cross-authority hook. It is invoked
+	// once after a successful job becomes the served result for its scope.
+	// Failed, canceled, or superseded work never reaches it.
+	onPublication func(scope string)
 
 	// loadOnce gates the one-shot persisted-result read (see
 	// newGammaZeroCacheWithStore for why it is deferred to first use).
@@ -300,6 +304,18 @@ func (g *gammaComputation) successfulAt() time.Time {
 
 func newGammaZeroCache() *gammaZeroCache {
 	return &gammaZeroCache{}
+}
+
+// setPublicationCallback installs the daemon-owned successful-publication
+// hook. Production calls this before the server starts; the lock also keeps
+// narrow concurrency tests race-free.
+func (c *gammaZeroCache) setPublicationCallback(callback func(string)) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.onPublication = callback
+	c.mu.Unlock()
 }
 
 // knownGammaScopes enumerates the scopes the cache will look for
@@ -791,6 +807,11 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 	wallStartedAt := time.Now()
 
 	go func() {
+		// Publication notification runs after done closes, so downstream readers
+		// can observe Status=ready, and after outcome accounting has reset the
+		// retry streak. It remains outside the cache lock while calling daemon
+		// glue so Regime acquisition may read this same cache.
+		defer func() { c.notifyJobPublication(job, bgCtx.Err() != nil) }()
 		defer close(job.done)
 		// Failure-streak accounting. Deliberately registered between the
 		// done-close and the panic guard (LIFO order: guard finalises
@@ -854,6 +875,34 @@ func (c *gammaZeroCache) spawnJob(parent context.Context, scope, key string, now
 	}()
 
 	return job
+}
+
+// notifyJobPublication promotes a successful refresh before notifying the
+// daemon. The slot identity checks exclude force-superseded work, and the
+// callback runs only after the result is both complete and canonical for its
+// scope. Soft-TTL and forced refreshes therefore share one publication edge.
+func (c *gammaZeroCache) notifyJobPublication(job *gammaComputation, cancelled bool) {
+	if c == nil || job == nil || cancelled || job.err != nil || job.result == nil {
+		return
+	}
+	c.mu.Lock()
+	slot := c.slots[job.scope]
+	published := false
+	if slot != nil {
+		switch {
+		case slot.current == job:
+			published = true
+		case slot.refresh == job:
+			slot.current = job
+			slot.refresh = nil
+			published = true
+		}
+	}
+	callback := c.onPublication
+	c.mu.Unlock()
+	if published && callback != nil {
+		callback(job.scope)
+	}
 }
 
 // noteJobOutcome records a finished computation in its slot's failure

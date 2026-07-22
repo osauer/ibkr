@@ -228,7 +228,7 @@ func TestEarningsProviderBackoffPersistsAcrossRestart(t *testing.T) {
 		expected time.Duration
 	}{
 		{
-			name:     "unsupported contract",
+			name:     "provider-confirmed unsupported security",
 			result:   earningsProviderFetchResult{Status: rpc.EarningsStatusUnsupportedSecurity},
 			expected: earningsTTL,
 		},
@@ -245,8 +245,8 @@ func TestEarningsProviderBackoffPersistsAcrossRestart(t *testing.T) {
 			expected: earningsNonRetryableFailureRetry,
 		},
 		{
-			name:     "contract resolution failure",
-			result:   transportFailureResult(rpc.SourceFailureTransportFailed, rpc.SourceFailureStageWSHContractResolve, true, base),
+			name:     "temporary connector inactive",
+			result:   transportFailureResult(rpc.SourceFailureContractUnavailable, rpc.SourceFailureStageWSHContractResolve, true, base),
 			expected: earningsContractResolutionRetry,
 		},
 	}

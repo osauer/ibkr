@@ -1,6 +1,45 @@
 package daemon
 
-import "time"
+import (
+	"time"
+
+	"github.com/osauer/ibkr/v2/internal/rpc"
+)
+
+// regimeRefreshWakeChannel returns the daemon-lifetime, capacity-one wake
+// channel used by successful direct-dependency publications.
+func (s *Server) regimeRefreshWakeChannel() <-chan struct{} {
+	return s.regimeRefreshWakeSender()
+}
+
+func (s *Server) regimeRefreshWakeSender() chan struct{} {
+	if s == nil {
+		return nil
+	}
+	s.regimeConsumerWakeMu.Lock()
+	if s.regimeRefreshWake == nil {
+		s.regimeRefreshWake = make(chan struct{}, 1)
+	}
+	wake := s.regimeRefreshWake
+	s.regimeConsumerWakeMu.Unlock()
+	return wake
+}
+
+// handleGammaPublication links the canonical combined gamma publication to
+// Regime without making Gamma own Regime scheduling. Failed, canceled, and
+// superseded jobs never call this hook; diagnostic single-index publications
+// cannot invalidate the combined Regime input.
+func (s *Server) handleGammaPublication(scope string) {
+	if s == nil || scope != rpc.GammaZeroScopeCombined || s.regimeSnapshots == nil ||
+		!s.regimeSnapshots.invalidateForDependencyPublication() {
+		return
+	}
+	wake := s.regimeRefreshWakeSender()
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
 
 // canaryEvaluationWakeChannel returns the daemon-lifetime, capacity-one wake
 // channel. A buffered wake survives startup ordering and naturally coalesces

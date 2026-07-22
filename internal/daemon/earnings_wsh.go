@@ -74,6 +74,8 @@ func classifyWSHEarningsError(err error, now time.Time) earningsProviderFetchRes
 	}
 	stage = wshFailureStage(wshErr.Operation)
 	switch wshErr.Kind {
+	case ibkrlib.WSHErrorConnectorInactive:
+		code = rpc.SourceFailureContractUnavailable
 	case ibkrlib.WSHErrorUnsupportedSecurity:
 		return earningsProviderFetchResult{Status: rpc.EarningsStatusUnsupportedSecurity}
 	case ibkrlib.WSHErrorMalformedResponse:

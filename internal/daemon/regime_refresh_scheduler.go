@@ -13,18 +13,17 @@ func (s *Server) startRegimeRefreshLoop(ctx context.Context) {
 	if s == nil || ctx == nil || ctx.Err() != nil || s.regimeSnapshots == nil {
 		return
 	}
-	s.regimeRefreshLoopWG.Add(1)
-	go func() {
-		defer s.regimeRefreshLoopWG.Done()
+	s.regimeRefreshLoopWG.Go(func() {
 		runRegimeRefreshLoop(
 			ctx,
 			s.regimeSnapshots,
 			regimeSnapshotRefreshPoll,
 			regimeSnapshotRefreshAhead,
+			s.regimeRefreshWakeChannel(),
 			s.regimeRefreshGatewayReady,
 			s.acquireRegimeSnapshot,
 		)
-	}()
+	})
 }
 
 // regimeRefreshGatewayReady is a non-triggering readiness read. The scheduler
@@ -42,6 +41,7 @@ func runRegimeRefreshLoop(
 	cache *regimeSnapshotCache,
 	pollEvery time.Duration,
 	refreshAhead time.Duration,
+	wake <-chan struct{},
 	ready func() bool,
 	refresh regimeSnapshotRefreshFunc,
 ) {
@@ -61,6 +61,8 @@ func runRegimeRefreshLoop(
 		select {
 		case <-ctx.Done():
 			return
+		case <-wake:
+			kick()
 		case <-ticker.C:
 			kick()
 		}

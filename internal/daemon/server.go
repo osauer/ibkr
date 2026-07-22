@@ -556,6 +556,10 @@ type Server struct {
 	rulebookRefreshLoopWG  sync.WaitGroup
 	regimeConsumerWakeMu   sync.Mutex
 	regimeConsumerRevision int64
+	// Successful canonical gamma publications invalidate only Regime's refresh
+	// schedule and signal this capacity-one daemon-owned wake. The prior Regime
+	// authority remains visible until a complete replacement publishes.
+	regimeRefreshWake chan struct{}
 	// alertShadow is the daemon-owned, record-only alert measurement path.
 	// It persists lifecycle through alertEpisodes but has no sender, delivery
 	// eligibility, page policy, badge, or service-worker authority.
@@ -674,6 +678,9 @@ func New(opts Options) *Server {
 	s.installFXRateCache()
 	s.installEarningsCache()
 	s.installEarningsTerminalStore()
+	if s.zeroGamma != nil {
+		s.zeroGamma.setPublicationCallback(s.handleGammaPublication)
+	}
 	return s
 }
 

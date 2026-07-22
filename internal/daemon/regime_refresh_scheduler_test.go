@@ -171,6 +171,7 @@ func TestRegimeRefreshLoopRunsWithoutAlertOrApp(t *testing.T) {
 			cache,
 			time.Hour,
 			20*time.Second,
+			nil,
 			func() bool { return true },
 			func(ctx context.Context) (*rpc.RegimeSnapshotResult, bool, regimeSnapshotAfterPublishFunc, error) {
 				close(started)
@@ -195,5 +196,99 @@ func TestRegimeRefreshLoopRunsWithoutAlertOrApp(t *testing.T) {
 	}
 	if view.Revision != 2 || view.Snapshot == nil || view.Snapshot.Summary.Label != "scheduled" {
 		t.Fatalf("scheduler did not publish without alert/app owners: %+v", view)
+	}
+}
+
+func TestSuccessfulGammaPublicationRefreshesRegimeAndWakesConsumers(t *testing.T) {
+	store := openRegimeSnapshotTestStore(t)
+	daemonContext, cancelDaemon := context.WithCancel(context.Background())
+	t.Cleanup(cancelDaemon)
+	clock := &regimeSnapshotTestClock{now: regimeSnapshotTestNow()}
+	cache := newRegimeSnapshotTestCache(t, store, daemonContext, clock)
+	server := &Server{regimeSnapshots: cache, zeroGamma: newGammaZeroCache()}
+	server.zeroGamma.setPublicationCallback(server.handleGammaPublication)
+	canaryWake := server.canaryEvaluationWakeChannel()
+	rulebookWake := server.rulebookRefreshWakeChannel()
+	afterPublish := func(_ context.Context, publication regimeSnapshotPublication) error {
+		server.publishRulesRegimeStageState(regimeDependencyTestStage(publication), publication)
+		return nil
+	}
+	if _, err := cache.serve(t.Context(), func(context.Context) (*rpc.RegimeSnapshotResult, bool, regimeSnapshotAfterPublishFunc, error) {
+		return regimeSnapshotCacheFixture(clock.Now(), "gamma unavailable"), true, afterPublish, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertRegimeDependencyWake(t, "initial Canary", canaryWake)
+	assertRegimeDependencyWake(t, "initial Rulebook", rulebookWake)
+
+	loopContext, cancelLoop := context.WithCancel(context.Background())
+	loopDone := make(chan struct{})
+	readyChecked := make(chan struct{}, 1)
+	var refreshCalls atomic.Int32
+	go func() {
+		defer close(loopDone)
+		runRegimeRefreshLoop(
+			loopContext,
+			cache,
+			time.Hour,
+			20*time.Second,
+			server.regimeRefreshWakeChannel(),
+			func() bool {
+				select {
+				case readyChecked <- struct{}{}:
+				default:
+				}
+				return true
+			},
+			func(context.Context) (*rpc.RegimeSnapshotResult, bool, regimeSnapshotAfterPublishFunc, error) {
+				refreshCalls.Add(1)
+				envelope := server.zeroGamma.snapshotCurrent(rpc.GammaZeroScopeCombined, clock.Now)
+				label := "gamma unavailable"
+				if envelope.Status == rpc.GammaZeroStatusReady && envelope.Result != nil {
+					label = "gamma recovered"
+				}
+				return regimeSnapshotCacheFixture(clock.Now(), label), true, afterPublish, nil
+			},
+		)
+	}()
+	<-readyChecked
+
+	failed := server.zeroGamma.force(daemonContext, rpc.GammaZeroScopeCombined, clock.Now(), 0,
+		func(context.Context, *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+			return nil, errors.New("temporary gamma failure")
+		})
+	<-failed.done
+	time.Sleep(20 * time.Millisecond)
+	stable, err := cache.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshCalls.Load() != 0 || stable.Revision != 1 || stable.Snapshot.Summary.Label != "gamma unavailable" {
+		t.Fatalf("failed Gamma changed Regime authority: calls=%d view=%+v", refreshCalls.Load(), stable)
+	}
+	assertNoRegimeDependencyWake(t, "failed Gamma Canary", canaryWake)
+	assertNoRegimeDependencyWake(t, "failed Gamma Rulebook", rulebookWake)
+
+	recoveredGamma := helperGammaResult(clock.Now())
+	recoveredGamma.Scope = rpc.GammaZeroScopeCombined
+	succeeded := server.zeroGamma.force(daemonContext, rpc.GammaZeroScopeCombined, clock.Now(), 0,
+		func(context.Context, *atomic.Int32) (*rpc.GammaZeroComputed, error) {
+			return recoveredGamma, nil
+		})
+	<-succeeded.done
+	recovered := waitForRegimeSnapshotCache(t, cache, func(view regimeSnapshotCacheView) bool {
+		return view.Revision == 2 && view.Snapshot != nil && view.Snapshot.Summary.Label == "gamma recovered"
+	})
+	if refreshCalls.Load() != 1 || recovered.Health.Status != rpc.RegimeAuthorityFresh {
+		t.Fatalf("Gamma recovery refresh calls=%d view=%+v", refreshCalls.Load(), recovered)
+	}
+	assertRegimeDependencyWake(t, "recovered Gamma Canary", canaryWake)
+	assertRegimeDependencyWake(t, "recovered Gamma Rulebook", rulebookWake)
+
+	cancelLoop()
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("Regime dependency wake loop did not stop")
 	}
 }

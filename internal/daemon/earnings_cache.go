@@ -34,10 +34,10 @@ const (
 	earningsTTL            = 45 * 24 * time.Hour
 	earningsFetchTimeout   = 8 * time.Second
 	earningsFailureRetry   = 15 * time.Minute
-	// One five-minute confirmation probe fits inside the connector's bounded
-	// inactive-candidate window. Two broker definition misses then become a
-	// typed unsupported outcome with the long retry below, rather than an
-	// endless stream of generic contract-resolution attempts.
+	// A temporary connector-inactive mark is not a provider verdict. Keep its
+	// durable retry inside the connector's bounded 12-hour mark lifetime so a
+	// restart cannot turn that session-local observation into the 45-day
+	// unsupported-security quiet period below.
 	earningsContractResolutionRetry = 5 * time.Minute
 	// Format, entitlement, protocol, and other non-retryable provider failures
 	// remain due failures, but one failed read is enough for the daily source

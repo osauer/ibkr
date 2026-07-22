@@ -130,6 +130,11 @@ type regimeSnapshotCache struct {
 	refresh       *regimeSnapshotRefresh
 	failureCode   rpc.RegimeAuthorityFailureCode
 	lastAttemptAt time.Time
+	// dependencyRefreshPending records a successful publication by a direct
+	// Regime dependency, currently canonical combined gamma. It invalidates
+	// only the refresh schedule: the prior immutable Regime publication stays
+	// authoritative until a complete replacement commits.
+	dependencyRefreshPending bool
 
 	// projectionPending means the snapshot CAS committed but at least one
 	// derived projector or the final projection receipt did not. It blocks a
@@ -339,12 +344,31 @@ func (cache *regimeSnapshotCache) allowRefreshNow() {
 	}
 }
 
+// invalidateForDependencyPublication makes the next scheduler kick due now
+// without clearing last-good bytes, health, failure detail, or revision. A
+// boolean is sufficient because each refresh reads the latest immutable
+// dependency; repeated publications coalesce while work is in flight.
+func (cache *regimeSnapshotCache) invalidateForDependencyPublication() bool {
+	if cache == nil {
+		return false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.daemonContext.Err() != nil {
+		return false
+	}
+	cache.dependencyRefreshPending = true
+	return true
+}
+
 // startRefreshAhead starts one daemon-owned refresh before last-good reaches
-// its hard freshness ceiling. It never changes health or freshness itself:
-// the retained publication remains fresh until the original deadline and
-// becomes stale at that deadline if this refresh cannot finish. Cold or
-// already-stale authority is due immediately. The cache's existing
-// single-flight, failure backoff, clock, and projection gates remain binding.
+// its hard freshness ceiling, or immediately after a direct dependency
+// publication invalidates the schedule. It never changes health or freshness
+// itself: the retained publication remains fresh until the original deadline
+// and becomes stale at that deadline if this refresh cannot finish. Cold or
+// already-stale authority is due immediately. Single-flight, clock, and
+// projection gates remain binding; a new successful dependency may bypass an
+// older failed-attempt quiet period because it is fresh recovery evidence.
 func (cache *regimeSnapshotCache) startRefreshAhead(refresh regimeSnapshotRefreshFunc, ahead time.Duration) bool {
 	if cache == nil || refresh == nil || ahead <= 0 {
 		return false
@@ -354,16 +378,18 @@ func (cache *regimeSnapshotCache) startRefreshAhead(refresh regimeSnapshotRefres
 
 	now := cache.now()
 	cache.recoverClockLocked(now)
+	dependencyDue := cache.dependencyRefreshPending
 	if cache.projectionPending || cache.clockInvalidLocked(now) || cache.refresh != nil ||
-		cache.daemonContext.Err() != nil || !cache.refreshDueLocked(now) {
+		cache.daemonContext.Err() != nil || (!dependencyDue && !cache.refreshDueLocked(now)) {
 		return false
 	}
-	if len(cache.raw) != 0 && !cache.isStaleLocked(now) {
+	if !dependencyDue && len(cache.raw) != 0 && !cache.isStaleLocked(now) {
 		refreshAt := cache.lastSuccessAt.Add(cache.freshFor - ahead)
 		if now.Before(refreshAt) {
 			return false
 		}
 	}
+	cache.dependencyRefreshPending = false
 	cache.startRefreshLocked(refresh)
 	return true
 }

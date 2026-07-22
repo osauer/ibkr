@@ -331,8 +331,8 @@ func TestFetchWSHEarningsRejectsUnsupportedSecurityBeforeWire(t *testing.T) {
 	}
 }
 
-func TestFetchWSHEarningsKnownInactiveSkipsResolutionAndWire(t *testing.T) {
-	connector, _, out := newWSHTestConnector(t)
+func TestFetchWSHEarningsKnownInactiveRecoversAfterReconnect(t *testing.T) {
+	connector, conn, out := newWSHTestConnector(t)
 	const testName = "TESTQ"
 	connector.inactiveMu.Lock()
 	if connector.inactiveSymbols == nil {
@@ -351,12 +351,36 @@ func TestFetchWSHEarningsKnownInactiveSkipsResolutionAndWire(t *testing.T) {
 	}
 
 	_, err := connector.FetchWSHEarnings(context.Background(), testName)
-	assertWSHError(t, err, WSHErrorUnsupportedSecurity, "resolve_contract", 0)
+	assertWSHError(t, err, WSHErrorConnectorInactive, "resolve_contract", 0)
 	if resolveCalls != 0 {
 		t.Fatalf("known-inactive contract resolution calls = %d, want 0", resolveCalls)
 	}
 	if out.Len() != 0 {
 		t.Fatalf("known-inactive request emitted %d wire bytes, want 0", out.Len())
+	}
+
+	// A successor connector session drops every unstamped observation,
+	// including the temporary inactive mark. The next WSH attempt must resolve
+	// and reach the provider instead of retaining an unsupported verdict.
+	connector.invalidateUnstampedConnectorObservations(conn)
+	if connector.IsSymbolInactive(testName) {
+		t.Fatal("reconnect did not clear the temporary inactive mark")
+	}
+	responderDone := make(chan struct{})
+	go func() {
+		defer close(responderDone)
+		metaReqID := waitForHandlerReqID(t, conn, msgWSHMetaData)
+		deliverWSHData(conn, msgWSHMetaData, metaReqID, `{"event_types":["wsh_ed"]}`)
+		eventReqID := waitForHandlerReqIDAfter(t, conn, msgWSHEventData, metaReqID)
+		deliverWSHData(conn, msgWSHEventData, eventReqID, `{"events":[]}`)
+	}()
+	got, err := connector.FetchWSHEarnings(context.Background(), testName)
+	<-responderDone
+	if err != nil || got != `{"events":[]}` {
+		t.Fatalf("post-reconnect WSH result=%q err=%v", got, err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("post-reconnect contract resolution calls = %d, want 1", resolveCalls)
 	}
 }
 
@@ -376,7 +400,7 @@ func TestFetchWSHEarningsResolutionInactiveMarkSkipsProviderWire(t *testing.T) {
 	}
 
 	_, err := connector.FetchWSHEarnings(context.Background(), testName)
-	assertWSHError(t, err, WSHErrorUnsupportedSecurity, "resolve_contract", 0)
+	assertWSHError(t, err, WSHErrorConnectorInactive, "resolve_contract", 0)
 	if resolveCalls != 1 {
 		t.Fatalf("contract resolution calls = %d, want 1 confirmation", resolveCalls)
 	}

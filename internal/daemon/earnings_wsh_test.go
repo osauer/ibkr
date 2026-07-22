@@ -167,6 +167,7 @@ func TestClassifyWSHEarningsError(t *testing.T) {
 		retryable bool
 	}{
 		{"unsupported security", &ibkrlib.WSHError{Kind: ibkrlib.WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}, rpc.EarningsStatusUnsupportedSecurity, "", "", false},
+		{"connector inactive", &ibkrlib.WSHError{Kind: ibkrlib.WSHErrorConnectorInactive, Operation: "resolve_contract"}, rpc.EarningsStatusTransportFailure, rpc.SourceFailureContractUnavailable, rpc.SourceFailureStageWSHContractResolve, true},
 		{"malformed event", &ibkrlib.WSHError{Kind: ibkrlib.WSHErrorMalformedResponse, Operation: "event_data"}, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageWSHDecode, false},
 		{"malformed metadata", &ibkrlib.WSHError{Kind: ibkrlib.WSHErrorMalformedResponse, Operation: "metadata"}, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageWSHMetadata, false},
 		{"event type unavailable", &ibkrlib.WSHError{Kind: ibkrlib.WSHErrorEventTypeUnavailable, Operation: "metadata"}, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageWSHMetadata, false},

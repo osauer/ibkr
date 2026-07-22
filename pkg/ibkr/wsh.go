@@ -32,6 +32,11 @@ const (
 	WSHErrorTransport WSHErrorKind = "transport_failure"
 	// WSHErrorUnsupportedProtocol means TWS or Gateway is too old for the request.
 	WSHErrorUnsupportedProtocol WSHErrorKind = "unsupported_protocol"
+	// WSHErrorConnectorInactive means the current connector temporarily marked
+	// the symbol inactive after repeated definition failures. The mark expires
+	// after a bounded interval and is cleared on reconnect, so callers must not
+	// persist it as a provider verdict about the security.
+	WSHErrorConnectorInactive WSHErrorKind = "connector_inactive"
 	// WSHErrorUnsupportedSecurity means WSH cannot be queried for the instrument.
 	WSHErrorUnsupportedSecurity WSHErrorKind = "unsupported_security"
 	// WSHErrorContractResolution means the stock conId could not be resolved.
@@ -109,7 +114,7 @@ func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string
 	// the serialized WSH gate so a dead contract cannot keep reaching either
 	// contract resolution or the event-calendar wire path.
 	if c.IsSymbolInactive(symbol) {
-		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+		return "", &WSHError{Kind: WSHErrorConnectorInactive, Operation: "resolve_contract"}
 	}
 
 	release, err := c.acquireWSH(ctx)
@@ -140,7 +145,7 @@ func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string
 			return "", newWSHContextError("resolve_contract", resolveErr)
 		}
 		if errors.Is(resolveErr, ErrSymbolInactive) || c.IsSymbolInactive(symbol) {
-			return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+			return "", &WSHError{Kind: WSHErrorConnectorInactive, Operation: "resolve_contract"}
 		}
 		return "", &WSHError{Kind: WSHErrorContractResolution, Operation: "resolve_contract"}
 	}
@@ -148,7 +153,7 @@ func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string
 		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
 	}
 	if c.IsSymbolInactive(symbol) {
-		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+		return "", &WSHError{Kind: WSHErrorConnectorInactive, Operation: "resolve_contract"}
 	}
 
 	now := time.Now().UTC()
