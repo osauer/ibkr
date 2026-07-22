@@ -2,11 +2,6 @@ package alerts
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -14,1357 +9,465 @@ import (
 
 	"github.com/osauer/ibkr/v2/internal/app/push"
 	"github.com/osauer/ibkr/v2/internal/app/state"
-	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
-func TestShouldAlertModes(t *testing.T) {
+func TestDispatcherObserveConfirmsSendsAndDeduplicates(t *testing.T) {
 	t.Parallel()
-	watch := rpc.CanaryResult{Severity: risk.SeverityWatch}
-	act := rpc.CanaryResult{Severity: risk.SeverityAct}
-	observe := rpc.CanaryResult{Severity: risk.SeverityObserve}
-	confirm := rpc.CanaryResult{Severity: risk.SeverityObserve, Action: "confirm_inputs"}
+	base := time.Date(2026, 7, 22, 8, 0, 0, 0, time.UTC)
+	store := newAlertStore(t, t.TempDir(), base)
+	addAlertTarget(t, store, "device-one", "subscription-one", base)
+	ensureAlertKeys(t, store, base)
 
-	if ShouldAlert(state.AlertModeNone, act) {
-		t.Fatalf("none mode should not alert")
-	}
-	if ShouldAlert(state.AlertModeActOnly, watch) {
-		t.Fatalf("act_only should ignore watch severity")
-	}
-	if !ShouldAlert(state.AlertModeActOnly, act) {
-		t.Fatalf("act_only should alert on act severity")
-	}
-	if !ShouldAlert(state.AlertModeActOnly, confirm) {
-		t.Fatalf("act_only should alert on confirm_inputs")
-	}
-	if !ShouldAlert(state.AlertModeWatchAndAct, confirm) {
-		t.Fatalf("watch_and_act should alert on confirm_inputs")
-	}
-	if !ShouldAlert(state.AlertModeWatchAndAct, watch) {
-		t.Fatalf("watch_and_act should alert on watch severity")
-	}
-	// The relevance policy has one copy, in internal/canary; the daemon stamps
-	// its verdict on the snapshot and this gate only reads it.
-	emptyMarketWatch := rpc.CanaryResult{
-		Severity:               risk.SeverityWatch,
-		PortfolioFit:           "low",
-		PortfolioAlertRelevant: new(false),
-	}
-	if ShouldAlert(state.AlertModeWatchAndAct, emptyMarketWatch) {
-		t.Fatalf("watch_and_act should not alert when the daemon stamped the canary portfolio-irrelevant")
-	}
-	portfolioWatch := emptyMarketWatch
-	portfolioWatch.PortfolioAlertRelevant = new(true)
-	if !ShouldAlert(state.AlertModeWatchAndAct, portfolioWatch) {
-		t.Fatalf("watch_and_act should alert when the daemon stamped the canary portfolio-relevant")
-	}
-	// An unstamped snapshot (older daemon) fails open: skew may add noise but
-	// must never suppress delivery. The `watch` fixture above already proves
-	// nil-stamp alerts; this pins the low-fit variant explicitly.
-	unstampedWatch := rpc.CanaryResult{Severity: risk.SeverityWatch, PortfolioFit: "low"}
-	if !ShouldAlert(state.AlertModeWatchAndAct, unstampedWatch) {
-		t.Fatalf("watch_and_act must fail open on an unstamped canary snapshot")
-	}
-	if ShouldAlert("bogus", act) {
-		t.Fatalf("unknown mode should not alert")
-	}
-	if ShouldAlert(state.AlertModeWatchAndAct, observe) {
-		t.Fatalf("watch_and_act should ignore observe severity")
-	}
-}
-
-func TestShouldAlertUsesEstablishedProjectionAtomically(t *testing.T) {
-	t.Parallel()
-
-	advisoryOnly := rpc.CanaryResult{
-		Action: "confirm_inputs", Severity: risk.SeverityWatch,
-		EstablishedAlertProjection: testEstablishedAlertProjection("a", "stand_down", risk.SeverityObserve, true),
-	}
-	if ShouldAlert(state.AlertModeActOnly, advisoryOnly) || ShouldAlert(state.AlertModeWatchAndAct, advisoryOnly) {
-		t.Fatal("advisory-only health escaped the established projection")
-	}
-
-	establishedAct := rpc.CanaryResult{
-		Action: "confirm_inputs", Severity: risk.SeverityWatch,
-		EstablishedAlertProjection: testEstablishedAlertProjection("b", "defend", risk.SeverityAct, true),
-	}
-	if !ShouldAlert(state.AlertModeActOnly, establishedAct) || !ShouldAlert(state.AlertModeWatchAndAct, establishedAct) {
-		t.Fatal("established act was suppressed by the richer advisory result")
-	}
-
-	malformed := establishedAct
-	bad := *malformed.EstablishedAlertProjection
-	bad.SchemaVersion = "unknown"
-	malformed.EstablishedAlertProjection = &bad
-	if ShouldAlert(state.AlertModeWatchAndAct, malformed) {
-		t.Fatal("malformed present established projection did not fail closed")
-	}
-}
-
-func TestObserveAdvisoryOnlyProjectionCreatesNoLegacyAttentionOrPush(t *testing.T) {
-	t.Parallel()
-	for _, mode := range []string{state.AlertModeActOnly, state.AlertModeWatchAndAct} {
-		t.Run(mode, func(t *testing.T) {
-			t.Parallel()
-			store := governanceStore(t, mode)
-			if err := store.AddPushSubscription(state.PushSubscription{
-				ID: "sub-1", DeviceID: "device-1", Endpoint: "https://push.example/sub", P256DH: "p256dh", Auth: "auth",
-			}); err != nil {
-				t.Fatal(err)
-			}
-			sender := &recordingSender{}
-			monitor := Monitor{Store: store, Sender: sender}
-			advisory := rpc.CanaryResult{
-				Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:" + strings.Repeat("f", 64)},
-				Action:      "confirm_inputs", Severity: risk.SeverityWatch, MarketConfirmation: "blocked",
-				EstablishedAlertProjection: testEstablishedAlertProjection("a", "stand_down", risk.SeverityObserve, true),
-			}
-			record, attempts := monitor.Observe(t.Context(), advisory)
-			if record != nil || len(attempts) != 0 || len(sender.payloads) != 0 || len(store.AlertHistory(10)) != 0 {
-				t.Fatalf("mode=%s record=%+v attempts=%d sends=%d history=%+v", mode, record, len(attempts), len(sender.payloads), store.AlertHistory(10))
-			}
-			attention := store.Attention()
-			if attention.HighWaterSeq != 0 || attention.UnreadCount != 0 || len(attention.UnreadRefs) != 0 {
-				t.Fatalf("mode=%s advisory changed legacy attention: %+v", mode, attention)
-			}
-		})
-	}
-}
-
-func TestObserveEstablishedProjectionPreservesActAndDedupeIdentity(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeActOnly)
-	if err := store.AddPushSubscription(state.PushSubscription{
-		ID: "sub-1", DeviceID: "device-1", Endpoint: "https://push.example/sub", P256DH: "p256dh", Auth: "auth",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	sender := &recordingSender{}
-	monitor := Monitor{Store: store, Sender: sender}
-	projection := testEstablishedAlertProjection("b", "defend", risk.SeverityAct, true)
-
-	first := rpc.CanaryResult{
-		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:" + strings.Repeat("c", 64)},
-		Action:      "confirm_inputs", Severity: risk.SeverityWatch, MarketConfirmation: "blocked",
-		EstablishedAlertProjection: projection,
-	}
-	record, attempts := monitor.Observe(t.Context(), first)
-	if record == nil || record.Action != "defend" || record.Severity != string(risk.SeverityAct) || len(attempts) != 1 || len(sender.payloads) != 1 {
-		t.Fatalf("established act record=%+v attempts=%d sends=%d", record, len(attempts), len(sender.payloads))
-	}
-
-	second := first
-	second.Fingerprint.Key = "sha256:" + strings.Repeat("d", 64)
-	second.Action = "watch"
-	second.Severity = risk.SeverityUrgent
-	record, attempts = monitor.Observe(t.Context(), second)
-	if record != nil || len(attempts) != 0 || len(sender.payloads) != 1 || len(store.AlertHistory(10)) != 1 {
-		t.Fatalf("advisory churn bypassed established dedupe: record=%+v attempts=%d sends=%d history=%+v", record, len(attempts), len(sender.payloads), store.AlertHistory(10))
-	}
-}
-
-func TestObserveMalformedEstablishedProjectionFailsClosed(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	sender := &recordingSender{}
-	projection := testEstablishedAlertProjection("e", "watch", risk.SeverityWatch, true)
-	projection.OccurrenceEligible = false
-	canary := rpc.CanaryResult{
-		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:" + strings.Repeat("f", 64)},
-		Action:      "defend", Severity: risk.SeverityAct, EstablishedAlertProjection: projection,
-	}
-	record, attempts := (Monitor{Store: store, Sender: sender}).Observe(t.Context(), canary)
-	if record != nil || len(attempts) != 0 || len(sender.payloads) != 0 || len(store.AlertHistory(10)) != 0 || store.Attention().UnreadCount != 0 {
-		t.Fatalf("malformed projection created legacy state: record=%+v attempts=%d sends=%d", record, len(attempts), len(sender.payloads))
-	}
-}
-
-func TestWatchAndActIncludesEveryActOnlyCanary(t *testing.T) {
-	t.Parallel()
-	cases := []rpc.CanaryResult{
-		{Severity: risk.SeverityObserve, Action: "defend"},
-		{Severity: risk.SeverityObserve, Action: "rebalance"},
-		{Severity: risk.SeverityObserve, Action: "confirm_inputs"},
-		{Severity: risk.SeverityAct},
-		{Severity: risk.SeverityUrgent},
-	}
-	for _, canary := range cases {
-		if !ShouldAlert(state.AlertModeActOnly, canary) {
-			t.Fatalf("fixture is not act_only eligible: %+v", canary)
+	sender := &recordingSender{results: []state.PushAttempt{{OK: true, Class: state.GovernanceTransportAccepted}}}
+	sender.onSend = func(_ int, _ state.PushSubscription, payload push.Payload) {
+		view := store.AlertDelivery(base.Add(time.Minute))
+		if view.AttemptTotals.Confirmed != 1 {
+			t.Errorf("send ran without one durable confirmed attempt: %+v", view.AttemptTotals)
 		}
-		if !ShouldAlert(state.AlertModeWatchAndAct, canary) {
-			t.Fatalf("watch_and_act excluded act_only-eligible canary: %+v", canary)
+		if payload.AlertID != "" || payload.Action != "" {
+			t.Errorf("legacy payload fields escaped the allowlist: %+v", payload)
 		}
 	}
-}
+	now := base.Add(time.Minute)
+	dispatcher := Dispatcher{Store: store, Sender: sender, URL: "https://app.example/alerts", Now: func() time.Time { return now }}
+	candidate := alertCandidate(t, rpc.AlertPresentationCanaryPortfolioStress, "opening-one", now)
+	snapshot := alertSnapshot(t, now, candidate)
 
-func TestObserveRedactsPayloadAndDedupesFingerprint(t *testing.T) {
-	t.Parallel()
-	store, err := state.Open(t.TempDir())
+	view, err := dispatcher.Observe(context.Background(), snapshot)
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := store.EnsureVAPID(time.Now().UTC(), func() (string, string, error) {
-		return "private", "public", nil
-	}); err != nil {
-		t.Fatalf("EnsureVAPID: %v", err)
+	if sender.callCount() != 1 || view.AttemptTotals.Accepted != 1 || view.AttemptTotals.Confirmed != 0 {
+		t.Fatalf("unexpected accepted delivery result: calls=%d totals=%+v", sender.callCount(), view.AttemptTotals)
 	}
-	if err := store.SetAlertMode(state.AlertModeWatchAndAct); err != nil {
-		t.Fatalf("SetAlertMode: %v", err)
+	if view.DeliveryHealth.State != state.AlertDeliveryHealthHealthy || view.DeliveryHealth.Class != "" {
+		t.Fatalf("accepted delivery did not leave healthy state: %+v", view.DeliveryHealth)
 	}
-	if err := store.AddPushSubscription(state.PushSubscription{
-		ID:       "sub-1",
-		DeviceID: "device-1",
-		Endpoint: "https://push.example/sub",
-		P256DH:   "p256dh",
-		Auth:     "auth",
-	}); err != nil {
-		t.Fatalf("AddPushSubscription: %v", err)
+	payload := sender.payloadAt(t, 0)
+	if payload.Title != "Portfolio stress" || payload.DisplayID == "" || payload.Severity != string(rpc.AlertSeverityWatch) {
+		t.Fatalf("unexpected fixed payload: %+v", payload)
 	}
-	sender := &recordingSender{}
-	monitor := Monitor{
-		Store:  store,
-		Sender: sender,
-		URL:    "https://relay.example",
-		Now: func() time.Time {
-			return time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
-		},
-	}
-	canary := rpc.CanaryResult{
-		Fingerprint:        rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:test"},
-		Action:             "defend",
-		Severity:           risk.SeverityAct,
-		MarketConfirmation: "confirmed",
-		Summary:            "private AAPL exposure is 100000 USD",
+	if strings.Contains(payload.Title+payload.Body, candidate.OccurrenceKey) || strings.Contains(payload.Title+payload.Body, candidate.EvidenceFingerprint) {
+		t.Fatal("private candidate identity escaped into push copy")
 	}
 
-	rec, attempts := monitor.Observe(context.Background(), canary)
-	if rec == nil {
-		t.Fatalf("expected alert record")
+	if _, err := dispatcher.Observe(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
 	}
-	if len(attempts) != 1 || len(sender.payloads) != 1 {
-		t.Fatalf("push attempts=%d payloads=%d, want 1 each", len(attempts), len(sender.payloads))
+	if sender.callCount() != 1 {
+		t.Fatalf("accepted occurrence-target pair was sent again: %d calls", sender.callCount())
 	}
-	payloadText := sender.payloads[0].Title + " " + sender.payloads[0].Body
-	for _, forbidden := range []string{"AAPL", "100000", "private"} {
-		if strings.Contains(payloadText, forbidden) {
-			t.Fatalf("payload leaked %q: %s", forbidden, payloadText)
+}
+
+func TestDispatcherUsesCandidateReturnedByFinalConfirm(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+	store := newAlertStore(t, t.TempDir(), base)
+	addAlertTarget(t, store, "device-one", "subscription-one", base)
+	addAlertTarget(t, store, "device-two", "subscription-two", base)
+	ensureAlertKeys(t, store, base)
+
+	now := base.Add(time.Minute)
+	initial := alertCandidateForSource(t, rpc.AlertSourceRulebook, rpc.AlertKindPolicyDrift,
+		rpc.AlertPresentationRulebookSingleNameExposure, "opening-revision", now)
+	revisedAt := now.Add(time.Minute)
+	revised := initial
+	revised.EvidenceFingerprint = "sha256:" + strings.Repeat("b", 64)
+	revised.PresentationCode = rpc.AlertPresentationRulebookFXExposure
+	revised.Severity = rpc.AlertSeverityAct
+	revised.EvidenceAsOf = revisedAt
+	revised.ObservedAt = revisedAt
+
+	sender := &recordingSender{results: []state.PushAttempt{
+		{OK: true, Class: state.GovernanceTransportAccepted},
+		{OK: true, Class: state.GovernanceTransportAccepted},
+	}}
+	sender.onSend = func(index int, _ state.PushSubscription, _ push.Payload) {
+		if index != 0 {
+			return
+		}
+		now = revisedAt
+		if _, err := store.ObserveAlertSnapshot(alertSnapshot(t, revisedAt, revised)); err != nil {
+			t.Errorf("revise candidate between target confirmations: %v", err)
 		}
 	}
-	if !strings.Contains(payloadText, "Open ibkr for portfolio details") {
-		t.Fatalf("payload missing app-open hint: %s", payloadText)
+	dispatcher := Dispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
+	if _, err := dispatcher.Observe(context.Background(), alertSnapshot(t, now, initial)); err != nil {
+		t.Fatal(err)
 	}
-
-	rec, attempts = monitor.Observe(context.Background(), canary)
-	if rec != nil || len(attempts) != 0 {
-		t.Fatalf("duplicate fingerprint should be suppressed, rec=%#v attempts=%d", rec, len(attempts))
+	if sender.callCount() != 2 {
+		t.Fatalf("expected both active targets, got %d sends", sender.callCount())
 	}
-	if got := store.AlertHistory(10); len(got) != 1 {
-		t.Fatalf("alert history length=%d, want 1", len(got))
+	first, second := sender.payloadAt(t, 0), sender.payloadAt(t, 1)
+	if first.Title != "Single-name exposure" || first.Severity != string(rpc.AlertSeverityWatch) {
+		t.Fatalf("first target did not use its confirmed candidate: %+v", first)
+	}
+	if second.Title != "Currency exposure" || second.Severity != string(rpc.AlertSeverityAct) {
+		t.Fatalf("second target reused stale due-work instead of final confirmation: %+v", second)
 	}
 }
 
-func TestObserveRecordsBeforeApplyingDeliveryMode(t *testing.T) {
+func TestDispatcherRecordsTypedPrerequisiteHealth(t *testing.T) {
 	t.Parallel()
-	store, err := state.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if _, err := store.EnsureVAPID(time.Now().UTC(), func() (string, string, error) {
-		return "private", "public", nil
-	}); err != nil {
-		t.Fatalf("EnsureVAPID: %v", err)
-	}
-	if err := store.AddPushSubscription(state.PushSubscription{
-		ID: "sub-1", DeviceID: "device-1", Endpoint: "https://push.example/sub", P256DH: "p256dh", Auth: "auth",
-	}); err != nil {
-		t.Fatalf("AddPushSubscription: %v", err)
-	}
-	sender := &recordingSender{}
-	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	monitor := Monitor{Store: store, Sender: sender, Now: func() time.Time { return now }}
-
-	if err := store.SetAlertMode(state.AlertModeActOnly); err != nil {
-		t.Fatal(err)
-	}
-	watch := rpc.CanaryResult{
-		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:watch-under-act-only"},
-		Severity:    risk.SeverityWatch,
-	}
-	rec, attempts := monitor.Observe(t.Context(), watch)
-	if rec == nil || len(attempts) != 0 || len(sender.payloads) != 0 {
-		t.Fatalf("act_only watch rec=%#v attempts=%d sends=%d, want durable record without transport", rec, len(attempts), len(sender.payloads))
-	}
-
-	if err := store.SetAlertMode(state.AlertModeWatchAndAct); err != nil {
-		t.Fatal(err)
-	}
-	rec, attempts = monitor.Observe(t.Context(), watch)
-	if rec != nil || len(attempts) != 0 || len(sender.payloads) != 0 {
-		t.Fatalf("re-enabled delivery retried persisted fingerprint: rec=%#v attempts=%d sends=%d", rec, len(attempts), len(sender.payloads))
-	}
-
-	if err := store.SetAlertMode(state.AlertModeNone); err != nil {
-		t.Fatal(err)
-	}
-	underNone := rpc.CanaryResult{
-		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:act-under-none"},
-		Action:      "defend", Severity: risk.SeverityAct,
-	}
-	rec, attempts = monitor.Observe(t.Context(), underNone)
-	if rec == nil || len(attempts) != 0 || len(sender.payloads) != 0 {
-		t.Fatalf("none rec=%#v attempts=%d sends=%d, want durable record without transport", rec, len(attempts), len(sender.payloads))
-	}
-
-	if err := store.SetAlertMode(state.AlertModeActOnly); err != nil {
-		t.Fatal(err)
-	}
-	rec, attempts = monitor.Observe(t.Context(), underNone)
-	if rec != nil || len(attempts) != 0 || len(sender.payloads) != 0 {
-		t.Fatalf("re-enabled delivery retried fingerprint first seen under none: rec=%#v attempts=%d sends=%d", rec, len(attempts), len(sender.payloads))
-	}
-	now = now.Add(time.Minute)
-	action := rpc.CanaryResult{
-		Fingerprint: rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:new-action"},
-		Action:      "confirm_inputs", Severity: risk.SeverityObserve,
-	}
-	rec, attempts = monitor.Observe(t.Context(), action)
-	if rec == nil || len(attempts) != 1 || len(sender.payloads) != 1 {
-		t.Fatalf("new act_only action rec=%#v attempts=%d sends=%d, want record and transport", rec, len(attempts), len(sender.payloads))
-	}
-	if got := store.AlertHistory(10); len(got) != 3 {
-		t.Fatalf("alert history length=%d, want 3 independently recorded occurrences", len(got))
-	}
-}
-
-func TestObserveRequiresPreAndPostRecordDeliveryEligibility(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
+	base := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
 		name      string
-		before    string
-		after     string
-		canary    rpc.CanaryResult
-		wantSends int
+		addTarget bool
+		addKeys   bool
+		sender    push.Sender
+		class     string
 	}{
-		{
-			name: "none to act_only", before: state.AlertModeNone, after: state.AlertModeActOnly,
-			canary: rpc.CanaryResult{Action: "defend", Severity: risk.SeverityAct},
-		},
-		{
-			name: "act_only suppression to watch_and_act", before: state.AlertModeActOnly, after: state.AlertModeWatchAndAct,
-			canary: rpc.CanaryResult{Severity: risk.SeverityWatch},
-		},
-		{
-			name: "watch_and_act to none", before: state.AlertModeWatchAndAct, after: state.AlertModeNone,
-			canary: rpc.CanaryResult{Severity: risk.SeverityWatch},
-		},
-		{
-			name: "unchanged enabled", before: state.AlertModeActOnly, after: state.AlertModeActOnly,
-			canary: rpc.CanaryResult{Action: "confirm_inputs", Severity: risk.SeverityObserve}, wantSends: 1,
-		},
+		{name: "no active subscription", addKeys: true, sender: &recordingSender{}, class: state.AlertDeliveryHealthClassNoSubscription},
+		{name: "signing keys unavailable", addTarget: true, sender: &recordingSender{}, class: state.AlertDeliveryHealthClassSigningKeys},
+		{name: "sender unavailable", addTarget: true, addKeys: true, class: state.AlertDeliveryHealthClassSender},
 	}
-	for _, tc := range cases {
+	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			store, err := state.Open(t.TempDir())
+			t.Parallel()
+			store := newAlertStore(t, t.TempDir(), base)
+			if tc.addTarget {
+				addAlertTarget(t, store, "device-one", "subscription-one", base)
+			}
+			if tc.addKeys {
+				ensureAlertKeys(t, store, base)
+			}
+			now := base.Add(time.Minute)
+			dispatcher := Dispatcher{Store: store, Sender: tc.sender, Now: func() time.Time { return now }}
+			view, err := dispatcher.Observe(context.Background(), alertSnapshot(t, now,
+				alertCandidate(t, rpc.AlertPresentationCanaryPortfolioStress, tc.name, now)))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := store.SetAlertMode(tc.before); err != nil {
-				t.Fatal(err)
-			}
-			ensureGovernanceKeys(t, store)
-			if err := store.AddPushSubscription(state.PushSubscription{
-				ID: "sub", DeviceID: "device", Endpoint: "https://push.example/sub", P256DH: "key", Auth: "auth",
-			}); err != nil {
-				t.Fatal(err)
-			}
-			tc.canary.Fingerprint = rpc.Fingerprint{Version: rpc.CanaryFingerprintVersion, Key: "sha256:" + strings.ReplaceAll(tc.name, " ", "-")}
-			sender := &recordingSender{}
-			var transitionErr error
-			monitor := Monitor{
-				Store: store, Sender: sender,
-				afterRecord: func() { transitionErr = store.SetAlertMode(tc.after) },
-			}
-			rec, attempts := monitor.Observe(t.Context(), tc.canary)
-			if transitionErr != nil {
-				t.Fatalf("transition alert mode: %v", transitionErr)
-			}
-			if rec == nil || len(store.AlertHistory(10)) != 1 {
-				t.Fatalf("durable history missing: rec=%#v history=%+v", rec, store.AlertHistory(10))
-			}
-			if len(attempts) != tc.wantSends || len(sender.payloads) != tc.wantSends {
-				t.Fatalf("attempts=%d sends=%d, want %d", len(attempts), len(sender.payloads), tc.wantSends)
-			}
-			duplicate, duplicateAttempts := monitor.Observe(t.Context(), tc.canary)
-			if duplicate != nil || len(duplicateAttempts) != 0 || len(sender.payloads) != tc.wantSends {
-				t.Fatalf("duplicate rec=%#v attempts=%d total sends=%d, want no resend", duplicate, len(duplicateAttempts), len(sender.payloads))
+			if view.DeliveryHealth.State != state.AlertDeliveryHealthUnavailable || view.DeliveryHealth.Class != tc.class {
+				t.Fatalf("wrong prerequisite health: %+v", view.DeliveryHealth)
 			}
 		})
 	}
 }
 
-func TestObserveConcurrentSameFingerprintCreatesAndSendsOnce(t *testing.T) {
-	store := governanceStore(t, state.AlertModeActOnly)
-	addGovernanceTarget(t, store, "device", "sub")
-	now := time.Date(2026, 7, 19, 12, 15, 0, 0, time.UTC)
-	sender := &threadSafeRecordingSender{}
-	monitor := Monitor{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	canary := rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "sha256:atomic-canary"}, Action: "defend", Severity: risk.SeverityAct}
-	const observers = 32
-	start := make(chan struct{})
-	results := make(chan *state.AlertRecord, observers)
-	var wg sync.WaitGroup
-	for range observers {
-		wg.Go(func() {
-			<-start
-			record, _ := monitor.Observe(t.Context(), canary)
-			results <- record
-		})
-	}
-	close(start)
-	wg.Wait()
-	close(results)
-	created := 0
-	for record := range results {
-		if record != nil {
-			created++
-		}
-	}
-	if created != 1 || len(store.AlertHistory(0)) != 1 || sender.Calls() != 1 {
-		t.Fatalf("created=%d history=%+v sends=%d", created, store.AlertHistory(0), sender.Calls())
-	}
-	attention := store.Attention()
-	if attention.HighWaterSeq != 1 || attention.UnreadCount != 1 || len(attention.UnreadRefs) != 1 {
-		t.Fatalf("attention=%+v", attention)
-	}
-}
-
-func TestObserveSameTimestampDifferentFingerprintsHaveDistinctIDs(t *testing.T) {
-	store := governanceStore(t, state.AlertModeNone)
-	now := time.Date(2026, 7, 19, 12, 20, 0, 0, time.UTC)
-	monitor := Monitor{Store: store, Now: func() time.Time { return now }}
-	first, _ := monitor.Observe(t.Context(), rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "sha256:first"}, Action: "defend", Severity: risk.SeverityAct})
-	second, _ := monitor.Observe(t.Context(), rpc.CanaryResult{Fingerprint: rpc.Fingerprint{Key: "sha256:second"}, Action: "defend", Severity: risk.SeverityAct})
-	if first == nil || second == nil || first.ID == "" || second.ID == "" || first.ID == second.ID {
-		t.Fatalf("first=%+v second=%+v", first, second)
-	}
-	attention := store.Attention()
-	if attention.UnreadCount != 2 || len(attention.UnreadRefs) != 2 || attention.UnreadRefs[0].ID == attention.UnreadRefs[1].ID {
-		t.Fatalf("attention refs=%+v", attention)
-	}
-}
-
-func TestGovernanceWatchDeliveryIgnoresCanarySeverityBand(t *testing.T) {
+func TestDispatcherClearsPrerequisiteHealthWhenNoWorkRemains(t *testing.T) {
 	t.Parallel()
-	store := governanceStore(t, state.AlertModeActOnly)
-	addGovernanceTarget(t, store, "device", "sub")
-	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	sender := &recordingSender{}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
+	base := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
+	store := newAlertStore(t, t.TempDir(), base)
+	ensureAlertKeys(t, store, base)
+	now := base.Add(time.Minute)
+	candidate := alertCandidate(t, rpc.AlertPresentationCanaryPortfolioStress, "recover-after-prerequisite", now)
+	dispatcher := Dispatcher{Store: store, Sender: &recordingSender{}, Now: func() time.Time { return now }}
 
-	watch := governanceSnapshot(now)
-	watch.Candidates[0].Severity = rpc.NudgeSeverityWatch
-	view, err := dispatcher.Observe(t.Context(), watch)
+	view, err := dispatcher.Observe(context.Background(), alertSnapshot(t, now, candidate))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(view.Occurrences) != 1 || len(sender.payloads) != 1 {
-		t.Fatalf("act_only governance watch occurrences=%d sends=%d, want record and delivery", len(view.Occurrences), len(sender.payloads))
+	if view.DeliveryHealth.Class != state.AlertDeliveryHealthClassNoSubscription {
+		t.Fatalf("prerequisite outage not established: %+v", view.DeliveryHealth)
 	}
 
-	if err := store.SetAlertMode(state.AlertModeNone); err != nil {
-		t.Fatal(err)
-	}
 	now = now.Add(time.Minute)
-	watch.Candidates[0].Fingerprint = "sha256:" + strings.Repeat("b", 64)
-	watch.Candidates[0].OccurredAt = now
-	view, err = dispatcher.Observe(t.Context(), watch)
+	recovered := candidate
+	recovered.State = rpc.AlertEpisodeRecovered
+	recovered.EvidenceFingerprint = "sha256:" + strings.Repeat("c", 64)
+	recovered.StateChangedAt = now
+	recovered.EvidenceAsOf = now
+	recovered.ObservedAt = now
+	view, err = dispatcher.Observe(context.Background(), alertSnapshot(t, now, recovered))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(view.Occurrences) != 2 || len(sender.payloads) != 1 {
-		t.Fatalf("none governance occurrences=%d sends=%d, want new record without transport", len(view.Occurrences), len(sender.payloads))
-	}
-	if view.DeliveryHealth.State != state.GovernanceDeliverySuppressed || view.DeliveryHealth.Class != state.GovernanceTransportSuppressed {
-		t.Fatalf("none mode health=%+v", view.DeliveryHealth)
-	}
-	if len(view.Attempts) != 2 || view.Attempts[1].Class != state.GovernanceTransportSuppressed {
-		t.Fatalf("none mode attempts=%+v, want durable suppressed transport evidence", view.Attempts)
+	if view.DeliveryHealth.State == state.AlertDeliveryHealthUnavailable || view.DeliveryHealth.Class != "" {
+		t.Fatalf("stale prerequisite outage survived after work recovered: %+v", view.DeliveryHealth)
 	}
 }
 
-func TestGovernanceDeliversUnderBothNonNoneModes(t *testing.T) {
+func TestDispatcherRetriesAfterRestartAndRetainsDedupe(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{state.AlertModeActOnly, state.AlertModeWatchAndAct} {
-		t.Run(mode, func(t *testing.T) {
-			store := governanceStore(t, mode)
-			addGovernanceTarget(t, store, "device", "sub")
-			now := time.Date(2026, 7, 19, 12, 30, 0, 0, time.UTC)
-			snapshot := governanceSnapshot(now)
-			snapshot.Candidates[0].Severity = rpc.NudgeSeverityWatch
-			sender := &recordingSender{}
-			view, err := (&GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}).Observe(t.Context(), snapshot)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(sender.payloads) != 1 || len(view.Receipts) != 1 || view.AttemptTotals.Accepted != 1 {
-				t.Fatalf("mode=%s sends=%d receipts=%+v totals=%+v", mode, len(sender.payloads), view.Receipts, view.AttemptTotals)
-			}
-		})
-	}
-}
-
-func TestGovernanceFirstSeenUnderNoneStaysSuppressedAfterReenable(t *testing.T) {
-	t.Parallel()
-	for _, mode := range []string{state.AlertModeActOnly, state.AlertModeWatchAndAct} {
-		t.Run(mode, func(t *testing.T) {
-			dir := t.TempDir()
-			store, err := state.Open(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := store.SetAlertMode(state.AlertModeNone); err != nil {
-				t.Fatal(err)
-			}
-			ensureGovernanceKeys(t, store)
-			addGovernanceTarget(t, store, "device-first", "sub-first")
-			now := time.Date(2026, 7, 19, 13, 0, 0, 0, time.UTC)
-			sender := &recordingSender{}
-			dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-			view, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(view.Occurrences) != 1 || len(view.Attempts) != 1 || view.Attempts[0].Class != state.GovernanceTransportSuppressed {
-				t.Fatalf("initial none observation=%+v", view)
-			}
-			firstDisplayID := view.Occurrences[0].DisplayID
-
-			reopened, err := state.Open(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			addGovernanceTarget(t, reopened, "device-late", "sub-late")
-			if err := reopened.SetAlertMode(mode); err != nil {
-				t.Fatal(err)
-			}
-			now = now.Add(time.Minute)
-			dispatcher = GovernanceDispatcher{Store: reopened, Sender: sender, Now: func() time.Time { return now }}
-			view, err = dispatcher.Observe(t.Context(), governanceSnapshot(now))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(sender.payloads) != 0 || len(view.Receipts) != 0 {
-				t.Fatalf("%s re-enable sent first-seen-none episode: sends=%d receipts=%+v", mode, len(sender.payloads), view.Receipts)
-			}
-			if len(view.Occurrences) != 1 || view.Occurrences[0].DisplayID != firstDisplayID || !view.Occurrences[0].ResolvedAt.IsZero() {
-				t.Fatalf("%s changed occurrence episode: %+v", mode, view.Occurrences)
-			}
-			if view.AttemptTotals.Suppressed != 1 || view.AttemptTotals.Accepted != 0 || view.DeliveryHealth.State != state.GovernanceDeliverySuppressed {
-				t.Fatalf("%s suppression evidence/health=%+v totals=%+v", mode, view.DeliveryHealth, view.AttemptTotals)
-			}
-		})
-	}
-}
-
-func TestGovernanceDurableSuppressionDoesNotDependOnForensicAttempt(t *testing.T) {
-	t.Parallel()
+	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	dir := t.TempDir()
-	now := time.Date(2026, 7, 19, 13, 30, 0, 0, time.UTC)
-	snapshot := governanceSnapshot(now)
-	raw, err := json.Marshal(state.Data{
-		AlertSettings:         state.AlertSettings{Mode: state.AlertModeActOnly},
-		AttentionHighWaterSeq: 1,
-		GovernanceOccurrences: []state.GovernanceOccurrence{{
-			Fingerprint: snapshot.Candidates[0].Fingerprint, DisplayID: "gov-durable", Kind: string(snapshot.Candidates[0].Kind),
-			State: string(snapshot.Candidates[0].State), Severity: string(snapshot.Candidates[0].Severity),
-			Title: snapshot.Candidates[0].Title, Body: snapshot.Candidates[0].Body, Destination: string(snapshot.Candidates[0].Destination),
-			OccurredAt: now, FirstSeenAt: now, LastSeenAt: now, AttentionSeq: 1,
-			DeliveryDisposition: state.GovernanceDispositionSuppressedAtCreation,
-		}},
-	})
+	store := newAlertStore(t, dir, base)
+	addAlertTarget(t, store, "device-one", "subscription-one", base)
+	ensureAlertKeys(t, store, base)
+	now := base.Add(time.Minute)
+	retrying := &recordingSender{results: []state.PushAttempt{{Class: state.GovernanceTransportNetworkRetry}}}
+	dispatcher := Dispatcher{Store: store, Sender: retrying, Now: func() time.Time { return now }}
+	candidate := alertCandidate(t, rpc.AlertPresentationCanaryPortfolioStress, "restart-retry", now)
+
+	view, err := dispatcher.Observe(context.Background(), alertSnapshot(t, now, candidate))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o600); err != nil {
-		t.Fatal(err)
+	if view.AttemptTotals.RetryPending != 1 || view.DeliveryHealth.Class != state.AlertDeliveryHealthClassRetry {
+		t.Fatalf("retry evidence not durable before restart: totals=%+v health=%+v", view.AttemptTotals, view.DeliveryHealth)
 	}
-	store, err := state.Open(dir)
+
+	restarted, err := state.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ensureGovernanceKeys(t, store)
-	addGovernanceTarget(t, store, "device", "sub")
+	now = now.Add(2 * time.Minute)
+	accepted := &recordingSender{results: []state.PushAttempt{{OK: true, Class: state.GovernanceTransportAccepted}}}
+	retryDispatcher := Dispatcher{Store: restarted, Sender: accepted, Now: func() time.Time { return now }}
+	view, err = retryDispatcher.DispatchPending(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.callCount() != 1 || view.AttemptTotals.Attempts != 2 || view.AttemptTotals.Accepted != 1 || view.AttemptTotals.RetryPending != 0 {
+		t.Fatalf("restart retry did not converge: calls=%d totals=%+v", accepted.callCount(), view.AttemptTotals)
+	}
+	if _, err := retryDispatcher.DispatchPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if accepted.callCount() != 1 {
+		t.Fatalf("accepted retry was sent again: %d calls", accepted.callCount())
+	}
+}
+
+func TestDispatcherRetiresDeadSubscription(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 22, 13, 0, 0, 0, time.UTC)
+	store := newAlertStore(t, t.TempDir(), base)
+	addAlertTarget(t, store, "device-one", "subscription-one", base)
+	ensureAlertKeys(t, store, base)
+	now := base.Add(time.Minute)
+	sender := &recordingSender{results: []state.PushAttempt{{Class: state.GovernanceTransportDead}}}
+	dispatcher := Dispatcher{
+		Store: store, Sender: sender,
+		Now: func() time.Time { return now },
+	}
+	view, err := dispatcher.Observe(context.Background(), alertSnapshot(t, now,
+		alertCandidate(t, rpc.AlertPresentationCanaryPortfolioStress, "dead-target", now)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.ActivePushSubscriptions()) != 0 || view.AttemptTotals.Rejected != 1 {
+		t.Fatalf("dead target was not atomically retired: active=%d totals=%+v", len(store.ActivePushSubscriptions()), view.AttemptTotals)
+	}
+	if _, err := dispatcher.DispatchPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if sender.callCount() != 1 {
+		t.Fatalf("retired dead target was retried: %d calls", sender.callCount())
+	}
+}
+
+func TestDispatcherFinalizesConfirmedAttemptWhenFixedCopyIsUnavailable(t *testing.T) {
+	base := time.Date(2026, 7, 22, 14, 0, 0, 0, time.UTC)
+	store := newAlertStore(t, t.TempDir(), base)
+	addAlertTarget(t, store, "device-one", "subscription-one", base)
+	ensureAlertKeys(t, store, base)
+	now := base.Add(time.Minute)
+	code := rpc.AlertPresentationCanaryPortfolioStress
+	fixed := presentations[code]
+	delete(presentations, code)
+	defer func() { presentations[code] = fixed }()
+
 	sender := &recordingSender{}
-	view, err := (&GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now.Add(time.Minute) }}).Observe(t.Context(), snapshot)
-	if err != nil {
-		t.Fatal(err)
+	dispatcher := Dispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
+	if _, err := dispatcher.Observe(context.Background(), alertSnapshot(t, now,
+		alertCandidate(t, code, "missing-fixed-copy", now))); err == nil {
+		t.Fatal("missing fixed copy did not fail closed")
 	}
-	if len(sender.payloads) != 0 || len(view.Receipts) != 0 || view.AttemptTotals.Accepted != 0 || view.AttemptTotals.Suppressed != 1 {
-		t.Fatalf("durable flag did not remain terminal: sends=%d view=%+v", len(sender.payloads), view)
-	}
-}
-
-func TestGovernanceLegacyUnknownEpisodeNeverSendsButNewEpisodeResamples(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	now := time.Date(2026, 7, 19, 13, 45, 0, 0, time.UTC)
-	snapshot := governanceSnapshot(now)
-	// This deliberately uses the pre-disposition storage shape. In particular,
-	// the old false boolean cannot prove that the episode was created enabled.
-	raw, err := json.Marshal(map[string]any{
-		"alert_settings": map[string]any{"mode": state.AlertModeActOnly},
-		"governance_occurrences": []map[string]any{{
-			"fingerprint": snapshot.Candidates[0].Fingerprint, "display_id": "gov-legacy", "kind": string(snapshot.Candidates[0].Kind),
-			"state": string(snapshot.Candidates[0].State), "severity": string(snapshot.Candidates[0].Severity),
-			"title": snapshot.Candidates[0].Title, "body": snapshot.Candidates[0].Body, "destination": string(snapshot.Candidates[0].Destination),
-			"occurred_at": now, "first_seen_at": now, "last_seen_at": now,
-			"delivery_suppressed_at_creation": false,
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store, err := state.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ensureGovernanceKeys(t, store)
-	addGovernanceTarget(t, store, "device", "sub")
-	sender := &recordingSender{}
-	dispatcher := &GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	view, err := dispatcher.Observe(t.Context(), snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sender.payloads) != 0 || len(view.Receipts) != 0 || view.AttemptTotals.Suppressed != 1 {
-		t.Fatalf("legacy episode delivered or lacked forensic accounting: sends=%d view=%+v", len(sender.payloads), view)
-	}
-	empty := governanceSnapshot(now.Add(time.Minute))
-	empty.Candidates = nil
-	now = now.Add(time.Minute)
-	if _, err := dispatcher.Observe(t.Context(), empty); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(time.Minute)
-	snapshot.Candidates[0].OccurredAt = now
-	view, err = dispatcher.Observe(t.Context(), snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sender.payloads) != 1 || len(view.Receipts) != 1 || len(view.Occurrences) != 2 || view.Occurrences[1].DisplayID == "gov-legacy" {
-		t.Fatalf("new episode did not resample enabled mode: sends=%d view=%+v", len(sender.payloads), view)
+	view := store.AlertDelivery(now)
+	if sender.callCount() != 0 || view.AttemptTotals.Confirmed != 0 || view.AttemptTotals.Rejected != 1 {
+		t.Fatalf("confirmed attempt was not finalized after copy failure: calls=%d totals=%+v", sender.callCount(), view.AttemptTotals)
 	}
 }
 
-func TestGovernanceResolvedNoneEpisodeCanDeliverWhenReopened(t *testing.T) {
+func TestPresentationForCoversClosedCodesAndStates(t *testing.T) {
 	t.Parallel()
-	store := governanceStore(t, state.AlertModeNone)
-	addGovernanceTarget(t, store, "device", "sub")
-	now := time.Date(2026, 7, 19, 14, 0, 0, 0, time.UTC)
-	sender := &recordingSender{}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	view, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if err != nil {
-		t.Fatal(err)
+	codes := []rpc.AlertPresentationCode{
+		rpc.AlertPresentationCanaryPortfolioStress,
+		rpc.AlertPresentationRegimeMarketStress,
+		rpc.AlertPresentationRulebookSingleNameExposure,
+		rpc.AlertPresentationRulebookOptionLinePremium,
+		rpc.AlertPresentationRulebookCashSellOnly,
+		rpc.AlertPresentationRulebookExtrinsicBudget,
+		rpc.AlertPresentationRulebookExpiryRunway,
+		rpc.AlertPresentationRulebookCatalystCoverage,
+		rpc.AlertPresentationRulebookOverwriteEarnings,
+		rpc.AlertPresentationRulebookEarningsSizeFreeze,
+		rpc.AlertPresentationRulebookRedOnGreen,
+		rpc.AlertPresentationRulebookWinnerTrim,
+		rpc.AlertPresentationRulebookGreenDayAction,
+		rpc.AlertPresentationRulebookHedgeIntegrity,
+		rpc.AlertPresentationRulebookExitDiscipline,
+		rpc.AlertPresentationRulebookFXExposure,
+		rpc.AlertPresentationProtectionOrphanedOrder,
+		rpc.AlertPresentationProtectionReconciliationRequired,
+		rpc.AlertPresentationOrderIntegrityMismatch,
+		rpc.AlertPresentationDataHealthGateway,
+		rpc.AlertPresentationDataHealthStorage,
+		rpc.AlertPresentationDataHealthProposals,
+		rpc.AlertPresentationDataHealthOpportunities,
+		rpc.AlertPresentationDataHealthDataFarms,
+		rpc.AlertPresentationDataHealthRegime,
+		rpc.AlertPresentationDataHealthGamma,
+		rpc.AlertPresentationDataHealthQuality,
+		rpc.AlertPresentationRiskPolicyLimitWouldBlock,
+		rpc.AlertPresentationRiskPolicyDrawdownLatched,
+		rpc.AlertPresentationRiskPolicyDrift,
+		rpc.AlertPresentationReconciliationDue,
+		rpc.AlertPresentationReconciliationException,
+		rpc.AlertPresentationReconciliationConfirmedFlow,
+		rpc.AlertPresentationGovernanceMonthlyPulse,
+		rpc.AlertPresentationDeliveryHealth,
+		rpc.AlertPresentationRulebookLegacyCondition,
+		rpc.AlertPresentationRiskPolicyLegacyCondition,
+		rpc.AlertPresentationReconciliationLegacyCondition,
+		rpc.AlertPresentationGovernanceLegacyCondition,
 	}
-	if len(view.Occurrences) != 1 || len(sender.payloads) != 0 {
-		t.Fatalf("first episode view=%+v sends=%d", view, len(sender.payloads))
-	}
-	firstDisplayID := view.Occurrences[0].DisplayID
-
-	now = now.Add(time.Minute)
-	empty := governanceSnapshot(now)
-	empty.Candidates = nil
-	if _, err := dispatcher.Observe(t.Context(), empty); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetAlertMode(state.AlertModeActOnly); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(time.Minute)
-	view, err = dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sender.payloads) != 1 || len(view.Receipts) != 1 {
-		t.Fatalf("reopened episode sends=%d receipts=%+v", len(sender.payloads), view.Receipts)
-	}
-	if len(view.Occurrences) != 2 || view.Occurrences[0].ResolvedAt.IsZero() || view.Occurrences[1].DisplayID == firstDisplayID || !view.Occurrences[1].ResolvedAt.IsZero() {
-		t.Fatalf("episode identities=%+v", view.Occurrences)
-	}
-}
-
-func TestGovernanceDispatcherNoSubscriptionAndNoneSuppression(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
-	dispatcher := GovernanceDispatcher{Store: store, Sender: &recordingSender{}, Now: func() time.Time { return now }}
-	view, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(view.Attempts) != 1 || view.Attempts[0].Class != state.GovernanceTransportNoSubscription || len(view.Receipts) != 0 {
-		t.Fatalf("no-subscription view=%+v", view)
-	}
-	if err := store.SetAlertMode(state.AlertModeNone); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(time.Minute)
-	view, err = dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if view.DeliveryHealth.State != state.GovernanceDeliverySuppressed || view.DeliveryHealth.Class != state.GovernanceTransportSuppressed {
-		t.Fatalf("none mode health=%+v", view.DeliveryHealth)
-	}
-}
-
-func TestGovernanceDispatcherPerDevicePartialAndRestartDedupe(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	store, err := state.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetAlertMode(state.AlertModeActOnly); err != nil {
-		t.Fatal(err)
-	}
-	ensureGovernanceKeys(t, store)
-	addGovernanceTarget(t, store, "device-one", "sub-one")
-	addGovernanceTarget(t, store, "device-two", "sub-two")
-	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
-	sender := &recordingSender{results: map[string]state.PushAttempt{
-		"sub-one": {OK: true, Class: state.GovernanceTransportAccepted},
-		"sub-two": {Class: state.GovernanceTransportHTTPRetry},
-	}}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	view, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sender.payloads) != 2 || len(view.Receipts) != 1 || view.DeliveryHealth.Class != state.GovernanceTransportPartial {
-		t.Fatalf("partial dispatch payloads=%d view=%+v", len(sender.payloads), view)
-	}
-	if view.AttemptTotals.CumulativeAttempts != 2 || view.AttemptTotals.RetryPending != 1 || view.HealthTotals.PartialEpisodes != 1 {
-		t.Fatalf("partial aggregate mixed attempts and health episodes: attempts=%+v health=%+v", view.AttemptTotals, view.HealthTotals)
-	}
-
-	reopened, err := state.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	restartSender := &recordingSender{results: map[string]state.PushAttempt{
-		"sub-one": {OK: true, Class: state.GovernanceTransportAccepted},
-		"sub-two": {OK: true, Class: state.GovernanceTransportAccepted},
-	}}
-	now = now.Add(time.Minute)
-	restartedDispatcher := GovernanceDispatcher{Store: reopened, Sender: restartSender, Now: func() time.Time { return now }}
-	view, err = restartedDispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(restartSender.payloads) != 1 {
-		t.Fatalf("accepted target should stay terminal while retryable target retries once: %d sends", len(restartSender.payloads))
-	}
-	if len(view.Receipts) != 2 {
-		t.Fatalf("receipts=%+v", view.Receipts)
-	}
-}
-
-func TestGovernanceDispatcherTerminalRejectionDoesNotRetryOrBlockNewTarget(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	addGovernanceTarget(t, store, "device-rejected", "sub-rejected")
-	now := time.Date(2026, 7, 19, 11, 0, 0, 0, time.UTC)
-	sender := &recordingSender{results: map[string]state.PushAttempt{
-		"sub-rejected": {Class: state.GovernanceTransportHTTPRejected},
-	}}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	view, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sender.payloads) != 1 || len(view.Attempts) != 1 || !view.Attempts[0].RetryAt.IsZero() || view.AttemptTotals.RetryPending != 0 {
-		t.Fatalf("initial terminal rejection sends=%d view=%+v", len(sender.payloads), view)
-	}
-
-	addGovernanceTarget(t, store, "device-new", "sub-new")
-	sender.results["sub-new"] = state.PushAttempt{OK: true, Class: state.GovernanceTransportAccepted}
-	now = now.Add(24 * time.Hour)
-	view, err = dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sender.payloads) != 2 || len(view.Attempts) != 2 || len(view.Receipts) != 1 || view.AttemptTotals.Rejected != 1 || view.AttemptTotals.Accepted != 1 || view.AttemptTotals.RetryPending != 0 {
-		t.Fatalf("terminal target blocked or retried unrelated delivery: sends=%d view=%+v", len(sender.payloads), view)
-	}
-}
-
-func TestGovernanceDispatcherTimeoutRetriesWithoutCallingItAccepted(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	addGovernanceTarget(t, store, "device", "sub")
-	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
-	sender := &recordingSender{results: map[string]state.PushAttempt{"sub": {Class: state.GovernanceTransportTimeoutRetry}}}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	view, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(view.Receipts) != 0 || view.Attempts[len(view.Attempts)-1].Class != state.GovernanceTransportTimeoutRetry {
-		t.Fatalf("timeout view=%+v", view)
-	}
-	now = now.Add(30 * time.Second)
-	_, _ = dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if len(sender.payloads) != 1 {
-		t.Fatalf("timeout retried before bounded backoff: sends=%d", len(sender.payloads))
-	}
-	now = now.Add(30 * time.Second)
-	_, _ = dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if len(sender.payloads) != 2 {
-		t.Fatalf("timeout did not retry when due: sends=%d", len(sender.payloads))
-	}
-	now = now.Add(5 * time.Minute)
-	_, _ = dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	for range 3 {
-		now = now.Add(15 * time.Minute)
-		_, _ = dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	}
-	if len(sender.payloads) != 6 {
-		t.Fatalf("capped retry stopped while occurrence remained active: sends=%d", len(sender.payloads))
-	}
-}
-
-func TestGovernanceSuppressedSnapshotDoesNotResolveActiveOccurrence(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
-	dispatcher := GovernanceDispatcher{Store: store, Now: func() time.Time { return now }}
-	if _, err := dispatcher.Observe(t.Context(), governanceSnapshot(now)); err != nil {
-		t.Fatal(err)
-	}
-	suppressed := governanceSnapshot(now.Add(time.Minute))
-	suppressed.Candidates = nil
-	suppressed.SourceHealth.Reconciliation = rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusUnavailable, Reason: rpc.NudgeHealthReasonSourceUnavailable, AsOf: now.Add(time.Minute)}
-	now = now.Add(time.Minute)
-	if _, err := dispatcher.Observe(t.Context(), suppressed); err != nil {
-		t.Fatal(err)
-	}
-	view := store.Governance(now)
-	if len(view.Occurrences) != 1 || !view.Occurrences[0].ResolvedAt.IsZero() {
-		t.Fatalf("suppressed daemon input falsely resolved occurrence: %+v", view.Occurrences)
-	}
-}
-
-func TestGovernanceSuppressedEmptySnapshotStillResolvesOwnExpiry(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	now := time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC)
-	dispatcher := GovernanceDispatcher{Store: store, Now: func() time.Time { return now }}
-	occurrence, _, err := store.UpsertGovernanceOccurrence(state.GovernanceOccurrence{
-		Fingerprint: "sha256:" + strings.Repeat("e", 64), Kind: rpc.NudgeKindPolicyDrift, State: rpc.NudgeStateOpen,
-		OccurredAt: now, ExpiresAt: now.Add(time.Minute),
-	}, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := state.GovernanceTargetRef("device", "sub")
-	reservation, _, _ := store.ReserveGovernanceAttempt(occurrence.DisplayID, target, now)
-	if _, err := store.CompleteGovernanceAttempt(reservation.ID, state.GovernanceTransportNetworkRetry, false, now); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(time.Minute)
-	suppressed := governanceSnapshot(now)
-	suppressed.Candidates = nil
-	suppressed.SourceHealth.Reconciliation = rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusUnavailable, Reason: rpc.NudgeHealthReasonSourceUnavailable, AsOf: now}
-	if _, err := dispatcher.Observe(t.Context(), suppressed); err != nil {
-		t.Fatal(err)
-	}
-	view := store.Governance(now)
-	if len(view.Occurrences) != 1 || view.Occurrences[0].ResolvedAt.IsZero() || view.AttemptTotals.RetryPending != 0 {
-		t.Fatalf("suppressed empty expiry remained active: %+v", view)
-	}
-}
-
-func TestGovernanceDispatcherSingleSuccessAllFailureAndDeadSubscription(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name        string
-		result      state.PushAttempt
-		wantHealth  string
-		wantReceipt int
-		wantSubs    int
-	}{
-		{name: "single success", result: state.PushAttempt{OK: true, Class: state.GovernanceTransportAccepted}, wantHealth: state.GovernanceTransportAccepted, wantReceipt: 1, wantSubs: 1},
-		{name: "all failure", result: state.PushAttempt{Class: state.GovernanceTransportRejected}, wantHealth: state.GovernanceTransportAllFailed, wantSubs: 1},
-		{name: "dead subscription", result: state.PushAttempt{Class: state.GovernanceTransportDead}, wantHealth: state.GovernanceTransportAllFailed, wantSubs: 0},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			store := governanceStore(t, state.AlertModeActOnly)
-			addGovernanceTarget(t, store, "device", "sub")
-			now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
-			sender := &recordingSender{results: map[string]state.PushAttempt{"sub": tc.result}}
-			dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-			view, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
-			if err != nil {
-				t.Fatal(err)
+	states := []rpc.AlertEpisodeState{rpc.AlertEpisodeOpen, rpc.AlertEpisodeEscalated, rpc.AlertEpisodeRecovered}
+	for _, code := range codes {
+		for _, episodeState := range states {
+			presentation, ok := PresentationFor(code, episodeState)
+			if !ok || strings.TrimSpace(presentation.Title) == "" || strings.TrimSpace(presentation.Body) == "" {
+				t.Fatalf("closed presentation code %q state %q has no fixed copy: %+v", code, episodeState, presentation)
 			}
-			if view.DeliveryHealth.Class != tc.wantHealth || len(view.Receipts) != tc.wantReceipt || len(store.ActivePushSubscriptions()) != tc.wantSubs {
-				t.Fatalf("view=%+v active_subscriptions=%d", view, len(store.ActivePushSubscriptions()))
-			}
-			if tc.name == "dead subscription" && (len(view.Attempts) != 1 || view.Attempts[0].RetiredAt.IsZero() || view.Attempts[0].Class != state.GovernanceTransportDead) {
-				t.Fatalf("dead-subscription evidence was deleted: %+v", view.Attempts)
-			}
-		})
-	}
-}
-
-func TestGovernanceDispatcherFinalizesOutcomeWhenTargetRetiresInFlight(t *testing.T) {
-	for _, mutation := range []string{"unsubscribe", "reassign"} {
-		for _, outcome := range []string{"accepted", "failed"} {
-			t.Run(mutation+"/"+outcome, func(t *testing.T) {
-				store := governanceStore(t, state.AlertModeWatchAndAct)
-				addGovernanceTarget(t, store, "device-old", "sub")
-				now := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
-				result := state.PushAttempt{Class: state.GovernanceTransportNetworkRetry}
-				if outcome == "accepted" {
-					result = state.PushAttempt{OK: true, Class: state.GovernanceTransportAccepted}
-				}
-				sender := &retiringTargetSender{started: make(chan struct{}), release: make(chan struct{}), result: result}
-				dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-				done := make(chan error, 1)
-				go func() {
-					_, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
-					done <- err
-				}()
-				<-sender.started
-				switch mutation {
-				case "unsubscribe":
-					if err := store.RemovePushSubscriptionAt("sub", now); err != nil {
-						t.Fatal(err)
-					}
-				case "reassign":
-					if err := store.AddDevice(state.DeviceGrant{ID: "device-new", CreatedAt: now}); err != nil {
-						t.Fatal(err)
-					}
-					if err := store.AddPushSubscription(state.PushSubscription{ID: "replacement", DeviceID: "device-new", Endpoint: "https://push.example/sub", P256DH: "key", Auth: "auth", LastSeenAt: now}); err != nil {
-						t.Fatal(err)
-					}
-				}
-				close(sender.release)
-				if err := <-done; err != nil {
-					t.Fatal(err)
-				}
-				view := store.Governance(now)
-				if len(view.Attempts) != 1 || view.Attempts[0].Class != result.Class || view.Attempts[0].RetiredAt.IsZero() || view.AttemptTotals.RetryPending != 0 {
-					t.Fatalf("retired in-flight attempt=%+v totals=%+v", view.Attempts, view.AttemptTotals)
-				}
-				if view.DeliveryHealth.State == state.GovernanceDeliveryHealthy || view.DeliveryHealth.Class != state.GovernanceTransportTargetRetired {
-					t.Fatalf("retired target distorted active health: %+v", view.DeliveryHealth)
-				}
-				if outcome == "accepted" {
-					if len(view.Receipts) != 1 || view.Receipts[0].RetiredAt.IsZero() || view.DeliveryHealth.LastAcceptedAt.IsZero() {
-						t.Fatalf("retired acceptance truth=%+v health=%+v", view.Receipts, view.DeliveryHealth)
-					}
-				} else if len(view.Receipts) != 0 {
-					t.Fatalf("failed retired transport invented receipt: %+v", view.Receipts)
-				}
-			})
 		}
 	}
-}
-
-func TestGovernanceDispatcherSerializesConcurrentPolls(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	addGovernanceTarget(t, store, "device", "sub")
-	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
-	sender := &blockingGovernanceSender{started: make(chan struct{}), release: make(chan struct{})}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	var wait sync.WaitGroup
-	wait.Add(2)
-	for range 2 {
-		go func() {
-			defer wait.Done()
-			_, _ = dispatcher.Observe(t.Context(), governanceSnapshot(now))
-		}()
+	if len(codes) != len(presentations) {
+		t.Fatalf("coverage list and fixed presentation table diverged: tested=%d table=%d", len(codes), len(presentations))
 	}
-	<-sender.started
-	close(sender.release)
-	wait.Wait()
-	if sender.calls != 1 {
-		t.Fatalf("concurrent polls sent %d notifications for one occurrence/target", sender.calls)
+	if presentation, ok := PresentationFor("producer_supplied_unknown", rpc.AlertEpisodeOpen); ok || presentation != (Presentation{}) {
+		t.Fatalf("unknown producer code did not fail closed: %+v, %v", presentation, ok)
 	}
-}
-
-func TestGovernanceDispatcherDoesNotSendWithoutDurableReservationCapacity(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
-	attempts := make([]state.GovernanceAttempt, 4096)
-	for i := range attempts {
-		attempts[i] = state.GovernanceAttempt{ID: "full-" + string(rune(i)), OccurrenceID: "old", TargetRef: "old", ReceiptKey: "old", At: now, Class: state.GovernanceTransportHTTPRejected, RetryAt: now.Add(time.Hour)}
+	if presentation, ok := PresentationFor(rpc.AlertPresentationCanaryPortfolioStress, "producer_supplied_state"); ok || presentation != (Presentation{}) {
+		t.Fatalf("unknown lifecycle state did not fail closed: %+v, %v", presentation, ok)
 	}
-	data := state.Data{
-		Devices:           []state.DeviceGrant{{ID: "device", CreatedAt: now}},
-		PushSubscriptions: []state.PushSubscription{{ID: "sub", DeviceID: "device", Endpoint: "https://push/sub", P256DH: "key", Auth: "auth"}},
-		VAPID:             &state.VAPIDKeys{PublicKey: "public", PrivateKey: "private", CreatedAt: now},
-		AlertSettings:     state.AlertSettings{Mode: state.AlertModeWatchAndAct}, GovernanceAttempts: attempts,
-	}
-	raw, err := json.Marshal(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store, err := state.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sender := &recordingSender{}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	if _, err := dispatcher.Observe(t.Context(), governanceSnapshot(now)); !errors.Is(err, state.ErrGovernanceOverflow) {
-		t.Fatalf("err=%v, want overflow", err)
-	}
-	if len(sender.payloads) != 0 {
-		t.Fatalf("sender called %d times without durable capacity", len(sender.payloads))
-	}
-}
-
-func TestGovernanceReactivatedIdenticalFingerprintSendsNewEpisode(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	addGovernanceTarget(t, store, "device", "sub")
-	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
-	sender := &recordingSender{}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	if _, err := dispatcher.Observe(t.Context(), governanceSnapshot(now)); err != nil {
-		t.Fatal(err)
-	}
-	empty := governanceSnapshot(now.Add(time.Minute))
-	empty.Candidates = nil
-	now = now.Add(time.Minute)
-	if _, err := dispatcher.Observe(t.Context(), empty); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(time.Minute)
-	if _, err := dispatcher.Observe(t.Context(), governanceSnapshot(now)); err != nil {
-		t.Fatal(err)
-	}
-	if len(sender.payloads) != 2 || sender.payloads[0].DisplayID == sender.payloads[1].DisplayID {
-		t.Fatalf("reactivated sends=%d payloads=%+v", len(sender.payloads), sender.payloads)
-	}
-}
-
-func TestGovernanceWorkerCoalescesWhileHungAndRecoversAfterTimeout(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	addGovernanceTarget(t, store, "device", "sub")
-	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
-	sender := &contextAwareSender{started: make(chan struct{}, 4)}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }, SendTimeout: 30 * time.Millisecond}
-	worker := NewGovernanceWorker(&dispatcher)
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		worker.Run(ctx)
-	}()
-	worker.Submit(governanceSnapshot(now))
-	<-sender.started
-	now = now.Add(time.Minute)
-	for i := range 100 {
-		latest := governanceSnapshot(now.Add(time.Duration(i+1) * time.Minute))
-		worker.Submit(latest)
-	}
-	select {
-	case <-sender.started:
-	case <-time.After(time.Second):
-		t.Fatal("coalesced latest snapshot did not run after timeout")
-	}
-	if sender.MaxConcurrent() != 1 || worker.Pending() > 1 {
-		t.Fatalf("max concurrent=%d pending=%d", sender.MaxConcurrent(), worker.Pending())
-	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("governance worker did not stop after cancellation")
-	}
-}
-
-func TestGovernanceWorkerConcurrentSubmitProcessesNewestGenerationLast(t *testing.T) {
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	addGovernanceTarget(t, store, "device", "sub")
-	base := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
-	now := base
-	sender := &generationSender{started: make(chan struct{}), release: make(chan struct{})}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	worker := NewGovernanceWorker(&dispatcher)
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		worker.Run(ctx)
-	}()
-	worker.Submit(governanceSnapshot(base))
-	<-sender.started
-
-	type submission struct {
-		generation uint64
-		occurredAt time.Time
-	}
-	const count = 64
-	start := make(chan struct{})
-	results := make(chan submission, count)
-	var submits sync.WaitGroup
-	submits.Add(count)
-	for i := range count {
-		go func(index int) {
-			defer submits.Done()
-			<-start
-			at := base.Add(time.Duration(index+1) * time.Second)
-			snapshot := governanceSnapshot(at)
-			snapshot.Candidates[0].Fingerprint = "sha256:" + fmt.Sprintf("%064x", index+1)
-			generation := worker.Submit(snapshot)
-			results <- submission{generation: generation, occurredAt: at}
-		}(i)
-	}
-	close(start)
-	submits.Wait()
-	close(results)
-	var newest submission
-	for result := range results {
-		if result.generation > newest.generation {
-			newest = result
-		}
-	}
-	now = base.Add(2 * time.Minute)
-	close(sender.release)
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		view := store.Governance(now)
-		if worker.Pending() == 0 && sender.Calls() >= 2 && len(view.Occurrences) >= 2 {
-			last := view.Occurrences[len(view.Occurrences)-1]
-			if !last.OccurredAt.Equal(newest.occurredAt) || !last.ResolvedAt.IsZero() {
-				t.Fatalf("last processed occurrence=%+v, newest generation=%+v", last, newest)
-			}
-			if sender.Calls() != 2 {
-				t.Fatalf("coalescing processed %d sends, want initial plus newest", sender.Calls())
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("newest generation was not processed: pending=%d calls=%d view=%+v", worker.Pending(), sender.Calls(), view)
-		}
-		time.Sleep(time.Millisecond)
-	}
-	cancel()
-	<-done
-}
-
-func TestGovernanceHealthRecoversAfterNoneWithoutAnotherSend(t *testing.T) {
-	t.Parallel()
-	store := governanceStore(t, state.AlertModeWatchAndAct)
-	addGovernanceTarget(t, store, "device", "sub")
-	now := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
-	sender := &recordingSender{}
-	dispatcher := GovernanceDispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
-	if _, err := dispatcher.Observe(t.Context(), governanceSnapshot(now)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetAlertMode(state.AlertModeNone); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(time.Minute)
-	if _, err := dispatcher.Observe(t.Context(), governanceSnapshot(now)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetAlertMode(state.AlertModeWatchAndAct); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(time.Minute)
-	view, err := dispatcher.Observe(t.Context(), governanceSnapshot(now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sender.payloads) != 1 || view.DeliveryHealth.State != state.GovernanceDeliveryHealthy || view.DeliveryHealth.Class != state.GovernanceTransportAccepted {
-		t.Fatalf("sends=%d health=%+v", len(sender.payloads), view.DeliveryHealth)
-	}
-}
-
-func governanceStore(t *testing.T, mode string) *state.Store {
-	t.Helper()
-	store, err := state.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetAlertMode(mode); err != nil {
-		t.Fatal(err)
-	}
-	ensureGovernanceKeys(t, store)
-	return store
-}
-
-func testEstablishedAlertProjection(hexDigit, action string, severity risk.SignalSeverity, relevant bool) *rpc.EstablishedAlertProjection {
-	actEligible := severity == risk.SeverityAct || severity == risk.SeverityUrgent ||
-		action == "defend" || action == "rebalance" || action == "confirm_inputs"
-	occurrenceEligible := relevant && (severity == risk.SeverityWatch || severity == risk.SeverityAct || severity == risk.SeverityUrgent || actEligible)
-	return &rpc.EstablishedAlertProjection{
-		SchemaVersion: rpc.EstablishedAlertProjectionSchemaVersion,
-		CanonicalFingerprint: rpc.Fingerprint{
-			Version: rpc.EstablishedCanaryFingerprintVersion,
-			Key:     "sha256:" + strings.Repeat(hexDigit, 64),
-		},
-		OccurrenceEligible: occurrenceEligible,
-		ActOnlyEligible:    occurrenceEligible && actEligible,
-		Action:             action,
-		MarketConfirmation: "none",
-		Severity:           severity,
-		PortfolioRelevant:  relevant,
-	}
-}
-
-func ensureGovernanceKeys(t *testing.T, store *state.Store) {
-	t.Helper()
-	if _, err := store.EnsureVAPID(time.Now().UTC(), func() (string, string, error) { return "private", "public", nil }); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func addGovernanceTarget(t *testing.T, store *state.Store, deviceID, subID string) {
-	t.Helper()
-	if err := store.AddDevice(state.DeviceGrant{ID: deviceID, CreatedAt: time.Now().UTC()}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AddPushSubscription(state.PushSubscription{ID: subID, DeviceID: deviceID, Endpoint: "https://push.example/" + subID, P256DH: "key", Auth: "auth", CreatedAt: time.Now().UTC()}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func governanceSnapshot(now time.Time) rpc.NudgesSnapshotResult {
-	ok := rpc.NudgeInputHealth{Status: rpc.NudgeInputStatusOK, AsOf: now}
-	return rpc.NudgesSnapshotResult{AsOf: now, Candidates: []rpc.NudgeCandidate{{
-		Fingerprint: "sha256:" + strings.Repeat("a", 64), Kind: rpc.NudgeKindPolicyDrift, State: rpc.NudgeStateOpen,
-		Severity: rpc.NudgeSeverityAct, Title: "Policy pins need review", Body: "Review the policy pin status.", OccurredAt: now, Destination: rpc.NudgeDestinationAlerts,
-	}}, SourceHealth: rpc.NudgeSourceHealth{Policy: ok, Reconciliation: ok, Capital: ok, Pins: ok, Cadence: ok, ConfirmedFlow: ok}, ConfirmedFlowCoverage: &rpc.NudgeConfirmedFlowCoverage{CoverageFrom: now}}
 }
 
 type recordingSender struct {
-	payloads []push.Payload
-	results  map[string]state.PushAttempt
-}
-
-type threadSafeRecordingSender struct {
-	mu    sync.Mutex
-	calls int
-}
-
-func (s *threadSafeRecordingSender) Send(_ context.Context, sub state.PushSubscription, _ state.VAPIDKeys, _ push.Payload) state.PushAttempt {
-	s.mu.Lock()
-	s.calls++
-	s.mu.Unlock()
-	return state.PushAttempt{SubscriptionID: sub.ID, OK: true, Class: state.GovernanceTransportAccepted}
-}
-
-func (s *threadSafeRecordingSender) Calls() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.calls
-}
-
-type blockingGovernanceSender struct {
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
-	calls   int
-}
-
-type contextAwareSender struct {
-	started chan struct{}
 	mu      sync.Mutex
-	current int
-	max     int
+	results []state.PushAttempt
+	payload []push.Payload
+	calls   int
+	onSend  func(int, state.PushSubscription, push.Payload)
 }
 
-type retiringTargetSender struct {
-	started chan struct{}
-	release chan struct{}
-	result  state.PushAttempt
-}
-
-func (s *retiringTargetSender) Send(_ context.Context, sub state.PushSubscription, _ state.VAPIDKeys, _ push.Payload) state.PushAttempt {
-	close(s.started)
-	<-s.release
-	result := s.result
-	result.SubscriptionID = sub.ID
+func (s *recordingSender) Send(_ context.Context, subscription state.PushSubscription, _ state.VAPIDKeys, payload push.Payload) state.PushAttempt {
+	s.mu.Lock()
+	index := s.calls
+	s.calls++
+	s.payload = append(s.payload, payload)
+	result := state.PushAttempt{OK: true, Class: state.GovernanceTransportAccepted}
+	if index < len(s.results) {
+		result = s.results[index]
+	}
+	hook := s.onSend
+	s.mu.Unlock()
+	if hook != nil {
+		hook(index, subscription, payload)
+	}
 	return result
 }
 
-type generationSender struct {
-	started chan struct{}
-	release chan struct{}
-	mu      sync.Mutex
-	calls   int
-}
-
-func (s *generationSender) Send(_ context.Context, sub state.PushSubscription, _ state.VAPIDKeys, _ push.Payload) state.PushAttempt {
-	s.mu.Lock()
-	s.calls++
-	call := s.calls
-	s.mu.Unlock()
-	if call == 1 {
-		close(s.started)
-		<-s.release
-	}
-	return state.PushAttempt{SubscriptionID: sub.ID, OK: true, Class: state.GovernanceTransportAccepted}
-}
-
-func (s *generationSender) Calls() int {
+func (s *recordingSender) callCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls
 }
 
-func (s *contextAwareSender) Send(ctx context.Context, sub state.PushSubscription, _ state.VAPIDKeys, _ push.Payload) state.PushAttempt {
-	s.mu.Lock()
-	s.current++
-	if s.current > s.max {
-		s.max = s.current
-	}
-	s.mu.Unlock()
-	s.started <- struct{}{}
-	<-ctx.Done()
-	s.mu.Lock()
-	s.current--
-	s.mu.Unlock()
-	return state.PushAttempt{SubscriptionID: sub.ID, Class: state.GovernanceTransportDeadlineRetry}
-}
-
-func (s *contextAwareSender) MaxConcurrent() int {
+func (s *recordingSender) payloadAt(t *testing.T, index int) push.Payload {
+	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.max
-}
-
-func (s *blockingGovernanceSender) Send(_ context.Context, sub state.PushSubscription, _ state.VAPIDKeys, _ push.Payload) state.PushAttempt {
-	s.calls++
-	s.once.Do(func() { close(s.started) })
-	<-s.release
-	return state.PushAttempt{SubscriptionID: sub.ID, OK: true, Class: state.GovernanceTransportAccepted}
-}
-
-func (s *recordingSender) Send(_ context.Context, sub state.PushSubscription, _ state.VAPIDKeys, payload push.Payload) state.PushAttempt {
-	s.payloads = append(s.payloads, payload)
-	if attempt, ok := s.results[sub.ID]; ok {
-		attempt.SubscriptionID = sub.ID
-		return attempt
+	if index < 0 || index >= len(s.payload) {
+		t.Fatalf("payload %d not found in %d sends", index, len(s.payload))
 	}
-	return state.PushAttempt{At: time.Now().UTC(), SubscriptionID: sub.ID, AlertID: payload.AlertID, OK: true, Status: "202 Accepted"}
+	return s.payload[index]
+}
+
+func newAlertStore(t *testing.T, dir string, baselineAt time.Time) *state.Store {
+	t.Helper()
+	store, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAlertMode(state.AlertModeWatchAndAct); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ObserveAlertSnapshot(alertSnapshot(t, baselineAt)); err != nil {
+		t.Fatalf("establish alert cutover baseline: %v", err)
+	}
+	return store
+}
+
+func addAlertTarget(t *testing.T, store *state.Store, deviceID, subscriptionID string, at time.Time) {
+	t.Helper()
+	if err := store.AddDevice(state.DeviceGrant{ID: deviceID, CreatedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddPushSubscription(state.PushSubscription{
+		ID: subscriptionID, DeviceID: deviceID, Endpoint: "https://push.example/" + subscriptionID,
+		P256DH: "p256dh", Auth: "auth", CreatedAt: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func ensureAlertKeys(t *testing.T, store *state.Store, at time.Time) {
+	t.Helper()
+	if _, err := store.EnsureVAPID(at, func() (string, string, error) { return "private-key", "public-key", nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func alertCandidate(t *testing.T, code rpc.AlertPresentationCode, opening string, at time.Time) rpc.AlertCandidate {
+	t.Helper()
+	return alertCandidateForSource(t, rpc.AlertSourceCanary, rpc.AlertKindPortfolioRisk, code, opening, at)
+}
+
+func alertCandidateForSource(t *testing.T, source rpc.AlertSource, kind rpc.AlertKind, code rpc.AlertPresentationCode, opening string, at time.Time) rpc.AlertCandidate {
+	t.Helper()
+	episodeKey, err := rpc.BuildAlertEpisodeKey(source, kind, "dispatcher-test-episode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	occurrenceKey, err := rpc.BuildAlertOccurrenceKey(episodeKey, opening)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rpc.AlertCandidate{
+		EpisodeKey: episodeKey, OccurrenceKey: occurrenceKey, EvidenceFingerprint: "sha256:" + strings.Repeat("a", 64),
+		Source: source, Kind: kind, PresentationCode: code, State: rpc.AlertEpisodeOpen, Severity: rpc.AlertSeverityWatch,
+		EvidenceHealth: rpc.AlertEvidenceCurrent, Destination: rpc.AlertDestinationAlerts,
+		EvidenceAsOf: at, StateChangedAt: at, ObservedAt: at,
+	}
+}
+
+func alertSnapshot(t *testing.T, at time.Time, candidates ...rpc.AlertCandidate) rpc.AlertCandidateSnapshot {
+	t.Helper()
+	scope, err := rpc.BuildAlertAuthorityScope("TEST-ACCOUNT", "paper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := rpc.AlertSourceCanary
+	if len(candidates) > 0 {
+		source = candidates[0].Source
+		for _, candidate := range candidates[1:] {
+			if candidate.Source != source {
+				t.Fatal("test snapshot helper supports one source")
+			}
+		}
+	}
+	currentState := rpc.AlertSnapshotClear
+	for _, candidate := range candidates {
+		if candidate.State == rpc.AlertEpisodeOpen || candidate.State == rpc.AlertEpisodeEscalated {
+			currentState = rpc.AlertSnapshotActive
+		}
+	}
+	candidateRows := make([]rpc.AlertCandidate, len(candidates))
+	copy(candidateRows, candidates)
+	return rpc.AlertCandidateSnapshot{
+		SchemaVersion: rpc.AlertCandidateSnapshotVersion, AuthorityScope: scope, AsOf: at, CurrentState: currentState,
+		Coverage: rpc.AlertCoverage{
+			State: rpc.AlertCoverageComplete, Freshness: rpc.AlertCoverageCurrent, AsOf: at,
+			ExpectedSources: []rpc.AlertSource{source}, CoveredSources: []rpc.AlertSource{source},
+		},
+		Sources: []rpc.AlertSourceCoverage{{
+			Source: source, Status: "current", Reason: "current", EvidenceHealth: rpc.AlertEvidenceCurrent,
+			InputAsOf: at, ObservedAt: at, EvidenceAsOf: at, FreshUntil: at.Add(time.Hour), Covered: true,
+		}},
+		Candidates: candidateRows,
+	}
 }

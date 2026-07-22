@@ -2,7 +2,6 @@ package alerts
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"strings"
 	"sync"
@@ -10,545 +9,167 @@ import (
 
 	"github.com/osauer/ibkr/v2/internal/app/push"
 	"github.com/osauer/ibkr/v2/internal/app/state"
-	"github.com/osauer/ibkr/v2/internal/risk"
 	"github.com/osauer/ibkr/v2/internal/rpc"
 )
 
-// Monitor records legacy Canary alerts before attempting best-effort delivery
-// to the subscriptions retained by the app store. A nil Store disables both
-// recording and transport.
-type Monitor struct {
-	Store         *state.Store
-	Sender        push.Sender
-	URL           string
-	Now           func() time.Time
-	TradingStatus func() *rpc.TradingStatus
-	// afterRecord is a synchronous test seam for delivery-mode transitions.
-	afterRecord func()
-}
-
-// GovernanceDispatcher transports daemon-authored candidates independently
-// from Canary alert history and fingerprint caps. The daemon remains the sole
-// policy evaluator; this type owns only per-target delivery evidence.
-type GovernanceDispatcher struct {
+// Dispatcher is the sole app-side alert delivery owner. Its mutex keeps the
+// complete Observe -> Due -> Begin -> Confirm -> Send -> Complete sequence
+// single-threaded while the store remains the durable authority at every
+// transition.
+type Dispatcher struct {
 	Store       *state.Store
 	Sender      push.Sender
+	URL         string
 	Now         func() time.Time
 	SendTimeout time.Duration
-	mu          sync.Mutex
+
+	mu sync.Mutex
 }
 
-// Observe durably reconciles one daemon-authored governance snapshot and then
-// attempts delivery for eligible occurrences and active app subscriptions.
-// The daemon remains the policy authority; this method owns transport evidence
-// only.
-func (d *GovernanceDispatcher) Observe(ctx context.Context, snapshot rpc.NudgesSnapshotResult) (state.GovernanceView, error) {
+// Observe atomically applies one daemon-authored snapshot and then dispatches
+// only work the durable ledger still authorizes. It never evaluates risk or
+// accepts producer-authored notification copy.
+func (d *Dispatcher) Observe(ctx context.Context, snapshot rpc.AlertCandidateSnapshot) (state.AlertDeliveryView, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.Store == nil {
-		return state.GovernanceView{}, nil
+		return state.AlertDeliveryView{}, nil
 	}
-	now := time.Now().UTC()
-	if d.Now != nil {
-		now = d.Now().UTC()
+	if _, err := d.Store.ObserveAlertSnapshot(snapshot); err != nil {
+		return d.Store.AlertDelivery(d.now()), err
 	}
-	if err := d.Store.CompactGovernance(now); err != nil {
-		return d.Store.Governance(now), err
-	}
-	records := make([]state.GovernanceOccurrence, 0, len(snapshot.Candidates))
-	for _, candidate := range snapshot.Candidates {
-		// The payload constructor is the app's mandatory canonicalization
-		// boundary. Its temporary display id is replaced by the store's stable
-		// id after the occurrence has been persisted.
-		probe, err := push.GovernancePayload(candidate, governanceProbeDisplayID)
-		if err != nil {
-			_ = d.Store.SetGovernanceDeliveryHealth(state.GovernanceDeliveryHealth{
-				State: state.GovernanceDeliveryUnavailable, Class: state.GovernanceTransportAllFailed, UpdatedAt: now,
-			})
-			return d.Store.Governance(now), fmt.Errorf("invalid governance candidate: %w", err)
-		}
-		records = append(records, state.GovernanceOccurrence{
-			Fingerprint: candidate.Fingerprint, Kind: probe.Kind, State: candidate.State, Severity: probe.Severity,
-			Title: probe.Title, Body: probe.Body, Destination: probe.Destination,
-			OccurredAt: candidate.OccurredAt, DueAt: candidate.DueAt, ExpiresAt: candidate.ExpiresAt,
-		})
-	}
-	normalizedHealth := rpc.NormalizeNudgeSourceHealth(snapshot.SourceHealth, len(snapshot.Candidates))
-	occurrences, err := d.Store.ObserveGovernanceOccurrences(records, normalizedHealth.Aggregate == rpc.NudgeAggregateReady, now)
-	if err != nil {
-		return d.Store.Governance(now), err
-	}
-	if len(occurrences) == 0 {
-		return d.Store.Governance(now), nil
-	}
+	return d.dispatchLocked(ctx)
+}
 
-	mode := d.Store.AlertSettings().Mode
-	deliverable := occurrences[:0]
-	for _, occurrence := range occurrences {
-		if occurrence.DeliveryDisposition != state.GovernanceDispositionEligible {
-			target := governanceEpisodeSuppressedTarget
-			if occurrence.DeliveryDisposition == state.GovernanceDispositionLegacyUnknown {
-				target = governanceLegacyUnknownTarget
-			}
-			if err := d.recordMissed(occurrence, target, state.GovernanceTransportSuppressed, now); err != nil {
-				return d.Store.Governance(now), err
-			}
-			continue
-		}
-		if mode == state.AlertModeNone {
-			if err := d.recordMissed(occurrence, governanceSuppressedTarget, state.GovernanceTransportSuppressed, now); err != nil {
-				return d.Store.Governance(now), err
-			}
-			continue
-		}
-		deliverable = append(deliverable, occurrence)
+// DispatchPending retries already-persisted due work without fabricating a
+// fresh producer observation. Observe is the normal poll path; this method is
+// useful for a bounded startup or scheduler retry.
+func (d *Dispatcher) DispatchPending(ctx context.Context) (state.AlertDeliveryView, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.Store == nil {
+		return state.AlertDeliveryView{}, nil
 	}
-	if len(deliverable) == 0 {
-		err := d.Store.SetGovernanceDeliveryHealth(state.GovernanceDeliveryHealth{
-			State: state.GovernanceDeliverySuppressed, Class: state.GovernanceTransportSuppressed, UpdatedAt: now,
-		})
-		return d.Store.Governance(now), err
+	return d.dispatchLocked(ctx)
+}
+
+func (d *Dispatcher) dispatchLocked(ctx context.Context) (state.AlertDeliveryView, error) {
+	now := d.now()
+	if err := d.Store.RecoverAlertDeliveries(now); err != nil {
+		return d.Store.AlertDelivery(now), err
 	}
-	occurrences = deliverable
+	if err := d.Store.CompactAlertDelivery(now); err != nil {
+		return d.Store.AlertDelivery(now), err
+	}
+	due := d.Store.AlertDeliveriesDue(now)
+	if len(due) == 0 {
+		if err := d.Store.SetAlertDeliveryPrerequisiteHealth("", now); err != nil {
+			return d.Store.AlertDelivery(now), err
+		}
+		return d.Store.AlertDelivery(now), nil
+	}
 
 	subscriptions := d.Store.ActivePushSubscriptions()
 	if len(subscriptions) == 0 {
-		for _, occurrence := range occurrences {
-			if err := d.recordMissed(occurrence, "no-subscription", state.GovernanceTransportNoSubscription, now); err != nil {
-				return d.Store.Governance(now), err
-			}
-		}
-		err := d.Store.SetGovernanceDeliveryHealth(state.GovernanceDeliveryHealth{
-			State: state.GovernanceDeliveryUnavailable, Class: state.GovernanceTransportNoSubscription, UpdatedAt: now,
-		})
-		return d.Store.Governance(now), err
+		return d.failPrerequisite(now, state.AlertDeliveryHealthClassNoSubscription)
+	}
+	keys, hasKeys := d.Store.VAPID()
+	if !hasKeys || strings.TrimSpace(keys.PublicKey) == "" || strings.TrimSpace(keys.PrivateKey) == "" {
+		return d.failPrerequisite(now, state.AlertDeliveryHealthClassSigningKeys)
+	}
+	if d.Sender == nil {
+		return d.failPrerequisite(now, state.AlertDeliveryHealthClassSender)
+	}
+	if err := d.Store.SetAlertDeliveryPrerequisiteHealth("", now); err != nil {
+		return d.Store.AlertDelivery(now), err
 	}
 
-	keys, hasKeys := d.Store.VAPID()
-	accepted, failed, retired := 0, 0, 0
-	var acceptedAt time.Time
-	for _, occurrence := range occurrences {
-		candidate := rpc.NudgeCandidate{
-			Fingerprint: occurrence.Fingerprint, Kind: occurrence.Kind, State: occurrence.State,
-			Severity: occurrence.Severity, Title: occurrence.Title, Body: occurrence.Body,
-			OccurredAt: occurrence.OccurredAt, DueAt: occurrence.DueAt, Destination: occurrence.Destination,
-		}
-		payload, err := push.GovernancePayload(candidate, occurrence.DisplayID)
-		if err != nil {
-			return d.Store.Governance(now), err
-		}
+	for _, work := range due {
 		for _, subscription := range subscriptions {
-			targetRef := state.GovernanceTargetRef(subscription.DeviceID, subscription.ID)
-			receiptKey := state.GovernanceReceiptKey(occurrence.DisplayID, targetRef)
-			if d.Store.HasGovernanceReceipt(receiptKey) {
-				accepted++
-				continue
-			}
-			reservation, send, err := d.Store.ReserveGovernanceAttempt(occurrence.DisplayID, targetRef, now)
+			target := state.AlertDeliveryTargetRef(subscription.DeviceID, subscription.ID)
+			reservation, send, err := d.Store.BeginAlertDelivery(work.OccurrenceKey, target, d.now())
 			if err != nil {
-				return d.Store.Governance(now), err
+				return d.Store.AlertDelivery(d.now()), err
 			}
 			if !send {
-				failed++
 				continue
 			}
-			if !d.Store.BeginGovernanceTransport(reservation.ID) {
-				retired++
-				continue
-			}
-			class := state.GovernanceTransportSenderMissing
-			result := state.PushAttempt{Class: class}
-			if !hasKeys {
-				result.Class = state.GovernanceTransportMissingKeys
-			} else if d.Sender != nil {
-				timeout := d.SendTimeout
-				if timeout <= 0 {
-					timeout = 10 * time.Second
-				}
-				sendCtx, cancel := context.WithTimeout(ctx, timeout)
-				result = d.Sender.Send(sendCtx, subscription, keys, payload)
-				cancel()
-			}
-			class = normalizeGovernanceResult(result)
-			if result.OK {
-				class = state.GovernanceTransportAccepted
-			}
-			acceptedResult := result.OK && class == state.GovernanceTransportAccepted
-			outcome, err := d.Store.CompleteGovernanceAttempt(reservation.ID, class, acceptedResult, now)
+			// Nothing authority-relevant may occur between this durable recheck
+			// and the external sender call.
+			confirmed, allowed, err := d.Store.ConfirmAlertTransport(reservation.AttemptID, d.now())
 			if err != nil {
-				return d.Store.Governance(now), err
+				return d.Store.AlertDelivery(d.now()), err
 			}
-			if acceptedResult {
-				acceptedAt = now
+			if !allowed {
+				continue
 			}
-			if outcome.Disposition == state.GovernanceCompletionRetired {
-				retired++
-			} else if acceptedResult {
-				accepted++
-			} else {
-				failed++
+			if confirmed.DisplayID != work.DisplayID {
+				if _, err := d.Store.CompleteAlertDelivery(confirmed.AttemptID, state.AlertDeliveryCompletionRejected, d.now()); err != nil {
+					return d.Store.AlertDelivery(d.now()), err
+				}
+				return d.Store.AlertDelivery(d.now()), fmt.Errorf("alert display authority changed before send")
 			}
-			if class == state.GovernanceTransportDead {
-				if err := d.Store.RemovePushSubscriptionAt(subscription.ID, now); err != nil {
-					return d.Store.Governance(now), err
+			presentation, ok := PresentationFor(confirmed.Candidate.PresentationCode, confirmed.Candidate.State)
+			if !ok {
+				if _, err := d.Store.CompleteAlertDelivery(confirmed.AttemptID, state.AlertDeliveryCompletionRejected, d.now()); err != nil {
+					return d.Store.AlertDelivery(d.now()), err
+				}
+				return d.Store.AlertDelivery(d.now()), fmt.Errorf("unsupported alert presentation code %q", confirmed.Candidate.PresentationCode)
+			}
+			payload := push.Payload{
+				Title: presentation.Title, Body: presentation.Body,
+				Severity: string(confirmed.Candidate.Severity), Kind: string(confirmed.Candidate.Kind),
+				Destination: string(confirmed.Candidate.Destination), DisplayID: confirmed.DisplayID, URL: d.URL,
+			}
+			sendCtx, cancel := context.WithTimeout(ctx, d.sendTimeout())
+			result := d.Sender.Send(sendCtx, subscription, keys, payload)
+			cancel()
+			completion, dead := classifyAlertCompletion(result)
+			completedAt := d.now()
+			if _, err := d.Store.CompleteAlertDelivery(confirmed.AttemptID, completion, completedAt); err != nil {
+				return d.Store.AlertDelivery(completedAt), err
+			}
+			if dead {
+				if err := d.Store.RemovePushSubscriptionAt(subscription.ID, completedAt); err != nil {
+					return d.Store.AlertDelivery(completedAt), err
 				}
 			}
 		}
 	}
-	health := state.GovernanceDeliveryHealth{UpdatedAt: now}
-	switch {
-	case accepted > 0 && failed == 0:
-		health.State = state.GovernanceDeliveryHealthy
-		health.Class = state.GovernanceTransportAccepted
-		health.LastAcceptedAt = acceptedAt
-	case accepted > 0:
-		health.State = state.GovernanceDeliveryDegraded
-		health.Class = state.GovernanceTransportPartial
-		health.LastAcceptedAt = acceptedAt
-	case retired > 0 && failed == 0:
-		health.State = state.GovernanceDeliveryUnavailable
-		health.Class = state.GovernanceTransportTargetRetired
-		health.LastAcceptedAt = acceptedAt
-	default:
-		health.State = state.GovernanceDeliveryUnavailable
-		health.Class = state.GovernanceTransportAllFailed
-		health.LastAcceptedAt = acceptedAt
-	}
-	if err := d.Store.SetGovernanceDeliveryHealth(health); err != nil {
-		return d.Store.Governance(now), err
-	}
-	return d.Store.Governance(now), nil
+	return d.Store.AlertDelivery(d.now()), nil
 }
 
-func normalizeGovernanceResult(result state.PushAttempt) string {
+func (d *Dispatcher) failPrerequisite(now time.Time, class string) (state.AlertDeliveryView, error) {
+	err := d.Store.SetAlertDeliveryPrerequisiteHealth(class, now)
+	return d.Store.AlertDelivery(now), err
+}
+
+func (d *Dispatcher) now() time.Time {
+	if d.Now != nil {
+		return d.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (d *Dispatcher) sendTimeout() time.Duration {
+	if d.SendTimeout > 0 {
+		return d.SendTimeout
+	}
+	return 10 * time.Second
+}
+
+func classifyAlertCompletion(result state.PushAttempt) (state.AlertDeliveryCompletion, bool) {
+	if result.OK && result.Class == state.GovernanceTransportAccepted {
+		return state.AlertDeliveryCompletionAccepted, false
+	}
 	switch result.Class {
-	case state.GovernanceTransportAccepted, state.GovernanceTransportDeadlineRetry,
-		state.GovernanceTransportCanceledRetry, state.GovernanceTransportNetworkRetry,
-		state.GovernanceTransportHTTPRetry, state.GovernanceTransportHTTPRejected,
-		state.GovernanceTransportMissingKeys, state.GovernanceTransportSenderMissing,
-		state.GovernanceTransportTimeoutRetry, state.GovernanceTransportRejected,
-		state.GovernanceTransportDead:
-		return result.Class
+	case state.GovernanceTransportDeadlineRetry, state.GovernanceTransportCanceledRetry,
+		state.GovernanceTransportNetworkRetry, state.GovernanceTransportHTTPRetry,
+		state.GovernanceTransportTimeoutRetry:
+		return state.AlertDeliveryCompletionRetryable, false
+	case state.GovernanceTransportDead:
+		return state.AlertDeliveryCompletionRejected, true
 	default:
-		return state.GovernanceTransportHTTPRejected
+		return state.AlertDeliveryCompletionRejected, false
 	}
-}
-
-const (
-	governanceProbeDisplayID   = "gov-0000000000000000"
-	governanceSuppressedTarget = "suppressed"
-	// This target distinguishes forensic accounting for an episode whose
-	// terminal suppression boundary lives on the occurrence row itself.
-	governanceEpisodeSuppressedTarget = "episode-suppressed"
-	governanceLegacyUnknownTarget     = "legacy-unknown"
-)
-
-func (d *GovernanceDispatcher) recordMissed(occurrence state.GovernanceOccurrence, target, class string, now time.Time) error {
-	targetRef := state.GovernanceTargetRef("governance", target)
-	receiptKey := state.GovernanceReceiptKey(occurrence.DisplayID, targetRef)
-	if !d.Store.GovernanceAttemptDue(receiptKey, now) {
-		return nil
-	}
-	return d.Store.RecordGovernanceAttempt(state.GovernanceAttempt{
-		OccurrenceID: occurrence.DisplayID, TargetRef: targetRef, ReceiptKey: receiptKey, At: now, Class: class,
-	}, false)
-}
-
-// GovernanceWorker bounds poll-triggered delivery to one active observation
-// and one coalesced latest snapshot.
-type GovernanceWorker struct {
-	dispatcher *GovernanceDispatcher
-	submitMu   sync.Mutex
-	generation uint64
-	latest     chan governanceWork
-}
-
-type governanceWork struct {
-	generation uint64
-	snapshot   rpc.NudgesSnapshotResult
-}
-
-// NewGovernanceWorker returns a worker that retains at most the latest queued
-// snapshot while one observation is running.
-func NewGovernanceWorker(dispatcher *GovernanceDispatcher) *GovernanceWorker {
-	return &GovernanceWorker{dispatcher: dispatcher, latest: make(chan governanceWork, 1)}
-}
-
-// Submit replaces any queued snapshot with snapshot and returns its local,
-// monotonically increasing generation.
-func (w *GovernanceWorker) Submit(snapshot rpc.NudgesSnapshotResult) uint64 {
-	w.submitMu.Lock()
-	defer w.submitMu.Unlock()
-	w.generation++
-	work := governanceWork{generation: w.generation, snapshot: snapshot}
-	select {
-	case w.latest <- work:
-		return work.generation
-	default:
-	}
-	select {
-	case <-w.latest:
-	default:
-	}
-	select {
-	case w.latest <- work:
-	default:
-	}
-	return work.generation
-}
-
-// Pending reports whether the worker currently has a coalesced snapshot
-// waiting to be observed.
-func (w *GovernanceWorker) Pending() int { return len(w.latest) }
-
-// Run observes submitted snapshots until ctx is canceled. Observation errors
-// are not returned; callers inspect the dispatcher's durable delivery evidence.
-func (w *GovernanceWorker) Run(ctx context.Context) {
-	if w == nil || w.dispatcher == nil {
-		return
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case work := <-w.latest:
-			_, _ = w.dispatcher.Observe(ctx, work.snapshot)
-		}
-	}
-}
-
-// Observe records a newly eligible Canary occurrence before any Web Push send
-// and returns the created redacted record plus this call's transport attempts.
-// A nil record means no new row was persisted; a returned failed attempt may
-// describe the persistence error.
-func (m Monitor) Observe(ctx context.Context, canary rpc.CanaryResult) (*state.AlertRecord, []state.PushAttempt) {
-	if m.Store == nil {
-		return nil, nil
-	}
-	established, ok := establishedAlertView(canary)
-	if !ok {
-		// A present projection comes from a new daemon and is a single atomic
-		// compatibility contract. Never fall back to the richer advisory result
-		// when that contract is malformed: doing so could change established
-		// paging cadence. Nil remains the explicit older-daemon skew path.
-		return nil, nil
-	}
-	canary = established.canary
-	fp := canary.Fingerprint.Key
-	if fp == "" {
-		fp = canary.Fingerprint.Version + ":" + canary.Action + ":" + string(canary.Severity)
-	}
-	now := time.Now().UTC()
-	if m.Now != nil {
-		now = m.Now().UTC()
-	}
-	account, tradingMode := "", ""
-	if m.TradingStatus != nil {
-		if trading := m.TradingStatus(); trading != nil {
-			account, tradingMode = trading.Account, trading.Mode
-		}
-	}
-	// Every observation, eligible or not, refreshes context stamps and
-	// expires read previous-context history; a failed save only skips this
-	// round's compaction.
-	_ = m.Store.CompactAlertHistory(fp, account, tradingMode, now)
-	if !established.occurrenceEligible {
-		return nil, nil
-	}
-	modeBeforeRecord := m.Store.AlertSettings().Mode
-	rec := RedactedRecord(canary, fp, now)
-	rec.Fingerprint = fp
-	rec.Account = account
-	rec.Mode = tradingMode
-	created, err := m.Store.RecordAlertIfNew(rec)
-	if err != nil {
-		return nil, []state.PushAttempt{{At: now, AlertID: rec.ID, Error: err.Error()}}
-	}
-	if !created {
-		return nil, nil
-	}
-	if m.afterRecord != nil {
-		m.afterRecord()
-	}
-	modeAfterRecord := m.Store.AlertSettings().Mode
-	if !established.shouldAlert(modeBeforeRecord) || !established.shouldAlert(modeAfterRecord) {
-		return &rec, nil
-	}
-	payload := push.Payload{
-		Title:    rec.Title,
-		Body:     rec.Body + " Open ibkr for portfolio details.",
-		URL:      m.URL,
-		AlertID:  rec.ID,
-		Action:   rec.Action,
-		Severity: rec.Severity,
-	}
-	keys, hasKeys := m.Store.VAPID()
-	var attempts []state.PushAttempt
-	if m.Sender != nil && hasKeys {
-		for _, sub := range m.Store.PushSubscriptions() {
-			attempt := m.Sender.Send(ctx, sub, keys, payload)
-			attempts = append(attempts, attempt)
-			_ = m.Store.RecordPush(attempt)
-		}
-	}
-	return &rec, attempts
-}
-
-type establishedCanaryAlertView struct {
-	canary             rpc.CanaryResult
-	occurrenceEligible bool
-	actOnlyEligible    bool
-}
-
-// establishedAlertView resolves one immutable compatibility view for the
-// whole Observe call. New daemons stamp the exact pre-shadow Canary identity
-// and eligibility; older daemons have no projection and retain their existing
-// result semantics. A malformed present projection fails closed.
-func establishedAlertView(canary rpc.CanaryResult) (establishedCanaryAlertView, bool) {
-	projection := canary.EstablishedAlertProjection
-	if projection == nil {
-		return establishedCanaryAlertView{
-			canary:             canary,
-			occurrenceEligible: canaryOccurrenceEligible(canary),
-			actOnlyEligible:    canaryActEligible(canary),
-		}, true
-	}
-	if err := rpc.ValidateEstablishedAlertProjection(*projection); err != nil {
-		return establishedCanaryAlertView{}, false
-	}
-	relevant := projection.PortfolioRelevant
-	canary.Fingerprint = projection.CanonicalFingerprint
-	canary.Action = projection.Action
-	canary.MarketConfirmation = projection.MarketConfirmation
-	canary.Severity = projection.Severity
-	canary.PortfolioAlertRelevant = &relevant
-	return establishedCanaryAlertView{
-		canary:             canary,
-		occurrenceEligible: projection.OccurrenceEligible,
-		actOnlyEligible:    projection.ActOnlyEligible,
-	}, true
-}
-
-func (view establishedCanaryAlertView) shouldAlert(mode string) bool {
-	switch mode {
-	case state.AlertModeNone:
-		return false
-	case state.AlertModeActOnly:
-		return view.occurrenceEligible && view.actOnlyEligible
-	case state.AlertModeWatchAndAct, "":
-		return view.occurrenceEligible
-	default:
-		return false
-	}
-}
-
-// ShouldAlert reports whether the established Canary compatibility projection
-// permits an occurrence in mode. A malformed present projection fails closed.
-func ShouldAlert(mode string, canary rpc.CanaryResult) bool {
-	view, ok := establishedAlertView(canary)
-	if !ok {
-		return false
-	}
-	return view.shouldAlert(mode)
-}
-
-func canaryOccurrenceEligible(canary rpc.CanaryResult) bool {
-	return portfolioAlertRelevant(canary) &&
-		(severityAtLeast(canary.Severity, risk.SeverityWatch) || canaryActEligible(canary))
-}
-
-func canaryActEligible(canary rpc.CanaryResult) bool {
-	return severityAtLeast(canary.Severity, risk.SeverityAct) ||
-		canary.Action == "defend" ||
-		canary.Action == "rebalance" ||
-		canary.Action == "confirm_inputs"
-}
-
-// portfolioAlertRelevant reads the daemon-stamped relevance verdict; the
-// policy's single copy lives in internal/canary. An unstamped snapshot (a
-// producer predating the field) fails open to relevant: version skew may add
-// market-weather noise but must never silently suppress alert delivery.
-func portfolioAlertRelevant(canary rpc.CanaryResult) bool {
-	return canary.PortfolioAlertRelevant == nil || *canary.PortfolioAlertRelevant
-}
-
-// RedactedRecord authors the stored in-app history copy. It stays deliberately
-// free of symbols, quantities, and account data because the same record feeds
-// the web-push payload; the push-only call to action is appended in Observe.
-func RedactedRecord(canary rpc.CanaryResult, fingerprint string, now time.Time) state.AlertRecord {
-	action := strings.TrimSpace(canary.Action)
-	if action == "" {
-		action = "canary"
-	}
-	severity := string(canary.Severity)
-	title := "Canary: " + strings.ReplaceAll(action, "_", " ")
-	// The severity is restated only when it differs from the action in the
-	// title; "Canary: watch — Watch severity" says one thing twice.
-	body := ""
-	if s := nonEmpty(severity, "watch"); !strings.EqualFold(s, action) {
-		body = capitalize(s) + " severity"
-	}
-	if phrase := marketConfirmationPhrase(canary.MarketConfirmation); phrase != "" {
-		if body == "" {
-			body = capitalize(phrase)
-		} else {
-			body += " — " + phrase
-		}
-	}
-	if body == "" {
-		body = "Canary state recorded"
-	}
-	body += "."
-	idHash := sha256.Sum256([]byte(fingerprint + "\x00" + now.UTC().Format(time.RFC3339Nano)))
-	return state.AlertRecord{
-		ID:        fmt.Sprintf("canary-%x", idHash[:12]),
-		Action:    action,
-		Severity:  severity,
-		Title:     title,
-		Body:      body,
-		CreatedAt: now,
-	}
-}
-
-// marketConfirmationPhrase translates the wire enum into reader terms; the
-// enum values themselves must never reach rendered copy.
-func marketConfirmationPhrase(confirmation string) string {
-	switch confirmation {
-	case "confirmed":
-		return "market stress confirmed"
-	case "partial":
-		return "market stress partly confirmed"
-	case "none":
-		return "market stress not confirmed"
-	case "blocked":
-		return "market data blocked"
-	case "":
-		return ""
-	default:
-		return "market confirmation " + confirmation
-	}
-}
-
-func capitalize(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
-}
-
-func severityAtLeast(got risk.SignalSeverity, want risk.SignalSeverity) bool {
-	rank := map[risk.SignalSeverity]int{
-		risk.SeverityObserve: 0,
-		risk.SeverityWatch:   1,
-		risk.SeverityAct:     2,
-		risk.SeverityUrgent:  3,
-	}
-	return rank[got] >= rank[want]
-}
-
-func nonEmpty(v, fallback string) string {
-	if strings.TrimSpace(v) == "" {
-		return fallback
-	}
-	return v
 }
