@@ -2513,6 +2513,7 @@ type DailyPnLObservation struct {
 // DailyPnLObservationStatus is the closed set of Daily P&L feed states.
 type DailyPnLObservationStatus string
 
+// Daily P&L observation statuses exposed across daemon surfaces.
 const (
 	DailyPnLObservationOK      DailyPnLObservationStatus = "ok"
 	DailyPnLObservationMissing DailyPnLObservationStatus = "missing"

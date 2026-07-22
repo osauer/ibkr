@@ -30,6 +30,7 @@ type AccountDailyPnL struct {
 // states from a nil value alone.
 type DailyPnLFrameStatus string
 
+// Daily P&L frame statuses reported by the connector.
 const (
 	DailyPnLFrameAvailable   DailyPnLFrameStatus = "available"
 	DailyPnLFrameUnavailable DailyPnLFrameStatus = "unavailable"
