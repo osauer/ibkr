@@ -62,7 +62,6 @@ func New(opts Options) (*App, error) {
 	if _, err := store.EnsureVAPID(time.Now().UTC(), push.GenerateVAPIDKeys); err != nil {
 		return nil, fmt.Errorf("vapid keys: %w", err)
 	}
-	authMgr := auth.NewManager(store, opts.PairingTTL)
 	daemonClient := daemonclient.Real{SocketPath: opts.SocketPath, AutoSpawn: true}
 	liveSvc := live.New(
 		daemonClient,
@@ -80,10 +79,11 @@ func New(opts Options) (*App, error) {
 	}
 	pushSender := push.WebPushSender{Subscriber: push.Subscriber}
 	dispatcher := &alerts.Dispatcher{Store: store, Sender: pushSender, URL: opts.PublicURL}
+	authMgr := auth.NewManager(store, dispatcher, opts.PairingTTL)
 	if err := liveSvc.SetAlertSnapshotAuthority(dispatcher); err != nil {
 		return nil, fmt.Errorf("prime alert delivery state: %w", err)
 	}
-	app, err := newWithParts(opts, store, authMgr, daemonClient, liveSvc, relayClient, pushSender)
+	app, err := newWithParts(opts, store, authMgr, daemonClient, liveSvc, relayClient, dispatcher)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func acquireAppLock(stateDir string) (*xdgcache.Lock, error) {
 	return lock, nil
 }
 
-func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, daemonClient daemonclient.Client, liveSvc *live.Service, relayClient relay.Client, pushSender push.Sender) (*App, error) {
+func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, daemonClient daemonclient.Client, liveSvc *live.Service, relayClient relay.Client, alertController *alerts.Dispatcher) (*App, error) {
 	srv, err := hyperserve.NewServer(
 		hyperserve.WithAddr(opts.Addr),
 		hyperserve.WithTimeouts(30*time.Second, 0, 0),
@@ -169,15 +169,15 @@ func newWithParts(opts Options, store *state.Store, authMgr *auth.Manager, daemo
 		Server:  srv,
 	}
 	apphttp.Register(apphttp.Dependencies{
-		Server:     srv,
-		Store:      store,
-		Auth:       authMgr,
-		Daemon:     daemonClient,
-		Live:       liveSvc,
-		Relay:      relayClient,
-		PublicURL:  opts.PublicURL,
-		Version:    opts.Version,
-		PushSender: pushSender,
+		Server:          srv,
+		Store:           store,
+		Auth:            authMgr,
+		Daemon:          daemonClient,
+		Live:            liveSvc,
+		Relay:           relayClient,
+		PublicURL:       opts.PublicURL,
+		Version:         opts.Version,
+		AlertController: alertController,
 	})
 	return a, nil
 }

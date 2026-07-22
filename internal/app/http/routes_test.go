@@ -21,6 +21,7 @@ import (
 
 	hyperserve "github.com/osauer/hyperserve/pkg/server"
 
+	"github.com/osauer/ibkr/v2/internal/app/alerts"
 	"github.com/osauer/ibkr/v2/internal/app/auth"
 	"github.com/osauer/ibkr/v2/internal/app/daemonclient"
 	"github.com/osauer/ibkr/v2/internal/app/live"
@@ -1354,7 +1355,8 @@ func newTestHandlerWithClientAndRelay(t *testing.T, fakeClient daemonclient.Clie
 	}); err != nil {
 		t.Fatalf("EnsureVAPID: %v", err)
 	}
-	authMgr := auth.NewManager(store, time.Minute)
+	alertController := &alerts.Dispatcher{Store: store, URL: "https://relay.example"}
+	authMgr := auth.NewManager(store, alertController, time.Minute)
 	liveSvc := live.New(fakeClient, time.Minute, time.Minute)
 	liveSvc.PollOnce(t.Context())
 	srv, err := hyperserve.NewServer(
@@ -1365,14 +1367,15 @@ func newTestHandlerWithClientAndRelay(t *testing.T, fakeClient daemonclient.Clie
 		t.Fatalf("NewServer: %v", err)
 	}
 	Register(Dependencies{
-		Server:    srv,
-		Store:     store,
-		Auth:      authMgr,
-		Daemon:    fakeClient,
-		Live:      liveSvc,
-		Relay:     relayClient,
-		PublicURL: "https://relay.example",
-		Version:   "test-version",
+		Server:          srv,
+		Store:           store,
+		Auth:            authMgr,
+		Daemon:          fakeClient,
+		Live:            liveSvc,
+		Relay:           relayClient,
+		PublicURL:       "https://relay.example",
+		Version:         "test-version",
+		AlertController: alertController,
 	})
 	return srv
 }
@@ -1403,7 +1406,6 @@ func newGovernanceTestHandlerWithPoll(t *testing.T, fakeClient daemonclient.Clie
 	if _, err := store.EnsureVAPID(time.Now().UTC(), func() (string, string, error) { return "private", "public", nil }); err != nil {
 		t.Fatal(err)
 	}
-	authMgr := auth.NewManager(store, time.Minute)
 	liveSvc := live.New(fakeClient, time.Minute, time.Minute)
 	if poll {
 		liveSvc.PollOnce(t.Context())
@@ -1413,10 +1415,12 @@ func newGovernanceTestHandlerWithPoll(t *testing.T, fakeClient daemonclient.Clie
 		t.Fatal(err)
 	}
 	sender := &governanceHTTPTestSender{}
+	alertController := &alerts.Dispatcher{Store: store, Sender: sender, URL: "https://relay.example"}
+	authMgr := auth.NewManager(store, alertController, time.Minute)
 	Register(Dependencies{
 		Server: srv, Store: store, Auth: authMgr, Daemon: fakeClient, Live: liveSvc,
 		Relay: relay.Noop{PublicURL: "https://relay.example"}, PublicURL: "https://relay.example", Version: "test-version",
-		PushSender: sender,
+		AlertController: alertController,
 	})
 	return srv, store, sender
 }

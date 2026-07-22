@@ -20,7 +20,6 @@ import (
 	"github.com/osauer/ibkr/v2/internal/app/auth"
 	"github.com/osauer/ibkr/v2/internal/app/daemonclient"
 	"github.com/osauer/ibkr/v2/internal/app/live"
-	"github.com/osauer/ibkr/v2/internal/app/push"
 	"github.com/osauer/ibkr/v2/internal/app/relay"
 	"github.com/osauer/ibkr/v2/internal/app/state"
 	"github.com/osauer/ibkr/v2/internal/rpc"
@@ -31,15 +30,25 @@ import (
 // the HTTP layer. Registering a daemon client makes RPC methods reachable but
 // does not transfer daemon policy or broker-write authority to HTTP.
 type Dependencies struct {
-	Server     *hyperserve.Server
-	Store      *state.Store
-	Auth       *auth.Manager
-	Daemon     daemonclient.Client
-	Live       *live.Service
-	Relay      relay.Client
-	PublicURL  string
-	Version    string
-	PushSender push.Sender
+	Server          *hyperserve.Server
+	Store           *state.Store
+	Auth            *auth.Manager
+	Daemon          daemonclient.Client
+	Live            *live.Service
+	Relay           relay.Client
+	PublicURL       string
+	Version         string
+	AlertController AlertDeliveryController
+}
+
+// AlertDeliveryController serializes every production mode or target-topology
+// mutation with final alert confirmation and transport.
+type AlertDeliveryController interface {
+	SetAlertMode(string) error
+	PruneDevices(time.Time) (int, error)
+	AddPushSubscription(state.PushSubscription) error
+	RemovePushSubscription(string) error
+	SendSafeDiagnostic(context.Context, string) (state.GovernanceDiagnosticStatus, bool, error)
 }
 
 type handler struct {
@@ -240,7 +249,7 @@ func (h *handler) handleDevicesPrune(w nethttp.ResponseWriter, r *nethttp.Reques
 		return
 	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -req.KeepDays)
-	removed, err := h.deps.Store.PruneDevices(cutoff)
+	removed, err := h.deps.AlertController.PruneDevices(cutoff)
 	if err != nil {
 		writeError(w, nethttp.StatusInternalServerError, err.Error())
 		return
@@ -841,7 +850,7 @@ func (h *handler) handlePutAlertSettings(w nethttp.ResponseWriter, r *nethttp.Re
 		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.deps.Store.SetAlertMode(req.Mode); err != nil {
+	if err := h.deps.AlertController.SetAlertMode(req.Mode); err != nil {
 		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
@@ -870,7 +879,7 @@ func (h *handler) handlePushSubscribe(w nethttp.ResponseWriter, r *nethttp.Reque
 		CreatedAt:  time.Now().UTC(),
 		LastSeenAt: time.Now().UTC(),
 	}
-	if err := h.deps.Store.AddPushSubscription(sub); err != nil {
+	if err := h.deps.AlertController.AddPushSubscription(sub); err != nil {
 		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
@@ -878,7 +887,7 @@ func (h *handler) handlePushSubscribe(w nethttp.ResponseWriter, r *nethttp.Reque
 }
 
 func (h *handler) handlePushDelete(w nethttp.ResponseWriter, r *nethttp.Request) {
-	if err := h.deps.Store.RemovePushSubscription(r.PathValue("id")); err != nil {
+	if err := h.deps.AlertController.RemovePushSubscription(r.PathValue("id")); err != nil {
 		writeError(w, nethttp.StatusInternalServerError, err.Error())
 		return
 	}
@@ -908,58 +917,12 @@ func (h *handler) handleSafePushTest(w nethttp.ResponseWriter, r *nethttp.Reques
 		writeError(w, nethttp.StatusUnauthorized, "unauthorized")
 		return
 	}
-	now := time.Now().UTC()
-	if h.deps.Store.AlertSettings().Mode == state.AlertModeNone {
-		if err := h.deps.Store.RecordDiagnosticStatus(state.GovernanceDiagnosticStatus{State: state.GovernanceTransportSuppressed, At: now}); err != nil {
-			writeError(w, nethttp.StatusInternalServerError, "diagnostic state write failed")
-			return
-		}
-		writeJSON(w, SafePushTestResult{State: state.GovernanceTransportSuppressed})
+	status, accepted, err := h.deps.AlertController.SendSafeDiagnostic(r.Context(), sess.DeviceID)
+	if err != nil {
+		writeError(w, nethttp.StatusInternalServerError, "diagnostic dispatch failed")
 		return
 	}
-	subs := h.deps.Store.ActivePushSubscriptionsForDevice(sess.DeviceID)
-	stateClass := state.GovernanceTransportNoSubscription
-	accepted, failed := 0, 0
-	keys, hasKeys := h.deps.Store.VAPID()
-	for _, sub := range subs {
-		result := state.PushAttempt{Class: state.GovernanceTransportSenderMissing}
-		if !hasKeys {
-			result.Class = state.GovernanceTransportMissingKeys
-		} else if h.deps.PushSender != nil {
-			sendCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-			result = h.deps.PushSender.Send(sendCtx, sub, keys, push.SafeDiagnosticPayload())
-			cancel()
-		}
-		class := result.Class
-		if result.OK {
-			class = state.GovernanceTransportAccepted
-		}
-		if class == "" || class == state.GovernanceTransportAccepted && !result.OK {
-			class = state.GovernanceTransportHTTPRejected
-		}
-		if class == state.GovernanceTransportAccepted {
-			accepted++
-		} else {
-			failed++
-			stateClass = class
-		}
-		if class == state.GovernanceTransportDead {
-			_ = h.deps.Store.RemovePushSubscription(sub.ID)
-		}
-	}
-	switch {
-	case accepted > 0 && failed == 0:
-		stateClass = state.GovernanceTransportAccepted
-	case accepted > 0:
-		stateClass = state.GovernanceTransportPartial
-	case len(subs) > 1 && failed > 0:
-		stateClass = state.GovernanceTransportAllFailed
-	}
-	if err := h.deps.Store.RecordDiagnosticStatus(state.GovernanceDiagnosticStatus{State: stateClass, At: now}); err != nil {
-		writeError(w, nethttp.StatusInternalServerError, "diagnostic state write failed")
-		return
-	}
-	writeJSON(w, SafePushTestResult{State: stateClass, PushServiceAccepted: accepted > 0})
+	writeJSON(w, SafePushTestResult{State: status.State, PushServiceAccepted: accepted})
 }
 
 func (h *handler) requireAuth(next nethttp.HandlerFunc) nethttp.HandlerFunc {

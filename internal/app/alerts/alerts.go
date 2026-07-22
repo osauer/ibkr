@@ -76,30 +76,16 @@ func (d *Dispatcher) dispatchLocked(ctx context.Context) (state.AlertDeliveryVie
 		return d.Store.AlertDelivery(now), err
 	}
 	due := d.Store.AlertDeliveriesDue(now)
-	if len(due) == 0 {
-		if err := d.Store.SetAlertDeliveryPrerequisiteHealth("", now); err != nil {
-			return d.Store.AlertDelivery(now), err
-		}
+	readiness, err := d.refreshTransportReadinessLocked(now)
+	if err != nil {
+		return d.Store.AlertDelivery(now), err
+	}
+	if !readiness.enabled || readiness.class != "" || len(due) == 0 {
 		return d.Store.AlertDelivery(now), nil
 	}
 
-	subscriptions := d.Store.ActivePushSubscriptions()
-	if len(subscriptions) == 0 {
-		return d.failPrerequisite(now, state.AlertDeliveryHealthClassNoSubscription)
-	}
-	keys, hasKeys := d.Store.VAPID()
-	if !hasKeys || strings.TrimSpace(keys.PublicKey) == "" || strings.TrimSpace(keys.PrivateKey) == "" {
-		return d.failPrerequisite(now, state.AlertDeliveryHealthClassSigningKeys)
-	}
-	if d.Sender == nil {
-		return d.failPrerequisite(now, state.AlertDeliveryHealthClassSender)
-	}
-	if err := d.Store.SetAlertDeliveryPrerequisiteHealth("", now); err != nil {
-		return d.Store.AlertDelivery(now), err
-	}
-
 	for _, work := range due {
-		for _, subscription := range subscriptions {
+		for _, subscription := range readiness.subscriptions {
 			target := state.AlertDeliveryTargetRef(subscription.DeviceID, subscription.ID)
 			reservation, send, err := d.Store.BeginAlertDelivery(work.OccurrenceKey, target, d.now())
 			if err != nil {
@@ -136,7 +122,7 @@ func (d *Dispatcher) dispatchLocked(ctx context.Context) (state.AlertDeliveryVie
 				Destination: string(confirmed.Candidate.Destination), DisplayID: confirmed.DisplayID, URL: d.URL,
 			}
 			sendCtx, cancel := context.WithTimeout(ctx, d.sendTimeout())
-			result := d.Sender.Send(sendCtx, subscription, keys, payload)
+			result := d.Sender.Send(sendCtx, subscription, readiness.keys, payload)
 			cancel()
 			completion, dead := classifyAlertCompletion(result)
 			completedAt := d.now()
@@ -153,9 +139,31 @@ func (d *Dispatcher) dispatchLocked(ctx context.Context) (state.AlertDeliveryVie
 	return d.Store.AlertDelivery(d.now()), nil
 }
 
-func (d *Dispatcher) failPrerequisite(now time.Time, class string) (state.AlertDeliveryView, error) {
-	err := d.Store.SetAlertDeliveryPrerequisiteHealth(class, now)
-	return d.Store.AlertDelivery(now), err
+type transportReadiness struct {
+	enabled       bool
+	class         string
+	subscriptions []state.PushSubscription
+	keys          state.VAPIDKeys
+}
+
+func (d *Dispatcher) refreshTransportReadinessLocked(now time.Time) (transportReadiness, error) {
+	readiness := transportReadiness{enabled: d.Store.AlertSettings().Mode != state.AlertModeNone}
+	if readiness.enabled {
+		readiness.subscriptions = d.Store.ActivePushSubscriptions()
+		switch {
+		case len(readiness.subscriptions) == 0:
+			readiness.class = state.AlertDeliveryHealthClassNoSubscription
+		default:
+			var hasKeys bool
+			readiness.keys, hasKeys = d.Store.VAPID()
+			if !hasKeys || strings.TrimSpace(readiness.keys.PublicKey) == "" || strings.TrimSpace(readiness.keys.PrivateKey) == "" {
+				readiness.class = state.AlertDeliveryHealthClassSigningKeys
+			} else if d.Sender == nil {
+				readiness.class = state.AlertDeliveryHealthClassSender
+			}
+		}
+	}
+	return readiness, d.Store.SetAlertDeliveryPrerequisiteHealth(readiness.class, now)
 }
 
 func (d *Dispatcher) now() time.Time {

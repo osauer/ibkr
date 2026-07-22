@@ -147,7 +147,7 @@ func TestDispatcherRecordsTypedPrerequisiteHealth(t *testing.T) {
 	}
 }
 
-func TestDispatcherClearsPrerequisiteHealthWhenNoWorkRemains(t *testing.T) {
+func TestDispatcherKeepsPrerequisiteHealthTruthfulWhenNoWorkRemains(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
 	store := newAlertStore(t, t.TempDir(), base)
@@ -175,8 +175,163 @@ func TestDispatcherClearsPrerequisiteHealthWhenNoWorkRemains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if view.DeliveryHealth.State != state.AlertDeliveryHealthUnavailable || view.DeliveryHealth.Class != state.AlertDeliveryHealthClassNoSubscription {
+		t.Fatalf("idle active mode hid its missing subscription: %+v", view.DeliveryHealth)
+	}
+
+	if err := dispatcher.SetAlertMode(state.AlertModeNone); err != nil {
+		t.Fatal(err)
+	}
+	view, err = dispatcher.DispatchPending(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if view.DeliveryHealth.State == state.AlertDeliveryHealthUnavailable || view.DeliveryHealth.Class != "" {
-		t.Fatalf("stale prerequisite outage survived after work recovered: %+v", view.DeliveryHealth)
+		t.Fatalf("disabled mode was reported as a prerequisite outage: %+v", view.DeliveryHealth)
+	}
+}
+
+func TestDispatcherReportsIdlePrerequisiteHealth(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 22, 11, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		addTarget bool
+		addKeys   bool
+		sender    push.Sender
+		class     string
+	}{
+		{name: "no active subscription", addKeys: true, sender: &recordingSender{}, class: state.AlertDeliveryHealthClassNoSubscription},
+		{name: "signing keys unavailable", addTarget: true, sender: &recordingSender{}, class: state.AlertDeliveryHealthClassSigningKeys},
+		{name: "sender unavailable", addTarget: true, addKeys: true, class: state.AlertDeliveryHealthClassSender},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := newAlertStore(t, t.TempDir(), base)
+			if tc.addTarget {
+				addAlertTarget(t, store, "device-one", "subscription-one", base)
+			}
+			if tc.addKeys {
+				ensureAlertKeys(t, store, base)
+			}
+			now := base.Add(time.Minute)
+			dispatcher := Dispatcher{Store: store, Sender: tc.sender, Now: func() time.Time { return now }}
+			view, err := dispatcher.DispatchPending(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if view.DeliveryHealth.State != state.AlertDeliveryHealthUnavailable || view.DeliveryHealth.Class != tc.class {
+				t.Fatalf("idle readiness is not truthful: %+v", view.DeliveryHealth)
+			}
+		})
+	}
+}
+
+func TestControllerMutationsWaitForConfirmedTransport(t *testing.T) {
+	base := time.Date(2026, 7, 22, 11, 45, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		mutate    func(*Dispatcher) error
+		committed func(*state.Store) bool
+	}{
+		{
+			name: "disable alerts",
+			mutate: func(dispatcher *Dispatcher) error {
+				return dispatcher.SetAlertMode(state.AlertModeNone)
+			},
+			committed: func(store *state.Store) bool {
+				return store.AlertSettings().Mode == state.AlertModeNone
+			},
+		},
+		{
+			name: "retire target",
+			mutate: func(dispatcher *Dispatcher) error {
+				return dispatcher.RemovePushSubscription("subscription-one")
+			},
+			committed: func(store *state.Store) bool {
+				return len(store.ActivePushSubscriptions()) == 0
+			},
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			store := newAlertStore(t, t.TempDir(), base)
+			addAlertTarget(t, store, "device-one", "subscription-one", base)
+			ensureAlertKeys(t, store, base)
+			now := base.Add(time.Minute)
+			sender := newBlockingSender()
+			dispatcher := &Dispatcher{Store: store, Sender: sender, Now: func() time.Time { return now }}
+			snapshot := alertSnapshot(t, now,
+				alertCandidate(t, rpc.AlertPresentationCanaryPortfolioStress, tc.name, now))
+
+			observeDone := make(chan error, 1)
+			go func() {
+				_, err := dispatcher.Observe(context.Background(), snapshot)
+				observeDone <- err
+			}()
+			<-sender.entered
+			if view := store.AlertDelivery(now); view.AttemptTotals.Confirmed != 1 {
+				t.Fatalf("sender did not block after durable confirmation: %+v", view.AttemptTotals)
+			}
+
+			mutationStarted := make(chan struct{})
+			mutationDone := make(chan error, 1)
+			go func() {
+				close(mutationStarted)
+				mutationDone <- tc.mutate(dispatcher)
+			}()
+			<-mutationStarted
+			select {
+			case err := <-mutationDone:
+				t.Fatalf("mutation committed while confirmed transport was blocked: %v", err)
+			case <-time.After(50 * time.Millisecond):
+			}
+			if tc.committed(store) {
+				t.Fatal("mode or target mutation became visible before transport finished")
+			}
+
+			close(sender.release)
+			if err := <-observeDone; err != nil {
+				t.Fatalf("observe: %v", err)
+			}
+			if err := <-mutationDone; err != nil {
+				t.Fatalf("mutation: %v", err)
+			}
+			select {
+			case <-sender.finished:
+			default:
+				t.Fatal("mutation committed before transport returned")
+			}
+			if !tc.committed(store) {
+				t.Fatal("serialized mutation did not commit after transport finished")
+			}
+		})
+	}
+}
+
+func TestSafeDiagnosticRetiresDeadTargetThroughController(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 22, 11, 50, 0, 0, time.UTC)
+	store := newAlertStore(t, t.TempDir(), base)
+	addAlertTarget(t, store, "device-one", "subscription-one", base)
+	ensureAlertKeys(t, store, base)
+	dispatcher := Dispatcher{
+		Store:  store,
+		Sender: &recordingSender{results: []state.PushAttempt{{Class: state.GovernanceTransportDead}}},
+		Now:    func() time.Time { return base.Add(time.Minute) },
+	}
+	status, accepted, err := dispatcher.SendSafeDiagnostic(context.Background(), "device-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted || status.State != state.GovernanceTransportDead {
+		t.Fatalf("unexpected diagnostic result: status=%+v accepted=%v", status, accepted)
+	}
+	if len(store.ActivePushSubscriptions()) != 0 {
+		t.Fatal("dead diagnostic target remained active")
 	}
 }
 
@@ -342,6 +497,23 @@ type recordingSender struct {
 	payload []push.Payload
 	calls   int
 	onSend  func(int, state.PushSubscription, push.Payload)
+}
+
+type blockingSender struct {
+	entered  chan struct{}
+	release  chan struct{}
+	finished chan struct{}
+}
+
+func newBlockingSender() *blockingSender {
+	return &blockingSender{entered: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
+}
+
+func (s *blockingSender) Send(_ context.Context, subscription state.PushSubscription, _ state.VAPIDKeys, _ push.Payload) state.PushAttempt {
+	close(s.entered)
+	<-s.release
+	close(s.finished)
+	return state.PushAttempt{SubscriptionID: subscription.ID, OK: true, Class: state.GovernanceTransportAccepted}
 }
 
 func (s *recordingSender) Send(_ context.Context, subscription state.PushSubscription, _ state.VAPIDKeys, payload push.Payload) state.PushAttempt {

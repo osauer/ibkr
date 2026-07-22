@@ -54,7 +54,7 @@ func TestAlertRoutesRequireAuthAndBootstrapMatchesGET(t *testing.T) {
 	if err := json.Unmarshal(getResponse.Body.Bytes(), &getDTO); err != nil {
 		t.Fatal(err)
 	}
-	if getDTO.SchemaVersion != AlertSchemaVersion || getDTO.Version != state.AlertDeliveryVersion || !getDTO.Initialized || getDTO.Generation != 1 {
+	if getDTO.SchemaVersion != AlertSchemaVersion || getDTO.Version != state.AlertDeliveryVersion || !getDTO.Initialized || getDTO.Generation != 2 {
 		t.Fatalf("GET envelope=%+v", getDTO)
 	}
 	if getDTO.Coverage == nil || len(getDTO.Sources) != 1 || getDTO.Sources[0].Reason != "source_current" || getDTO.Sources[0].FreshUntil == nil {
@@ -108,6 +108,9 @@ func TestAlertRoutesRequireAuthAndBootstrapMatchesGET(t *testing.T) {
 	assertAlertExactJSONKeys(t, getResponse.Body.Bytes())
 	if getDTO.DeliveryHealth.LastPushServiceAcceptanceAt != nil {
 		t.Fatalf("never-accepted alert ledger invented push acceptance: %+v", getDTO.DeliveryHealth)
+	}
+	if getDTO.DeliveryHealth.State != state.AlertDeliveryHealthUnavailable || getDTO.DeliveryHealth.Class != state.AlertDeliveryHealthClassNoSubscription {
+		t.Fatalf("active mode without a subscription rendered healthy: %+v", getDTO.DeliveryHealth)
 	}
 }
 
@@ -198,7 +201,7 @@ func TestAlertAttentionReadReturnsFullGenerationAndRejectsConflicts(t *testing.T
 	if validResponse.Code != http.StatusOK || json.Unmarshal(validResponse.Body.Bytes(), &dto) != nil {
 		t.Fatalf("valid cursor status=%d body=%s", validResponse.Code, validResponse.Body.String())
 	}
-	if dto.Generation != 2 || dto.Attention.HighWaterSeq != 1 || dto.Attention.ReadThroughSeq != 1 || dto.Attention.UnreadCount != 0 || len(dto.Attention.UnreadRefs) != 0 {
+	if dto.Generation != 3 || dto.Attention.HighWaterSeq != 1 || dto.Attention.ReadThroughSeq != 1 || dto.Attention.UnreadCount != 0 || len(dto.Attention.UnreadRefs) != 0 {
 		t.Fatalf("read returned incoherent generation: %+v", dto)
 	}
 

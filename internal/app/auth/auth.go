@@ -30,14 +30,21 @@ const SessionTTL = 12 * time.Hour
 // sessions with durable device grants in the app state store. Its in-memory
 // credential maps are mutex-protected for concurrent HTTP handlers.
 type Manager struct {
-	store      *state.Store
-	pairingTTL time.Duration
-	now        func() time.Time
+	store        *state.Store
+	deviceWriter DeviceWriter
+	pairingTTL   time.Duration
+	now          func() time.Time
 
 	mu         sync.Mutex
 	pairing    map[string]PairingSession
 	challenges map[string]Challenge
 	sessions   map[string]Session
+}
+
+// DeviceWriter persists paired-device creation and revocation through the
+// app's serialized alert-delivery controller.
+type DeviceWriter interface {
+	AddDevice(state.DeviceGrant) error
 }
 
 // PairingSession is a short-lived, one-use invitation to enroll a device. ID,
@@ -88,20 +95,22 @@ type CompletePairingResult struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// NewManager constructs a Manager backed by store. A pairingTTL of zero or less
-// uses five minutes. It allocates only process-local maps and performs no store
-// mutation; store must be non-nil before authentication methods are used.
-func NewManager(store *state.Store, pairingTTL time.Duration) *Manager {
+// NewManager constructs a Manager backed by store. Device writes are routed
+// through deviceWriter so revocation cannot race confirmed alert transport. A
+// pairingTTL of zero or less uses five minutes. Both authorities must be
+// non-nil before authentication methods are used.
+func NewManager(store *state.Store, deviceWriter DeviceWriter, pairingTTL time.Duration) *Manager {
 	if pairingTTL <= 0 {
 		pairingTTL = 5 * time.Minute
 	}
 	return &Manager{
-		store:      store,
-		pairingTTL: pairingTTL,
-		now:        time.Now,
-		pairing:    map[string]PairingSession{},
-		challenges: map[string]Challenge{},
-		sessions:   map[string]Session{},
+		store:        store,
+		deviceWriter: deviceWriter,
+		pairingTTL:   pairingTTL,
+		now:          time.Now,
+		pairing:      map[string]PairingSession{},
+		challenges:   map[string]Challenge{},
+		sessions:     map[string]Session{},
 	}
 }
 
@@ -178,7 +187,10 @@ func (m *Manager) CompletePairing(req CompletePairingRequest) (CompletePairingRe
 	if grant.Name == "" {
 		grant.Name = "iPhone"
 	}
-	if err := m.store.AddDevice(grant); err != nil {
+	if m.deviceWriter == nil {
+		return CompletePairingResult{}, errors.New("device writer unavailable")
+	}
+	if err := m.deviceWriter.AddDevice(grant); err != nil {
 		return CompletePairingResult{}, err
 	}
 	sess, err := m.newSession(deviceID, now)

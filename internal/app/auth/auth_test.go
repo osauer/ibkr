@@ -22,7 +22,7 @@ func TestCompletePairingStoresGrantAndSession(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	now := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
-	mgr := NewManager(store, time.Minute)
+	mgr := NewManager(store, store, time.Minute)
 	mgr.now = func() time.Time { return now }
 	key := newTestKey(t)
 	pairing, err := mgr.StartPairing("https://relay.example")
@@ -61,7 +61,7 @@ func TestPairingExpiryRejectsLateProof(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	now := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
-	mgr := NewManager(store, time.Minute)
+	mgr := NewManager(store, store, time.Minute)
 	mgr.now = func() time.Time { return now }
 	key := newTestKey(t)
 	pairing, err := mgr.StartPairing("https://relay.example")
@@ -94,7 +94,7 @@ func TestChallengeSessionUsesStoredDeviceKey(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddDevice: %v", err)
 	}
-	mgr := NewManager(store, time.Minute)
+	mgr := NewManager(store, store, time.Minute)
 	challenge, err := mgr.StartChallenge("device-1")
 	if err != nil {
 		t.Fatalf("StartChallenge: %v", err)
@@ -117,7 +117,7 @@ func TestHTTPDeviceSecretPairingAndChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	mgr := NewManager(store, time.Minute)
+	mgr := NewManager(store, store, time.Minute)
 	pairing, err := mgr.StartPairing("http://192.168.1.42:8765")
 	if err != nil {
 		t.Fatalf("StartPairing: %v", err)
@@ -173,7 +173,7 @@ func TestHTTPDeviceSecretRejectsWrongSecret(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddDevice: %v", err)
 	}
-	mgr := NewManager(store, time.Minute)
+	mgr := NewManager(store, store, time.Minute)
 	challenge, err := mgr.StartChallenge("device-1")
 	if err != nil {
 		t.Fatalf("StartChallenge: %v", err)
@@ -190,7 +190,7 @@ func TestReapDropsExpiredEntriesAndKeepsLiveOnes(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	now := time.Date(2026, 6, 10, 9, 0, 0, 0, time.UTC)
-	mgr := NewManager(store, time.Minute)
+	mgr := NewManager(store, store, time.Minute)
 	mgr.now = func() time.Time { return now }
 	if err := store.AddDevice(state.DeviceGrant{ID: "device-1", CreatedAt: now}); err != nil {
 		t.Fatalf("AddDevice: %v", err)
@@ -254,7 +254,7 @@ func TestStartReaperStopsOnContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	mgr := NewManager(store, time.Minute)
+	mgr := NewManager(store, store, time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
