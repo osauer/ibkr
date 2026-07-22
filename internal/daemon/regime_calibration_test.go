@@ -155,16 +155,29 @@ func TestRegimeOffHoursGammaStaleAloneStaysNormal(t *testing.T) {
 	if r.Lifecycle.Stage != rpc.LifecycleQuiet {
 		t.Fatalf("lifecycle.stage = %q, want %q", r.Lifecycle.Stage, rpc.LifecycleQuiet)
 	}
-	// The staleness is still honestly disclosed on the data-quality surface
-	// (--explain/status readers see it) even though it doesn't gate tone.
-	foundGammaStale := false
-	for _, item := range r.DataQuality {
-		if slices.Contains(item.StaleClusters, "gamma") {
-			foundGammaStale = true
+	// The raw observation remains stale/context-only, while the aggregate
+	// source health says the next closed-session compute is not due. Normal
+	// schedule gaps must not appear as data-quality failures.
+	if r.GammaZero.Status != rpc.RegimeStatusStale {
+		t.Fatalf("gamma status = %q, want raw stale context", r.GammaZero.Status)
+	}
+	foundGammaHealth := false
+	for _, health := range r.SourceHealth {
+		if health.Source != "gamma" {
+			continue
+		}
+		foundGammaHealth = true
+		if health.Status != rpc.SourceStatusOK || health.RefreshState != rpc.SourceRefreshNotDue {
+			t.Fatalf("gamma source health = %+v, want ok/not_due", health)
 		}
 	}
-	if !foundGammaStale {
-		t.Fatalf("data_quality = %+v, want gamma disclosed as stale (awareness, not a readiness gate)", r.DataQuality)
+	if !foundGammaHealth {
+		t.Fatal("gamma source health missing")
+	}
+	for _, item := range r.DataQuality {
+		if slices.Contains(item.StaleClusters, "gamma") {
+			t.Fatalf("data_quality = %+v, normal not_due gamma must not be stale", r.DataQuality)
+		}
 	}
 }
 

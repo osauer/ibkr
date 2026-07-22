@@ -617,6 +617,7 @@ const (
 // breadth refresh problem. Raw per-symbol broker errors remain daemon-local.
 type BreadthRefreshFailure string
 
+// Breadth refresh failure values are the allowlisted wire vocabulary.
 const (
 	BreadthRefreshFailureFetch     BreadthRefreshFailure = "fetch_failed"
 	BreadthRefreshFailurePersist   BreadthRefreshFailure = "persist_failed"

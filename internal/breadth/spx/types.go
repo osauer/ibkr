@@ -46,6 +46,7 @@ const MinCoverageFraction = 0.80
 // refresh problem. Raw broker and transport errors remain local logs.
 type RefreshFailure string
 
+// Breadth refresh failure values keep raw broker and storage text local.
 const (
 	RefreshFailureFetch     RefreshFailure = "fetch_failed"
 	RefreshFailurePersist   RefreshFailure = "persist_failed"
