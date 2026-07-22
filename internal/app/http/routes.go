@@ -95,12 +95,8 @@ func Register(deps Dependencies) {
 	srv.GET("/api/alerts/settings", h.requireAuth(h.handleGetAlertSettings))
 	srv.PUT("/api/alerts/settings", h.requireAuth(h.handlePutAlertSettings))
 	srv.GET("/api/alerts", h.requireAuth(h.handleAlerts))
-	srv.DELETE("/api/alerts", h.requireAuth(h.handleClearAlerts))
-	srv.GET("/api/attention", h.requireAuth(h.handleAttention))
-	srv.POST("/api/attention/read", h.requireAuth(h.handleAttentionRead))
-	srv.GET("/api/alert-inbox-v2", h.requireAuth(h.handleAlertInboxV2))
-	srv.GET("/api/alert-inbox-v2/attention", h.requireAuth(h.handleAlertInboxV2Attention))
-	srv.POST("/api/alert-inbox-v2/attention/read", h.requireAuth(h.handleAlertInboxV2AttentionRead))
+	srv.GET("/api/alerts/attention", h.requireAuth(h.handleAlertAttention))
+	srv.POST("/api/alerts/attention/read", h.requireAuth(h.handleAlertAttentionRead))
 	srv.GET("/api/orders/open", h.requireAuth(h.handleOrdersOpen))
 	srv.GET("/api/orders/{id}", h.requireAuth(h.handleOrderStatus))
 	srv.POST("/api/orders/{id}/cancel", h.requireAuth(h.handleOrderCancel))
@@ -137,9 +133,9 @@ func Register(deps Dependencies) {
 
 func (h *handler) serveIndex(w nethttp.ResponseWriter, r *nethttp.Request) {
 	// GET / is a subtree pattern in net/http. Keep unknown JavaScript paths
-	// from falling through to index.html; only exact embedded module routes
-	// registered above may return JavaScript.
-	if strings.HasSuffix(r.URL.Path, ".js") {
+	// and removed or unknown API paths from falling through to index.html.
+	// Only exact routes registered above may return those resources.
+	if strings.HasSuffix(r.URL.Path, ".js") || strings.HasPrefix(r.URL.Path, "/api/") {
 		nethttp.NotFound(w, r)
 		return
 	}
@@ -350,10 +346,7 @@ func (h *handler) handleBootstrap(w nethttp.ResponseWriter, r *nethttp.Request) 
 		"snapshot":         h.deps.Live.Snapshot(),
 		"settings":         h.settingsSnapshot(r.Context()),
 		"alert_settings":   h.deps.Store.AlertSettings(),
-		"alerts":           alertHistoryDTOs(h.deps.Store.AlertHistory(20)),
-		"attention":        h.deps.Store.Attention(),
-		"alert_inbox_v2":   h.alertInboxV2DTO(),
-		"last_push":        h.deps.Store.LastPush(),
+		"alerts":           h.alertDTO(),
 		"relay":            h.deps.Relay.Status(),
 		"vapid_public_key": vapid.PublicKey,
 		"auth":             h.authStatus(r),
@@ -599,32 +592,6 @@ func (h *handler) handleReconcileCheck(w nethttp.ResponseWriter, r *nethttp.Requ
 	writeJSON(w, reconciliationResponseDTO{Outcome: result.Outcome, Reconciliation: reconciliation})
 }
 
-func (h *handler) handleAttention(w nethttp.ResponseWriter, _ *nethttp.Request) {
-	writeJSON(w, h.deps.Store.Attention())
-}
-
-func (h *handler) handleAttentionRead(w nethttp.ResponseWriter, r *nethttp.Request) {
-	throughSeq, err := decodeAttentionReadRequest(r)
-	if err != nil {
-		writeError(w, nethttp.StatusBadRequest, "invalid attention read request")
-		return
-	}
-	attention, err := h.deps.Store.MarkAttentionRead(throughSeq)
-	if err != nil {
-		if errors.Is(err, state.ErrAttentionReadRegression) || errors.Is(err, state.ErrAttentionReadBeyondHighWater) {
-			writeError(w, nethttp.StatusBadRequest, err.Error())
-			return
-		}
-		if errors.Is(err, state.ErrAttentionReferencesIncomplete) {
-			writeError(w, nethttp.StatusConflict, err.Error())
-			return
-		}
-		writeError(w, nethttp.StatusInternalServerError, "persist attention read cursor")
-		return
-	}
-	writeJSON(w, attention)
-}
-
 func (h *handler) handleGovernanceCutoverReview(w nethttp.ResponseWriter, r *nethttp.Request) {
 	if err := decodeEmptyJSONObject(r); err != nil {
 		writeError(w, nethttp.StatusBadRequest, "governance cutover review body must be an empty JSON object")
@@ -826,15 +793,15 @@ func (h *handler) handleEvents(w nethttp.ResponseWriter, r *nethttp.Request) {
 	defer release()
 	msg := hyperserve.SSEMessage{Event: "snapshot", Data: h.deps.Live.Snapshot()}
 	fmt.Fprint(w, msg.String())
-	alertInbox := h.alertInboxV2DTO()
-	alertInboxCursor := newAlertInboxV2StreamCursor(alertInbox)
-	msg = hyperserve.SSEMessage{Event: "alert_inbox_v2", Data: alertInbox}
+	alerts := h.alertDTO()
+	alertCursor := newAlertStreamCursor(alerts)
+	msg = hyperserve.SSEMessage{Event: "alerts", Data: alerts}
 	fmt.Fprint(w, msg.String())
 	flusher.Flush()
 	heartbeat := time.NewTicker(20 * time.Second)
 	defer heartbeat.Stop()
-	alertInboxPoll := time.NewTicker(alertInboxV2PollInterval)
-	defer alertInboxPoll.Stop()
+	alertPoll := time.NewTicker(alertPollInterval)
+	defer alertPoll.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
@@ -843,14 +810,14 @@ func (h *handler) handleEvents(w nethttp.ResponseWriter, r *nethttp.Request) {
 			msg := hyperserve.SSEMessage{Event: "heartbeat", Data: map[string]any{"at": time.Now().UTC()}}
 			fmt.Fprint(w, msg.String())
 			flusher.Flush()
-		case <-alertInboxPoll.C:
-			next := h.alertInboxV2DTO()
-			nextCursor := newAlertInboxV2StreamCursor(next)
-			if nextCursor == alertInboxCursor {
+		case <-alertPoll.C:
+			next := h.alertDTO()
+			nextCursor := newAlertStreamCursor(next)
+			if nextCursor == alertCursor {
 				continue
 			}
-			alertInboxCursor = nextCursor
-			msg := hyperserve.SSEMessage{Event: "alert_inbox_v2", Data: next}
+			alertCursor = nextCursor
+			msg := hyperserve.SSEMessage{Event: "alerts", Data: next}
 			fmt.Fprint(w, msg.String())
 			flusher.Flush()
 		case ev, ok := <-ch:
@@ -879,44 +846,6 @@ func (h *handler) handlePutAlertSettings(w nethttp.ResponseWriter, r *nethttp.Re
 		return
 	}
 	writeJSON(w, h.deps.Store.AlertSettings())
-}
-
-func (h *handler) handleAlerts(w nethttp.ResponseWriter, _ *nethttp.Request) {
-	writeJSON(w, alertHistoryDTOs(h.deps.Store.AlertHistory(100)))
-}
-
-type alertHistoryDTO struct {
-	ID          string    `json:"id"`
-	Fingerprint string    `json:"fingerprint"`
-	Action      string    `json:"action,omitempty"`
-	Severity    string    `json:"severity,omitempty"`
-	Account     string    `json:"account,omitempty"`
-	Mode        string    `json:"mode,omitempty"`
-	Title       string    `json:"title"`
-	Body        string    `json:"body"`
-	CreatedAt   time.Time `json:"created_at"`
-}
-
-func alertHistoryDTOs(records []state.AlertRecord) []alertHistoryDTO {
-	out := make([]alertHistoryDTO, len(records))
-	for i, record := range records {
-		out[i] = alertHistoryDTO{
-			ID: record.ID, Fingerprint: record.Fingerprint, Action: record.Action, Severity: record.Severity,
-			Account: record.Account, Mode: record.Mode, Title: record.Title, Body: record.Body, CreatedAt: record.CreatedAt,
-		}
-	}
-	return out
-}
-
-func (h *handler) handleClearAlerts(w nethttp.ResponseWriter, r *nethttp.Request) {
-	cleared, err := h.deps.Store.ClearAlertHistory()
-	if err != nil {
-		writeError(w, nethttp.StatusInternalServerError, err.Error())
-		return
-	}
-	sess, _ := h.session(r)
-	log.Printf("ibkr app alerts.clear device_id=%s cleared=%d", sess.DeviceID, cleared)
-	writeJSON(w, map[string]any{"ok": true, "cleared": cleared})
 }
 
 func (h *handler) handlePushSubscribe(w nethttp.ResponseWriter, r *nethttp.Request) {
