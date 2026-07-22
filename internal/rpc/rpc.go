@@ -2507,7 +2507,7 @@ type AccountResult struct {
 type DailyPnLObservation struct {
 	Status     DailyPnLObservationStatus `json:"status"`
 	SessionKey string                    `json:"session_key,omitempty"`
-	AsOf       time.Time                 `json:"as_of,omitempty"`
+	AsOf       time.Time                 `json:"as_of"`
 }
 
 // DailyPnLObservationStatus is the closed set of Daily P&L feed states.
