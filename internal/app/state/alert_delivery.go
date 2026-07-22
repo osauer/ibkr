@@ -730,7 +730,8 @@ func (s *Store) archiveAlertDeliveryAuthorityScopeLocked(data *alertDeliveryData
 	}
 	data.SourceWatermarksByScope[priorScope] = cloneAlertSourceWatermarks(data.SourceWatermarks)
 	data.SourceWatermarks = cloneAlertSourceWatermarks(data.SourceWatermarksByScope[snapshot.AuthorityScope])
-	if data.Health.State == AlertDeliveryHealthOverflow || data.Health.State == AlertDeliveryHealthUnavailable {
+	if data.Health.State == AlertDeliveryHealthOverflow || data.Health.State == AlertDeliveryHealthUnavailable ||
+		(data.Health.State == AlertDeliveryHealthDegraded && data.Health.Class == AlertDeliveryHealthClassInterrupted) {
 		data.Health.LastAcceptedAt = time.Time{}
 	} else {
 		data.Health = AlertDeliveryHealth{}
@@ -2188,15 +2189,16 @@ func (s *Store) recomputeAlertDeliveryHealthLocked(data *alertDeliveryData, now 
 	interrupted := false
 	latest := make(map[string]alertDeliveryAttempt)
 	for _, attempt := range data.Attempts {
-		if attempt.AuthorityScope != data.Snapshot.AuthorityScope {
-			continue
-		}
 		// Confirmed transport with an unknown outcome remains operationally
-		// relevant even if recovery or retirement happened afterward. It is
-		// intentional uncertainty, not a retry/rejection that can be dismissed
-		// merely because the occurrence or target is no longer active.
+		// relevant even if recovery, retirement, or an authority-scope change
+		// happened afterward. It is intentional uncertainty, not a scoped
+		// retry/rejection that can be dismissed merely because the occurrence
+		// or target is no longer active.
 		if attempt.Class == AlertDeliveryAttemptInterrupted {
 			interrupted = true
+			continue
+		}
+		if attempt.AuthorityScope != data.Snapshot.AuthorityScope {
 			continue
 		}
 		// Retired targets are no longer part of current transport posture.

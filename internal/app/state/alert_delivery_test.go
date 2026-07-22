@@ -213,6 +213,130 @@ func TestAlertDeliveryAuthorityScopeChangeRetiresPreviousContextWithoutRecoveryO
 	}
 }
 
+func TestAlertDeliveryInterruptedUncertaintySurvivesAuthorityScopeChange(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopeA, err := rpc.BuildAlertAuthorityScope("ACCOUNT-A", "paper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopeB, err := rpc.BuildAlertAuthorityScope("ACCOUNT-B", "live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Minute)
+	source := rpc.AlertSourceCanary
+	baseline := testAlertSnapshot(base, []rpc.AlertSource{source}, []rpc.AlertSource{source}, rpc.AlertCoverageCurrent)
+	baseline.AuthorityScope = scopeA
+	if _, err := store.ObserveAlertSnapshot(baseline); err != nil {
+		t.Fatal(err)
+	}
+	candidateAt := base.Add(10 * time.Second)
+	candidate := testAlertCandidate(t, source, rpc.AlertKindPortfolioRisk, "scope-a-uncertain", "open-a", candidateAt)
+	active := testAlertSnapshot(candidateAt, []rpc.AlertSource{source}, []rpc.AlertSource{source}, rpc.AlertCoverageCurrent, candidate)
+	active.AuthorityScope = scopeA
+	if _, err := store.ObserveAlertSnapshot(active); err != nil {
+		t.Fatal(err)
+	}
+	target := AlertDeliveryTargetRef("scope-a-device", "scope-a-subscription")
+	reservation, send, err := store.BeginAlertDelivery(candidate.OccurrenceKey, target, candidateAt.Add(time.Second))
+	if err != nil || !send {
+		t.Fatalf("scope A reservation send=%v err=%v", send, err)
+	}
+	if _, confirmed, err := store.ConfirmAlertTransport(reservation.AttemptID, candidateAt.Add(2*time.Second)); err != nil || !confirmed {
+		t.Fatalf("scope A confirmation confirmed=%v err=%v", confirmed, err)
+	}
+
+	recovered, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health := recovered.AlertDelivery(time.Now().UTC()).DeliveryHealth; health.State != AlertDeliveryHealthDegraded || health.Class != AlertDeliveryHealthClassInterrupted {
+		t.Fatalf("restart did not expose scope A uncertainty: %+v", health)
+	}
+	changedAt := time.Now().UTC().Add(time.Second)
+	unknownB := testAlertSnapshot(changedAt, []rpc.AlertSource{source}, nil, rpc.AlertCoverageUnknown)
+	unknownB.AuthorityScope = scopeB
+	if _, err := recovered.ObserveAlertSnapshot(unknownB); err != nil {
+		t.Fatal(err)
+	}
+	currentBAt := changedAt.Add(time.Second)
+	currentB := testAlertSnapshot(currentBAt, []rpc.AlertSource{source}, []rpc.AlertSource{source}, rpc.AlertCoverageCurrent)
+	currentB.AuthorityScope = scopeB
+	view, err := recovered.ObserveAlertSnapshot(currentB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.DeliveryHealth.State != AlertDeliveryHealthDegraded || view.DeliveryHealth.Class != AlertDeliveryHealthClassInterrupted || view.AttemptTotals.Interrupted != 1 {
+		t.Fatalf("scope B refresh concealed unresolved scope A uncertainty: %+v", view)
+	}
+	if due := recovered.AlertDeliveriesDue(currentBAt); len(due) != 0 {
+		t.Fatalf("old-scope uncertainty reactivated delivery work: %+v", due)
+	}
+}
+
+func TestAlertDeliveryRestartAfterAuthorityScopeChangeKeepsInterruptedUncertainty(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopeA, err := rpc.BuildAlertAuthorityScope("ACCOUNT-A", "paper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopeB, err := rpc.BuildAlertAuthorityScope("ACCOUNT-B", "live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Minute)
+	source := rpc.AlertSourceCanary
+	baseline := testAlertSnapshot(base, []rpc.AlertSource{source}, []rpc.AlertSource{source}, rpc.AlertCoverageCurrent)
+	baseline.AuthorityScope = scopeA
+	if _, err := store.ObserveAlertSnapshot(baseline); err != nil {
+		t.Fatal(err)
+	}
+	candidateAt := base.Add(10 * time.Second)
+	candidate := testAlertCandidate(t, source, rpc.AlertKindPortfolioRisk, "scope-a-restart", "open-a", candidateAt)
+	active := testAlertSnapshot(candidateAt, []rpc.AlertSource{source}, []rpc.AlertSource{source}, rpc.AlertCoverageCurrent, candidate)
+	active.AuthorityScope = scopeA
+	if _, err := store.ObserveAlertSnapshot(active); err != nil {
+		t.Fatal(err)
+	}
+	target := AlertDeliveryTargetRef("scope-restart-device", "scope-restart-subscription")
+	reservation, send, err := store.BeginAlertDelivery(candidate.OccurrenceKey, target, candidateAt.Add(time.Second))
+	if err != nil || !send {
+		t.Fatalf("scope A reservation send=%v err=%v", send, err)
+	}
+	if _, confirmed, err := store.ConfirmAlertTransport(reservation.AttemptID, candidateAt.Add(2*time.Second)); err != nil || !confirmed {
+		t.Fatalf("scope A confirmation confirmed=%v err=%v", confirmed, err)
+	}
+	changedAt := candidateAt.Add(3 * time.Second)
+	unknownB := testAlertSnapshot(changedAt, []rpc.AlertSource{source}, nil, rpc.AlertCoverageUnknown)
+	unknownB.AuthorityScope = scopeB
+	if _, err := store.ObserveAlertSnapshot(unknownB); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := restarted.AlertDelivery(time.Now().UTC())
+	if view.DeliveryHealth.State != AlertDeliveryHealthDegraded || view.DeliveryHealth.Class != AlertDeliveryHealthClassInterrupted || view.AttemptTotals.Interrupted != 1 {
+		t.Fatalf("restart in scope B concealed interrupted scope A send: %+v", view)
+	}
+	if attempt := restarted.data.AlertDelivery.Attempts[0]; attempt.AuthorityScope != scopeA || attempt.Class != AlertDeliveryAttemptInterrupted || attempt.Disposition != AlertDeliveryCompletionInactive {
+		t.Fatalf("restart did not preserve scoped interruption evidence: %+v", attempt)
+	}
+	if due := restarted.AlertDeliveriesDue(time.Now().UTC()); len(due) != 0 {
+		t.Fatalf("restart reactivated old-scope delivery work: %+v", due)
+	}
+}
+
 func TestAlertDeliveryAuthorityRecoveryReopenAndEscalation(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
