@@ -696,28 +696,28 @@ type BreadthSPXResult struct {
 // GammaZeroSPXStatus values are returned on GammaZeroSPXResult.Status and
 // drive the dashboard generator's "render the number" vs "render a
 // loading state" choice. The compute is heavy (several minutes against
-// hundreds of option legs) and runs on a daemon-internal goroutine, so
-// the wire shape always carries a state — the first caller of the day
-// receives "computing" and a renderer hint; subsequent callers receive
-// "ready" with a cached payload until the next NY trading session.
+// hundreds of option legs) and runs on a daemon-internal goroutine, so the
+// wire shape always carries a state. The daemon normally prewarms after
+// gateway startup. Successful last-good data is served while a newer compute
+// refreshes behind it after the 15-minute RTH soft TTL; outside regular option
+// hours automatic refresh is not due.
 //
 // The four states mirror BreadthState's cold/computing/ready/error
 // semantics so consumers can branch on Status uniformly across the two
 // state-machine engines.
 const (
-	// GammaZeroStatusCold — no compute has been kicked this NY trading
-	// session AND none is in flight. The daemon hasn't been asked to
-	// produce a value yet. Distinct from Computing so a consumer can
-	// tell "first caller of the day must kick or wait" from "wait,
-	// this will resolve on its own."
+	// GammaZeroStatusCold — no usable last-good exists and no compute is in
+	// flight. This can persist off-hours because automatic refresh is not due.
+	// Distinct from Computing, which will resolve without another kick.
 	GammaZeroStatusCold = "cold"
-	// GammaZeroStatusComputing — a background compute is in flight; the
-	// EtaSeconds / Progress fields carry refresh hints. Callers who can
-	// wait may set GammaZeroSPXParams.WaitMs > 0 on the request to block
-	// up to that budget for the result.
+	// GammaZeroStatusComputing — a background compute is in flight and no
+	// usable last-good can be served; the EtaSeconds / Progress fields carry
+	// refresh hints. Callers who can wait may set GammaZeroSPXParams.WaitMs >
+	// 0 on the request to block up to that budget for the result.
 	GammaZeroStatusComputing = "computing"
-	// GammaZeroStatusReady — Result is populated and reflects the most
-	// recent NY trading session's calculation.
+	// GammaZeroStatusReady — Result is the served successful last-good. During
+	// RTH a newer calculation may refresh behind it; off-hours it can be
+	// retained as typed closed-session context.
 	GammaZeroStatusReady = "ready"
 	// GammaZeroStatusError — the last compute failed; Error carries the
 	// classified reason. Callers retry by re-invoking the method.
@@ -1436,8 +1436,8 @@ func stripGammaComputedProfiles(c *GammaZeroComputed) {
 //   - "ok"          — the indicator carries a real, fresh measurement
 //   - "stale"       — measurement returned but the gateway labeled it
 //     delayed/frozen; renderer should dim
-//   - "computing"   — heavy compute is in-flight (gamma's first call
-//     of the day); poll again to see the result
+//   - "computing"   — a heavy compute is in-flight with no usable served
+//     value yet; the daemon normally prewarms gamma after startup
 //   - "unavailable" — IBKR doesn't carry the feed on this account; the
 //     `notes` field explains why and what to do
 //   - "error"       — fetch failed; `error_message` carries the reason

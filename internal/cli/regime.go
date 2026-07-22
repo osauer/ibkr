@@ -308,6 +308,12 @@ func renderRegimeTextWidthWithOptions(env *Env, out io.Writer, r *rpc.RegimeSnap
 	}
 	decorateRegimeRowPolicy(rows, r)
 	c := tallyCompositeFromSnapshot(r, rows)
+	// The monitor projection is the typed cross-surface authority contract for
+	// the compact readout. Build it once and let the text renderer consume its
+	// whole-snapshot health, lifecycle, and canonical composite instead of
+	// inferring those states from otherwise healthy-looking rows.
+	monitorSnapshot := *r
+	monitor := rpc.CompactRegimeMonitor(&monitorSnapshot)
 
 	// Shared hero: only the title + timestamp live here. The regime
 	// renderer keeps its own flow below so the verdict/punch-line block
@@ -326,10 +332,10 @@ func renderRegimeTextWidthWithOptions(env *Env, out io.Writer, r *rpc.RegimeSnap
 	// counts and layout. Raw band and rankability words stay out of the
 	// default readout; the table below is the audit trail and --explain
 	// carries the mechanics.
-	fmt.Fprintf(out, "  %s %s\n", env.bold(colorRegimeVerdict(env, r, c, regimeServedVerdict(r, c))), env.dim("· "+c.evidence()))
+	fmt.Fprintf(out, "  %s %s\n", env.bold(colorRegimeVerdict(env, monitor, c, regimeServedVerdict(monitor, c))), env.dim("· "+c.evidence(monitor.AuthorityHealth)))
 	fmt.Fprintln(out)
-	renderRegimeSummaryLine(out, "Read:", regimeReadLine(c), width, nil)
-	renderRegimeSummaryLine(out, "Input health:", regimeInputHealthLine(c, rows, r.DataQuality), width, regimeInputHealthColor(env, c, rows, r.DataQuality))
+	renderRegimeSummaryLine(out, "Read:", regimeReadLine(c, monitor), width, nil)
+	renderRegimeSummaryLine(out, "Input health:", regimeInputHealthLine(c, rows, monitor), width, regimeInputHealthColor(env, c, rows, monitor))
 	if governed := regimeGovernorLine(r.Lifecycle.Governors); governed != "" {
 		renderRegimeSummaryLine(out, "Governed:", governed, width, env.yellow)
 	}
@@ -342,8 +348,8 @@ func renderRegimeTextWidthWithOptions(env *Env, out io.Writer, r *rpc.RegimeSnap
 	if aside := regimeSetAsideLine(rows); aside != "" {
 		renderRegimeSummaryLine(out, "Set aside:", aside, width, env.dim)
 	}
-	if len(r.DataQuality) > 0 {
-		if context := regimeDataQualityContext(r.DataQuality); context != "" {
+	if len(monitor.DataQuality) > 0 {
+		if context := regimeDataQualityContext(monitor.DataQuality); context != "" {
 			renderRegimeSummaryLine(out, "Data context:", context, width, env.dim)
 		}
 	}
@@ -585,8 +591,14 @@ func regimeWhenLabel(row regimeRow) string {
 	switch strings.ToLower(label) {
 	case "":
 		label = asOfLabel(nil, row.status)
-	case "stale", "frozen":
-		return "cached"
+	case "stale":
+		return "stale"
+	case "frozen":
+		return "frozen"
+	case "not_due":
+		return "not due"
+	case "overdue":
+		return "overdue"
 	case "computing":
 		return "building"
 	case "unavailable":
@@ -743,29 +755,43 @@ const verdictFloor = 3
 // back to the shared function over the renderer-local tally (older daemon /
 // synthetic snapshot). The fallback uses the same shared policy function so
 // the renderer does not create an independent verdict definition.
-func regimeServedVerdict(r *rpc.RegimeSnapshotResult, c regimeComposite) string {
-	if v := strings.TrimSpace(r.Composite.Verdict); v != "" {
-		return v
+func regimeServedVerdict(monitor rpc.RegimeMonitorResult, c regimeComposite) string {
+	if reason, impaired := regimeAuthorityIssue(monitor.AuthorityHealth); impaired {
+		if !regimeAuthorityCurrent(monitor.AuthorityHealth) {
+			return "Market state undefined — " + reason
+		}
 	}
-	// No eligibility context exists client-side, so fallback reds count as
-	// provisional — the label degrades gracefully to "Stress signal
-	// present" rather than claiming confirmation the renderer can't verify.
-	comp := rpc.RegimeComposite{
-		ClusterGreenCount:          c.clusterGreen,
-		ClusterYellowCount:         c.clusterYellow,
-		ClusterRedCount:            c.clusterRed,
-		ClusterProvisionalRedCount: c.clusterRed,
-		ClusterRankedCount:         c.clusterRanked,
-		ClusterUnrankedCount:       c.clusterUnranked,
+	verdict := strings.TrimSpace(monitor.Composite.Verdict)
+	if verdict == "" {
+		// No eligibility context exists client-side, so fallback reds count as
+		// provisional — the label degrades gracefully to "Stress signal
+		// present" rather than claiming confirmation the renderer can't verify.
+		comp := rpc.RegimeComposite{
+			ClusterGreenCount:          c.clusterGreen,
+			ClusterYellowCount:         c.clusterYellow,
+			ClusterRedCount:            c.clusterRed,
+			ClusterProvisionalRedCount: c.clusterRed,
+			ClusterRankedCount:         c.clusterRanked,
+			ClusterUnrankedCount:       c.clusterUnranked,
+		}
+		verdict = rpc.RegimeHeadline(comp, monitor.Lifecycle.Stage)
 	}
-	return rpc.RegimeHeadline(comp, r.Lifecycle.Stage)
+	if reason, impaired := regimeAuthorityIssue(monitor.AuthorityHealth); impaired {
+		return verdict + " — refresh degraded: " + reason
+	}
+	return verdict
 }
 
 // colorRegimeVerdict colors the headline from the SERVED posture tone so
 // the terminal, SPA, and MCP read the same color policy; the local-tally
 // heuristic only covers snapshots without a posture.
-func colorRegimeVerdict(env *Env, r *rpc.RegimeSnapshotResult, c regimeComposite, label string) string {
-	switch strings.TrimSpace(r.Posture.Tone) {
+func colorRegimeVerdict(env *Env, monitor rpc.RegimeMonitorResult, c regimeComposite, label string) string {
+	if _, impaired := regimeAuthorityIssue(monitor.AuthorityHealth); impaired {
+		if !regimeAuthorityCurrent(monitor.AuthorityHealth) {
+			return env.red(label)
+		}
+	}
+	switch strings.TrimSpace(monitor.Posture.Tone) {
 	case rpc.RegimeToneStress, rpc.RegimeToneRiskOff:
 		return env.red(label)
 	case rpc.RegimeToneWatch, rpc.RegimeToneDataQuality:
@@ -805,7 +831,9 @@ func regimeGovernorLine(govs []rpc.GovernorAction) string {
 // decorateRegimeRowPolicy reconciles the renderer-local row classification
 // with the served confirmation policy: a daemon-side hysteresis hold keeps
 // the row red, and a red whose evidence failed the eligibility gates is
-// marked provisional so the reader knows it warns but cannot confirm.
+// marked provisional so the reader knows it cannot confirm. Whether it can
+// contribute to early_warning depends on the typed lifecycle's required-input
+// health; broken or overdue evidence produces data_quality instead.
 func decorateRegimeRowPolicy(rows []regimeRow, r *rpc.RegimeSnapshotResult) {
 	metas := []rpc.RegimeIndicatorMeta{
 		r.VIXTermStructure.RegimeIndicatorMeta,
@@ -822,6 +850,14 @@ func decorateRegimeRowPolicy(rows []regimeRow, r *rpc.RegimeSnapshotResult) {
 			return
 		}
 		meta := metas[i]
+		if meta.Freshness != nil {
+			switch meta.Freshness.Class {
+			case rpc.RegimeFreshnessNotDue:
+				rows[i].asOf = "not_due"
+			case rpc.RegimeFreshnessOverdue:
+				rows[i].asOf = "overdue"
+			}
+		}
 		if meta.Band != "red" {
 			continue
 		}
@@ -865,7 +901,7 @@ func regimeEligibilityReasonText(reasons []string) string {
 	return strings.Join(out, ", ")
 }
 
-func (c regimeComposite) evidence() string {
+func (c regimeComposite) evidence(authority *rpc.RegimeAuthorityHealth) string {
 	var parts []string
 	if c.clusterGreen > 0 {
 		parts = append(parts, fmt.Sprintf("%d calm", c.clusterGreen))
@@ -879,7 +915,11 @@ func (c regimeComposite) evidence() string {
 	if c.clusterUnranked > 0 {
 		parts = append(parts, fmt.Sprintf("%d waiting", c.clusterUnranked))
 	}
-	coverage := fmt.Sprintf("%d/%d evidence groups usable", c.clusterRanked, c.clusterTotal)
+	coverageWord := "usable"
+	if !regimeAuthorityCurrent(authority) {
+		coverageWord = "retained"
+	}
+	coverage := fmt.Sprintf("%d/%d evidence groups %s", c.clusterRanked, c.clusterTotal, coverageWord)
 	if len(parts) == 0 {
 		return coverage
 	}
@@ -897,17 +937,33 @@ func colorRegimeLabel(env *Env, c regimeComposite, label string) string {
 	}
 }
 
-func regimeReadLine(c regimeComposite) string {
+func regimeReadLine(c regimeComposite, monitor rpc.RegimeMonitorResult) string {
 	coverage := fmt.Sprintf("%d/%d evidence groups usable", c.clusterRanked, c.clusterTotal)
+	stage := strings.ToLower(strings.TrimSpace(monitor.Lifecycle.Stage))
+	if reason, impaired := regimeAuthorityIssue(monitor.AuthorityHealth); impaired {
+		if regimeAuthorityCurrent(monitor.AuthorityHealth) {
+			if regimeLifecycleStageConfirmsStress(stage) {
+				return "The current retained read still confirms stress, but " + reason + "."
+			}
+			return "The current retained Regime read remains usable, but " + reason + "."
+		}
+		return "No current regime read — " + reason + "; embedded rows are retained context only."
+	}
+	eligibleRed := monitor.Composite.ClusterEligibleRedCount
+	provisionalRed := monitor.Composite.ClusterProvisionalRedCount
 	switch {
+	case stage == rpc.LifecycleDataQuality:
+		return "Market state is undefined — required evidence is incomplete; provisional stress remains context only."
 	case c.clusterRanked == 0:
 		return "No regime read yet — every evidence group is still building or missing."
 	case c.clusterRanked < verdictFloor:
 		return "Thin read — " + coverage + "; treat the regime label as context until more inputs load."
-	case c.clusterRed >= 3:
+	case stage == rpc.LifecyclePanic && eligibleRed >= 3:
 		return "Broad stress is confirmed across independent groups."
-	case c.clusterRed > 0:
-		return "One or more stress groups are red, but independent confirmation is not strong enough to dominate the read."
+	case regimeLifecycleStageConfirmsStress(stage):
+		return "Current usable evidence confirms stress."
+	case eligibleRed+provisionalRed > 0 || monitor.Composite.ClusterRedCount > 0 || c.clusterRed > 0:
+		return "Stress evidence is visible, but current usable evidence has not confirmed broad stress."
 	case c.clusterYellow > 0:
 		return "Watch conditions are visible; not a confirmed broad stress regime."
 	default:
@@ -915,9 +971,19 @@ func regimeReadLine(c regimeComposite) string {
 	}
 }
 
-func regimeInputHealthLine(c regimeComposite, rows []regimeRow, dataQuality []rpc.DataQualityHealth) string {
+func regimeInputHealthLine(c regimeComposite, rows []regimeRow, monitor rpc.RegimeMonitorResult) string {
 	coverage := fmt.Sprintf("%d/%d evidence groups loaded", c.clusterRanked, c.clusterTotal)
-	qualityProblems := regimeInputHealthDataQualityProblems(dataQuality)
+	qualityProblems := regimeInputHealthDataQualityProblems(monitor.DataQuality)
+	if reason, impaired := regimeAuthorityIssue(monitor.AuthorityHealth); impaired {
+		if regimeAuthorityCurrent(monitor.AuthorityHealth) {
+			return "Degraded — " + reason + "; " + coverage + " from the current retained snapshot."
+		}
+		return "Blocked — " + reason + "; embedded evidence is retained context only."
+	}
+	if strings.EqualFold(strings.TrimSpace(monitor.Lifecycle.Stage), rpc.LifecycleDataQuality) {
+		return "Blocked — required evidence is incomplete, so the market state is undefined."
+	}
+	staleRows := regimeRowsByWhen(rows, "stale", "overdue")
 	switch {
 	case c.clusterRanked == 0:
 		return "Blocked — no evidence group has loaded."
@@ -927,18 +993,40 @@ func regimeInputHealthLine(c regimeComposite, rows []regimeRow, dataQuality []rp
 		return "Needs confirmation — " + coverage + "; " + joinHumanList(regimeRowDisplayNames(regimeRowsByStatuses(rows, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable))) + " did not load."
 	case len(regimeRowsByStatuses(rows, rpc.RegimeStatusComputing)) > 0:
 		return "Warming — " + coverage + "; " + joinHumanList(regimeRowDisplayNames(regimeRowsByStatuses(rows, rpc.RegimeStatusComputing))) + " still building."
+	case len(staleRows) > 0:
+		names := regimeRowDisplayNames(staleRows)
+		return "Needs confirmation — " + coverage + "; " + joinHumanList(names) + " " + areOrIs(names) + " stale or overdue."
 	case len(qualityProblems) > 0:
 		return "Needs confirmation — " + coverage + "; " + joinHumanList(qualityProblems) + " need confirmation."
 	default:
-		return "OK — " + coverage + "."
+		var context []string
+		if monitor.AuthorityHealth != nil && monitor.AuthorityHealth.Refreshing {
+			context = append(context, "the current snapshot remains usable while a Regime refresh runs")
+		}
+		if len(regimeRowsByWhen(rows, "frozen")) > 0 {
+			context = append(context, "frozen rows are closed-session context")
+		}
+		if len(regimeRowsByWhen(rows, "not due")) > 0 {
+			context = append(context, "scheduled inputs are not due yet")
+		}
+		if len(context) == 0 {
+			return "OK — " + coverage + "."
+		}
+		return "OK — " + coverage + "; " + strings.Join(context, "; ") + "."
 	}
 }
 
-func regimeInputHealthColor(env *Env, c regimeComposite, rows []regimeRow, dataQuality []rpc.DataQualityHealth) func(string) string {
-	switch {
-	case c.clusterRanked == 0 || c.clusterRanked < verdictFloor:
+func regimeInputHealthColor(env *Env, c regimeComposite, rows []regimeRow, monitor rpc.RegimeMonitorResult) func(string) string {
+	if _, impaired := regimeAuthorityIssue(monitor.AuthorityHealth); impaired {
+		if regimeAuthorityCurrent(monitor.AuthorityHealth) {
+			return env.yellow
+		}
 		return env.red
-	case len(regimeRowsByStatuses(rows, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable, rpc.RegimeStatusComputing)) > 0 || len(regimeInputHealthDataQualityProblems(dataQuality)) > 0:
+	}
+	switch {
+	case c.clusterRanked == 0 || c.clusterRanked < verdictFloor || strings.EqualFold(strings.TrimSpace(monitor.Lifecycle.Stage), rpc.LifecycleDataQuality):
+		return env.red
+	case len(regimeRowsByStatuses(rows, rpc.RegimeStatusError, rpc.RegimeStatusUnavailable, rpc.RegimeStatusComputing)) > 0 || len(regimeRowsByWhen(rows, "stale", "overdue")) > 0 || len(regimeInputHealthDataQualityProblems(monitor.DataQuality)) > 0:
 		return env.yellow
 	default:
 		return env.green
@@ -949,6 +1037,13 @@ func regimeInputHealthDataQualityProblems(items []rpc.DataQualityHealth) []strin
 	var out []string
 	for _, item := range items {
 		switch strings.ToLower(strings.TrimSpace(item.Status)) {
+		case "stale":
+			if strings.EqualFold(strings.TrimSpace(item.CadenceState), rpc.DataCadenceNotDue) {
+				continue
+			}
+			for _, cluster := range item.StaleClusters {
+				out = appendUniqueString(out, strings.TrimSpace(cluster))
+			}
 		case "partial":
 			for _, cluster := range item.PartialClusters {
 				out = appendUniqueString(out, strings.TrimSpace(cluster))
@@ -978,11 +1073,11 @@ func regimeWatchLine(rows []regimeRow) string {
 	var parts []string
 	if names := regimeNamesByBand(rows, bandRed); len(names) > 0 {
 		parts = append(parts, fmt.Sprintf("%s %s showing stress%s",
-			joinHumanList(names), areOrIs(names), cachedContextSuffix(rows, bandRed)))
+			joinHumanList(names), areOrIs(names), regimeBandContextSuffix(rows, bandRed)))
 	}
 	if names := regimeNamesByBand(rows, bandYellow); len(names) > 0 {
 		parts = append(parts, fmt.Sprintf("%s %s on watch%s",
-			joinHumanList(names), areOrIs(names), cachedContextSuffix(rows, bandYellow)))
+			joinHumanList(names), areOrIs(names), regimeBandContextSuffix(rows, bandYellow)))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -1066,6 +1161,23 @@ func regimeRowsByStatuses(rows []regimeRow, statuses ...string) []regimeRow {
 	return out
 }
 
+func regimeRowsByWhen(rows []regimeRow, labels ...string) []regimeRow {
+	if len(labels) == 0 {
+		return nil
+	}
+	labelSet := make(map[string]bool, len(labels))
+	for _, label := range labels {
+		labelSet[strings.ToLower(strings.TrimSpace(label))] = true
+	}
+	var out []regimeRow
+	for _, row := range rows {
+		if labelSet[strings.ToLower(regimeWhenLabel(row))] {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
 func regimeRowDisplayNames(rows []regimeRow) []string {
 	names := make([]string, 0, len(rows))
 	for _, row := range rows {
@@ -1074,9 +1186,21 @@ func regimeRowDisplayNames(rows []regimeRow) []string {
 	return names
 }
 
-func cachedContextSuffix(rows []regimeRow, band regimeBand) string {
+func regimeBandContextSuffix(rows []regimeRow, band regimeBand) string {
 	for _, row := range rows {
-		if row.band == band && row.status == rpc.RegimeStatusStale {
+		if row.band != band {
+			continue
+		}
+		switch when := regimeWhenLabel(row); {
+		case when == "stale":
+			return " from stale data"
+		case when == "overdue":
+			return " from overdue data"
+		case when == "frozen":
+			return " from frozen market context"
+		case when == "not due":
+			return " from not-due context"
+		case strings.HasPrefix(when, "cached"):
 			return " from cached data"
 		}
 	}
@@ -1093,8 +1217,76 @@ func areOrIs(parts []string) string {
 func regimeDataQualityContext(items []rpc.DataQualityHealth) string {
 	value := formatDataQualityValue(items)
 	value = strings.ReplaceAll(value, "degraded", "context")
-	value = strings.ReplaceAll(value, "stale", "cached")
 	return value
+}
+
+func regimeLifecycleStageConfirmsStress(stage string) bool {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case rpc.LifecycleConfirmedStress, rpc.LifecyclePanic, rpc.LifecycleForcedDefense:
+		return true
+	default:
+		return false
+	}
+}
+
+// regimeAuthorityIssue interprets only the typed whole-snapshot contract. A
+// fresh last-good remains usable while a refresh runs. Every stale,
+// unavailable, failed, or invalid authority state blocks an all-clear claim,
+// even when all embedded indicator rows still look healthy.
+func regimeAuthorityIssue(health *rpc.RegimeAuthorityHealth) (string, bool) {
+	if health == nil {
+		return "Regime snapshot health is unavailable", true
+	}
+	if err := rpc.ValidateRegimeAuthorityHealth(*health); err != nil {
+		return "Regime snapshot health metadata is invalid", true
+	}
+	var parts []string
+	switch health.Status {
+	case rpc.RegimeAuthorityFresh:
+	case rpc.RegimeAuthorityStale:
+		parts = append(parts, "whole snapshot is stale")
+	case rpc.RegimeAuthorityUnavailable:
+		parts = append(parts, "no complete retained snapshot is available")
+	default:
+		parts = append(parts, "Regime snapshot health state is invalid")
+	}
+	if failure := regimeAuthorityFailureText(health.FailureCode); failure != "" && !(health.Status == rpc.RegimeAuthorityUnavailable && health.FailureCode == rpc.RegimeAuthorityFailureNoLastGood) {
+		parts = append(parts, failure)
+	}
+	if health.Refreshing && health.Status != rpc.RegimeAuthorityFresh {
+		parts = append(parts, "refresh in progress")
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	return strings.Join(parts, "; "), true
+}
+
+func regimeAuthorityCurrent(health *rpc.RegimeAuthorityHealth) bool {
+	return health != nil && rpc.ValidateRegimeAuthorityHealth(*health) == nil && health.Status == rpc.RegimeAuthorityFresh
+}
+
+func regimeAuthorityFailureText(code rpc.RegimeAuthorityFailureCode) string {
+	switch code {
+	case rpc.RegimeAuthorityFailureNone:
+		return ""
+	case rpc.RegimeAuthorityFailureNoLastGood:
+		return "no complete Regime snapshot has been accepted"
+	case rpc.RegimeAuthorityFailureRefreshTimeout:
+		return "latest Regime refresh timed out"
+	case rpc.RegimeAuthorityFailureRefreshIncomplete:
+		return "latest Regime refresh was incomplete"
+	case rpc.RegimeAuthorityFailureRefreshFailed:
+		return "latest Regime refresh failed"
+	case rpc.RegimeAuthorityFailurePublishFailed:
+		return "latest Regime refresh could not be published"
+	case rpc.RegimeAuthorityFailureInvalidPersistedState:
+		return "saved Regime snapshot is invalid"
+	case rpc.RegimeAuthorityFailureClockInvalid:
+		return "daemon clock is behind the last committed snapshot"
+	default:
+		return "Regime snapshot health reported an unknown failure"
+	}
 }
 
 func regimeEvidenceName(name string) string {
@@ -1308,7 +1500,7 @@ func renderExplainBlock(env *Env, out io.Writer, r *rpc.RegimeSnapshotResult, di
 	}
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  %s\n", env.bold("Confirmation policy"))
-	renderExplainKV(env, out, "Rule", "A red row may CONFIRM stress only when it is deep, persistent, and cadence-fresh; otherwise it is provisional — visible, drives early_warning, never confirms or rescues another cluster. While threshold sets carry pending_backtest, severity \"act\" additionally needs a tape co-sign (SPY ≤ −1.5%, VIX +10%, or a fresh same-session term inversion); pure-tape panic (SPY ≤ −4%/−7%) is exempt. Governed downgrades are disclosed on the Governed line.", nil)
+	renderExplainKV(env, out, "Rule", "A red row may CONFIRM stress only when it is deep, persistent, and cadence-fresh; otherwise it is provisional — visible, but never confirms or rescues another cluster. A provisional red contributes to early_warning only while required inputs are current and usable; overdue or broken required evidence produces data_quality instead. While threshold sets carry pending_backtest, severity \"act\" additionally needs a tape co-sign (SPY ≤ −1.5%, VIX +10%, or a fresh same-session term inversion); pure-tape panic (SPY ≤ −4%/−7%) is exempt. Governed downgrades are disclosed on the Governed line.", nil)
 	renderExplainKV(env, out, "Gates", regimeGateExplainLine(), nil)
 	fmt.Fprintln(out)
 	for _, e := range entries {

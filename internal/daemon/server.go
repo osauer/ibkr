@@ -221,12 +221,11 @@ type Server struct {
 	// spot, but long enough to make back-to-back calls free.
 	greeks *greeksCache
 
-	// zeroGamma holds the current/most-recent dealer zero-gamma
-	// compute for SPX, keyed on NY trading-session date. The compute
-	// is a multi-minute fan-out across hundreds of option legs; this
-	// cache singleflights concurrent callers and outlives any single
-	// RPC ctx so a client disconnect mid-compute doesn't kill the
-	// run that other pollers are waiting on.
+	// zeroGamma holds the served dealer zero-gamma last-good plus any RTH
+	// soft-TTL refresh running behind it, per scope and NY session key. The
+	// compute is a multi-minute fan-out across hundreds of option legs; this
+	// cache singleflights concurrent callers and outlives any single RPC ctx so
+	// a client disconnect mid-compute doesn't kill work other pollers need.
 	zeroGamma *gammaZeroCache
 	// gammaOI persists per-contract option open interest observed by the gamma
 	// collector. Missing OI refreshes never write through this store; only live
@@ -1909,7 +1908,7 @@ func (s *Server) postConnectSetup(a connectAttempter, ep discover.Endpoint) {
 	}
 
 	// Pre-warm contract-details cache for the regime-dashboard symbols
-	// in the background. Without this the first regime call of the day
+	// in the background. Without this the first regime call after startup
 	// races five parallel goroutines against fresh contract resolution
 	// — confirmed observed at v0.22.0: first cold call returned with
 	// hyg_50dma and weekly_change_pct missing; second call (caches

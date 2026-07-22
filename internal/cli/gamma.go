@@ -101,24 +101,25 @@ func renderGammaTextWithOptions(env *Env, r *rpc.GammaZeroSPXResult, opts gammaR
 
 	switch r.Status {
 	case rpc.GammaZeroStatusCold:
-		// No compute has run this NY session and none is in flight. This is
-		// the common off-hours state: the daemon never recomputes on a closed
-		// market, so a stale or invalidated cache leaves us with no value to
-		// serve until the next regular U.S. options session open. Friendly
-		// explainer beats a bare "without a result payload" error.
+		// No usable last-good exists and no compute is in flight. The daemon
+		// normally prewarms after gateway startup, but automatic off-hours
+		// refresh is not due; a rejected or absent cache can therefore remain
+		// cold until regular U.S. option hours. Friendly explainer beats a bare
+		// "without a result payload" error.
 		fmt.Fprintf(out, "  Status      no data yet (cold cache)\n")
 		if r.ColdReason != "" {
 			fmt.Fprintf(out, "  Reason      %s\n", r.ColdReason)
 		}
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, env.dim("  The compute runs automatically on the first call of each regular"))
-		fmt.Fprintln(out, env.dim("  U.S. options session (09:30-16:15 ET, Mon-Fri). Outside session hours the"))
-		fmt.Fprintln(out, env.dim("  daemon does not run heavy option-chain fans against a closed"))
+		fmt.Fprintln(out, env.dim("  The daemon normally prewarms gamma after gateway startup. During regular"))
+		fmt.Fprintln(out, env.dim("  U.S. options hours (09:30-16:15 ET, Mon-Fri), the last successful result"))
+		fmt.Fprintln(out, env.dim("  refreshes behind the served value after a 15-minute soft TTL. Outside"))
+		fmt.Fprintln(out, env.dim("  those hours automatic refresh is not due, so the daemon avoids a heavy"))
 		if r.ColdAction != "" {
-			fmt.Fprintln(out, env.dim("  market. "+r.ColdAction))
+			fmt.Fprintln(out, env.dim("  option-chain fan against a closed market. "+r.ColdAction))
 		} else {
-			fmt.Fprintln(out, env.dim("  market. To force a compute now (mostly useful when troubleshooting"))
-			fmt.Fprintln(out, env.dim("  or testing): ibkr gamma --force"))
+			fmt.Fprintln(out, env.dim("  option-chain fan against a closed market. To force a compute now (mostly"))
+			fmt.Fprintln(out, env.dim("  useful when troubleshooting or testing): ibkr gamma --force"))
 		}
 		fmt.Fprintln(out)
 		return 0
@@ -135,8 +136,9 @@ func renderGammaTextWithOptions(env *Env, r *rpc.GammaZeroSPXResult, opts gammaR
 			fmt.Fprintf(out, "  Progress    %d %%\n", r.Progress)
 		}
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, env.dim("  Compute runs once per NY trading session (typical 2-4 min on a warm"))
-		fmt.Fprintln(out, env.dim("  contract cache); subsequent calls within the day return cached."))
+		fmt.Fprintln(out, env.dim("  The daemon prewarms gamma after gateway startup. During regular U.S."))
+		fmt.Fprintln(out, env.dim("  option hours, the last successful result refreshes behind the served"))
+		fmt.Fprintln(out, env.dim("  value after a 15-minute soft TTL; off-hours automatic refresh is not due."))
 		fmt.Fprintln(out, env.dim("  Re-run `ibkr gamma` to block again, or add --no-wait to poll."))
 		fmt.Fprintln(out)
 		return 0

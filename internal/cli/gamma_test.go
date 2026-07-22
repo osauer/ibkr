@@ -782,13 +782,57 @@ func TestRenderGamma_ColdRendersFriendlyExplainer(t *testing.T) {
 	for _, want := range []string{
 		"no data yet",
 		"cold cache",
-		"first call of each regular",
+		"normally prewarms gamma after gateway startup",
+		"15-minute soft TTL",
+		"automatic refresh is not due",
 		"09:30-16:15 ET",
 		"--force",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("cold explainer missing %q in:\n%s", want, out)
 		}
+	}
+	for _, stale := range []string{"first call", "once per NY trading session"} {
+		if strings.Contains(out, stale) {
+			t.Errorf("cold explainer retained stale cadence claim %q:\n%s", stale, out)
+		}
+	}
+}
+
+func TestRenderGamma_ComputingExplainsPrewarmAndIntradayRefresh(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	res := &rpc.GammaZeroSPXResult{Status: rpc.GammaZeroStatusComputing, Progress: 25, EtaSeconds: 90}
+	if code := renderGammaText(env, res, false); code != 0 {
+		t.Fatalf("computing should exit 0, got %d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{"prewarms gamma after gateway startup", "15-minute soft TTL", "off-hours automatic refresh is not due"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("computing explainer missing %q:\n%s", want, out)
+		}
+	}
+	for _, stale := range []string{"once per NY trading session", "subsequent calls within the day"} {
+		if strings.Contains(out, stale) {
+			t.Errorf("computing explainer retained stale cadence claim %q:\n%s", stale, out)
+		}
+	}
+}
+
+func TestGammaCommandCatalogDescribesRuntimeRefreshCadence(t *testing.T) {
+	t.Parallel()
+	cmd, ok := lookupCommand("gamma")
+	if !ok {
+		t.Fatal("gamma command missing from catalog")
+	}
+	for _, want := range []string{"daemon-prewarmed", "15m in RTH", "off-hours refresh not due"} {
+		if !strings.Contains(cmd.Summary, want) {
+			t.Errorf("gamma catalog missing %q: %s", want, cmd.Summary)
+		}
+	}
+	if strings.Contains(cmd.Summary, "once per NY trading day") {
+		t.Fatalf("gamma catalog retained stale once-daily claim: %s", cmd.Summary)
 	}
 }
 

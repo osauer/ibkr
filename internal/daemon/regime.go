@@ -27,11 +27,10 @@ import (
 // agent surface, while the raw measurements remain present for
 // renderers that want to apply their own thresholds.
 //
-// Dealer gamma is auto-kicked: the first regime snapshot of
-// the NY trading session triggers the heavy compute, returns
-// Status="computing" + an ETA. Subsequent calls within the day
-// return the cached result instantly via the existing
-// gammaZeroCache singleflight.
+// Dealer gamma is daemon-prewarmed after gateway startup. During option RTH,
+// a successful last-good refreshes behind the served value on the cache's
+// 15-minute soft TTL; outside RTH automatic refresh is not due. A cold cache
+// still returns Status="computing" plus an ETA once work is in flight.
 //
 // USD/JPY and breadth may surface
 // Status="unavailable" depending on classifySymbol coverage at
@@ -1285,10 +1284,10 @@ const gammaNotes = "Combined SPY+SPX dealer gamma context. SPY and SPX are repor
 
 func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	out := rpc.RegimeGammaZero{Notes: gammaNotes}
-	// Reuse the existing handler — auto-kick via the cache's
-	// kickOrJoin happens inside. WaitMs=0 means we get whatever
-	// state is current; subsequent regime calls within the day
-	// will see status="ready" once the bg compute finishes.
+	// Reuse the existing handler: daemon startup normally prewarms the cache,
+	// and kickOrJoin owns any needed RTH refresh. WaitMs=0 returns the served
+	// last-good immediately while a 15-minute soft-TTL refresh runs behind it;
+	// without a last-good it returns the current cold/computing state.
 	envelope, err := s.handleGammaZeroSPX(ctx, &rpc.Request{
 		Method: rpc.MethodGammaZeroSPX,
 		Params: json.RawMessage(`{}`),
@@ -1340,12 +1339,9 @@ func fetchRegimeGamma(ctx context.Context, s *Server) rpc.RegimeGammaZero {
 	case rpc.GammaZeroStatusComputing:
 		out.Status = rpc.RegimeStatusComputing
 	case rpc.GammaZeroStatusCold:
-		// Cold means no compute has ever been kicked this session. In
-		// practice handleGammaZeroSPX auto-kicks on every call so a
-		// regime fetch typically transitions Cold → Computing inside
-		// the same call. Map to Unavailable for the rare interleaving
-		// where the snapshot races a kick — mirrors breadth's Cold →
-		// Unavailable mapping below at fetchRegimeBreadth.
+		// Cold means no usable last-good exists and no compute is in flight.
+		// Automatic refresh is deliberately not due off-hours, so map it to
+		// Unavailable just as breadth maps its own cold state below.
 		out.Status = rpc.RegimeStatusUnavailable
 	case rpc.GammaZeroStatusError:
 		out.Status = rpc.RegimeStatusError

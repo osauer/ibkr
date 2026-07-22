@@ -18,6 +18,8 @@ import (
 // unavailable. Mirrors the cmd/_preview fixture so visual and test
 // expectations stay synchronised.
 func regimeFixture() *rpc.RegimeSnapshotResult {
+	asOf := time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC)
+	authorityAge := int64(0)
 	vix := 18.43
 	vix3m := 21.36
 	ratio := vix / vix3m
@@ -29,8 +31,13 @@ func regimeFixture() *rpc.RegimeSnapshotResult {
 	close7 := 158.05
 	weekly := 0.43
 	return &rpc.RegimeSnapshotResult{
-		AsOf:    time.Date(2026, 5, 17, 13, 12, 0, 0, time.UTC),
+		AsOf:    asOf,
 		SpecDoc: "docs/specs/risk-regime-dashboard.md",
+		AuthorityHealth: &rpc.RegimeAuthorityHealth{
+			Status:                rpc.RegimeAuthorityFresh,
+			LastSuccessAt:         &asOf,
+			LastSuccessAgeSeconds: &authorityAge,
+		},
 		VIXTermStructure: rpc.RegimeVIXTerm{
 			RegimeIndicatorMeta: rpc.RegimeIndicatorMeta{
 				AsOf: &rpc.RegimeAsOfSummary{Label: "live"},
@@ -123,7 +130,7 @@ func TestRenderRegime_CompositeVerdictAndCount(t *testing.T) {
 		"Support:",
 		"VIX/VIX3M (volatility term structure) and USD/JPY (FX carry proxy) are calm",
 		"Watch:",
-		"HYG vs SPY (ETF credit proxy) is on watch from cached data",
+		"HYG vs SPY (ETF credit proxy) is on watch from frozen market context",
 		"Set aside:",
 		"γ-zero (SPY+SPX) (dealer gamma) is still building",
 		"are not in this read yet",
@@ -170,7 +177,7 @@ func TestRenderRegime_DataQualityLine(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"Data context:", "gamma context", "SPX excluded", "regime cached"} {
+	for _, want := range []string{"Data context:", "gamma context", "SPX excluded", "regime stale"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("regime output missing %q:\n%s", want, out)
 		}
@@ -220,11 +227,11 @@ func TestRenderRegime_InputHealthColorSeparatesContextFromProblems(t *testing.T)
 	if !strings.Contains(out, ansiYellow+"Needs confirmation") {
 		t.Errorf("technical input gaps should color Input health yellow:\n%s", out)
 	}
-	if strings.Contains(out, ansiYellow+"regime cached") {
-		t.Errorf("expected cached/off-hours data context should not be yellow:\n%s", out)
+	if strings.Contains(out, ansiYellow+"regime stale") {
+		t.Errorf("data context detail should stay dim rather than inherit the health color:\n%s", out)
 	}
-	if !strings.Contains(out, ansiDim+"regime cached") {
-		t.Errorf("cached/off-hours context should be dim context, got:\n%s", out)
+	if !strings.Contains(out, ansiDim+"regime stale") {
+		t.Errorf("stale data context should be rendered plainly and dim, got:\n%s", out)
 	}
 }
 
@@ -301,10 +308,169 @@ func TestRenderRegime_WhenColumnShowsFriendlyFreshnessLabels(t *testing.T) {
 	env := &Env{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	_ = renderRegimeText(env, regimeFixture())
 	out := stdout.String()
-	for _, want := range []string{"WHEN", "live", "cached", "delayed 15m", "building", "missing"} {
+	for _, want := range []string{"WHEN", "live", "frozen", "delayed 15m", "building", "missing"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("regime table missing as-of label %q:\n%s", want, out)
 		}
+	}
+}
+
+func regimeAuthorityTestHealth(status rpc.RegimeAuthorityStatus, refreshing bool, failure rpc.RegimeAuthorityFailureCode) *rpc.RegimeAuthorityHealth {
+	health := &rpc.RegimeAuthorityHealth{Status: status, Refreshing: refreshing, FailureCode: failure}
+	if status == rpc.RegimeAuthorityFresh || status == rpc.RegimeAuthorityStale {
+		lastSuccess := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+		age := int64(60)
+		health.LastSuccessAt = &lastSuccess
+		health.LastSuccessAgeSeconds = &age
+	}
+	return health
+}
+
+func TestRegimeAuthorityHealthOverridesHealthyLookingRows(t *testing.T) {
+	t.Parallel()
+	c := regimeComposite{green: 6, ranked: 6, total: 6, clusterGreen: 6, clusterRanked: 6, clusterTotal: 6}
+	rows := []regimeRow{{name: "vol", status: rpc.RegimeStatusOK, band: bandGreen, asOf: "live"}}
+	base := rpc.RegimeMonitorResult{
+		Lifecycle: rpc.LifecycleState{Stage: rpc.LifecycleQuiet},
+		Composite: rpc.RegimeComposite{Verdict: "Normal regime", ClusterGreenCount: 6, ClusterRankedCount: 6},
+	}
+	tests := []struct {
+		name          string
+		health        *rpc.RegimeAuthorityHealth
+		wantVerdict   string
+		wantHealth    string
+		wantRead      string
+		forbidHealth  string
+		forbidVerdict string
+	}{
+		{name: "fresh", health: regimeAuthorityTestHealth(rpc.RegimeAuthorityFresh, false, rpc.RegimeAuthorityFailureNone), wantVerdict: "Normal regime", wantHealth: "OK", wantRead: "Constructive tape"},
+		{name: "stale refreshing", health: regimeAuthorityTestHealth(rpc.RegimeAuthorityStale, true, rpc.RegimeAuthorityFailureNone), wantVerdict: "Market state undefined", wantHealth: "Blocked", wantRead: "retained context only", forbidHealth: "OK", forbidVerdict: "Normal regime"},
+		{name: "clock invalid", health: regimeAuthorityTestHealth(rpc.RegimeAuthorityStale, false, rpc.RegimeAuthorityFailureClockInvalid), wantVerdict: "Market state undefined", wantHealth: "daemon clock is behind", wantRead: "retained context only", forbidHealth: "OK", forbidVerdict: "Normal regime"},
+		{name: "unavailable", health: regimeAuthorityTestHealth(rpc.RegimeAuthorityUnavailable, false, rpc.RegimeAuthorityFailureNoLastGood), wantVerdict: "Market state undefined", wantHealth: "no complete retained snapshot", wantRead: "retained context only", forbidHealth: "OK", forbidVerdict: "Normal regime"},
+		{name: "invalid", health: &rpc.RegimeAuthorityHealth{Status: rpc.RegimeAuthorityFresh}, wantVerdict: "Market state undefined", wantHealth: "metadata is invalid", wantRead: "retained context only", forbidHealth: "OK", forbidVerdict: "Normal regime"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			monitor := base
+			monitor.AuthorityHealth = tc.health
+			verdict := regimeServedVerdict(monitor, c)
+			health := regimeInputHealthLine(c, rows, monitor)
+			read := regimeReadLine(c, monitor)
+			if !strings.Contains(verdict, tc.wantVerdict) || !strings.Contains(health, tc.wantHealth) || !strings.Contains(read, tc.wantRead) {
+				t.Fatalf("verdict=%q health=%q read=%q", verdict, health, read)
+			}
+			if tc.forbidHealth != "" && strings.Contains(health, tc.forbidHealth) {
+				t.Fatalf("health=%q must not contain %q", health, tc.forbidHealth)
+			}
+			if tc.forbidVerdict != "" && strings.Contains(verdict, tc.forbidVerdict) {
+				t.Fatalf("verdict=%q must not contain %q", verdict, tc.forbidVerdict)
+			}
+		})
+	}
+}
+
+func TestRegimeAuthorityRefreshBeforeExpiryKeepsCurrentLastGoodUsable(t *testing.T) {
+	t.Parallel()
+	c := regimeComposite{green: 6, ranked: 6, total: 6, clusterGreen: 6, clusterRanked: 6, clusterTotal: 6}
+	monitor := rpc.RegimeMonitorResult{
+		AuthorityHealth: regimeAuthorityTestHealth(rpc.RegimeAuthorityFresh, true, rpc.RegimeAuthorityFailureNone),
+		Lifecycle:       rpc.LifecycleState{Stage: rpc.LifecycleQuiet},
+		Composite:       rpc.RegimeComposite{Verdict: "Normal regime", ClusterGreenCount: 6, ClusterRankedCount: 6},
+	}
+	health := regimeInputHealthLine(c, nil, monitor)
+	if !strings.Contains(health, "OK") || !strings.Contains(health, "current snapshot remains usable while a Regime refresh runs") {
+		t.Fatalf("refresh-ahead health=%q", health)
+	}
+	if got := regimeReadLine(c, monitor); !strings.Contains(got, "Constructive tape") {
+		t.Fatalf("refresh-ahead read=%q", got)
+	}
+}
+
+func TestRegimeFreshRefreshFailurePreservesConfirmedStress(t *testing.T) {
+	t.Parallel()
+	c := regimeComposite{red: 2, ranked: 6, total: 6, clusterRed: 2, clusterRanked: 6, clusterTotal: 6}
+	monitor := rpc.RegimeMonitorResult{
+		AuthorityHealth: regimeAuthorityTestHealth(rpc.RegimeAuthorityFresh, false, rpc.RegimeAuthorityFailureRefreshFailed),
+		Lifecycle:       rpc.LifecycleState{Stage: rpc.LifecycleConfirmedStress},
+		Composite: rpc.RegimeComposite{
+			Verdict: "Confirmed stress regime", ClusterRedCount: 2,
+			ClusterEligibleRedCount: 2, ClusterRankedCount: 6,
+		},
+	}
+	verdict := regimeServedVerdict(monitor, c)
+	if !strings.Contains(verdict, "Confirmed stress regime") || !strings.Contains(verdict, "refresh degraded") {
+		t.Fatalf("fresh failed-refresh verdict=%q", verdict)
+	}
+	health := regimeInputHealthLine(c, nil, monitor)
+	if strings.Contains(health, "OK") || !strings.Contains(health, "Degraded") || !strings.Contains(health, "refresh failed") {
+		t.Fatalf("fresh failed-refresh health=%q", health)
+	}
+	if got := regimeReadLine(c, monitor); !strings.Contains(got, "still confirms stress") || !strings.Contains(got, "refresh failed") {
+		t.Fatalf("fresh failed-refresh read=%q", got)
+	}
+}
+
+func TestRegimeFreshnessLabelsKeepStaleFrozenAndNotDueDistinct(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		label string
+		want  string
+	}{{"stale", "stale"}, {"frozen", "frozen"}, {"not_due", "not due"}, {"overdue", "overdue"}} {
+		if got := regimeWhenLabel(regimeRow{asOf: tc.label}); got != tc.want {
+			t.Fatalf("when(%q)=%q, want %q", tc.label, got, tc.want)
+		}
+	}
+	c := regimeComposite{ranked: 3, total: 3, clusterRanked: 3, clusterTotal: 3}
+	monitor := rpc.RegimeMonitorResult{
+		AuthorityHealth: regimeAuthorityTestHealth(rpc.RegimeAuthorityFresh, false, rpc.RegimeAuthorityFailureNone),
+		Lifecycle:       rpc.LifecycleState{Stage: rpc.LifecycleQuiet},
+	}
+	stale := regimeInputHealthLine(c, []regimeRow{{name: "vol", status: rpc.RegimeStatusStale, asOf: "stale"}}, monitor)
+	frozen := regimeInputHealthLine(c, []regimeRow{{name: "vol", status: rpc.RegimeStatusStale, asOf: "frozen"}}, monitor)
+	notDue := regimeInputHealthLine(c, []regimeRow{{name: "vol", status: rpc.RegimeStatusStale, asOf: "not_due"}}, monitor)
+	if !strings.Contains(stale, "Needs confirmation") || !strings.Contains(stale, "stale") {
+		t.Fatalf("stale health=%q", stale)
+	}
+	if !strings.Contains(frozen, "OK") || !strings.Contains(frozen, "frozen rows are closed-session context") || strings.Contains(frozen, "stale or overdue") {
+		t.Fatalf("frozen health=%q", frozen)
+	}
+	if !strings.Contains(notDue, "OK") || !strings.Contains(notDue, "not due yet") || strings.Contains(notDue, "stale or overdue") {
+		t.Fatalf("not-due health=%q", notDue)
+	}
+}
+
+func TestRegimeReadLineDoesNotConfirmThreeProvisionalReds(t *testing.T) {
+	t.Parallel()
+	c := regimeComposite{red: 3, ranked: 6, total: 6, clusterRed: 3, clusterRanked: 6, clusterTotal: 6}
+	monitor := rpc.RegimeMonitorResult{
+		AuthorityHealth: regimeAuthorityTestHealth(rpc.RegimeAuthorityFresh, false, rpc.RegimeAuthorityFailureNone),
+		Lifecycle:       rpc.LifecycleState{Stage: rpc.LifecycleEarlyWarning},
+		Composite: rpc.RegimeComposite{
+			ClusterRedCount: 3, ClusterProvisionalRedCount: 3, ClusterRankedCount: 6,
+		},
+	}
+	got := regimeReadLine(c, monitor)
+	if !strings.Contains(got, "has not confirmed broad stress") || strings.Contains(got, "Broad stress is confirmed") {
+		t.Fatalf("three provisional reds read=%q", got)
+	}
+}
+
+func TestRegimeReadLineProvisionalRedWithBrokenEvidenceIsDataQuality(t *testing.T) {
+	t.Parallel()
+	c := regimeComposite{red: 1, ranked: 6, total: 6, clusterRed: 1, clusterRanked: 6, clusterTotal: 6}
+	monitor := rpc.RegimeMonitorResult{
+		AuthorityHealth: regimeAuthorityTestHealth(rpc.RegimeAuthorityFresh, false, rpc.RegimeAuthorityFailureNone),
+		Lifecycle:       rpc.LifecycleState{Stage: rpc.LifecycleDataQuality, Readiness: "blocked"},
+		Composite: rpc.RegimeComposite{
+			ClusterRedCount: 1, ClusterProvisionalRedCount: 1, ClusterRankedCount: 6,
+		},
+	}
+	got := regimeReadLine(c, monitor)
+	if !strings.Contains(got, "Market state is undefined") || !strings.Contains(got, "required evidence is incomplete") || strings.Contains(got, "early_warning") {
+		t.Fatalf("provisional data-quality read=%q", got)
+	}
+	if health := regimeInputHealthLine(c, nil, monitor); !strings.Contains(health, "Blocked") || !strings.Contains(health, "undefined") {
+		t.Fatalf("provisional data-quality health=%q", health)
 	}
 }
 
@@ -379,6 +545,7 @@ func TestRenderRegime_ExplainModeUsesCompactAuditNotes(t *testing.T) {
 		"Read:",
 		"Volatility term structure",
 		"Dealer-gamma model",
+		"produces data_quality instead",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--explain output missing %q:\n%s", want, out)
@@ -387,6 +554,7 @@ func TestRenderRegime_ExplainModeUsesCompactAuditNotes(t *testing.T) {
 	for _, notWant := range []string{
 		"VIX/VIX3M notes", "HYG/SPY notes", "USD/JPY notes", "gamma notes", "breadth notes",
 		"Full methodology", "Inputs:", "Raw source:", "BAMLH0A0HYM2",
+		"visible, drives early_warning",
 	} {
 		if strings.Contains(out, notWant) {
 			t.Errorf("--explain should not dump fixture note %q:\n%s", notWant, out)
