@@ -27,15 +27,24 @@ import (
 // never a guessed date.
 
 const (
-	earningsStoreFilename    = "earnings-dates.json"
-	earningsPersistVersion   = 2
-	earningsLegacyVersion    = 1
-	earningsFreshWindow      = 24 * time.Hour
-	earningsTTL              = 45 * 24 * time.Hour
-	earningsFetchTimeout     = 8 * time.Second
-	earningsFailureRetry     = 15 * time.Minute
-	earningsFetchConcurrency = 4
-	earningsAuthorityScope   = "market/events/earnings"
+	earningsStoreFilename  = "earnings-dates.json"
+	earningsPersistVersion = 2
+	earningsLegacyVersion  = 1
+	earningsFreshWindow    = 24 * time.Hour
+	earningsTTL            = 45 * 24 * time.Hour
+	earningsFetchTimeout   = 8 * time.Second
+	earningsFailureRetry   = 15 * time.Minute
+	// One five-minute confirmation probe fits inside the connector's bounded
+	// inactive-candidate window. Two broker definition misses then become a
+	// typed unsupported outcome with the long retry below, rather than an
+	// endless stream of generic contract-resolution attempts.
+	earningsContractResolutionRetry = 5 * time.Minute
+	// Format, entitlement, protocol, and other non-retryable provider failures
+	// remain due failures, but one failed read is enough for the daily source
+	// cadence. Their typed outcome and next attempt survive daemon restart.
+	earningsNonRetryableFailureRetry = 24 * time.Hour
+	earningsFetchConcurrency         = 4
+	earningsAuthorityScope           = "market/events/earnings"
 	// Keep the established state kind: a v2 payload under the same key makes
 	// older binaries reject the authority instead of silently reading a stale
 	// sibling document.
@@ -388,7 +397,13 @@ func (c *earningsCache) refreshOne(ctx context.Context, sym string) {
 		}
 		symbolState.Providers[item.provider] = providerState
 		if item.localErr != nil {
-			c.logf("earnings provider %s fetch %s failed: %v", item.provider, sym, item.localErr)
+			code, stage, retryable := "", "", false
+			if item.attempt.LastFailure != nil {
+				code = item.attempt.LastFailure.Code
+				stage = item.attempt.LastFailure.Stage
+				retryable = item.attempt.LastFailure.Retryable
+			}
+			c.logf("earnings provider %s outcome status=%s code=%s stage=%s retryable=%t", item.provider, item.attempt.Status, code, stage, retryable)
 		}
 	}
 	decisionAt := c.clock()
@@ -398,13 +413,13 @@ func (c *earningsCache) refreshOne(ctx context.Context, sym string) {
 
 	observations, err := earningsProviderObservations(sym, completed)
 	if err != nil {
-		c.logf("earnings provider %s outcome encode failed: %v", sym, err)
+		c.logf("earnings provider outcome encode failed: %v", err)
 		return
 	}
 	if err := c.store.commit(context.WithoutCancel(ctx), candidate, observations, decisionAt); err != nil {
 		// Publishing an uncommitted attempt would make a transient memory result
 		// outrun restart authority. SQLite health reports the authority failure.
-		c.logf("earnings provider %s authority commit failed: %v", sym, err)
+		c.logf("earnings provider authority commit failed")
 		return
 	}
 	c.symbols = candidate
@@ -468,10 +483,13 @@ func earningsNextAttempt(status string, failure *rpc.SourceFailure, completedAt 
 	case rpc.EarningsStatusUnsupportedSecurity:
 		return completedAt.Add(earningsTTL)
 	case rpc.EarningsStatusFormatChange:
-		return completedAt.Add(earningsFreshWindow)
+		return completedAt.Add(earningsNonRetryableFailureRetry)
 	case rpc.EarningsStatusTransportFailure:
 		if failure != nil && !failure.Retryable {
-			return completedAt.Add(earningsFreshWindow)
+			return completedAt.Add(earningsNonRetryableFailureRetry)
+		}
+		if failure != nil && failure.Stage == rpc.SourceFailureStageWSHContractResolve {
+			return completedAt.Add(earningsContractResolutionRetry)
 		}
 		return completedAt.Add(earningsFailureRetry)
 	default:

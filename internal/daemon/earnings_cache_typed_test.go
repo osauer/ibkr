@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -216,6 +217,125 @@ func TestEarningsProviderOutcomesPersistAndRecoverWithoutRawError(t *testing.T) 
 		if provider.NextAttempt == nil || !provider.NextAttempt.After(now) {
 			t.Fatalf("provider retry state not recovered: %+v", provider)
 		}
+	}
+}
+
+func TestEarningsProviderBackoffPersistsAcrossRestart(t *testing.T) {
+	base := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		result   earningsProviderFetchResult
+		expected time.Duration
+	}{
+		{
+			name:     "unsupported contract",
+			result:   earningsProviderFetchResult{Status: rpc.EarningsStatusUnsupportedSecurity},
+			expected: earningsTTL,
+		},
+		{
+			name: "provider format",
+			result: earningsProviderFetchResult{Status: rpc.EarningsStatusFormatChange, Failure: &rpc.SourceFailure{
+				Code: rpc.SourceFailureInvalidPayload, Stage: rpc.SourceFailureStageWSHDecode, Retryable: false,
+			}},
+			expected: earningsNonRetryableFailureRetry,
+		},
+		{
+			name:     "non-retryable provider failure",
+			result:   transportFailureResult(rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHEvent, false, base),
+			expected: earningsNonRetryableFailureRetry,
+		},
+		{
+			name:     "contract resolution failure",
+			result:   transportFailureResult(rpc.SourceFailureTransportFailed, rpc.SourceFailureStageWSHContractResolve, true, base),
+			expected: earningsContractResolutionRetry,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openMarketTestCoreStore(t)
+			var providerLogs []string
+			initial := newEarningsCacheMemory(func(format string, args ...any) {
+				providerLogs = append(providerLogs, fmt.Sprintf(format, args...))
+			})
+			initial.clock = func() time.Time { return base }
+			initial.client = &http.Client{Transport: earningsRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":{"announcement":null},"status":{"rCode":200}}`))}, nil
+			})}
+			providerCalls := 0
+			if err := initial.setSecondaryProvider(earningsWSHProvider, func(context.Context, string) (earningsProviderFetchResult, error) {
+				providerCalls++
+				return tc.result, errors.New("typed provider failure")
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := initial.UseCoreStore(store); err != nil {
+				t.Fatal(err)
+			}
+			initial.refreshOne(context.Background(), "TESTQ")
+			if providerCalls != 1 {
+				t.Fatalf("initial provider calls = %d, want 1", providerCalls)
+			}
+			for _, line := range providerLogs {
+				if strings.Contains(line, "TESTQ") {
+					t.Fatalf("provider log exposed the requested name: %q", line)
+				}
+			}
+
+			view, ok := initial.resolution("TESTQ")
+			if !ok {
+				t.Fatal("missing committed provider outcome")
+			}
+			var nextAttempt *time.Time
+			for _, provider := range view.Providers {
+				if provider.Provider == earningsWSHProvider {
+					nextAttempt = provider.NextAttempt
+				}
+			}
+			wantNext := base.Add(tc.expected)
+			if nextAttempt == nil || !nextAttempt.Equal(wantNext) {
+				t.Fatalf("persisted next attempt = %v, want %v", nextAttempt, wantNext)
+			}
+
+			restarted := newEarningsCacheMemory(nil)
+			restartNow := wantNext.Add(-time.Minute)
+			restarted.clock = func() time.Time { return restartNow }
+			restarted.client = &http.Client{Transport: earningsRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":{"announcement":null},"status":{"rCode":200}}`))}, nil
+			})}
+			providerCalls = 0
+			if err := restarted.setSecondaryProvider(earningsWSHProvider, func(context.Context, string) (earningsProviderFetchResult, error) {
+				providerCalls++
+				return earningsProviderFetchResult{}, errors.New("unexpected early request")
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := restarted.UseCoreStore(store); err != nil {
+				t.Fatalf("restart attach: %v", err)
+			}
+			recovered, ok := restarted.resolution("TESTQ")
+			if !ok {
+				t.Fatal("restart lost the failed provider outcome")
+			}
+			recoveredStatus := ""
+			for _, provider := range recovered.Providers {
+				if provider.Provider == earningsWSHProvider {
+					recoveredStatus = provider.Status
+				}
+			}
+			if recoveredStatus != tc.result.Status {
+				t.Fatalf("restarted provider status = %q, want visible failure %q", recoveredStatus, tc.result.Status)
+			}
+			restarted.refreshOne(context.Background(), "TESTQ")
+			if providerCalls != 0 {
+				t.Fatalf("provider calls before persisted retry = %d, want 0", providerCalls)
+			}
+
+			restartNow = wantNext
+			restarted.refreshOne(context.Background(), "TESTQ")
+			if providerCalls != 1 {
+				t.Fatalf("provider calls at persisted retry = %d, want 1", providerCalls)
+			}
+		})
 	}
 }
 

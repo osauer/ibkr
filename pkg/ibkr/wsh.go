@@ -96,12 +96,6 @@ func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string
 		return "", newWSHContextError("acquire", err)
 	}
 
-	release, err := c.acquireWSH(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer release()
-
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	if symbol == "" {
 		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
@@ -109,6 +103,30 @@ func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string
 	secType, _, _, _ := classifySymbol(symbol)
 	if !strings.EqualFold(secType, "STK") {
 		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+	}
+	// A positive contract cache entry can outlive a later broker-confirmed
+	// inactive mark. Check the mark before consulting that cache or acquiring
+	// the serialized WSH gate so a dead contract cannot keep reaching either
+	// contract resolution or the event-calendar wire path.
+	if c.IsSymbolInactive(symbol) {
+		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
+	}
+
+	release, err := c.acquireWSH(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn == nil || !conn.IsConnected() {
+		return "", &WSHError{Kind: WSHErrorTransport, Operation: "metadata"}
+	}
+	serverVersion := conn.ServerVersion()
+	if serverVersion < minServerVerWSHEventFilters || serverVersion > maxClientVersion {
+		return "", &WSHError{Kind: WSHErrorUnsupportedProtocol, Operation: "event_data"}
 	}
 
 	resolver := c.resolveWSHContract
@@ -121,7 +139,7 @@ func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string
 		if errors.Is(resolveErr, context.Canceled) || errors.Is(resolveErr, context.DeadlineExceeded) {
 			return "", newWSHContextError("resolve_contract", resolveErr)
 		}
-		if errors.Is(resolveErr, ErrSymbolInactive) {
+		if errors.Is(resolveErr, ErrSymbolInactive) || c.IsSymbolInactive(symbol) {
 			return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
 		}
 		return "", &WSHError{Kind: WSHErrorContractResolution, Operation: "resolve_contract"}
@@ -129,16 +147,8 @@ func (c *Connector) FetchWSHEarnings(ctx context.Context, symbol string) (string
 	if detail == nil || detail.ConID <= 0 || (detail.SecType != "" && !strings.EqualFold(detail.SecType, "STK")) {
 		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
 	}
-
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-	if conn == nil || !conn.IsConnected() {
-		return "", &WSHError{Kind: WSHErrorTransport, Operation: "metadata"}
-	}
-	serverVersion := conn.ServerVersion()
-	if serverVersion < minServerVerWSHEventFilters || serverVersion > maxClientVersion {
-		return "", &WSHError{Kind: WSHErrorUnsupportedProtocol, Operation: "event_data"}
+	if c.IsSymbolInactive(symbol) {
+		return "", &WSHError{Kind: WSHErrorUnsupportedSecurity, Operation: "resolve_contract"}
 	}
 
 	now := time.Now().UTC()
@@ -269,6 +279,9 @@ func (c *Connector) markWSHMetadataReady(conn *Connection, now time.Time, eventT
 }
 
 func (c *Connector) resolveWSHStockContract(ctx context.Context, symbol string, timeout time.Duration) (*ContractDetailsLite, error) {
+	if c.IsSymbolInactive(symbol) {
+		return nil, ErrSymbolInactive
+	}
 	if detail := c.cachedContractDetail(symbol); detail != nil && detail.ConID > 0 {
 		copy := *detail
 		return &copy, nil
