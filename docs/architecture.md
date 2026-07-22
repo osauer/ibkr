@@ -348,8 +348,9 @@ before persistence. Restart discards runtime entitlement, failure, and backoff
 state; only an exact identical-wire 15-second retry boundary survives so a
 bounce cannot duplicate the same broker request immediately.
 
-For operator and builder reference, use [Trading Policy](policies.md) for the
-human decision and system-control model, and [Storage](database.md) for state,
-evidence, SQLite relationships, query boundaries, durability, and recovery.
-These pages are generated to public HTML from their Markdown sources by the
-same deterministic chain as this page.
+For operator and builder reference, use [Sensors](sensors.md) for measurement,
+freshness, last-good, and dependency semantics; [Trading Policy](policies.md)
+for the human decision and system-control model; and [Storage](database.md) for
+state, evidence, SQLite relationships, query boundaries, durability, and
+recovery. These pages are generated to public HTML from their Markdown sources
+by the same deterministic chain as this page.

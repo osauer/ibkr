@@ -246,5 +246,7 @@ Detailed references:
 - [Trading Harness Development](guides/trading-harness-development.md): how to
   design, shadow, promote, and reconcile a new control.
 - [Architecture](architecture.md): daemon, RPC, adapter, and broker ownership.
+- [Sensors](sensors.md): what current evidence means, when it expires, and how
+  dependent decisions fail closed.
 - [Storage](database.md): how applied policy state and local events are stored
   without making SQLite the policy-authoring surface.

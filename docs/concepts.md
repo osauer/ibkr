@@ -2,7 +2,7 @@
 
 Updated: 2026-07-19 19:40 CEST
 
-What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in [`docs/specs/`](./specs/); this page is the user's mental model.
+What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Start with [Sensors](./sensors.md) for authority, freshness, last-good behavior, and safe checks. Methodology rationale lives in [`docs/specs/`](./specs/); this page is the user's mental model.
 
 ---
 
@@ -43,7 +43,7 @@ Each row carries raw measurements, status/as-of metadata, green / yellow / red b
 
 Two failure modes worth flagging on the wire:
 
-- Gamma and breadth are heavy computes. On the first call of an NY trading day, gamma may return `status: "computing"` with an ETA; on a fresh daemon, breadth returns `state: "computing"` while the constituent fan-out runs (~60 min cold).
+- Gamma and breadth are heavy computes. Gamma may return `status: "computing"` with an ETA when no serveable result exists; during options RTH, a served result refreshes in the background after 15 minutes. On a fresh daemon, breadth returns `state: "computing"` while the constituent fan-out runs (~60 min cold).
 - Live IBKR rows may carry a `fields_missing` array for optional sub-fields that didn't land within the fetch budget. The primary measurement still landed; treat `fields_missing` as a render hint, not an error.
 
 The full methodology spec is at [`docs/specs/risk-regime-dashboard.md`](./specs/risk-regime-dashboard.md). Use it when calibrating your own threshold bands; the spec's suggestions are starting points, not gospel.
@@ -124,7 +124,7 @@ alone a no-vote when SPX has healthy 1-7DTE and term coverage.
 After the expiring SPXW series closes, the 0DTE bucket can be absent while the
 broader SPX surface remains usable.
 
-Compute timing: the first call of an NY trading day kicks a multi-minute background job; later callers within the same session see `status: "ready"` instantly. The cache persists across daemon restarts.
+Compute timing: the first eligible call without a serveable result kicks a multi-minute background job. During options RTH, later calls keep serving the last-good result and trigger one background refresh after 15 minutes; a successful replacement is promoted atomically. Closed-session automatic refresh is suppressed, and the latest completed-session result remains Regime `not_due` context until the next options open. The cache persists across daemon restarts.
 
 Full methodology at [`docs/specs/risk-regime-dashboard.md`](./specs/risk-regime-dashboard.md). Cache persistence details are in [`docs/design/gamma-zero-cache-persistence.md`](./design/gamma-zero-cache-persistence.md).
 

@@ -23,6 +23,7 @@
     <nav class="nav-links" aria-label="Site">
       <a href="index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="sensors.html">Sensors</a>
       <a href="reference/mcp-tools.html">MCP tools</a>
       <a href="guides/agentic-use.html">Agent guide</a>
     </nav>
@@ -531,11 +532,12 @@ the atomic portfolio rows/receipt, exact ConID and route, and a same-scope check
 before persistence. Restart discards runtime entitlement, failure, and backoff
 state; only an exact identical-wire 15-second retry boundary survives so a
 bounce cannot duplicate the same broker request immediately.</p>
-<p>For operator and builder reference, use <a href="policies.html">Trading Policy</a> for the
-human decision and system-control model, and <a href="database.html">Storage</a> for state,
-evidence, SQLite relationships, query boundaries, durability, and recovery.
-These pages are generated to public HTML from their Markdown sources by the
-same deterministic chain as this page.</p>
+<p>For operator and builder reference, use <a href="sensors.html">Sensors</a> for measurement,
+freshness, last-good, and dependency semantics; <a href="policies.html">Trading Policy</a>
+for the human decision and system-control model; and <a href="database.html">Storage</a> for
+state, evidence, SQLite relationships, query boundaries, durability, and
+recovery. These pages are generated to public HTML from their Markdown sources
+by the same deterministic chain as this page.</p>
   </main>
   <footer>
     <div class="wrap"><a href="index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div>

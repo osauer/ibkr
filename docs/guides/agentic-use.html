@@ -19,6 +19,7 @@
     <nav class="nav-links" aria-label="Site">
       <a href="../index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="../sensors.html">Sensors</a>
       <a href="../reference/mcp-tools.html">MCP tools</a>
       <a href="../guides/agentic-use.html">Agent guide</a>
     </nav>
@@ -79,7 +80,7 @@ and term coverage, the result can remain rankable while still disclosing the
 missing 0DTE bucket in <code>quality.coverage</code> and <code>warning_details</code>. After the
 expiring SPXW series closes, the 0DTE bucket can be absent even when the broader
 SPX surface is usable.</p>
-<p>The important diagnostic is <strong><code>disagree</code></strong>: one book stabilizing while the other amplifies, indicating institutional/retail positioning divergence. Claude usually flags this prominently. The first call of an NY trading day kicks a multi-minute background compute; you'll see <code>status: &quot;computing&quot;</code> with an ETA. Re-ask in a few minutes for the result. See <a href="../concepts.html#gamma">Concepts → Gamma</a>.</p>
+<p>The important diagnostic is <strong><code>disagree</code></strong>: one book stabilizing while the other amplifies, indicating institutional/retail positioning divergence. Claude usually flags this prominently. When no serveable result exists, Gamma kicks a multi-minute background compute and returns <code>status: &quot;computing&quot;</code> with an ETA. During options RTH, a served result refreshes behind the last-good value after 15 minutes. See <a href="../sensors.html#gamma">Sensors → Gamma</a> and <a href="../concepts.html#gamma">Concepts → Gamma</a>.</p>
 <h3 id="find-me-top-sp-500-names-trading-above-their-50-day-moving-average">&quot;Find me top S&amp;P 500 names trading above their 50-day moving average.&quot;</h3>
 <p>→ Claude invokes <code>ibkr_breadth</code> to get the index-wide reading, then <code>ibkr_scan</code> with the <code>top-movers</code> preset (or an ad-hoc scan) to return specific names.</p>
 <p>Returns the % of S&amp;P names above their 50-DMA (the tactical signal) and per-row scanner output enriched with last / prev_close / change_pct / volume / IV. Claude typically pairs the breadth context (&quot;market-wide reading: 54% above 50-DMA, healthy&quot;) with the specific names that match the scan. For follow-up questions like <em>&quot;show me daily bars for AAPL&quot;</em>, Claude chains to <code>ibkr_history</code>. See <a href="../concepts.html#breadth">Concepts → Breadth</a>.</p>

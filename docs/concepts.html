@@ -19,6 +19,7 @@
     <nav class="nav-links" aria-label="Site">
       <a href="index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="sensors.html">Sensors</a>
       <a href="reference/mcp-tools.html">MCP tools</a>
       <a href="guides/agentic-use.html">Agent guide</a>
     </nav>
@@ -26,7 +27,7 @@
   <main class="wrap doc">
 <h1 id="concepts">Concepts</h1>
 <p>Updated: 2026-07-19 19:40 CEST</p>
-<p>What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Methodology rationale lives in <a href="./specs/"><code>docs/specs/</code></a>; this page is the user's mental model.</p>
+<p>What the load-bearing context surfaces measure, in enough depth to read the output without mis-acting on it. Start with <a href="sensors.html">Sensors</a> for authority, freshness, last-good behavior, and safe checks. Methodology rationale lives in <a href="./specs/"><code>docs/specs/</code></a>; this page is the user's mental model.</p>
 <hr>
 <h2 id="market-calendars">Market Calendars</h2>
 <p>Market calendars answer a simple but risk-relevant question: <em>is this market supposed to be trading right now, and if not, when does the official session resume?</em></p>
@@ -56,7 +57,7 @@
 <p>Each row carries raw measurements, status/as-of metadata, green / yellow / red banding, and a <code>streak</code> field counting consecutive sessions in the current band; a Day-1 stress event reads differently from a Day-5 one. The lifecycle layer keeps weak or unconfirmed red evidence visible while preventing a single noisy proxy from dominating the broad-market trigger.</p>
 <p>Two failure modes worth flagging on the wire:</p>
 <ul>
-<li>Gamma and breadth are heavy computes. On the first call of an NY trading day, gamma may return <code>status: &quot;computing&quot;</code> with an ETA; on a fresh daemon, breadth returns <code>state: &quot;computing&quot;</code> while the constituent fan-out runs (~60 min cold).</li>
+<li>Gamma and breadth are heavy computes. Gamma may return <code>status: &quot;computing&quot;</code> with an ETA when no serveable result exists; during options RTH, a served result refreshes in the background after 15 minutes. On a fresh daemon, breadth returns <code>state: &quot;computing&quot;</code> while the constituent fan-out runs (~60 min cold).</li>
 <li>Live IBKR rows may carry a <code>fields_missing</code> array for optional sub-fields that didn't land within the fetch budget. The primary measurement still landed; treat <code>fields_missing</code> as a render hint, not an error.</li>
 </ul>
 <p>The full methodology spec is at <a href="specs/risk-regime-dashboard.html"><code>docs/specs/risk-regime-dashboard.md</code></a>. Use it when calibrating your own threshold bands; the spec's suggestions are starting points, not gospel.</p>
@@ -118,7 +119,7 @@
 alone a no-vote when SPX has healthy 1-7DTE and term coverage.
 After the expiring SPXW series closes, the 0DTE bucket can be absent while the
 broader SPX surface remains usable.</p>
-<p>Compute timing: the first call of an NY trading day kicks a multi-minute background job; later callers within the same session see <code>status: &quot;ready&quot;</code> instantly. The cache persists across daemon restarts.</p>
+<p>Compute timing: the first eligible call without a serveable result kicks a multi-minute background job. During options RTH, later calls keep serving the last-good result and trigger one background refresh after 15 minutes; a successful replacement is promoted atomically. Closed-session automatic refresh is suppressed, and the latest completed-session result remains Regime <code>not_due</code> context until the next options open. The cache persists across daemon restarts.</p>
 <p>Full methodology at <a href="specs/risk-regime-dashboard.html"><code>docs/specs/risk-regime-dashboard.md</code></a>. Cache persistence details are in <a href="design/gamma-zero-cache-persistence.html"><code>docs/design/gamma-zero-cache-persistence.md</code></a>.</p>
 <hr>
 <h2 id="breadth">Breadth</h2>

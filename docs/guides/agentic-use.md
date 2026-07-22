@@ -97,7 +97,7 @@ missing 0DTE bucket in `quality.coverage` and `warning_details`. After the
 expiring SPXW series closes, the 0DTE bucket can be absent even when the broader
 SPX surface is usable.
 
-The important diagnostic is **`disagree`**: one book stabilizing while the other amplifies, indicating institutional/retail positioning divergence. Claude usually flags this prominently. The first call of an NY trading day kicks a multi-minute background compute; you'll see `status: "computing"` with an ETA. Re-ask in a few minutes for the result. See [Concepts → Gamma](../concepts.md#gamma).
+The important diagnostic is **`disagree`**: one book stabilizing while the other amplifies, indicating institutional/retail positioning divergence. Claude usually flags this prominently. When no serveable result exists, Gamma kicks a multi-minute background compute and returns `status: "computing"` with an ETA. During options RTH, a served result refreshes behind the last-good value after 15 minutes. See [Sensors → Gamma](../sensors.md#gamma) and [Concepts → Gamma](../concepts.md#gamma).
 
 ### "Find me top S&P 500 names trading above their 50-day moving average."
 

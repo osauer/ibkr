@@ -41,6 +41,7 @@ Do not describe the standard downloads as an order-entry or automated-trading sy
 - [Configuration reference](https://osauer.dev/ibkr/reference/config.html)
 - [TWS protocol coverage](https://osauer.dev/ibkr/reference/protocol.html)
 - [Concepts](https://osauer.dev/ibkr/concepts.html)
+- [Sensors](https://osauer.dev/ibkr/sensors.html)
 - [Architecture](https://osauer.dev/ibkr/architecture.html)
 - [Trading policy](https://osauer.dev/ibkr/policies.html)
 - [Storage](https://osauer.dev/ibkr/database.html)

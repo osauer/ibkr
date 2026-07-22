@@ -874,6 +874,166 @@ function sqliteUpdateLifecycle() {
   });
 }
 
+function sensorBox({ x, y, width, height, title, lines, color = C.slate, iconName = "cpu", fill = C.panel, dark = false }) {
+  const titleFill = dark ? "#ffffff" : C.ink;
+  const bodyClass = dark ? "node-sub on-dark" : "card-sub";
+  return `<g role="group" aria-label="${esc([title, ...lines].join(". "))}">
+    <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="13" fill="${fill}" stroke="${color}" stroke-width="1.3"/>
+    ${iconTile(iconName, x + 16, y + 16, color, 36)}
+    <text x="${x + 64}" y="${y + 38}" class="card-title" style="fill:${titleFill}">${esc(title)}</text>
+    ${textLines(x + 18, y + 76, lines, bodyClass, 18)}
+  </g>`;
+}
+
+function sensorAuthorityPipeline() {
+  const body = `
+  ${header("Sensor Measurement and Authority", "Observed facts flow through daemon-owned sensors before any downstream alert view.")}
+
+  <text x="36" y="142" class="layer">1 · OBSERVED SOURCES</text>
+  <text x="352" y="142" class="layer">2 · PRIMARY SENSORS</text>
+  <text x="710" y="142" class="layer">3 · DEPENDENT DECISIONS</text>
+  <text x="1114" y="142" class="layer">4 · DOWNSTREAM CONSUMERS</text>
+
+  <rect x="24" y="158" width="284" height="570" rx="17" fill="${C.panelAlt}" stroke="${C.line}"/>
+  ${sensorBox({ x: 42, y: 184, width: 248, height: 116, title: "TWS / Gateway", lines: ["account · positions · tape", "quotes · chains · OI"], color: C.blue, iconName: "plugConnected" })}
+  ${sensorBox({ x: 42, y: 326, width: 248, height: 116, title: "Official & Public", lines: ["Nasdaq · FRED · Cboe", "calendars · membership"], color: C.greenDark, iconName: "worldDownload" })}
+  ${sensorBox({ x: 42, y: 468, width: 248, height: 116, title: "IBKR FTP", lines: ["global borrow availability", "annualized fee evidence"], color: C.green, iconName: "databaseImport" })}
+  ${sensorBox({ x: 42, y: 610, width: 248, height: 94, title: "daemon.db", lines: ["last-good + observations"], color: C.slate, iconName: "database" })}
+
+  <rect x="334" y="158" width="334" height="570" rx="17" fill="${C.panel}" stroke="${C.greenLine}" stroke-width="1.4"/>
+  ${sensorBox({ x: 352, y: 184, width: 298, height: 132, title: "Gamma", lines: ["SPX canonical · SPY context", "0DTE · 1–7 · term"], color: C.blue, iconName: "cpu" })}
+  ${sensorBox({ x: 352, y: 342, width: 298, height: 132, title: "Market Series", lines: ["vol · credit · funding · FX", "breadth + source health"], color: C.greenDark, iconName: "worldDownload" })}
+  ${sensorBox({ x: 352, y: 500, width: 298, height: 132, title: "Market Events", lines: ["Reg SHO · halts · borrow", "held-name typed context"], color: C.green, iconName: "bell" })}
+  ${sensorBox({ x: 352, y: 650, width: 298, height: 58, title: "Portfolio State", lines: [], color: C.blue, iconName: "user" })}
+
+  <rect x="692" y="158" width="368" height="570" rx="17" fill="${C.panel}" stroke="${C.greenLine}" stroke-width="1.4"/>
+  ${sensorBox({ x: 710, y: 184, width: 332, height: 126, title: "Regime", lines: ["8 rows → 6 clusters", "5-minute last-good authority"], color: C.green, iconName: "serverCog", fill: C.terminal, dark: true })}
+  ${sensorBox({ x: 710, y: 352, width: 332, height: 126, title: "Canary", lines: ["Regime + held portfolio", "one-minute fail-closed view"], color: C.amber, iconName: "shieldCheck" })}
+  ${sensorBox({ x: 710, y: 520, width: 332, height: 126, title: "Rulebook", lines: ["account + book + events", "one-minute advisory checks"], color: C.slate, iconName: "fileText" })}
+
+  <rect x="1096" y="158" width="320" height="570" rx="17" fill="${C.panelAlt}" stroke="${C.line}"/>
+  ${sensorBox({ x: 1114, y: 238, width: 284, height: 136, title: "Alerts", lines: ["consumes typed decisions", "delivery is a separate claim"], color: C.amber, iconName: "bell" })}
+  ${sensorBox({ x: 1114, y: 420, width: 284, height: 136, title: "Read-only Views", lines: ["CLI · MCP · app · web", "render; never re-decide"], color: C.slate, iconName: "browser" })}
+
+  ${line("M290 242H352", "blue")}
+  ${line("M290 384H352", "green")}
+  ${line("M290 526H352", "green")}
+  ${line("M290 657H334", "slate", { dashed: true, both: true })}
+  ${line("M290 270H320V679H352", "blue", { dashed: true })}
+  ${line("M650 250H680V247H710", "blue")}
+  ${line("M650 408H680V247H710", "green")}
+  ${line("M876 310V352", "green")}
+  ${line("M650 566H680V415H710", "green")}
+  ${line("M650 679H684V415H710", "blue", { dashed: true })}
+  ${line("M650 679H694V583H710", "blue", { dashed: true })}
+  ${line("M1042 247H1068V583H1042", "green", { dashed: true })}
+  ${line("M1042 247H1076V306H1114", "green")}
+  ${line("M1042 415H1076V306H1114", "amber")}
+  ${line("M1042 583H1076V306H1114", "slate")}
+  ${line("M1042 247H1082V488H1114", "slate", { dashed: true })}
+  ${line("M1042 415H1082V488H1114", "slate", { dashed: true })}
+  ${line("M1042 583H1082V488H1114", "slate", { dashed: true })}
+
+  <text x="1404" y="758" text-anchor="end" class="footnote">measurement is not policy · sensor state is not proof of delivery</text>
+  `;
+
+  return svgFrame({
+    width: 1440,
+    height: 780,
+    title: "Sensor Measurement and Authority (ibkr canary)",
+    description: "Broker and public observations enter daemon-owned Gamma, market-series, and market-event sensors. Regime consumes Gamma and market series; Canary consumes Regime, portfolio, and held-name events; Rulebook consumes current desk evidence. Alerts and read-only surfaces consume typed results without recreating authority.",
+    body,
+    extraStyles: policyReadableStyles,
+  });
+}
+
+function sensorFreshnessTimeline() {
+  const body = `
+  ${header("Freshness, Last-good, and Gaps", "A schedule says when a replacement is due; health says whether the old observation may still be used.")}
+
+  ${legendItem(962, 42, "green", "usable authority")}
+  ${legendItem(1132, 42, "blue", "refresh work", { dashed: true })}
+  ${legendItem(962, 66, "amber", "context / gap")}
+  ${legendItem(1132, 66, "slate", "time boundary", { dotted: true })}
+
+  <text x="42" y="150" class="layer">SOURCE IS DUE · PROACTIVE REFRESH</text>
+  <line x1="166" y1="244" x2="1370" y2="244" stroke="${C.line}" stroke-width="2"/>
+  <text x="42" y="249" class="matrix-head">Due source</text>
+
+  <rect x="166" y="184" width="390" height="88" rx="12" fill="${C.greenSoft}" stroke="${C.green}"/>
+  <text x="186" y="216" class="card-title">Current last-good</text>
+  <text x="186" y="242" class="card-sub">published value remains authoritative</text>
+  <text x="186" y="260" class="mono-small">as_of fixed · health=current</text>
+
+  <rect x="556" y="184" width="250" height="88" rx="12" fill="${C.blueSoft}" stroke="${C.blue}" stroke-dasharray="7 5"/>
+  <text x="576" y="216" class="card-title">Refresh starts early</text>
+  <text x="576" y="242" class="card-sub">old result stays served</text>
+  <text x="576" y="260" class="mono-small">single flight · bounded timeout</text>
+
+  <line x1="806" y1="158" x2="806" y2="326" stroke="${C.slate}" stroke-width="1.5" stroke-dasharray="2 5"/>
+  <text x="806" y="146" text-anchor="middle" class="card-note">hard expiry</text>
+
+  <path d="M806 214H850V176H900" fill="none" stroke="${C.green}" stroke-width="1.8" marker-end="url(#arrow-green)"/>
+  <rect x="900" y="142" width="250" height="78" rx="12" fill="${C.greenSoft}" stroke="${C.green}"/>
+  <text x="920" y="174" class="card-title">Success before expiry</text>
+  <text x="920" y="198" class="card-sub">atomically publish replacement</text>
+
+  <path d="M806 252H850V294H900" fill="none" stroke="${C.amber}" stroke-width="1.8" marker-end="url(#arrow-amber)"/>
+  <rect x="900" y="258" width="250" height="78" rx="12" fill="${C.amberSoft}" stroke="${C.amber}"/>
+  <text x="920" y="290" class="card-title">Failure at expiry</text>
+  <text x="920" y="314" class="card-sub">old value becomes stale</text>
+
+  ${line("M1150 297H1190", "amber")}
+  <rect x="1190" y="258" width="180" height="78" rx="12" fill="${C.panel}" stroke="${C.amber}"/>
+  <text x="1210" y="290" class="card-title">Fail closed</text>
+  <text x="1210" y="314" class="card-sub">dependent readiness blocks</text>
+
+  <text x="42" y="412" class="layer">SOURCE IS NOT DUE · SESSION-AWARE CARRY</text>
+  <line x1="166" y1="506" x2="1370" y2="506" stroke="${C.line}" stroke-width="2"/>
+  <text x="42" y="511" class="matrix-head">Closed window</text>
+
+  <rect x="166" y="446" width="278" height="88" rx="12" fill="${C.greenSoft}" stroke="${C.green}"/>
+  <text x="186" y="478" class="card-title">Completed-session result</text>
+  <text x="186" y="504" class="card-sub">valid last-good observation</text>
+  <text x="186" y="522" class="mono-small">session closes</text>
+
+  <rect x="444" y="446" width="448" height="88" rx="12" fill="${C.amberSoft}" stroke="${C.amber}"/>
+  <text x="464" y="478" class="card-title">Typed not_due context</text>
+  <text x="464" y="504" class="card-sub">no newer observation should exist · no automatic churn</text>
+  <text x="464" y="522" class="mono-small">visible, but not confirmation-eligible</text>
+
+  <line x1="892" y1="420" x2="892" y2="590" stroke="${C.slate}" stroke-width="1.5" stroke-dasharray="2 5"/>
+  <text x="892" y="408" text-anchor="middle" class="card-note">next source window opens</text>
+
+  <rect x="892" y="446" width="248" height="88" rx="12" fill="${C.blueSoft}" stroke="${C.blue}" stroke-dasharray="7 5"/>
+  <text x="912" y="478" class="card-title">Replacement is due</text>
+  <text x="912" y="504" class="card-sub">refresh current-session evidence</text>
+  <text x="912" y="522" class="mono-small">old session no longer not_due</text>
+
+  ${line("M1140 490H1180", "amber")}
+  <rect x="1180" y="446" width="190" height="88" rx="12" fill="${C.panel}" stroke="${C.amber}"/>
+  <text x="1200" y="478" class="card-title">Overdue gap</text>
+  <text x="1200" y="504" class="card-sub">undefined, never warning</text>
+  <text x="1200" y="522" class="mono-small">retry state explicit</text>
+
+  <rect x="166" y="604" width="1204" height="82" rx="14" fill="${C.panel}" stroke="${C.line}"/>
+  ${iconTile("shieldCheck", 186, 624, C.slate, 38)}
+  <text x="240" y="640" class="card-title">One rule across every sensor</text>
+  <text x="240" y="666" class="card-sub">Keep independently current evidence visible. Never let stale, partial, unavailable, or overdue required data become a pass or an early-warning signal.</text>
+
+  <text x="1404" y="722" text-anchor="end" class="footnote">timestamps never move unless a replacement is actually accepted</text>
+  `;
+
+  return svgFrame({
+    width: 1440,
+    height: 744,
+    title: "Freshness, Last-good, and Gaps (ibkr canary)",
+    description: "The due-source lane shows a current last-good value, a proactive refresh before hard expiry, successful atomic replacement, or stale fail-closed behavior after failure. The closed-window lane shows completed-session context as typed not-due until the next source window opens, after which a missing replacement is overdue and blocks dependent readiness.",
+    body,
+    extraStyles: policyReadableStyles,
+  });
+}
+
 const cleanGeneratedSVG = (svg) => svg.replace(/^[ \t]+$/gm, "");
 
 const outputs = new Map([
@@ -884,6 +1044,8 @@ const outputs = new Map([
   ["storage-overview.svg", cleanGeneratedSVG(storageOverview())],
   ["sqlite-data-model.svg", cleanGeneratedSVG(sqliteDataModel())],
   ["sqlite-update-lifecycle.svg", cleanGeneratedSVG(sqliteUpdateLifecycle())],
+  ["sensor-authority-pipeline.svg", cleanGeneratedSVG(sensorAuthorityPipeline())],
+  ["sensor-freshness-timeline.svg", cleanGeneratedSVG(sensorFreshnessTimeline())],
 ]);
 
 if (process.argv.includes("--check")) {

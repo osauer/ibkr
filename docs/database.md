@@ -285,6 +285,8 @@ or a change stream from each authoritative daemon.
 ## Reference Map
 
 - [Architecture](architecture.md): process, broker, RPC, and state ownership.
+- [Sensors](sensors.md): measurement authority, source cadence, last-good
+  behavior, and safe operator checks.
 - [SQLite Implementation Contract](design/daemon-sqlite-authority.md): cutover,
   durability, upgrade, and recovery mechanics.
 - [Platform Settings](design/platform-settings.md): the typed daemon document for

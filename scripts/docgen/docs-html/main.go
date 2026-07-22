@@ -57,6 +57,12 @@ var pages = []pageSpec{
 		SocialImage: "diagrams/storage-overview.png",
 	},
 	{
+		Source:      "docs/sensors.md",
+		Description: "How ibkr Gamma, Regime, Canary, Rulebook, and market-event sensors establish authority, freshness, last-good context, and fail-closed data quality.",
+		Layout:      "architecture",
+		SocialImage: "diagrams/sensor-authority-pipeline.png",
+	},
+	{
 		Source:      "docs/concepts.md",
 		Description: "What the load-bearing market, portfolio, and data-quality context surfaces measure, and how to read them without mis-acting on the output.",
 	},
@@ -141,6 +147,7 @@ var documentTemplate = template.Must(template.New("document").Parse(`<!doctype h
     <nav class="nav-links" aria-label="Site">
       <a href="{{.RootPrefix}}index.html#install">Install</a>
       <a href="https://github.com/osauer/ibkr">GitHub</a>
+      <a href="{{.RootPrefix}}sensors.html">Sensors</a>
       <a href="{{.RootPrefix}}reference/mcp-tools.html">MCP tools</a>
       <a href="{{.RootPrefix}}guides/agentic-use.html">Agent guide</a>
     </nav>
