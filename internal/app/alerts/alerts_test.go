@@ -123,7 +123,6 @@ func TestDispatcherRecordsTypedPrerequisiteHealth(t *testing.T) {
 		{name: "sender unavailable", addTarget: true, addKeys: true, class: state.AlertDeliveryHealthClassSender},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store := newAlertStore(t, t.TempDir(), base)
@@ -206,7 +205,6 @@ func TestDispatcherReportsIdlePrerequisiteHealth(t *testing.T) {
 		{name: "sender unavailable", addTarget: true, addKeys: true, class: state.AlertDeliveryHealthClassSender},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store := newAlertStore(t, t.TempDir(), base)
@@ -256,7 +254,6 @@ func TestControllerMutationsWaitForConfirmedTransport(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			store := newAlertStore(t, t.TempDir(), base)
 			addAlertTarget(t, store, "device-one", "subscription-one", base)

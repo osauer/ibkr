@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"time"
 
@@ -203,9 +204,7 @@ func decodeAlertDeliveryV2(raw []byte) (*alertDeliveryData, error) {
 		Health: legacy.Health, AttentionHighWaterSeq: legacy.AttentionHighWaterSeq,
 		AttentionReadThroughSeq: legacy.AttentionReadThroughSeq, migratedV2: true,
 	}
-	for key, value := range legacy.RetiredTargets {
-		current.RetiredTargets[key] = value
-	}
+	maps.Copy(current.RetiredTargets, legacy.RetiredTargets)
 	for _, occurrence := range legacy.Occurrences {
 		converted, err := occurrence.current()
 		if err != nil {
