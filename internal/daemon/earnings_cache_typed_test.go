@@ -1050,6 +1050,16 @@ func TestDecodeEarningsV4UpgradesOnlyLegacyWSHNotEntitledAggregate(t *testing.T)
 		loaded["SYNTH1"].Providers[earningsWSHProvider].LastAttempt.NextAttempt == nil || !loaded["SYNTH1"].Providers[earningsWSHProvider].LastAttempt.NextAttempt.Equal(next) {
 		t.Fatalf("legacy tuple upgrade failed: loaded=%+v err=%v", loaded, err)
 	}
+	unsupported := legacy
+	unsupported.Providers = make(map[string]earningsProviderState, len(providers))
+	maps.Copy(unsupported.Providers, providers)
+	nasdaq := unsupported.Providers[earningsNasdaqProvider]
+	nasdaq.LastAttempt.Status = rpc.EarningsStatusUnsupportedSecurity
+	unsupported.Providers[earningsNasdaqProvider] = nasdaq
+	loaded, err = decode(unsupported)
+	if err != nil || loaded["SYNTH1"].Resolution.Status != rpc.EarningsStatusUnsupportedSecurity {
+		t.Fatalf("legacy unsupported tuple upgrade failed: loaded=%+v err=%v", loaded, err)
+	}
 	for _, mutate := range []func(*rpc.SourceFailure){
 		func(f *rpc.SourceFailure) { f.Stage = "other" },
 		func(f *rpc.SourceFailure) { f.Retryable = true },

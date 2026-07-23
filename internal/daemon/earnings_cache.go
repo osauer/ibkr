@@ -1226,11 +1226,6 @@ func resolveEarningsProviders(providers map[string]earningsProviderState, now ti
 	return earningsResolution{Status: rpc.EarningsStatusTransportFailure, Reason: rpc.EarningsStatusTransportFailure}
 }
 
-func earningsNasdaqNoDateWithWSHNotEntitled(providers map[string]earningsProviderState) bool {
-	status, ok := earningsNasdaqObservedWithWSHNotEntitled(providers)
-	return ok && status == rpc.EarningsStatusNoDatePublished
-}
-
 func earningsNasdaqObservedWithWSHNotEntitled(providers map[string]earningsProviderState) (string, bool) {
 	if len(providers) != 2 {
 		return "", false
@@ -1838,9 +1833,10 @@ func validateEarningsSymbols(symbols map[string]earningsSymbolState, now time.Ti
 }
 
 func legacyWSHNotEntitledAggregate(stored earningsResolution, providers map[string]earningsProviderState, recomputed earningsResolution) bool {
+	observed, exact := earningsNasdaqObservedWithWSHNotEntitled(providers)
 	return stored.Status == rpc.EarningsStatusTransportFailure && stored.Reason == rpc.EarningsStatusTransportFailure &&
-		stored.Entry == nil && !stored.Stale && recomputed.Status == rpc.EarningsStatusNoDatePublished &&
-		earningsNasdaqNoDateWithWSHNotEntitled(providers)
+		stored.Entry == nil && !stored.Stale && exact && recomputed.Status == observed &&
+		(observed == rpc.EarningsStatusNoDatePublished || observed == rpc.EarningsStatusUnsupportedSecurity)
 }
 
 func validAggregateEarningsStatus(status string) bool {
