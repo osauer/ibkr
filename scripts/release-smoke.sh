@@ -336,6 +336,27 @@ esac
 assert_wire quote-spy "$boot_offset"
 
 echo "  [4] account.summary..."
+# The daemon coalesces closely spaced account reads behind one completed
+# broker snapshot (internal/daemon/account_authority.go's
+# accountSnapshotFreshFor), so Rulebook, Canary, brief, app, and CLI reads
+# arriving together cost one reqAccountSummary instead of a burst. An
+# `ibkr account` issued seconds after the boot/status read is therefore
+# served from that snapshot and emits no request of its own.
+#
+# Unlike the shared SPY line above — a live subscription whose data keeps
+# flowing — this is a time-boxed cache, and a cache is exactly what can go
+# silently stale. So this step does NOT widen its scan to the boot window:
+# it waits the snapshot out, which keeps the per-command assertion honest
+# and additionally proves the snapshot expires instead of serving forever.
+account_fresh_secs="$(sed -n 's/^const accountSnapshotFreshFor = \([0-9][0-9]*\) \* time\.Second$/\1/p' \
+    "$SCRIPT_DIR/../internal/daemon/account_authority.go" 2>/dev/null || true)"
+if [[ -z "$account_fresh_secs" ]]; then
+    account_fresh_secs=15
+    echo "    warning: could not read accountSnapshotFreshFor; assuming ${account_fresh_secs}s" >&2
+fi
+account_wait=$((account_fresh_secs + 3))
+echo "    waiting ${account_wait}s for the shared account snapshot to expire..."
+sleep "$account_wait"
 run_wire_cli account "$JSON_TIMEOUT" account --json
 account_json="$LAST_CMD_OUTPUT"
 account_id="$(json_field account_id "$account_json")"
