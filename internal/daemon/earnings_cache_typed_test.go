@@ -53,8 +53,9 @@ func TestParseNasdaqEarningsTypedOutcomes(t *testing.T) {
 		code           string
 		stage          string
 	}{
-		{"exact prefix only", nasdaqTestPayload(t, map[string]any{"announcement": prefix}, http.StatusOK), providerSymbol, rpc.EarningsStatusNoDatePublished, "", ""},
-		{"exact legacy trailing space", nasdaqTestPayload(t, map[string]any{"announcement": prefix + " "}, http.StatusOK), providerSymbol, rpc.EarningsStatusNoDatePublished, "", ""},
+		{"nested prefix only", nasdaqTestPayload(t, map[string]any{"announcement": prefix}, http.StatusOK), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
+		{"nested trailing space", nasdaqTestPayload(t, map[string]any{"announcement": prefix + " "}, http.StatusOK), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
+		{"observed exact no-date envelope", []byte(`{"data":{"announcement":"Earnings announcement* for TESTQ: "},"status":{"rCode":200}}`), providerSymbol, rpc.EarningsStatusNoDatePublished, "", ""},
 		{"leading space", nasdaqTestPayload(t, map[string]any{"announcement": " " + prefix}, http.StatusOK), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
 		{"leading tab", nasdaqTestPayload(t, map[string]any{"announcement": "\t" + prefix}, http.StatusOK), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
 		{"leading newline", nasdaqTestPayload(t, map[string]any{"announcement": "\n" + prefix}, http.StatusOK), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
@@ -80,7 +81,7 @@ func TestParseNasdaqEarningsTypedOutcomes(t *testing.T) {
 		{"missing nested status code", []byte(`{"data":{"announcement":null,"status":{}}}`), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
 		{"null nested status code", []byte(`{"data":{"announcement":null,"status":{"rCode":null}}}`), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
 		{"invalid nested status code type", []byte(`{"data":{"announcement":null,"status":{"rCode":"200"}}}`), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
-		{"top-level-only status", []byte(`{"data":{"announcement":"Earnings announcement* for TESTQ: Jul 30, 2026"},"status":{"rCode":200}}`), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
+		{"top-level-only status date", []byte(`{"data":{"announcement":"Earnings announcement* for TESTQ: Jul 30, 2026"},"status":{"rCode":200}}`), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
 		{"conflicting top-level status", []byte(`{"data":{"announcement":"Earnings announcement* for TESTQ: Jul 30, 2026","status":{"rCode":200}},"status":{"rCode":404}}`), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
 		{"bad request with data", nasdaqTestPayload(t, map[string]any{"announcement": nil}, http.StatusBadRequest), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
 		{"not found with data", nasdaqTestPayload(t, map[string]any{"announcement": nil}, http.StatusNotFound), providerSymbol, rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema},
@@ -198,6 +199,10 @@ func TestParseNasdaqEarningsToleratesUnrelatedProseFields(t *testing.T) {
 	requireNasdaqTypedOutcome(t,
 		[]byte(`{"notice":"untrusted top-level prose","data":null,"status":{"rCode":400,"bCodeMessage":"untrusted status prose"}}`),
 		rpc.EarningsStatusUnsupportedSecurity, "", "")
+
+	requireNasdaqTypedOutcome(t,
+		[]byte(`{"notice":"untrusted top-level prose","data":{"announcement":"Earnings announcement* for TESTQ: ","reportText":"untrusted data prose"},"status":{"rCode":200,"message":"untrusted status prose"}}`),
+		rpc.EarningsStatusNoDatePublished, "", "")
 }
 
 func TestParseNasdaqEarningsUnsupportedRequiresExplicitNullDataAndExactBadRequest(t *testing.T) {
@@ -212,6 +217,12 @@ func TestParseNasdaqEarningsUnsupportedRequiresExplicitNullDataAndExactBadReques
 		{"string bad request", `{"data":null,"status":{"rCode":"400"}}`},
 		{"fractional bad request", `{"data":null,"status":{"rCode":400.0}}`},
 		{"nested bad request", `{"data":{"announcement":null,"status":{"rCode":400}}}`},
+		{"no-date wrong root code", `{"data":{"announcement":"Earnings announcement* for TESTQ: "},"status":{"rCode":400}}`},
+		{"no-date string root code", `{"data":{"announcement":"Earnings announcement* for TESTQ: "},"status":{"rCode":"200"}}`},
+		{"no-date root plus nested status", `{"data":{"announcement":"Earnings announcement* for TESTQ: ","status":{"rCode":200}},"status":{"rCode":200}}`},
+		{"no-date exact prefix without space", `{"data":{"announcement":"Earnings announcement* for TESTQ:"},"status":{"rCode":200}}`},
+		{"no-date two trailing spaces", `{"data":{"announcement":"Earnings announcement* for TESTQ:  "},"status":{"rCode":200}}`},
+		{"no-date wrong symbol", `{"data":{"announcement":"Earnings announcement* for OTHERQ: "},"status":{"rCode":200}}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -263,11 +274,13 @@ func TestValidateEarningsNasdaqParserProvenance(t *testing.T) {
 		{"negative format change", earningsNasdaqProvider, formatChange, -1, false},
 		{"v0 format change", earningsNasdaqProvider, formatChange, 0, false},
 		{"v1 format change", earningsNasdaqProvider, formatChange, earningsNasdaqParserContractLegacy, true},
-		{"v2 format change", earningsNasdaqProvider, formatChange, earningsNasdaqParserContract, true},
+		{"v2 format change", earningsNasdaqProvider, formatChange, earningsNasdaqParserContractPrevious, true},
+		{"v3 format change", earningsNasdaqProvider, formatChange, earningsNasdaqParserContract, true},
 		{"future format change", earningsNasdaqProvider, formatChange, earningsNasdaqParserContract + 1, false},
 		{"v0 legacy non-format", earningsNasdaqProvider, noDate, 0, true},
 		{"v1 non-format", earningsNasdaqProvider, noDate, earningsNasdaqParserContractLegacy, false},
-		{"v2 current non-format", earningsNasdaqProvider, noDate, earningsNasdaqParserContract, true},
+		{"v2 no-date", earningsNasdaqProvider, noDate, earningsNasdaqParserContractPrevious, true},
+		{"v3 current non-format", earningsNasdaqProvider, noDate, earningsNasdaqParserContract, true},
 		{"WSH v1", earningsWSHProvider, noDate, earningsNasdaqParserContractLegacy, false},
 		{"WSH v2", earningsWSHProvider, noDate, earningsNasdaqParserContract, false},
 	}
@@ -280,6 +293,48 @@ func TestValidateEarningsNasdaqParserProvenance(t *testing.T) {
 			}
 			if !test.valid && err == nil {
 				t.Fatal("invalid parser provenance accepted")
+			}
+		})
+	}
+}
+
+func TestEarningsNasdaqParserContractV2DueRules(t *testing.T) {
+	completed := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	formatChange := normalizeEarningsAttempt(earningsNasdaqProvider, "TESTQ", earningsProviderFetchResult{
+		Status:  rpc.EarningsStatusFormatChange,
+		Failure: &rpc.SourceFailure{Code: rpc.SourceFailureInvalidPayload, Stage: rpc.SourceFailureStageNasdaqSchema},
+	}, completed, completed)
+	noDate := normalizeEarningsAttempt(earningsNasdaqProvider, "TESTQ", earningsProviderFetchResult{
+		Status: rpc.EarningsStatusNoDatePublished,
+	}, completed, completed)
+	entry := earningsEntry{Date: "2026-07-30", ObservedAt: completed}
+	date := normalizeEarningsAttempt(earningsNasdaqProvider, "TESTQ", earningsProviderFetchResult{
+		Status: rpc.EarningsStatusDate, Entry: entry,
+	}, completed, completed)
+	unsupported := normalizeEarningsAttempt(earningsNasdaqProvider, "TESTQ", earningsProviderFetchResult{
+		Status: rpc.EarningsStatusUnsupportedSecurity,
+	}, completed, completed)
+	for _, test := range []struct {
+		name    string
+		attempt earningsProviderAttempt
+		version int
+		wantDue bool
+	}{
+		{"v2 format change", formatChange, earningsNasdaqParserContractPrevious, true},
+		{"v2 no-date", noDate, earningsNasdaqParserContractPrevious, true},
+		{"v2 date", date, earningsNasdaqParserContractPrevious, false},
+		{"v2 unsupported", unsupported, earningsNasdaqParserContractPrevious, false},
+		{"v3 format change", formatChange, earningsNasdaqParserContract, false},
+		{"v3 no-date", noDate, earningsNasdaqParserContract, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.attempt.ParserContractVersion = test.version
+			if test.attempt.NextAttempt == nil || !test.attempt.NextAttempt.After(completed) {
+				t.Fatal("fixture has no stored future retry deadline")
+			}
+			got := earningsProviderDue(earningsNasdaqProvider, earningsProviderState{LastAttempt: test.attempt}, completed)
+			if got != test.wantDue {
+				t.Fatalf("due = %v, want %v", got, test.wantDue)
 			}
 		})
 	}
@@ -463,7 +518,7 @@ func TestEarningsProviderOutcomesPersistAndRecoverWithoutRawError(t *testing.T) 
 	cache := newEarningsCacheMemory(nil)
 	cache.clock = func() time.Time { return now }
 	cache.client = &http.Client{Transport: earningsRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		body := nasdaqTestPayload(t, map[string]any{"announcement": nasdaqAnnouncementPrefix("AAPL") + " "}, http.StatusOK)
+		body := []byte(`{"data":{"announcement":"Earnings announcement* for AAPL: "},"status":{"rCode":200}}`)
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
 	})}
 	if err := cache.setSecondaryProvider(earningsWSHProvider, func(context.Context, string) (earningsProviderFetchResult, error) {
@@ -878,6 +933,100 @@ func TestEarningsNasdaqParserContractUpgradeRetriesOnlyOldFormatChange(t *testin
 	if recovered.ParserContractVersion != earningsNasdaqParserContract ||
 		recovered.NextAttempt == nil || !recovered.NextAttempt.Equal(wantNext) {
 		t.Fatal("same parser contract retry deadline did not survive close and reopen")
+	}
+}
+
+func TestEarningsNasdaqParserContractV2NoDateRefreshesAndPersistsV3Deadline(t *testing.T) {
+	base := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	loadNow := base.Add(time.Hour)
+	storedNext := base.Add(earningsFreshWindow)
+	previous := earningsProviderAttempt{
+		Status: rpc.EarningsStatusNoDatePublished, AttemptedAt: base, CompletedAt: base,
+		NextAttempt: &storedNext, ParserContractVersion: earningsNasdaqParserContractPrevious,
+	}
+	providers := map[string]earningsProviderState{earningsNasdaqProvider: {LastAttempt: previous}}
+	seed := earningsPersistEnvelope{Version: earningsPersistVersion, Symbols: map[string]earningsSymbolState{
+		"TESTQ": {Resolution: resolveEarningsState(providers, nil, base), Providers: providers, UpdatedAt: base},
+	}}
+	raw, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatal("marshal v2 no-date authority")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal("secure v2 no-date authority directory")
+	}
+	databasePath := filepath.Join(dir, "daemon.db")
+	store, err := corestore.Open(t.Context(), corestore.Options{Path: databasePath})
+	if err != nil {
+		t.Fatal("open v2 no-date authority")
+	}
+	if _, err := store.CompareAndSwapStateDocument(t.Context(), corestore.StateDocumentCAS{
+		ScopeKey: earningsAuthorityScope, Kind: earningsStateKind, JSON: raw,
+	}); err != nil {
+		t.Fatal("seed v2 no-date authority")
+	}
+
+	providerCalls := 0
+	cache := newEarningsCacheMemory(nil)
+	cache.clock = func() time.Time { return loadNow }
+	cache.client = &http.Client{Transport: earningsRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		providerCalls++
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":{"announcement":"Earnings announcement* for TESTQ: "},"status":{"rCode":200}}`))}, nil
+	})}
+	if err := cache.UseCoreStore(store); err != nil {
+		t.Fatal("load v2 no-date authority")
+	}
+	loaded := cache.symbols["TESTQ"].Providers[earningsNasdaqProvider].LastAttempt
+	if loaded.ParserContractVersion != earningsNasdaqParserContractPrevious ||
+		!earningsProviderDue(earningsNasdaqProvider, earningsProviderState{LastAttempt: loaded}, loadNow) {
+		t.Fatal("v2 no-date authority was not immediately due after load")
+	}
+	cache.refreshOne(t.Context(), "TESTQ")
+	if providerCalls != 1 {
+		t.Fatalf("provider calls = %d, want 1", providerCalls)
+	}
+	wantNext := loadNow.Add(earningsFreshWindow)
+	doc, ok, err := store.GetStateDocument(t.Context(), earningsAuthorityScope, earningsStateKind)
+	if err != nil || !ok {
+		t.Fatalf("read v3 no-date authority: ok=%v err=%v", ok, err)
+	}
+	var persisted earningsPersistEnvelope
+	if err := json.Unmarshal(doc.JSON, &persisted); err != nil {
+		t.Fatal("decode v3 no-date authority")
+	}
+	current := persisted.Symbols["TESTQ"].Providers[earningsNasdaqProvider].LastAttempt
+	if current.Status != rpc.EarningsStatusNoDatePublished || current.ParserContractVersion != earningsNasdaqParserContract ||
+		current.NextAttempt == nil || !current.NextAttempt.Equal(wantNext) {
+		t.Fatalf("persisted v3 no-date attempt = %+v", current)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal("close v3 no-date authority")
+	}
+
+	store, err = corestore.Open(t.Context(), corestore.Options{Path: databasePath})
+	if err != nil {
+		t.Fatal("reopen v3 no-date authority")
+	}
+	defer func() { _ = store.Close() }()
+	restartNow := loadNow.Add(time.Minute)
+	restarted := newEarningsCacheMemory(nil)
+	restarted.clock = func() time.Time { return restartNow }
+	restarted.client = &http.Client{Transport: earningsRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		providerCalls++
+		return nil, errors.New("unexpected v3 no-date retry")
+	})}
+	if err := restarted.UseCoreStore(store); err != nil {
+		t.Fatal("reload v3 no-date authority")
+	}
+	restarted.refreshOne(t.Context(), "TESTQ")
+	if providerCalls != 1 {
+		t.Fatal("v3 no-date retried before its persisted deadline")
+	}
+	recovered := restarted.symbols["TESTQ"].Providers[earningsNasdaqProvider].LastAttempt
+	if recovered.ParserContractVersion != earningsNasdaqParserContract ||
+		recovered.NextAttempt == nil || !recovered.NextAttempt.Equal(wantNext) {
+		t.Fatal("v3 no-date retry deadline did not survive restart")
 	}
 }
 

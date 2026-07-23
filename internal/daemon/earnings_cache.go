@@ -36,12 +36,15 @@ const (
 	earningsProviderObservationVersion = 3
 	earningsLegacyVersion              = 1
 	earningsNasdaqParserContractLegacy = 1
-	earningsNasdaqParserContract       = 2
-	earningsFreshWindow                = 24 * time.Hour
-	earningsTTL                        = 45 * 24 * time.Hour
-	earningsFetchTimeout               = 8 * time.Second
-	earningsFailureRetry               = 15 * time.Minute
-	earningsAuthorityCommitRetry       = time.Minute
+	// v2 accepted a nested no-date announcement. v3 accepts the narrowly
+	// observed top-level-status envelope instead.
+	earningsNasdaqParserContractPrevious = 2
+	earningsNasdaqParserContract         = 3
+	earningsFreshWindow                  = 24 * time.Hour
+	earningsTTL                          = 45 * 24 * time.Hour
+	earningsFetchTimeout                 = 8 * time.Second
+	earningsFailureRetry                 = 15 * time.Minute
+	earningsAuthorityCommitRetry         = time.Minute
 	// A temporary connector-inactive mark is not a provider verdict. Keep its
 	// durable retry inside the connector's bounded 12-hour mark lifetime so a
 	// restart cannot turn that session-local observation into the 45-day
@@ -486,6 +489,10 @@ func earningsProviderDue(provider string, state earningsProviderState, now time.
 		state.LastAttempt.ParserContractVersion != earningsNasdaqParserContract {
 		return true
 	}
+	if provider == earningsNasdaqProvider && state.LastAttempt.Status == rpc.EarningsStatusNoDatePublished &&
+		state.LastAttempt.ParserContractVersion == earningsNasdaqParserContractPrevious {
+		return true
+	}
 	if state.LastAttempt.AttemptedAt.IsZero() {
 		return true
 	}
@@ -916,12 +923,13 @@ func (c *earningsCache) fetchOne(ctx context.Context, sym string) (earningsEntry
 	return parseNasdaqEarnings(body, providerSymbol, c.clock())
 }
 
-// parseNasdaqEarnings accepts only the observed nested data.status contract and
-// typed announcement grammar for the exact provider symbol requested.
-// Only the exact prefix, optionally with one trailing space, is an explicit
-// no-date publication. Missing, null, empty, elapsed, or any other announcement
-// is a format change. Top-level status is authoritative only for the observed
-// explicit data:null unsupported envelope.
+// parseNasdaqEarnings accepts only the observed authority envelopes and typed
+// announcement grammar for the exact provider symbol requested. A strict future
+// date requires nested data.status.rCode=200. A no-date publication requires
+// data.status to be absent and top-level status.rCode=200, with exactly one
+// trailing ASCII space after the symbol-bound prefix. Missing, null, empty,
+// elapsed, or any other announcement is a format change. Top-level status is
+// also authoritative for the explicit data:null unsupported envelope.
 func parseNasdaqEarnings(body []byte, providerSymbol string, now time.Time) (earningsEntry, error) {
 	if !json.Valid(body) {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqDecode, false, errors.New("nasdaq payload is not valid JSON"))
@@ -941,17 +949,9 @@ func parseNasdaqEarnings(body []byte, providerSymbol string, now time.Time) (ear
 		}
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq null data has no supported typed status"))
 	}
-	if _, hasStatus := top["status"]; hasStatus {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has conflicting status authority"))
-	}
 	data, err := decodeExactAuthorityObject(dataRaw, "announcement", "status")
 	if err != nil {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has invalid data object"))
-	}
-	statusRaw, hasStatus := data["status"]
-	rCode, ok := nasdaqStatusCode(statusRaw)
-	if !hasStatus || !ok || rCode != http.StatusOK {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload status is inconsistent with data"))
 	}
 	announcementRaw, hasAnnouncement := data["announcement"]
 	if !hasAnnouncement || jsonRawIsNull(announcementRaw) {
@@ -968,8 +968,24 @@ func parseNasdaqEarnings(body []byte, providerSymbol string, now time.Time) (ear
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement format changed"))
 	}
 	prefix := nasdaqAnnouncementPrefix(providerSymbol)
-	if announcement == prefix || announcement == prefix+" " {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusNoDatePublished, "", "", false, errors.New("nasdaq published no earnings date"))
+	dataStatusRaw, hasDataStatus := data["status"]
+	topStatusRaw, hasTopStatus := top["status"]
+	if announcement == prefix+" " && !hasDataStatus {
+		rCode, ok := nasdaqStatusCode(topStatusRaw)
+		if hasTopStatus && ok && rCode == http.StatusOK {
+			return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusNoDatePublished, "", "", false, errors.New("nasdaq published no earnings date"))
+		}
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq no-date status is inconsistent with data"))
+	}
+	if hasTopStatus {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has conflicting status authority"))
+	}
+	rCode, ok := nasdaqStatusCode(dataStatusRaw)
+	if !hasDataStatus || !ok || rCode != http.StatusOK {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload status is inconsistent with data"))
+	}
+	if announcement == prefix {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement format changed"))
 	}
 	dateText, ok := strings.CutPrefix(announcement, prefix+" ")
 	if !ok || dateText == "" {
@@ -1851,6 +1867,8 @@ func validNasdaqParserContract(status string, version int) bool {
 		return status != rpc.EarningsStatusFormatChange
 	case earningsNasdaqParserContractLegacy:
 		return status == rpc.EarningsStatusFormatChange
+	case earningsNasdaqParserContractPrevious:
+		return true
 	case earningsNasdaqParserContract:
 		return true
 	default:

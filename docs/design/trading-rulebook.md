@@ -388,9 +388,11 @@ web/app/*                         rules card + drill-in
   requested through serialized metadata/event reads and requires the account's
   WSH research entitlement. Matching dates form consensus; differing dates or
   incompatible published session halves remain `conflicting_sources`.
-  Nasdaq accepts a semantic no-date only from the exact symbol-bound
-  announcement prefix (optionally one trailing space), and semantic unsupported
-  only from HTTP 200 with explicit `data:null` plus top-level `rCode=400`.
+  Nasdaq accepts a semantic no-date only from the observed HTTP 200 envelope:
+  a `data` object with no `data.status`, a top-level numeric `status.rCode=200`,
+  and the exact symbol-bound announcement prefix followed by exactly one ASCII
+  space. Semantic unsupported requires explicit `data:null` plus top-level
+  numeric `rCode=400`.
   Missing/null/empty announcements, `rCode=404`, and bare non-200 responses are
   typed format or protocol failures.
 - Persistence: daemon.db v4 current state plus immutable v3 provider-outcome and
