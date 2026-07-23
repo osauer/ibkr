@@ -174,7 +174,8 @@ func TestEarningsIdentityPersistsRetryAndRetainedProofAcrossRealReopen(t *testin
 		})
 		cache.clock = func() time.Time { return *now }
 		cache.client = &http.Client{Transport: earningsRoundTripFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":{"announcement":null},"status":{"rCode":200}}`))}, nil
+			body := nasdaqTestPayload(t, map[string]any{"announcement": nasdaqAnnouncementPrefix(nasdaqSymbol(privateSymbol))}, http.StatusOK)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
 		})}
 		return cache
 	}
@@ -416,7 +417,8 @@ func TestEarningsIdentityDefinitiveSupersessionCASRollbackSurvivesRestart(t *tes
 		cache := newEarningsCacheMemory(nil)
 		cache.clock = func() time.Time { return now }
 		cache.client = &http.Client{Transport: earningsRoundTripFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":{"announcement":null},"status":{"rCode":200}}`))}, nil
+			body := nasdaqTestPayload(t, map[string]any{"announcement": nasdaqAnnouncementPrefix("SYNTH1")}, http.StatusOK)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
 		})}
 		if err := cache.setIdentityFetcher(func(context.Context, string, int) (earningsIdentityFetchResult, error) {
 			return earningsIdentityFetchResult{Outcome: identityOutcome}, nil
@@ -511,8 +513,12 @@ func TestEarningsV2MigrationPreservesProviderDeadlinesAndMakesIdentityDue(t *tes
 		earningsNasdaqProvider: {LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusNoDatePublished, AttemptedAt: now, CompletedAt: now, NextAttempt: &next}},
 		earningsWSHProvider:    {LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusUnsupportedSecurity, AttemptedAt: now, CompletedAt: now, NextAttempt: &next}},
 	}
+	legacyProviders := map[string]earningsProviderStateLegacy{
+		earningsNasdaqProvider: {LastAttempt: earningsProviderAttemptLegacy{Status: rpc.EarningsStatusNoDatePublished, AttemptedAt: now, CompletedAt: now, NextAttempt: &next}},
+		earningsWSHProvider:    {LastAttempt: earningsProviderAttemptLegacy{Status: rpc.EarningsStatusUnsupportedSecurity, AttemptedAt: now, CompletedAt: now, NextAttempt: &next}},
+	}
 	v2 := earningsPersistEnvelopeV2{Version: earningsPreviousPersistVersion, Symbols: map[string]earningsSymbolStateV2{
-		"SYNTH1": {Resolution: resolveEarningsProviders(providers, now), Providers: providers, UpdatedAt: now},
+		"SYNTH1": {Resolution: resolveEarningsProviders(providers, now), Providers: legacyProviders, UpdatedAt: now},
 	}}
 	raw, err := json.Marshal(v2)
 	if err != nil {
@@ -636,7 +642,7 @@ func TestEarningsValidationErrorsDoNotExposeIdentityKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = decodeEarningsEnvelopeV3(raw, now)
+	_, err = decodeEarningsEnvelopeV4(raw, now)
 	if err == nil {
 		t.Fatal("invalid authority unexpectedly decoded")
 	}

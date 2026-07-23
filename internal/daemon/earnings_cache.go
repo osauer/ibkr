@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -29,14 +30,18 @@ import (
 
 const (
 	earningsStoreFilename              = "earnings-dates.json"
-	earningsPersistVersion             = 3
+	earningsPersistVersion             = 4
+	earningsIdentityPersistVersion     = 3
 	earningsPreviousPersistVersion     = 2
-	earningsProviderObservationVersion = 2
+	earningsProviderObservationVersion = 3
 	earningsLegacyVersion              = 1
+	earningsNasdaqParserContractLegacy = 1
+	earningsNasdaqParserContract       = 2
 	earningsFreshWindow                = 24 * time.Hour
 	earningsTTL                        = 45 * 24 * time.Hour
 	earningsFetchTimeout               = 8 * time.Second
 	earningsFailureRetry               = 15 * time.Minute
+	earningsAuthorityCommitRetry       = time.Minute
 	// A temporary connector-inactive mark is not a provider verdict. Keep its
 	// durable retry inside the connector's bounded 12-hour mark lifetime so a
 	// restart cannot turn that session-local observation into the 45-day
@@ -57,7 +62,7 @@ const (
 	earningsObservationKind   = "earnings_dates.snapshot.v1"
 	earningsObservationSource = "nasdaq.earnings_calendar"
 
-	earningsProviderObservationKind = "earnings_dates.provider_outcome.v2"
+	earningsProviderObservationKind = "earnings_dates.provider_outcome.v3"
 	earningsNasdaqProvider          = "nasdaq"
 	earningsWSHProvider             = "ibkr_wsh"
 	earningsWSHObservationSource    = "ibkr.wsh_event_calendar"
@@ -93,7 +98,7 @@ type earningsEntry struct {
 }
 
 // earningsPersistEnvelopeV1 is deliberately pinned for the unpublished JSON
-// cutover importer. Never point it at the live v3 authority.
+// cutover importer. Never point it at the live v4 authority.
 type earningsPersistEnvelopeV1 struct {
 	Version int                      `json:"version"`
 	Entries map[string]earningsEntry `json:"entries"`
@@ -105,12 +110,13 @@ type earningsPersistEnvelope struct {
 }
 
 type earningsProviderAttempt struct {
-	Status      string             `json:"status"`
-	Entry       *earningsEntry     `json:"entry,omitempty"`
-	AttemptedAt time.Time          `json:"attempted_at"`
-	CompletedAt time.Time          `json:"completed_at"`
-	NextAttempt *time.Time         `json:"next_attempt,omitempty"`
-	LastFailure *rpc.SourceFailure `json:"last_failure,omitempty"`
+	Status                string             `json:"status"`
+	Entry                 *earningsEntry     `json:"entry,omitempty"`
+	AttemptedAt           time.Time          `json:"attempted_at"`
+	CompletedAt           time.Time          `json:"completed_at"`
+	NextAttempt           *time.Time         `json:"next_attempt,omitempty"`
+	LastFailure           *rpc.SourceFailure `json:"last_failure,omitempty"`
+	ParserContractVersion int                `json:"parser_contract_version,omitempty"`
 }
 
 type earningsProviderState struct {
@@ -167,17 +173,44 @@ type earningsSymbolState struct {
 	UpdatedAt  time.Time                        `json:"updated_at"`
 }
 
-// The v2 state shape is pinned for strict in-place migration. Keeping a
-// separate type prevents a version-2 document from smuggling future fields.
+type earningsProviderAttemptLegacy struct {
+	Status      string             `json:"status"`
+	Entry       *earningsEntry     `json:"entry,omitempty"`
+	AttemptedAt time.Time          `json:"attempted_at"`
+	CompletedAt time.Time          `json:"completed_at"`
+	NextAttempt *time.Time         `json:"next_attempt,omitempty"`
+	LastFailure *rpc.SourceFailure `json:"last_failure,omitempty"`
+}
+
+type earningsProviderStateLegacy struct {
+	LastAttempt earningsProviderAttemptLegacy `json:"last_attempt"`
+	LastGood    *earningsEntry                `json:"last_good,omitempty"`
+}
+
+// The v2 and v3 state shapes are pinned for strict in-place migration. Keeping
+// separate provider types prevents an older document from smuggling the v4
+// parser-contract field.
 type earningsSymbolStateV2 struct {
-	Resolution earningsResolution               `json:"resolution"`
-	Providers  map[string]earningsProviderState `json:"providers"`
-	UpdatedAt  time.Time                        `json:"updated_at"`
+	Resolution earningsResolution                     `json:"resolution"`
+	Providers  map[string]earningsProviderStateLegacy `json:"providers"`
+	UpdatedAt  time.Time                              `json:"updated_at"`
 }
 
 type earningsPersistEnvelopeV2 struct {
 	Version int                              `json:"version"`
 	Symbols map[string]earningsSymbolStateV2 `json:"symbols"`
+}
+
+type earningsSymbolStateV3 struct {
+	Resolution earningsResolution                     `json:"resolution"`
+	Providers  map[string]earningsProviderStateLegacy `json:"providers"`
+	Identity   *earningsIdentityState                 `json:"identity,omitempty"`
+	UpdatedAt  time.Time                              `json:"updated_at"`
+}
+
+type earningsPersistEnvelopeV3 struct {
+	Version int                              `json:"version"`
+	Symbols map[string]earningsSymbolStateV3 `json:"symbols"`
 }
 
 // earningsResolutionView is the cache's typed rulebook integration surface.
@@ -229,6 +262,10 @@ type earningsCache struct {
 	secondaryProvider string
 	secondaryFetch    earningsProviderFetcher
 	identityFetch     earningsIdentityFetcher
+	// authorityRetryNotBefore is an ephemeral publication-failure gate. It
+	// prevents a due provider result from being fetched on every snapshot while
+	// SQLite is unavailable without publishing or changing a durable deadline.
+	authorityRetryNotBefore map[string]time.Time
 }
 
 func newEarningsCache(dir string, logf func(string, ...any)) *earningsCache {
@@ -255,12 +292,13 @@ func newEarningsCacheMemory(logf func(string, ...any)) *earningsCache {
 		logf = func(string, ...any) {}
 	}
 	return &earningsCache{
-		symbols:  map[string]earningsSymbolState{},
-		inflight: map[string]bool{},
-		client:   &http.Client{Timeout: earningsFetchTimeout},
-		logf:     logf,
-		clock:    time.Now,
-		fetchURL: "https://api.nasdaq.com/api/analyst/%s/earnings-date",
+		symbols:                 map[string]earningsSymbolState{},
+		inflight:                map[string]bool{},
+		client:                  &http.Client{Timeout: earningsFetchTimeout},
+		logf:                    logf,
+		clock:                   time.Now,
+		fetchURL:                "https://api.nasdaq.com/api/analyst/%s/earnings-date",
+		authorityRetryNotBefore: map[string]time.Time{},
 	}
 }
 
@@ -293,7 +331,7 @@ func (c *earningsCache) setIdentityFetcher(fetch earningsIdentityFetcher) error 
 }
 
 // UseCoreStore replaces any legacy JSON projection loaded by construction
-// with the current daemon.db document. Missing state initializes a cold v3
+// with the current daemon.db document. Missing state initializes a cold v4
 // document. Failure is returned before the authority pointer or in-memory
 // projection changes.
 func (c *earningsCache) UseCoreStore(store *corestore.Store) error {
@@ -314,6 +352,7 @@ func (c *earningsCache) UseCoreStore(store *corestore.Store) error {
 	}
 	c.symbols = loaded
 	c.inflight = map[string]bool{}
+	c.authorityRetryNotBefore = map[string]time.Time{}
 	return nil
 }
 
@@ -431,15 +470,22 @@ func (c *earningsCache) providerNamesLocked() []string {
 }
 
 func (c *earningsCache) anyRefreshDueLocked(state earningsSymbolState, target earningsRefreshTarget, now time.Time) bool {
+	if retryAt, blocked := c.authorityRetryNotBefore[target.Symbol]; blocked && now.Before(retryAt) {
+		return false
+	}
 	for _, provider := range c.providerNamesLocked() {
-		if earningsProviderDue(state.Providers[provider], now) {
+		if earningsProviderDue(provider, state.Providers[provider], now) {
 			return true
 		}
 	}
 	return c.identityFetch != nil && earningsIdentityTargetValid(target) && earningsIdentityDue(state.Identity, target, now)
 }
 
-func earningsProviderDue(state earningsProviderState, now time.Time) bool {
+func earningsProviderDue(provider string, state earningsProviderState, now time.Time) bool {
+	if provider == earningsNasdaqProvider && state.LastAttempt.Status == rpc.EarningsStatusFormatChange &&
+		state.LastAttempt.ParserContractVersion != earningsNasdaqParserContract {
+		return true
+	}
 	if state.LastAttempt.AttemptedAt.IsZero() {
 		return true
 	}
@@ -525,7 +571,7 @@ func (c *earningsCache) refreshTarget(ctx context.Context, target earningsRefres
 
 	var completed []earningsCompletedProvider
 	for _, provider := range providers {
-		if !earningsProviderDue(state.Providers[provider], now) {
+		if !earningsProviderDue(provider, state.Providers[provider], now) {
 			continue
 		}
 		attemptedAt := c.clock()
@@ -669,8 +715,10 @@ func (c *earningsCache) refreshTarget(ctx context.Context, target earningsRefres
 		// Publishing an uncommitted attempt would make a transient memory result
 		// outrun restart authority. SQLite health reports the authority failure.
 		c.logf("earnings provider authority commit failed")
+		c.authorityRetryNotBefore[sym] = c.clock().Add(earningsAuthorityCommitRetry)
 		return
 	}
+	delete(c.authorityRetryNotBefore, sym)
 	c.symbols = candidate
 }
 
@@ -702,6 +750,9 @@ func normalizeEarningsAttempt(provider, symbol string, result earningsProviderFe
 		result.Failure = &rpc.SourceFailure{Code: rpc.SourceFailureInvalidPayload, Stage: earningsProviderDecodeStage(provider), Retryable: false}
 	}
 	attempt := earningsProviderAttempt{Status: status, AttemptedAt: attemptedAt, CompletedAt: completedAt}
+	if provider == earningsNasdaqProvider {
+		attempt.ParserContractVersion = earningsNasdaqParserContract
+	}
 	if status == rpc.EarningsStatusDate {
 		entry := result.Entry
 		attempt.Entry = &entry
@@ -854,9 +905,6 @@ func (c *earningsCache) fetchOne(ctx context.Context, sym string) (earningsEntry
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusTransportFailure, rpc.SourceFailureTransportFailed, rpc.SourceFailureStageNasdaqRequest, true, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusUnsupportedSecurity, "", "", false, fmt.Errorf("status %d", resp.StatusCode))
-	}
 	if resp.StatusCode != http.StatusOK {
 		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusTransportFailure, rpc.SourceFailureProtocolRejected, rpc.SourceFailureStageNasdaqRequest, retryable, fmt.Errorf("status %d", resp.StatusCode))
@@ -868,52 +916,53 @@ func (c *earningsCache) fetchOne(ctx context.Context, sym string) (earningsEntry
 	return parseNasdaqEarnings(body, providerSymbol, c.clock())
 }
 
-// parseNasdaqEarnings accepts only the observed typed announcement grammar for
-// the exact provider symbol requested. Missing/null/empty announcement and the
-// exact prefix without a date are explicit no-date publications; every other
-// non-empty shape is a format change.
+// parseNasdaqEarnings accepts only the observed nested data.status contract and
+// typed announcement grammar for the exact provider symbol requested.
+// Only the exact prefix, optionally with one trailing space, is an explicit
+// no-date publication. Missing, null, empty, elapsed, or any other announcement
+// is a format change. Top-level status is authoritative only for the observed
+// explicit data:null unsupported envelope.
 func parseNasdaqEarnings(body []byte, providerSymbol string, now time.Time) (earningsEntry, error) {
-	var payload struct {
-		Data *struct {
-			Announcement json.RawMessage `json:"announcement"`
-		} `json:"data"`
-		Status json.RawMessage `json:"status"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if !json.Valid(body) {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqDecode, false, errors.New("nasdaq payload is not valid JSON"))
 	}
-	if len(payload.Status) == 0 || string(payload.Status) == "null" {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has no typed status"))
+	top, err := decodeExactAuthorityObject(body, "data", "status")
+	if err != nil {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has invalid authority fields"))
 	}
-	var status struct {
-		RCode json.RawMessage `json:"rCode"`
+	dataRaw, hasData := top["data"]
+	if !hasData {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has no explicit data field"))
 	}
-	if err := json.Unmarshal(payload.Status, &status); err != nil || len(status.RCode) == 0 || string(status.RCode) == "null" {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has no typed status code"))
-	}
-	var rCode int
-	if err := json.Unmarshal(status.RCode, &rCode); err != nil {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has invalid status code"))
-	}
-	if payload.Data == nil {
-		if rCode == http.StatusBadRequest || rCode == http.StatusNotFound {
+	if jsonRawIsNull(dataRaw) {
+		statusRaw, hasStatus := top["status"]
+		if rCode, ok := nasdaqStatusCode(statusRaw); hasStatus && ok && rCode == http.StatusBadRequest {
 			return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusUnsupportedSecurity, "", "", false, errors.New("nasdaq reports unsupported security"))
 		}
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has no data object"))
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq null data has no supported typed status"))
 	}
-	if rCode != http.StatusOK {
+	if _, hasStatus := top["status"]; hasStatus {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has conflicting status authority"))
+	}
+	data, err := decodeExactAuthorityObject(dataRaw, "announcement", "status")
+	if err != nil {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has invalid data object"))
+	}
+	statusRaw, hasStatus := data["status"]
+	rCode, ok := nasdaqStatusCode(statusRaw)
+	if !hasStatus || !ok || rCode != http.StatusOK {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload status is inconsistent with data"))
 	}
-	announcementRaw := payload.Data.Announcement
-	if len(announcementRaw) == 0 || string(announcementRaw) == "null" {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusNoDatePublished, "", "", false, errors.New("nasdaq published no earnings date"))
+	announcementRaw, hasAnnouncement := data["announcement"]
+	if !hasAnnouncement || jsonRawIsNull(announcementRaw) {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement is absent"))
 	}
 	var announcement string
 	if err := json.Unmarshal(announcementRaw, &announcement); err != nil {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement has invalid type"))
 	}
 	if announcement == "" {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusNoDatePublished, "", "", false, errors.New("nasdaq published no earnings date"))
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement is empty"))
 	}
 	if !validNasdaqProviderSymbol(providerSymbol) {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement format changed"))
@@ -931,9 +980,159 @@ func parseNasdaqEarnings(body []byte, providerSymbol string, now time.Time) (ear
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement date is invalid"))
 	}
 	if t.Format(time.DateOnly) < earningsCalendarDate(now) {
-		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusNoDatePublished, "", "", false, errors.New("nasdaq announcement date has elapsed"))
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement date has elapsed"))
 	}
 	return earningsEntry{Date: t.Format(time.DateOnly), ObservedAt: now}, nil
+}
+
+func nasdaqStatusCode(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 || jsonRawIsNull(raw) {
+		return 0, false
+	}
+	status, err := decodeExactAuthorityObject(raw, "rCode")
+	if err != nil {
+		return 0, false
+	}
+	rawCode, ok := status["rCode"]
+	if !ok || jsonRawIsNull(rawCode) {
+		return 0, false
+	}
+	var rCode int
+	if err := json.Unmarshal(rawCode, &rCode); err != nil {
+		return 0, false
+	}
+	return rCode, true
+}
+
+// decodeExactAuthorityObject reads only the named authority fields while
+// tolerating unrelated provider prose. Authority names are exact ASCII
+// contracts: duplicate or case-folded aliases are equivocation and fail.
+func decodeExactAuthorityObject(raw []byte, authorityKeys ...string) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	first, err := decoder.Token()
+	if err != nil || first != json.Delim('{') {
+		return nil, errors.New("authority value is not an object")
+	}
+	authority := make(map[string]struct{}, len(authorityKeys))
+	for _, key := range authorityKeys {
+		authority[key] = struct{}{}
+	}
+	fields := make(map[string]json.RawMessage, len(authorityKeys))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, errors.New("authority object key is invalid")
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, errors.New("authority object key is invalid")
+		}
+		matched := ""
+		for expected := range authority {
+			if key == expected {
+				matched = expected
+				break
+			}
+			if strings.EqualFold(key, expected) {
+				return nil, errors.New("authority object key has invalid case")
+			}
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, errors.New("authority object value is invalid")
+		}
+		if matched == "" {
+			continue
+		}
+		if _, duplicate := fields[matched]; duplicate {
+			return nil, errors.New("authority object key is duplicated")
+		}
+		fields[matched] = append(json.RawMessage(nil), value...)
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return nil, errors.New("authority object is incomplete")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("authority object has trailing JSON")
+	}
+	return fields, nil
+}
+
+func jsonRawIsNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+// rejectDuplicateJSONKeys closes the duplicate-key gap left by encoding/json's
+// last-value-wins behavior. Errors never echo object keys because persisted
+// maps may be keyed by private held symbols.
+func rejectDuplicateJSONKeys(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := scanUniqueJSONValue(decoder); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("earnings authority has trailing JSON")
+	}
+	return nil
+}
+
+func scanUniqueJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return errors.New("earnings authority is not valid JSON")
+	}
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		seenKeys := make([]string, 0)
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return errors.New("earnings authority object key is invalid")
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("earnings authority object key is invalid")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return errors.New("earnings authority has a duplicate object key")
+			}
+			for _, prior := range seenKeys {
+				if strings.EqualFold(prior, key) {
+					return errors.New("earnings authority has an ambiguous object key")
+				}
+			}
+			seen[key] = struct{}{}
+			seenKeys = append(seenKeys, key)
+			if err := scanUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return errors.New("earnings authority object is incomplete")
+		}
+		return nil
+	case '[':
+		for decoder.More() {
+			if err := scanUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return errors.New("earnings authority array is incomplete")
+		}
+		return nil
+	default:
+		return errors.New("earnings authority has an unexpected delimiter")
+	}
 }
 
 func earningsCalendarDate(now time.Time) string {
@@ -1189,7 +1388,7 @@ func validEarningsSourceFailure(failure rpc.SourceFailure) bool {
 	return rpc.ValidSourceFailure(&failure) && !failure.FailedAt.IsZero()
 }
 
-// earningsStore persists v3 state across restarts. The JSON save/load methods
+// earningsStore persists v4 state across restarts. The JSON save/load methods
 // remain v1-only for the sealed legacy cutover path and isolated tests.
 type earningsStore struct {
 	dir       string
@@ -1218,6 +1417,9 @@ func (s *earningsStore) useCoreStore(store *corestore.Store, now time.Time) (map
 			return nil, fmt.Errorf("initialize earnings authority: %w", err)
 		}
 	} else {
+		if err := rejectDuplicateJSONKeys(doc.JSON); err != nil {
+			return nil, fmt.Errorf("decode earnings authority header: %w", err)
+		}
 		var header struct {
 			Version int `json:"version"`
 		}
@@ -1258,10 +1460,26 @@ func (s *earningsStore) useCoreStore(store *corestore.Store, now time.Time) (map
 			if err != nil {
 				return nil, fmt.Errorf("persist migrated earnings authority: %w", err)
 			}
-		case earningsPersistVersion:
+		case earningsIdentityPersistVersion:
 			loaded, err = decodeEarningsEnvelopeV3(doc.JSON, now)
 			if err != nil {
 				return nil, fmt.Errorf("decode earnings authority v3: %w", err)
+			}
+			raw, err := json.Marshal(earningsPersistEnvelope{Version: earningsPersistVersion, Symbols: loaded})
+			if err != nil {
+				return nil, fmt.Errorf("encode migrated earnings authority: %w", err)
+			}
+			doc, err = store.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
+				ScopeKey: earningsAuthorityScope, Kind: earningsStateKind,
+				ExpectedRevision: doc.Revision, JSON: raw,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("persist migrated earnings authority: %w", err)
+			}
+		case earningsPersistVersion:
+			loaded, err = decodeEarningsEnvelopeV4(doc.JSON, now)
+			if err != nil {
+				return nil, fmt.Errorf("decode earnings authority v4: %w", err)
 			}
 		default:
 			return nil, fmt.Errorf("decode earnings authority: unsupported version %d", header.Version)
@@ -1346,6 +1564,9 @@ func decodeEarningsEnvelopeV1(data []byte, now time.Time, strict bool) (map[stri
 	var env earningsPersistEnvelopeV1
 	var err error
 	if strict {
+		if err := rejectDuplicateJSONKeys(data); err != nil {
+			return nil, fmt.Errorf("decode earnings cache: %w", err)
+		}
 		err = decodeStrictMarketEventJSON(data, &env)
 	} else {
 		err = json.Unmarshal(data, &env)
@@ -1379,6 +1600,9 @@ func decodeEarningsEnvelopeV1(data []byte, now time.Time, strict bool) (map[stri
 
 func decodeEarningsEnvelopeV2(data []byte, now time.Time) (map[string]earningsSymbolState, error) {
 	var env earningsPersistEnvelopeV2
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return nil, fmt.Errorf("decode earnings authority: %w", err)
+	}
 	if err := decodeStrictMarketEventJSON(data, &env); err != nil {
 		return nil, fmt.Errorf("decode earnings authority: %w", err)
 	}
@@ -1391,7 +1615,7 @@ func decodeEarningsEnvelopeV2(data []byte, now time.Time) (map[string]earningsSy
 	converted := make(map[string]earningsSymbolState, len(env.Symbols))
 	for symbol, state := range env.Symbols {
 		converted[symbol] = earningsSymbolState{
-			Resolution: state.Resolution, Providers: state.Providers, UpdatedAt: state.UpdatedAt,
+			Resolution: state.Resolution, Providers: migrateEarningsProviderStates(state.Providers), UpdatedAt: state.UpdatedAt,
 		}
 	}
 	if err := validateEarningsSymbols(converted, now); err != nil {
@@ -1401,7 +1625,37 @@ func decodeEarningsEnvelopeV2(data []byte, now time.Time) (map[string]earningsSy
 }
 
 func decodeEarningsEnvelopeV3(data []byte, now time.Time) (map[string]earningsSymbolState, error) {
+	var env earningsPersistEnvelopeV3
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return nil, fmt.Errorf("decode earnings authority: %w", err)
+	}
+	if err := decodeStrictMarketEventJSON(data, &env); err != nil {
+		return nil, fmt.Errorf("decode earnings authority: %w", err)
+	}
+	if env.Version != earningsIdentityPersistVersion {
+		return nil, fmt.Errorf("invalid earnings version %d", env.Version)
+	}
+	if env.Symbols == nil {
+		return nil, errors.New("earnings authority has no symbols map")
+	}
+	converted := make(map[string]earningsSymbolState, len(env.Symbols))
+	for symbol, state := range env.Symbols {
+		converted[symbol] = earningsSymbolState{
+			Resolution: state.Resolution, Providers: migrateEarningsProviderStates(state.Providers),
+			Identity: state.Identity, UpdatedAt: state.UpdatedAt,
+		}
+	}
+	if err := validateEarningsSymbols(converted, now); err != nil {
+		return nil, err
+	}
+	return cloneEarningsSymbols(converted), nil
+}
+
+func decodeEarningsEnvelopeV4(data []byte, now time.Time) (map[string]earningsSymbolState, error) {
 	var env earningsPersistEnvelope
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return nil, fmt.Errorf("decode earnings authority: %w", err)
+	}
 	if err := decodeStrictMarketEventJSON(data, &env); err != nil {
 		return nil, fmt.Errorf("decode earnings authority: %w", err)
 	}
@@ -1415,6 +1669,25 @@ func decodeEarningsEnvelopeV3(data []byte, now time.Time) (map[string]earningsSy
 		return nil, err
 	}
 	return cloneEarningsSymbols(env.Symbols), nil
+}
+
+func migrateEarningsProviderStates(legacy map[string]earningsProviderStateLegacy) map[string]earningsProviderState {
+	if legacy == nil {
+		return nil
+	}
+	providers := make(map[string]earningsProviderState, len(legacy))
+	for provider, state := range legacy {
+		attempt := state.LastAttempt
+		converted := earningsProviderAttempt{
+			Status: attempt.Status, Entry: attempt.Entry, AttemptedAt: attempt.AttemptedAt,
+			CompletedAt: attempt.CompletedAt, NextAttempt: attempt.NextAttempt, LastFailure: attempt.LastFailure,
+		}
+		if provider == earningsNasdaqProvider && attempt.Status == rpc.EarningsStatusFormatChange {
+			converted.ParserContractVersion = earningsNasdaqParserContractLegacy
+		}
+		providers[provider] = earningsProviderState{LastAttempt: converted, LastGood: state.LastGood}
+	}
+	return providers
 }
 
 var errInvalidEarningsIdentityObservation = errors.New("invalid retained earnings identity observation")
@@ -1533,10 +1806,17 @@ func sameEarningsResolution(a, b earningsResolution) bool {
 	return *a.Entry == *b.Entry
 }
 
-func validateEarningsProviderState(symbol, _ string, state earningsProviderState, now time.Time) error {
+func validateEarningsProviderState(symbol, provider string, state earningsProviderState, now time.Time) error {
 	attempt := state.LastAttempt
 	if !validEarningsProviderStatus(attempt.Status) || attempt.AttemptedAt.IsZero() || attempt.CompletedAt.IsZero() || attempt.CompletedAt.Before(attempt.AttemptedAt) || now.Before(attempt.CompletedAt) {
 		return errors.New("invalid earnings provider attempt")
+	}
+	if provider == earningsNasdaqProvider {
+		if !validNasdaqParserContract(attempt.Status, attempt.ParserContractVersion) {
+			return errors.New("invalid earnings Nasdaq parser contract")
+		}
+	} else if attempt.ParserContractVersion != 0 {
+		return errors.New("unexpected earnings parser contract")
 	}
 	if attempt.NextAttempt == nil || attempt.NextAttempt.Before(attempt.CompletedAt) {
 		return errors.New("invalid earnings provider retry")
@@ -1561,6 +1841,21 @@ func validateEarningsProviderState(symbol, _ string, state earningsProviderState
 		}
 	}
 	return nil
+}
+
+func validNasdaqParserContract(status string, version int) bool {
+	switch version {
+	case 0:
+		// Only migrated pre-version attempts may remain unlabelled, and an old
+		// format failure must be identified so the corrected parser retries it.
+		return status != rpc.EarningsStatusFormatChange
+	case earningsNasdaqParserContractLegacy:
+		return status == rpc.EarningsStatusFormatChange
+	case earningsNasdaqParserContract:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateEarningsIdentityState(state earningsIdentityState, now time.Time) error {
