@@ -186,10 +186,25 @@ func TestAccountBaseCurrencyEvidenceAcceptsEveryAllowlistedValueSuffix(t *testin
 func TestAccountBaseCurrencyEvidenceRejectsConflictingValueSuffixes(t *testing.T) {
 	currency, provenance := accountBaseCurrencyEvidence(map[string]string{
 		"NetLiquidation_USD": "100000",
-		"UnrealizedPnL_EUR":  "100",
+		"AvailableFunds_EUR": "100",
 	})
 	if currency != "" || provenance != AccountBaseCurrencyUnknown {
 		t.Fatalf("evidence = (%q, %q), want unknown", currency, provenance)
+	}
+}
+
+func TestAccountBaseCurrencyEvidenceIgnoresLedgerFamilySuffixes(t *testing.T) {
+	currency, provenance := accountBaseCurrencyEvidence(map[string]string{
+		"NetLiquidation_EUR": "100000",
+		"UnrealizedPnL_EUR":  "100",
+		"UnrealizedPnL_USD":  "200",
+		"RealizedPnL_EUR":    "10",
+		"RealizedPnL_USD":    "20",
+		"ExchangeRate_EUR":   "1",
+		"ExchangeRate_USD":   "0.9",
+	})
+	if currency != "EUR" || provenance != AccountBaseCurrencyValueSuffix {
+		t.Fatalf("evidence = (%q, %q), want (EUR, %q)", currency, provenance, AccountBaseCurrencyValueSuffix)
 	}
 }
 

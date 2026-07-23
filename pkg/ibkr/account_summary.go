@@ -89,7 +89,10 @@ const (
 // accountBaseCurrencyValueTags is the closed allowlist of ordinary aggregate
 // account-summary values whose three-letter suffix may prove the account base
 // currency. Ledger-family keys are deliberately absent: $LEDGER:ALL rows
-// describe held currencies, not the account's base unit.
+// describe held currencies, not the account's base unit. UnrealizedPnL and
+// RealizedPnL are ordinary summary tags too, but $LEDGER:ALL reuses those exact
+// names for every held currency. The flattened raw map cannot distinguish the
+// two origins, so neither tag is eligible base-currency evidence.
 var accountBaseCurrencyValueTags = []string{
 	"NetLiquidation",
 	"BuyingPower",
@@ -100,8 +103,6 @@ var accountBaseCurrencyValueTags = []string{
 	"MaintenanceMarginReq",
 	"InitMarginReq",
 	"GrossPositionValue",
-	"UnrealizedPnL",
-	"RealizedPnL",
 	"Cushion",
 	"LookAheadInitMarginReq",
 	"LookAheadMaintMarginReq",
