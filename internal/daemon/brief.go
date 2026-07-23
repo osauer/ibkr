@@ -485,6 +485,7 @@ func (s *Server) pruneMonthlyRenderReceiptsLocked(now time.Time) {
 func (s *Server) composeBrief(ctx context.Context) (*rpc.BriefResult, *rpc.RulesResult) {
 	acct, acctErr := s.buildAccountSummary(ctx, false)
 	pos, posErr := s.handlePositionsList(ctx, &rpc.Request{})
+	pos = s.analysisPositions(pos, s.briefNow())
 	regime, regimeErr := s.briefRegimeSnapshotContext(ctx)
 	breadth, breadthErr := s.buildBreadthSPX(&rpc.Request{}, false)
 	gamma := s.briefGammaSnapshot()
@@ -950,6 +951,9 @@ func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult
 			if evidenceInfo := briefEarningsEvidenceInfo(rules); evidenceInfo != "" {
 				state.Detail += "; " + evidenceInfo
 			}
+			if notice := briefWSHEntitlementNotice(rules); notice != "" {
+				state.Detail += "; " + notice
+			}
 		}
 		rows = append(rows, rpc.BriefMarketEventRow{BriefRowState: state, Kind: kind, Count: len(syms), Symbols: syms})
 	}
@@ -989,6 +993,24 @@ func briefEarningsEvidenceInfo(rules *rpc.RulesResult) string {
 	for _, health := range rules.InputHealth {
 		if health.Source == "earnings" && health.Status == rpc.SourceStatusOK && len(health.Notes) > 0 {
 			return "earnings evidence informational issue: " + strings.Join(health.Notes, "; ")
+		}
+	}
+	return ""
+}
+
+func briefWSHEntitlementNotice(rules *rpc.RulesResult) string {
+	if rules == nil {
+		return ""
+	}
+	for _, info := range rules.Earnings {
+		for _, provider := range info.Providers {
+			failure := provider.LastFailure
+			if provider.Provider != "ibkr_wsh" || failure == nil ||
+				failure.Code != rpc.SourceFailureNotEntitled || failure.Retryable ||
+				(failure.Stage != rpc.SourceFailureStageWSHMetadata && failure.Stage != rpc.SourceFailureStageWSHEvent) {
+				continue
+			}
+			return "optional Wall Street Horizon earnings feed unavailable because this account lacks the WSH research subscription; Nasdaq remains active; names without a usable date stay unknown, never pass"
 		}
 	}
 	return ""

@@ -532,7 +532,7 @@ func TestEarningsProviderOutcomesPersistAndRecoverWithoutRawError(t *testing.T) 
 	cache.refreshOne(context.Background(), "AAPL")
 
 	view, ok := cache.resolution("AAPL")
-	if !ok || view.Status != rpc.EarningsStatusTransportFailure || len(view.Providers) != 2 {
+	if !ok || view.Status != rpc.EarningsStatusNoDatePublished || len(view.Providers) != 2 {
 		t.Fatalf("resolution = %+v ok=%v", view, ok)
 	}
 	doc, ok, err := store.GetStateDocument(context.Background(), earningsAuthorityScope, earningsStateKind)
@@ -566,7 +566,7 @@ func TestEarningsProviderOutcomesPersistAndRecoverWithoutRawError(t *testing.T) 
 		t.Fatalf("restart attach: %v", err)
 	}
 	recovered, ok := restarted.resolution("AAPL")
-	if !ok || recovered.Status != rpc.EarningsStatusTransportFailure || len(recovered.Providers) != 2 {
+	if !ok || recovered.Status != rpc.EarningsStatusNoDatePublished || len(recovered.Providers) != 2 {
 		t.Fatalf("recovered = %+v ok=%v", recovered, ok)
 	}
 	for _, provider := range recovered.Providers {

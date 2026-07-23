@@ -334,6 +334,7 @@ func (s *Server) canaryEvaluationTick(ctx context.Context) bool {
 	}
 	acct, _ := reader.account(ctx)
 	pos, _ := reader.positions(ctx)
+	pos = s.analysisPositions(pos, reader.now())
 	var events *rpc.MarketEventsResult
 	if pos != nil {
 		events, _ = reader.marketEvents(ctx, marketEventSymbolsFromPositions(pos))

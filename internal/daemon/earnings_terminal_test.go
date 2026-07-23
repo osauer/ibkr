@@ -116,6 +116,39 @@ func TestEarningsTerminalDoesNotExemptSameTickerOptionLegs(t *testing.T) {
 	}
 }
 
+func TestAnalysisPositionsExcludesOnlyCurrentExactTerminalStock(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	authority := openMarketTestCoreStore(t)
+	store := newEarningsTerminalStore(writeTerminalImport(t, syntheticTerminalDocument(now)))
+	if err := store.UseCoreStore(t.Context(), authority, now); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{earningsTerminal: store}
+	positions := &rpc.PositionsResult{Stocks: []rpc.PositionView{
+		{Symbol: "ACMEQ", SecType: "STK", ConID: 1001, Quantity: 4, Mark: 1, MarketValue: 4, Currency: "USD"},
+		{Symbol: "ACMEQ", SecType: "STK", ConID: 2002, Quantity: 5, Mark: 2, MarketValue: 10, Currency: "USD"},
+		{Symbol: "OTHER", SecType: "STK", ConID: 3003, Quantity: 1, Mark: 3, MarketValue: 3, Currency: "USD"},
+	}, Portfolio: &rpc.PositionsPortfolio{BaseCurrency: "USD"}}
+	filtered := srv.analysisPositions(positions, now)
+	if filtered == positions || len(positions.Stocks) != 3 {
+		t.Fatal("analysis projection mutated or replaced raw broker positions")
+	}
+	if len(filtered.Stocks) != 2 || filtered.Stocks[0].ConID != 2002 || filtered.Stocks[1].ConID != 3003 {
+		t.Fatalf("analysis stocks = %+v", filtered.Stocks)
+	}
+	if filtered.Portfolio == nil || filtered.Portfolio.ExposureBase == nil || len(filtered.ByUnderlying) != 2 {
+		t.Fatal("analysis projection did not rebuild dependent aggregates")
+	}
+
+	if got := srv.analysisPositions(positions, now.AddDate(1, 0, 0)); got != positions {
+		t.Fatal("expired terminal evidence excluded a position from analysis")
+	}
+	positions.Stocks[0].Symbol = "RENAMED"
+	if got := srv.analysisPositions(positions, now); got != positions {
+		t.Fatal("identity-conflicting terminal evidence excluded a position from analysis")
+	}
+}
+
 func TestEarningsTerminalAuthorityRejectsRollbackAndUnsafeInput(t *testing.T) {
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	authority := openMarketTestCoreStore(t)

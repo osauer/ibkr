@@ -40,4 +40,16 @@ function earningsHealthNotes(rules = {}) {
   return `Earnings evidence informational issue: ${health.notes.join("; ")}.`;
 }
 
-export { earningsApplicabilitySummary, earningsHealthNotes, ruleStatusLabel, rulesCountSummary };
+function wshEntitlementNotice(rules = {}) {
+  const earnings = Array.isArray(rules.earnings) ? rules.earnings : [];
+  const unavailable = earnings.some((entry) => (entry?.providers || []).some((provider) => {
+    const failure = provider?.last_failure;
+    return provider?.provider === "ibkr_wsh" && failure?.code === "not_entitled" &&
+      (failure?.stage === "wsh_metadata" || failure?.stage === "wsh_event") && failure?.retryable === false;
+  }));
+  return unavailable
+    ? "The optional Wall Street Horizon earnings feed is unavailable because this account lacks the WSH research subscription. Nasdaq remains active; names without a usable date stay unknown, never pass."
+    : "";
+}
+
+export { earningsApplicabilitySummary, earningsHealthNotes, ruleStatusLabel, rulesCountSummary, wshEntitlementNotice };

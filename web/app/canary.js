@@ -1,6 +1,6 @@
 import { canaryProtectionCoverageFor, protectionCoverageBaseCurrency, protectionCoverageHasData, protectionCoverageHeadline, protectionCoverageLargestText, protectionCoverageStaleText } from "./protection-coverage.js";
 import { unknownEventRuleNote } from "./earnings-relevance.js";
-import { earningsApplicabilitySummary, earningsHealthNotes, ruleStatusLabel, rulesCountSummary } from "./rules-presentation.js";
+import { earningsApplicabilitySummary, earningsHealthNotes, ruleStatusLabel, rulesCountSummary, wshEntitlementNotice } from "./rules-presentation.js";
 import { $, cleanDetail, firstNumber, labelize, normalizeSymbol, numberRead, parseDate, pct, quoteTimestamp, renderFreshnessTimestamp, shortTimeWithZone, signedClass, signedPct } from "./shared.js";
 import { state } from "./state.js";
 
@@ -51,6 +51,8 @@ function renderRulesCard(rules) {
   if (applicability) noteParts.push(applicability);
   const evidenceInfo = earningsHealthNotes(rules);
   if (evidenceInfo) noteParts.push(evidenceInfo);
+  const wshNotice = wshEntitlementNotice(rules);
+  if (wshNotice) noteParts.push(wshNotice);
   const degraded = (rules.input_health || []).filter((h) => h.status && h.status !== "ok");
   if (rules.status === "degraded" && degraded.length) {
     noteParts.push(`Inputs degraded (${degraded.map((h) => `${h.source}: ${h.status}`).join(", ")}) — unknown rows are not passes.`);

@@ -249,6 +249,24 @@ func TestToolsHaveDirectoryAnnotations(t *testing.T) {
 	}
 }
 
+func TestRulesToolDescribesWSHEntitlementWithoutProviderInternals(t *testing.T) {
+	idx := slices.IndexFunc(Tools, func(tool Tool) bool { return tool.Name == "ibkr_rules" })
+	if idx < 0 {
+		t.Fatal("ibkr_rules tool missing")
+	}
+	desc := Tools[idx].Description
+	for _, want := range []string{"Wall Street Horizon", "WSH research subscription", "Nasdaq remains active", "unknown, never pass"} {
+		if !strings.Contains(desc, want) {
+			t.Fatalf("ibkr_rules description missing %q: %s", want, desc)
+		}
+	}
+	for _, forbidden := range []string{"ibkr_wsh", "not_entitled", "wsh_metadata", "wsh_event"} {
+		if strings.Contains(desc, forbidden) {
+			t.Fatalf("ibkr_rules description exposed provider internals %q: %s", forbidden, desc)
+		}
+	}
+}
+
 type mcpOrderPreviewCall struct {
 	method string
 	params rpc.OrderPreviewParams

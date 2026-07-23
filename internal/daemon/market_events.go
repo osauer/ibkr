@@ -248,6 +248,7 @@ func (s *Server) handleMarketEventsSnapshot(ctx context.Context, req *rpc.Reques
 		if err != nil {
 			return nil, err
 		}
+		pos = s.analysisPositions(pos, s.now())
 		symbols = marketEventSymbolsFromPositions(pos)
 	}
 	res := s.marketEventsForSymbols(ctx, symbols)

@@ -714,11 +714,12 @@ func rulesEarningsSourceHealth(infos []rpc.EarningsInfo, now time.Time) (rpc.Sou
 	informational := map[string]struct{}{}
 	for _, info := range infos {
 		resolved := info.Status == rpc.EarningsStatusDate || info.Status == rpc.EarningsStatusTerminalNonReporting || info.Status == rpc.EarningsStatusNotApplicable
-		if info.Source == "unknown" || info.Stale || !resolved {
+		wshEntitlementOnly := earningsWSHNotEntitledOnly(info)
+		if info.Source == "unknown" || info.Stale || (!resolved && !(info.Status == rpc.EarningsStatusNoDatePublished && wshEntitlementOnly)) {
 			status = rpc.SourceStatusDegraded
 			degraded = true
 			notes = append(notes, info.Symbol+": "+nonEmptyString(info.Reason, nonEmptyString(info.Status, "not_observed")))
-		} else if info.Reason == earningsReasonSingleSource && status == rpc.SourceStatusOK {
+		} else if info.Reason == earningsReasonSingleSource && !wshEntitlementOnly && status == rpc.SourceStatusOK {
 			status = rpc.SourceStatusPartial
 		}
 		for _, provider := range info.Providers {
@@ -756,6 +757,32 @@ func rulesEarningsSourceHealth(infos []rpc.EarningsInfo, now time.Time) (rpc.Sou
 	sort.Strings(infoNotes)
 	notes = append(notes, infoNotes...)
 	return rpc.SourceHealth{Source: "earnings", Status: status, AsOf: now, NextAttempt: nextAttempt, LastFailure: lastFailure, Notes: notes}, degraded
+}
+
+func earningsWSHNotEntitledOnly(info rpc.EarningsInfo) bool {
+	if info.Status != rpc.EarningsStatusDate && info.Status != rpc.EarningsStatusNoDatePublished {
+		return false
+	}
+	seenNasdaq, seenWSH := false, false
+	for _, provider := range info.Providers {
+		switch provider.Provider {
+		case earningsNasdaqProvider:
+			if provider.Status != rpc.EarningsStatusDate && provider.Status != rpc.EarningsStatusNoDatePublished {
+				return false
+			}
+			seenNasdaq = true
+		case earningsWSHProvider:
+			failure := provider.LastFailure
+			if provider.Status != rpc.EarningsStatusTransportFailure || failure == nil || failure.Code != rpc.SourceFailureNotEntitled || failure.Retryable ||
+				(failure.Stage != rpc.SourceFailureStageWSHMetadata && failure.Stage != rpc.SourceFailureStageWSHEvent) {
+				return false
+			}
+			seenWSH = true
+		default:
+			return false
+		}
+	}
+	return seenNasdaq && seenWSH
 }
 
 // mapRuleNames converts the positions snapshot into pure rule inputs. The
@@ -1006,9 +1033,6 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 	var toFetch []earningsRefreshTarget
 	for _, n := range names {
 		sym := strings.ToUpper(n.Symbol)
-		if pol.IsHedgeSymbol(sym) {
-			continue // index products have no earnings print
-		}
 		info := rpc.EarningsInfo{Symbol: sym, Source: "unknown", Reason: "not_observed"}
 		override, hasOverride := risk.EarningsInput{}, false
 		if raw, ok := overrides[sym]; ok {
@@ -1104,6 +1128,9 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 				}
 			} else {
 				earnings[sym] = risk.EarningsInput{Known: false, Source: "fetched", Reason: nonEmptyString(view.Reason, view.Status)}
+				if view.Status == rpc.EarningsStatusNoDatePublished {
+					info.Source = "fetched"
+				}
 			}
 		}
 		if _, ok := earnings[sym]; !ok {

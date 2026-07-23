@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -630,6 +631,57 @@ func TestAssembleEarningsCommonIssuerWithoutDateRemainsUnknown(t *testing.T) {
 	}
 	if _, degraded := rulesEarningsSourceHealth(infos, now); !degraded {
 		t.Fatal("COMMON issuer without a date did not remain degraded")
+	}
+}
+
+func TestAssembleEarningsDoesNotUseHedgeSymbolsAsApplicabilityAuthority(t *testing.T) {
+	now := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
+	srv := &Server{}
+	policy := risk.DefaultRulebookPolicy()
+	if !policy.IsHedgeSymbol("SPY") {
+		t.Fatal("test requires a configured hedge symbol")
+	}
+	_, infos := srv.assembleEarnings(t.Context(), []risk.NameInput{{Symbol: "SPY", StockConID: 7001, StockSecType: "STK"}}, policy, marketcal.New(), now, false)
+	if len(infos) != 1 || infos[0].Symbol != "SPY" {
+		t.Fatal("configured hedge symbol bypassed broker identity applicability")
+	}
+}
+
+func TestNasdaqNoDateWithExactWSHNotEntitledRemainsUnknownButHealthy(t *testing.T) {
+	now := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
+	base := map[string]earningsProviderState{
+		earningsNasdaqProvider: {LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusNoDatePublished}},
+		earningsWSHProvider:    {LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusTransportFailure, LastFailure: &rpc.SourceFailure{Code: rpc.SourceFailureNotEntitled, Stage: rpc.SourceFailureStageWSHMetadata, Retryable: false, FailedAt: now}}},
+	}
+	if got := resolveEarningsProviders(base, now); got.Status != rpc.EarningsStatusNoDatePublished {
+		t.Fatalf("exact entitlement tuple = %s, want no_date_published", got.Status)
+	}
+	info := rpc.EarningsInfo{Status: rpc.EarningsStatusNoDatePublished, Providers: projectEarningsProviders(base)}
+	health, degraded := rulesEarningsSourceHealth([]rpc.EarningsInfo{info}, now)
+	if degraded || health.Status != rpc.SourceStatusOK || health.LastFailure == nil {
+		t.Fatalf("typed no-date entitlement health = %+v degraded=%v", health, degraded)
+	}
+	for _, mutate := range []func(map[string]earningsProviderState){
+		func(p map[string]earningsProviderState) {
+			p[earningsWSHProvider] = earningsProviderState{LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusTransportFailure, LastFailure: &rpc.SourceFailure{Code: rpc.SourceFailureNotEntitled, Stage: "other", Retryable: false}}}
+		},
+		func(p map[string]earningsProviderState) {
+			p[earningsWSHProvider] = earningsProviderState{LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusTransportFailure, LastFailure: &rpc.SourceFailure{Code: rpc.SourceFailureNotEntitled, Stage: rpc.SourceFailureStageWSHMetadata, Retryable: true}}}
+		},
+		func(p map[string]earningsProviderState) {
+			p[earningsWSHProvider] = earningsProviderState{LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusTransportFailure, LastFailure: &rpc.SourceFailure{Code: rpc.SourceFailureInvalidPayload, Stage: rpc.SourceFailureStageWSHMetadata}}}
+		},
+	} {
+		providers := make(map[string]earningsProviderState, len(base))
+		maps.Copy(providers, base)
+		mutate(providers)
+		if got := resolveEarningsProviders(providers, now); got.Status == rpc.EarningsStatusNoDatePublished {
+			t.Fatal("non-exact WSH failure was accepted as no-date")
+		}
+		info := rpc.EarningsInfo{Status: rpc.EarningsStatusTransportFailure, Providers: projectEarningsProviders(providers)}
+		if _, degraded := rulesEarningsSourceHealth([]rpc.EarningsInfo{info}, now); !degraded {
+			t.Fatal("non-exact WSH failure did not degrade earnings health")
+		}
 	}
 }
 

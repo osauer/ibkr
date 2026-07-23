@@ -131,3 +131,43 @@ func TestRunRulesRendersBrokerNonIssuerSeparatelyFromTerminalAndUnresolved(t *te
 		t.Fatal("broker nonissuer was not rendered as its distinct resolved class")
 	}
 }
+
+func TestRunRulesRendersOnlyExactWSHEntitlementNotice(t *testing.T) {
+	now := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
+	makeResult := func(provider, code, stage string, retryable bool) rpc.RulesResult {
+		return rpc.RulesResult{AsOf: now, Enabled: true, Status: "ok", PolicyID: "rulebook-v2", PolicyVersion: 2,
+			Earnings: []rpc.EarningsInfo{{Symbol: "SYNTH1", Source: "unknown", Status: rpc.EarningsStatusNoDatePublished,
+				Providers: []rpc.EarningsProviderInfo{{Provider: provider, LastFailure: &rpc.SourceFailure{Code: code, Stage: stage, Retryable: retryable}}},
+			}},
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		res  rpc.RulesResult
+		want bool
+	}{
+		{"exact metadata", makeResult("ibkr_wsh", rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHMetadata, false), true},
+		{"exact event", makeResult("ibkr_wsh", rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHEvent, false), true},
+		{"wrong provider", makeResult("nasdaq", rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHMetadata, false), false},
+		{"wrong code", makeResult("ibkr_wsh", rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageWSHMetadata, false), false},
+		{"wrong stage", makeResult("ibkr_wsh", rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHContractResolve, false), false},
+		{"retryable", makeResult("ibkr_wsh", rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHMetadata, true), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &rulesFakeConn{result: tc.res}
+			var stdout, stderr bytes.Buffer
+			env := &Env{Stdout: &stdout, Stderr: &stderr, Conn: conn}
+			if code := Run(context.Background(), env, "rules", nil); code != 0 {
+				t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+			}
+			out := stdout.String()
+			got := strings.Contains(out, "Wall Street Horizon earnings feed")
+			if got != tc.want {
+				t.Fatalf("notice=%t want=%t output=%s", got, tc.want, out)
+			}
+			if strings.Contains(out, "ibkr_wsh") || strings.Contains(out, "invalid_payload") {
+				t.Fatalf("renderer exposed typed provider internals: %s", out)
+			}
+		})
+	}
+}

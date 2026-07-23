@@ -450,6 +450,7 @@ func (e *proposalEngine) refresh(ctx context.Context, show bool) (rpc.TradePropo
 		}
 		return snap, err
 	}
+	pos = e.server.analysisPositions(pos, now)
 	if proposalPositionsUnprimed(pos, acct) {
 		blockers := []rpc.TradingBlocker{{Code: "positions_pending", Message: "portfolio stream not yet primed; account summary reports open positions"}}
 		if snap, ok := e.preserveSnapshotOnRefreshFailure(scope, autoStatus, policyStatus, blockers, show); ok {

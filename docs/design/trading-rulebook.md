@@ -108,7 +108,11 @@ contradiction:
 5. Amendment (2026-07-21): earnings resolution combines Nasdaq with the
    subscription-gated IBKR Wall Street Horizon feed. Provider outcomes remain
    independent; conflicting published dates are `unknown`, and an override is
-   still the only operator-authored authority.
+   still the only operator-authored authority. A non-retryable WSH
+   `not_entitled` result at the metadata or event stage is rendered once as an
+   account subscription notice: Nasdaq remains active and any name without a
+   usable date stays `unknown`, never a pass. No other provider failure is
+   treated as an entitlement result.
 6. Amendment (2026-07-21): a reviewed exact broker contract may be classified
    `terminal_non_reporting` from typed daemon.db evidence. This is an explicit
    not-applicable/exempt result for rules 6-8, never a pass and never a
@@ -546,13 +550,9 @@ web/app/*                         rules card + drill-in
 |---|---|---|---|---|
 | Rule thresholds | compiled Rulebook model (operator TOML planned) × latched regime stage for rules 3/4/12 | `RulesResult.PolicyFingerprint` | all | embedded `rulebook-v2`; sibling ID/version pin is not fingerprint-level approval; stage carried/never-seen ⇒ worse-of/calm with disclosure |
 | Rule verdicts | daemon canonical evaluation + `rules.snapshot` | `RulesResult.Rules []RuleRow` | CLI/MCP/SPA, brief delta, history | per-row `unknown`/`not_evaluated`, result-level InputHealth |
-| Earnings dates/applicability | daemon multi-provider earnings resolution ∪ authoritative override ∪ exact-contract SQLite terminal evidence | `RulesResult.Earnings[]` with provider outcomes, terminal revision/fingerprint/provenance | same | typed `unknown`; conflicts/expired evidence have no usable date or exemption; stale LKG flagged |
+| Earnings dates/applicability | daemon multi-provider earnings resolution ∪ authoritative override ∪ exact-contract SQLite terminal evidence ∪ exact broker identity observations | `RulesResult.Earnings[]` with provider outcomes and typed applicability authority | same | typed `unknown`; conflicts, expired, or mismatched evidence have no usable date or exemption; stale LKG flagged |
 | Preview causes | daemon preview handler (scope-bound canonical result ≤75s) | `Warnings[].Code = rule_*`, `Scope = rulebook`; as-of in `Impact` | order preview surfaces | explicit unavailable advisory when canonical read cannot complete |
 | Alert episodes | daemon source-neutral alert authority | complete `RulesResult` + typed episode/occurrence contracts | Alerts inbox and Web Push | stale/incomplete evidence cannot clear an episode |
-| Rule thresholds | rulebook policy (embedded; TOML planned) × latched regime stage for rules 3/4/12 | `RulesResult.PolicyFingerprint` | all | embedded `rulebook-v2`; stage carried/never-seen ⇒ worse-of/calm with disclosure |
-| Rule verdicts | daemon `rules.snapshot` | `RulesResult.Rules []RuleRow` | CLI/MCP/SPA render only | per-row `unknown`/`not_evaluated`, result-level InputHealth |
-| Earnings dates/applicability | daemon multi-provider earnings resolution ∪ authoritative override ∪ exact-contract SQLite terminal evidence ∪ exact broker identity observations | `RulesResult.Earnings[]` with provider outcomes, terminal symbol-to-contract binding, or broker proof revision/fingerprint/opaque observation link and symbol-to-proof binding | same | typed `unknown`; conflicts, expired terminal evidence, or missing/mismatched applicability binding have no usable date or exemption; stale LKG flagged |
-| Preview causes | daemon preview handler (cached eval ≤45s) | `Warnings[].Code = rule_*`, `Scope = rulebook` | order preview surfaces | absent when rules disabled/stale beyond TTL |
 | Feature toggle + overrides | platform settings (runtime) | `features.rulebook.*` | settings surfaces + SPA | defaults on |
 
 ## SPA (authority-matrix row)

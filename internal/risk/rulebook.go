@@ -716,13 +716,6 @@ func (c *ruleContext) expiryRunway() RuleRow {
 	return row
 }
 
-// earningsExempt: policy hedge symbols are index products with no earnings
-// print; screening them through rules 6-8 would manufacture permanent
-// unknowns instead of protecting anything.
-func (c *ruleContext) earningsExempt(sym string) bool {
-	return c.pol.IsHedgeSymbol(sym)
-}
-
 // earningsFor resolves usable earnings context for a name; ok=false means
 // unknown/stale and the caller must degrade, not pass.
 func (c *ruleContext) earningsFor(sym string) (EarningsInput, bool) {
@@ -820,9 +813,6 @@ func (c *ruleContext) catalystCoverage() RuleRow {
 	assessed := 0
 	terminalExempt, brokerExempt := 0, 0
 	for _, n := range c.in.Names {
-		if c.earningsExempt(n.Symbol) {
-			continue
-		}
 		if _, terminal := c.terminalEarningsFor(n.Symbol); terminal {
 			exempt = append(exempt, terminalEarningsExemption(n.Symbol))
 			terminalExempt++
@@ -941,9 +931,6 @@ func (c *ruleContext) overwriteEarnings() RuleRow {
 	assessed := 0
 	terminalExempt, brokerExempt := 0, 0
 	for _, n := range c.in.Names {
-		if c.earningsExempt(n.Symbol) {
-			continue
-		}
 		if _, terminal := c.terminalEarningsFor(n.Symbol); terminal {
 			exempt = append(exempt, terminalEarningsExemption(n.Symbol))
 			terminalExempt++
@@ -1093,9 +1080,6 @@ func (c *ruleContext) earningsSizeFreeze() RuleRow {
 	assessed := 0
 	terminalExempt, brokerExempt := 0, 0
 	for _, n := range c.in.Names {
-		if c.earningsExempt(n.Symbol) {
-			continue
-		}
 		if _, terminal := c.terminalEarningsFor(n.Symbol); terminal {
 			exempt = append(exempt, terminalEarningsExemption(n.Symbol))
 			terminalExempt++

@@ -727,6 +727,54 @@ func (s *earningsTerminalStore) terminalEarningsFor(name risk.NameInput, now tim
 	return match, true
 }
 
+// analysisPositions returns a derived portfolio for advisory analysis. It
+// removes only a currently verified, exact cancelled/dissolved stock contract.
+// The broker position snapshot remains the account/reconciliation and order
+// authority; callers that resolve or act on an individual position must use it.
+func (s *Server) analysisPositions(pos *rpc.PositionsResult, now time.Time) *rpc.PositionsResult {
+	if s == nil || s.earningsTerminal == nil || pos == nil {
+		return pos
+	}
+	stocks := make([]rpc.PositionView, 0, len(pos.Stocks))
+	changed := false
+	for _, stock := range pos.Stocks {
+		match, found := s.earningsTerminal.terminalEarningsFor(risk.NameInput{
+			Symbol:       stock.Symbol,
+			StockConID:   stock.ConID,
+			StockSecType: stock.SecType,
+		}, now)
+		if found && match.Status == rpc.EarningsStatusTerminalNonReporting {
+			changed = true
+			continue
+		}
+		stocks = append(stocks, stock)
+	}
+	if !changed {
+		return pos
+	}
+	out := *pos
+	out.Stocks = stocks
+	baseCcy := ""
+	var netLiquidationBase *float64
+	if pos.Portfolio != nil {
+		baseCcy = pos.Portfolio.BaseCurrency
+		netLiquidationBase = pos.Portfolio.NetLiquidationBase
+	}
+	out.ByUnderlying = groupByUnderlying(out.Stocks, out.Options, baseCcy, netLiquidationBase)
+	out.Portfolio = buildPortfolioAggregatesWithBase(out.Stocks, out.Options, baseCcy)
+	addPortfolioBaseContext(out.Portfolio, out.ByUnderlying, baseCcy, netLiquidationBase)
+	if pos.Portfolio != nil {
+		// This is account-currency sensitivity, not a position aggregate; it
+		// comes from the currency ledger and remains valid for the analysis view.
+		out.Portfolio.FXSensitivityPerPct = pos.Portfolio.FXSensitivityPerPct
+		out.Portfolio.FXBaseCurrency = pos.Portfolio.FXBaseCurrency
+	}
+	// Coverage is reconciled against the raw broker position set and cannot be
+	// copied into a derived analysis view without re-running that reconciliation.
+	out.ProtectionCoverage = nil
+	return &out
+}
+
 func projectEarningsTerminalReferences(in []earningsTerminalReference) []rpc.EarningsEvidenceReference {
 	out := make([]rpc.EarningsEvidenceReference, 0, len(in))
 	for _, reference := range in {

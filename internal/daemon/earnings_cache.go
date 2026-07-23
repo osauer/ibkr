@@ -1204,6 +1204,9 @@ func resolveEarningsProviders(providers map[string]earningsProviderState, now ti
 		}
 		return earningsResolution{Status: rpc.EarningsStatusDate, Reason: reason, Entry: &chosen, Stale: stale}
 	}
+	if earningsNasdaqNoDateWithWSHNotEntitled(providers) {
+		return earningsResolution{Status: rpc.EarningsStatusNoDatePublished, Reason: rpc.EarningsStatusNoDatePublished}
+	}
 
 	if statuses[rpc.EarningsStatusFormatChange] > 0 {
 		return earningsResolution{Status: rpc.EarningsStatusFormatChange, Reason: rpc.EarningsStatusFormatChange}
@@ -1221,6 +1224,20 @@ func resolveEarningsProviders(providers map[string]earningsProviderState, now ti
 		return earningsResolution{Status: rpc.EarningsStatusNoDatePublished, Reason: earningsReasonDateElapsed}
 	}
 	return earningsResolution{Status: rpc.EarningsStatusTransportFailure, Reason: rpc.EarningsStatusTransportFailure}
+}
+
+func earningsNasdaqNoDateWithWSHNotEntitled(providers map[string]earningsProviderState) bool {
+	if len(providers) != 2 {
+		return false
+	}
+	nasdaq, hasNasdaq := providers[earningsNasdaqProvider]
+	wsh, hasWSH := providers[earningsWSHProvider]
+	if !hasNasdaq || !hasWSH || nasdaq.LastAttempt.Status != rpc.EarningsStatusNoDatePublished || wsh.LastAttempt.Status != rpc.EarningsStatusTransportFailure {
+		return false
+	}
+	failure := wsh.LastAttempt.LastFailure
+	return failure != nil && failure.Code == rpc.SourceFailureNotEntitled && !failure.Retryable &&
+		(failure.Stage == rpc.SourceFailureStageWSHMetadata || failure.Stage == rpc.SourceFailureStageWSHEvent)
 }
 
 func resolveEarningsState(providers map[string]earningsProviderState, identity *earningsIdentityState, now time.Time) earningsResolution {

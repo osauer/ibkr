@@ -1233,6 +1233,36 @@ func TestBriefEarningsRowEscalatesWhenGoverningRuleUnknown(t *testing.T) {
 	}
 }
 
+func TestBriefWSHEntitlementNoticeRequiresExactTypedTuple(t *testing.T) {
+	makeRules := func(provider, code, stage string, retryable bool) *rpc.RulesResult {
+		return &rpc.RulesResult{Earnings: []rpc.EarningsInfo{{Symbol: "SYNTH1", Providers: []rpc.EarningsProviderInfo{{
+			Provider: provider, LastFailure: &rpc.SourceFailure{Code: code, Stage: stage, Retryable: retryable},
+		}}}}}
+	}
+	for _, tc := range []struct {
+		name  string
+		rules *rpc.RulesResult
+		want  bool
+	}{
+		{"metadata", makeRules("ibkr_wsh", rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHMetadata, false), true},
+		{"event", makeRules("ibkr_wsh", rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHEvent, false), true},
+		{"provider", makeRules("nasdaq", rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHMetadata, false), false},
+		{"code", makeRules("ibkr_wsh", rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageWSHMetadata, false), false},
+		{"stage", makeRules("ibkr_wsh", rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHContractResolve, false), false},
+		{"retryable", makeRules("ibkr_wsh", rpc.SourceFailureNotEntitled, rpc.SourceFailureStageWSHMetadata, true), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := briefWSHEntitlementNotice(tc.rules)
+			if (got != "") != tc.want {
+				t.Fatalf("notice=%q want=%t", got, tc.want)
+			}
+			if strings.Contains(got, "ibkr_wsh") || strings.Contains(got, "not_entitled") {
+				t.Fatalf("notice exposed provider internals: %q", got)
+			}
+		})
+	}
+}
+
 func TestBriefMoversAggregateByUnderlyingWithResidual(t *testing.T) {
 	pos := &rpc.PositionsResult{ByUnderlying: []rpc.PositionGroup{
 		{Underlying: "spy", GroupDailyPnLBase: new(10263.60)},

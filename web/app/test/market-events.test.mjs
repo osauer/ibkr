@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { positionsHaveShortStock, relevantMarketEventHealth } from "../exposure-relevance.js";
 import { unknownEventRuleNote } from "../earnings-relevance.js";
-import { earningsApplicabilitySummary, earningsHealthNotes, ruleStatusLabel, rulesCountSummary } from "../rules-presentation.js";
+import { earningsApplicabilitySummary, earningsHealthNotes, ruleStatusLabel, rulesCountSummary, wshEntitlementNotice } from "../rules-presentation.js";
 
 test("borrow source health follows stock exposure across both position projections", () => {
   const positions = { stocks: [{ symbol: "XYZ", sec_type: "STOCK", quantity: 100 }], by_underlying: [] };
@@ -101,4 +101,22 @@ test("Canary renders retained earnings evidence issues as informational", () => 
   assert.match(note, /informational issue/);
   assert.match(note, /contract_unavailable/);
   assert.equal(earningsHealthNotes({ input_health: [{ source: "earnings", status: "degraded", notes: ["not_observed"] }] }), "");
+});
+
+test("WSH subscription notice requires the exact typed non-retryable entitlement tuple", () => {
+  const fixture = (provider, code, stage, retryable) => ({ earnings: [{
+    symbol: "SYNTH1",
+    providers: [{ provider, last_failure: { code, stage, retryable, message: "untrusted provider prose" } }],
+  }] });
+  assert.match(wshEntitlementNotice(fixture("ibkr_wsh", "not_entitled", "wsh_metadata", false)), /Wall Street Horizon earnings feed/);
+  assert.match(wshEntitlementNotice(fixture("ibkr_wsh", "not_entitled", "wsh_event", false)), /unknown, never pass/);
+  for (const [provider, code, stage, retryable] of [
+    ["nasdaq", "not_entitled", "wsh_metadata", false],
+    ["ibkr_wsh", "invalid_payload", "wsh_metadata", false],
+    ["ibkr_wsh", "not_entitled", "wsh_contract_resolve", false],
+    ["ibkr_wsh", "not_entitled", "wsh_metadata", true],
+  ]) {
+    assert.equal(wshEntitlementNotice(fixture(provider, code, stage, retryable)), "");
+  }
+  assert.doesNotMatch(wshEntitlementNotice(fixture("ibkr_wsh", "not_entitled", "wsh_metadata", false)), /untrusted provider prose|ibkr_wsh|not_entitled/);
 });

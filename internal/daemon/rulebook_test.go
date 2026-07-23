@@ -129,7 +129,7 @@ func TestAssembleEarningsPropagatesTypedUnknownAndSourceHealth(t *testing.T) {
 	}
 	srv := &Server{earnings: cache}
 	earnings, infos := srv.assembleEarnings(context.Background(), []risk.NameInput{{Symbol: "NOW"}}, risk.DefaultRulebookPolicy(), marketcal.New(), now, false)
-	if len(infos) != 1 || infos[0].Status != rpc.EarningsStatusNoDatePublished || infos[0].Reason != rpc.EarningsStatusNoDatePublished || infos[0].Source != "unknown" {
+	if len(infos) != 1 || infos[0].Status != rpc.EarningsStatusNoDatePublished || infos[0].Reason != rpc.EarningsStatusNoDatePublished || infos[0].Source != "fetched" {
 		t.Fatalf("typed earnings info = %+v", infos)
 	}
 	if got := earnings["NOW"]; got.Known || got.Reason != rpc.EarningsStatusNoDatePublished {

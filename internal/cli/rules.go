@@ -144,8 +144,32 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 			fmt.Fprintf(env.Stdout, "Earnings unresolved: %s — set an authoritative override with `ibkr settings set features.rulebook.earnings_overrides.<SYM>=YYYY-MM-DD` if needed (rules 6-8 stay unknown, never pass).\n",
 				strings.Join(unresolved, ", "))
 		}
+		if wshEntitlementNotice(&res) {
+			fmt.Fprintln(env.Stdout, "Earnings source notice: the optional Wall Street Horizon earnings feed is unavailable because this account lacks the WSH research subscription. Nasdaq remains active; names without a usable date stay unknown, never pass.")
+		}
 	}
 	return 0
+}
+
+// wshEntitlementNotice recognizes only the durable WSH entitlement result.
+// Other provider failures remain their own typed outcomes; adapters must not
+// infer account subscription state from an arbitrary failure or free text.
+func wshEntitlementNotice(res *rpc.RulesResult) bool {
+	if res == nil {
+		return false
+	}
+	for _, earnings := range res.Earnings {
+		for _, provider := range earnings.Providers {
+			failure := provider.LastFailure
+			if provider.Provider != "ibkr_wsh" || failure == nil ||
+				failure.Code != rpc.SourceFailureNotEntitled || failure.Retryable ||
+				(failure.Stage != rpc.SourceFailureStageWSHMetadata && failure.Stage != rpc.SourceFailureStageWSHEvent) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 func earningsOutcomeLabel(reason string) string {

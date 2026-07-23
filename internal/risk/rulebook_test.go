@@ -95,20 +95,20 @@ func TestEvaluateRulebookHealthyBook(t *testing.T) {
 		t.Fatalf("rows = %d, want 14", len(ev.Rows))
 	}
 	cases := map[string]string{
-		RuleSingleNameExposure: RuleStatusAct,   // NOW 155% of NLV
-		RuleOptionLinePremium:  RuleStatusAct,   // NOW 115C 14.7%, BB 13.9% (normal tier)
-		RuleCashSellOnly:       RuleStatusAct,   // -25.3% vs calm -25 floor
-		RuleExtrinsicBudget:    RuleStatusAct,   // ex-hedge ~29.1% of NLV
-		RuleExpiryRunway:       RuleStatusWatch, // NOW Jul 130C at 10 DTE
-		RuleCatalystCoverage:   RuleStatusWatch, // NOW 130C dies before Jul 22
-		RuleOverwriteEarnings:  RuleStatusAct,   // MSFT short call through Jul 29
-		RuleEarningsSizeFreeze: RuleStatusPass,  // 11 sessions out
-		RuleRedOnGreen:         RuleStatusWatch, // BB -1.7% on SPY +1.0%
-		RuleWinnerTrim:         RuleStatusPass,  // nothing +4%
-		RuleGreenDayAction:     RuleStatusInfo,  // green day, act rules open
-		RuleHedgeIntegrity:     RuleStatusAct,   // hedge ~159% of gross long > 2× calm band top
-		RuleExitDiscipline:     RuleStatusPass,  // worst line -30%, under the -40% fence
-		RuleFXExposure:         RuleStatusWatch, // 93.9% non-base vs 60% watch-only bar
+		RuleSingleNameExposure: RuleStatusAct,     // NOW 155% of NLV
+		RuleOptionLinePremium:  RuleStatusAct,     // NOW 115C 14.7%, BB 13.9% (normal tier)
+		RuleCashSellOnly:       RuleStatusAct,     // -25.3% vs calm -25 floor
+		RuleExtrinsicBudget:    RuleStatusAct,     // ex-hedge ~29.1% of NLV
+		RuleExpiryRunway:       RuleStatusWatch,   // NOW Jul 130C at 10 DTE
+		RuleCatalystCoverage:   RuleStatusWatch,   // NOW 130C dies before Jul 22
+		RuleOverwriteEarnings:  RuleStatusAct,     // MSFT short call through Jul 29
+		RuleEarningsSizeFreeze: RuleStatusUnknown, // hedge-list membership is not evidence that an option underlying is a nonissuer
+		RuleRedOnGreen:         RuleStatusWatch,   // BB -1.7% on SPY +1.0%
+		RuleWinnerTrim:         RuleStatusPass,    // nothing +4%
+		RuleGreenDayAction:     RuleStatusInfo,    // green day, act rules open
+		RuleHedgeIntegrity:     RuleStatusAct,     // hedge ~159% of gross long > 2× calm band top
+		RuleExitDiscipline:     RuleStatusPass,    // worst line -30%, under the -40% fence
+		RuleFXExposure:         RuleStatusWatch,   // 93.9% non-base vs 60% watch-only bar
 	}
 	for id, want := range cases {
 		if got := rowByID(t, ev, id).Status; got != want {
@@ -910,6 +910,9 @@ func TestEarningsSizeFreezeGapPropagation(t *testing.T) {
 		in.Names[1].GreeksGapNotionalBase = 34000 // BB gapped, material
 		e := EarningsInput{Known: known, Date: etDate(2026, 7, 9), SessionsUntil: sessions, Source: "fetched"}
 		in.Earnings["BB"] = e
+		// The test isolates BB's missing-Greeks decision. SPY is an option-only
+		// group here, so no exact stock identity can prove it is a nonissuer.
+		in.Earnings["SPY"] = EarningsInput{Known: true, Date: etDate(2026, 7, 20), SessionsUntil: new(11), Source: "fetched"}
 	}
 
 	in := healthyInputs()
