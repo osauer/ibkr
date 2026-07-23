@@ -84,6 +84,23 @@ func TestNasdaqSymbolMapping(t *testing.T) {
 	}
 }
 
+func TestCloneRulesResultDeepCopiesEarningsIdentity(t *testing.T) {
+	now := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
+	next := now.Add(5 * time.Minute)
+	in := &rpc.RulesResult{Earnings: []rpc.EarningsInfo{{Identity: &rpc.EarningsIdentityInfo{
+		Outcome: earningsIdentityUnknown, NotApplicable: true, AttemptedAt: now, NextAttempt: &next,
+		LastFailure: &rpc.SourceFailure{Code: rpc.SourceFailureContractUnavailable, Stage: rpc.SourceFailureStageWSHContractResolve, FailedAt: now},
+	}}}}
+	out := cloneRulesResult(in)
+	out.Earnings[0].Identity.Outcome = earningsIdentityIssuer
+	*out.Earnings[0].Identity.NextAttempt = next.Add(time.Hour)
+	out.Earnings[0].Identity.LastFailure.Code = rpc.SourceFailureInvalidPayload
+	if in.Earnings[0].Identity.Outcome != earningsIdentityUnknown || !in.Earnings[0].Identity.NextAttempt.Equal(next) ||
+		in.Earnings[0].Identity.LastFailure.Code != rpc.SourceFailureContractUnavailable {
+		t.Fatal("rules clone aliased nested earnings identity state")
+	}
+}
+
 func TestParseEarningsOverride(t *testing.T) {
 	loc, _ := time.LoadLocation("America/New_York")
 	e, ok := parseEarningsOverride("2026-07-22Tamc", loc)
@@ -727,6 +744,17 @@ func TestMapRuleNamesExactStockIdentityFailsClosedOnSameTickerListings(t *testin
 	}
 }
 
+func TestMapRuleNamesCanonicalizesBrokerStockAliasesForIdentity(t *testing.T) {
+	for _, secType := range []string{"STOCK", "ETF"} {
+		stock := rpc.PositionView{Symbol: "SYNTH1", SecType: secType, ConID: 7001, Quantity: 10, Mark: 20}
+		pos := &rpc.PositionsResult{Stocks: []rpc.PositionView{stock}, ByUnderlying: []rpc.PositionGroup{{Underlying: "SYNTH1", Stock: &stock}}}
+		names := mapRuleNames(pos, risk.DefaultRulebookPolicy(), "USD")
+		if len(names) != 1 || names[0].StockConID != 7001 || names[0].StockSecType != "STK" {
+			t.Fatal("broker stock alias did not produce a canonical exact identity")
+		}
+	}
+}
+
 // TestMapRuleNamesCostBasisJoinAndCompleteness covers the v2 input assembly:
 // multiplier-inclusive cost basis with the same-currency FX path (a
 // zero-marked line must keep its cost basis — that is rule 13's −100% case),
@@ -980,6 +1008,31 @@ func TestJournalRuleTransitionsCarriesPolicyAndTerminalAuthorityFingerprints(t *
 	key := pol.FingerprintKey()
 	at := time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
 	terminalKey := "sha256:" + strings.Repeat("a", 64)
+	identityKey := "sha256:" + strings.Repeat("c", 64)
+	identityObservationID := opaqueEarningsIdentityObservationID(81, identityKey)
+	identityAttemptedAt := at.Add(-2 * time.Minute)
+	identityFailedAt := at.Add(-time.Minute)
+	identityNextAttempt := identityFailedAt.Add(earningsContractResolutionRetry)
+	identity := &rpc.EarningsIdentityInfo{
+		Outcome: earningsIdentityUnknown, NotApplicable: true, AttemptedAt: identityAttemptedAt,
+		ProofObservedAt: at.Add(-30 * time.Minute), ProofOutcome: rpc.EarningsStatusNotApplicable,
+		AuthorityRevision: 8, AuthorityFingerprint: identityKey, ObservationID: identityObservationID,
+		NextAttempt: &identityNextAttempt,
+		LastFailure: &rpc.SourceFailure{
+			Code: rpc.SourceFailureContractUnavailable, Stage: rpc.SourceFailureStageWSHContractResolve,
+			FailedAt: identityFailedAt, Retryable: true,
+		},
+	}
+	identity.AuthorityBinding = rpc.BuildEarningsIdentityAuthorityBinding("SYNTH1", *identity)
+	terminal := &rpc.EarningsTerminalInfo{
+		ContractConID: 42, Issuer: "private issuer must not enter transitions", CIK: "0000000042",
+		Classification: earningsTerminalClassEquityCancelled,
+		EffectiveDate:  at.AddDate(0, -1, 0).Format(time.DateOnly),
+		VerifiedAt:     at.Add(-2 * time.Hour), RevalidateAfter: at.Add(30 * 24 * time.Hour),
+		AuthorityRevision: 7, AuthorityReviewedAt: at.Add(-time.Hour), AuthorityFingerprint: terminalKey,
+		Evidence: []rpc.EarningsEvidenceReference{{Authority: "SEC", Document: "private document", URL: "https://www.sec.gov/Archives/edgar/data/42/private"}},
+	}
+	terminal.AuthorityBinding = rpc.BuildEarningsTerminalAuthorityBinding("PRIVATE", *terminal)
 	server := &Server{}
 	server.journalRuleTransitions(&rpc.RulesResult{
 		AsOf:          at,
@@ -991,13 +1044,10 @@ func TestJournalRuleTransitionsCarriesPolicyAndTerminalAuthorityFingerprints(t *
 		},
 		Earnings: []rpc.EarningsInfo{{
 			Symbol: "PRIVATE", Source: "verified_terminal", Status: rpc.EarningsStatusTerminalNonReporting,
-			Terminal: &rpc.EarningsTerminalInfo{
-				ContractConID: 42, Issuer: "private issuer must not enter transitions", CIK: "0000000042",
-				Classification: earningsTerminalClassEquityCancelled,
-				VerifiedAt:     at.Add(-2 * time.Hour), RevalidateAfter: at.Add(30 * 24 * time.Hour),
-				AuthorityRevision: 7, AuthorityReviewedAt: at.Add(-time.Hour), AuthorityFingerprint: terminalKey,
-				Evidence: []rpc.EarningsEvidenceReference{{Authority: "SEC", Document: "private document", URL: "https://www.sec.gov/Archives/edgar/data/42/private"}},
-			},
+			Terminal: terminal,
+		}, {
+			Symbol: "SYNTH1", Source: "broker_identity", Status: rpc.EarningsStatusNotApplicable,
+			Identity: identity,
 		}},
 		Rules: []risk.RuleRow{{ID: risk.RuleSingleNameExposure, Status: risk.RuleStatusWatch}},
 	})
@@ -1041,8 +1091,12 @@ func TestJournalRuleTransitionsCarriesPolicyAndTerminalAuthorityFingerprints(t *
 	if got, _ := authority["authority_fingerprint"].(string); got != terminalKey {
 		t.Fatalf("authority_fingerprint = %q, want %q", got, terminalKey)
 	}
+	if got, _ := authority["authority_binding"].(string); got != terminal.AuthorityBinding {
+		t.Fatalf("authority_binding = %q, want %q", got, terminal.AuthorityBinding)
+	}
 	allowed := map[string]bool{
 		"contract_con_id": true, "authority_revision": true, "authority_fingerprint": true,
+		"authority_binding":     true,
 		"authority_reviewed_at": true, "verified_at": true, "revalidate_after": true, "classification": true,
 	}
 	for field := range authority {
@@ -1053,6 +1107,26 @@ func TestJournalRuleTransitionsCarriesPolicyAndTerminalAuthorityFingerprints(t *
 	if len(authority) != len(allowed) {
 		t.Fatalf("terminal authority fields = %#v, want exactly %#v", authority, allowed)
 	}
+	identityAuthorities, ok := entry["identity_authorities"].([]any)
+	if !ok || len(identityAuthorities) != 1 {
+		t.Fatalf("identity_authorities = %#v, want one accepted authority", entry["identity_authorities"])
+	}
+	identityAuthority, ok := identityAuthorities[0].(map[string]any)
+	if !ok || identityAuthority["authority_fingerprint"] != identityKey || int(identityAuthority["authority_revision"].(float64)) != 8 ||
+		identityAuthority["observation_id"] != identityObservationID ||
+		identityAuthority["authority_binding"] != identity.AuthorityBinding ||
+		identityAuthority["outcome"] != earningsIdentityNotApplicable {
+		t.Fatalf("identity authority = %#v", identityAuthorities[0])
+	}
+	identityAllowed := map[string]bool{
+		"authority_revision": true, "authority_fingerprint": true, "observation_id": true,
+		"authority_binding": true, "observed_at": true, "outcome": true,
+	}
+	for field := range identityAuthority {
+		if !identityAllowed[field] {
+			t.Fatalf("identity authority leaked non-audit field %q", field)
+		}
+	}
 	if err := json.Unmarshal([]byte(lines[1]), &entry); err != nil {
 		t.Fatalf("nil-fingerprint journal entry is not JSON: %v", err)
 	}
@@ -1062,22 +1136,28 @@ func TestJournalRuleTransitionsCarriesPolicyAndTerminalAuthorityFingerprints(t *
 	if authorities, ok := entry["terminal_authorities"].([]any); !ok || len(authorities) != 0 {
 		t.Fatalf("empty terminal_authorities = %#v, want []", entry["terminal_authorities"])
 	}
+	if authorities, ok := entry["identity_authorities"].([]any); !ok || len(authorities) != 0 {
+		t.Fatalf("empty identity_authorities = %#v, want []", entry["identity_authorities"])
+	}
 }
 
 func TestJournalRuleTransitionsSQLitePayloadCarriesAcceptedTerminalAuthority(t *testing.T) {
 	store := openMarketTestCoreStore(t)
 	at := time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
 	terminalKey := "sha256:" + strings.Repeat("b", 64)
+	terminal := &rpc.EarningsTerminalInfo{
+		ContractConID: 84, Classification: earningsTerminalClassIssuerDissolved,
+		EffectiveDate: at.AddDate(0, -1, 0).Format(time.DateOnly),
+		VerifiedAt:    at.Add(-2 * time.Hour), RevalidateAfter: at.Add(24 * time.Hour),
+		AuthorityRevision: 9, AuthorityReviewedAt: at.Add(-time.Hour), AuthorityFingerprint: terminalKey,
+	}
+	terminal.AuthorityBinding = rpc.BuildEarningsTerminalAuthorityBinding("PRIVATE2", *terminal)
 	server := &Server{coreStore: store}
 	server.journalRuleTransitions(&rpc.RulesResult{
 		AsOf: at, PolicyID: "rulebook", PolicyVersion: 3,
 		Earnings: []rpc.EarningsInfo{{
-			Source: "verified_terminal", Status: rpc.EarningsStatusTerminalNonReporting,
-			Terminal: &rpc.EarningsTerminalInfo{
-				ContractConID: 84, Classification: earningsTerminalClassIssuerDissolved,
-				VerifiedAt: at.Add(-2 * time.Hour), RevalidateAfter: at.Add(24 * time.Hour),
-				AuthorityRevision: 9, AuthorityReviewedAt: at.Add(-time.Hour), AuthorityFingerprint: terminalKey,
-			},
+			Symbol: "PRIVATE2", Source: "verified_terminal", Status: rpc.EarningsStatusTerminalNonReporting,
+			Terminal: terminal,
 		}},
 		Rules: []risk.RuleRow{{ID: risk.RuleEarningsSizeFreeze, Status: risk.RuleStatusInfo}},
 	})
@@ -1095,41 +1175,92 @@ func TestJournalRuleTransitionsSQLitePayloadCarriesAcceptedTerminalAuthority(t *
 		t.Fatalf("decode raw event payload: %v", err)
 	}
 	if len(payload.TerminalAuthorities) != 1 || payload.TerminalAuthorities[0].ContractConID != 84 ||
-		payload.TerminalAuthorities[0].AuthorityRevision != 9 || payload.TerminalAuthorities[0].AuthorityFingerprint != terminalKey {
+		payload.TerminalAuthorities[0].AuthorityRevision != 9 || payload.TerminalAuthorities[0].AuthorityFingerprint != terminalKey ||
+		payload.TerminalAuthorities[0].AuthorityBinding != terminal.AuthorityBinding {
 		t.Fatalf("raw terminal authority = %+v", payload.TerminalAuthorities)
 	}
 }
 
 func TestAcceptedRuleTransitionTerminalAuthoritiesSortsDedupesAndRejectsEquivocation(t *testing.T) {
 	at := time.Date(2026, 7, 21, 14, 0, 0, 0, time.UTC)
-	makeInfo := func(conID int, fingerprint string) rpc.EarningsInfo {
-		return rpc.EarningsInfo{
-			Source: "verified_terminal", Status: rpc.EarningsStatusTerminalNonReporting,
+	makeInfo := func(symbol string, conID int, fingerprint string) rpc.EarningsInfo {
+		info := rpc.EarningsInfo{
+			Symbol: symbol, Source: "verified_terminal", Status: rpc.EarningsStatusTerminalNonReporting,
 			Terminal: &rpc.EarningsTerminalInfo{
 				ContractConID: conID, Classification: earningsTerminalClassEquityCancelled,
-				VerifiedAt: at.Add(-2 * time.Hour), RevalidateAfter: at.Add(time.Hour),
+				EffectiveDate: at.AddDate(0, -1, 0).Format(time.DateOnly),
+				VerifiedAt:    at.Add(-2 * time.Hour), RevalidateAfter: at.Add(time.Hour),
 				AuthorityRevision: 3, AuthorityReviewedAt: at.Add(-time.Hour), AuthorityFingerprint: fingerprint,
 			},
 		}
+		info.Terminal.AuthorityBinding = rpc.BuildEarningsTerminalAuthorityBinding(symbol, *info.Terminal)
+		return info
 	}
 	one := "sha256:" + strings.Repeat("1", 64)
 	two := "sha256:" + strings.Repeat("2", 64)
 	conflictA := "sha256:" + strings.Repeat("3", 64)
 	conflictB := "sha256:" + strings.Repeat("4", 64)
-	info200 := makeInfo(200, two)
-	info100 := makeInfo(100, one)
-	conflictedA := makeInfo(300, conflictA)
-	conflictedB := makeInfo(300, conflictB)
-	invalid := makeInfo(400, "raw-free-text")
-	expired := makeInfo(500, one)
+	info200 := makeInfo("TERM200", 200, two)
+	info100 := makeInfo("TERM100", 100, one)
+	conflictedA := makeInfo("TERM300A", 300, conflictA)
+	conflictedB := makeInfo("TERM300B", 300, conflictB)
+	invalid := makeInfo("TERM400", 400, "raw-free-text")
+	expired := makeInfo("TERM500", 500, one)
 	expired.Terminal.RevalidateAfter = at
-	wrongSource := makeInfo(600, one)
+	expired.Terminal.AuthorityBinding = rpc.BuildEarningsTerminalAuthorityBinding(expired.Symbol, *expired.Terminal)
+	wrongSource := makeInfo("TERM600", 600, one)
 	wrongSource.Source = "fetched"
 	got := acceptedRuleTransitionTerminalAuthorities(&rpc.RulesResult{AsOf: at, Earnings: []rpc.EarningsInfo{
 		info200, info100, info100, conflictedA, conflictedB, invalid, expired, wrongSource,
 	}})
 	if len(got) != 2 || got[0].ContractConID != 100 || got[1].ContractConID != 200 {
 		t.Fatalf("accepted authorities = %+v, want sorted deduped ConIDs 100, 200", got)
+	}
+	duplicateA := makeInfo("TERM700A", 700, one)
+	duplicateB := makeInfo("TERM700B", 700, one)
+	if got := acceptedRuleTransitionTerminalAuthorities(&rpc.RulesResult{AsOf: at, Earnings: []rpc.EarningsInfo{duplicateA, duplicateB}}); len(got) != 0 {
+		t.Fatalf("terminal transition accepted one ConID for multiple symbols: %+v", got)
+	}
+}
+
+func TestAcceptedRuleTransitionIdentityAuthoritiesRequireOpaqueObservationLink(t *testing.T) {
+	at := time.Date(2026, 7, 23, 14, 0, 0, 0, time.UTC)
+	fingerprint := "sha256:" + strings.Repeat("7", 64)
+	proofObservedAt := at.Add(-time.Hour)
+	nextAttempt := proofObservedAt.Add(earningsFreshWindow)
+	info := rpc.EarningsInfo{
+		Symbol: "SYNTH1",
+		Source: "broker_identity", Status: rpc.EarningsStatusNotApplicable,
+		Identity: &rpc.EarningsIdentityInfo{
+			Outcome: earningsIdentityNotApplicable, NotApplicable: true,
+			AttemptedAt: proofObservedAt.Add(-time.Minute), ProofObservedAt: proofObservedAt,
+			ProofOutcome: rpc.EarningsStatusNotApplicable, AuthorityRevision: 4, AuthorityFingerprint: fingerprint,
+			NextAttempt: &nextAttempt,
+		},
+	}
+	if got := acceptedRuleTransitionIdentityAuthorities(&rpc.RulesResult{AsOf: at, Earnings: []rpc.EarningsInfo{info}}); len(got) != 0 {
+		t.Fatal("identity transition accepted authority without an observation link")
+	}
+	info.Identity.ObservationID = opaqueEarningsIdentityObservationID(41, fingerprint)
+	info.Identity.AuthorityBinding = rpc.BuildEarningsIdentityAuthorityBinding(info.Symbol, *info.Identity)
+	got := acceptedRuleTransitionIdentityAuthorities(&rpc.RulesResult{AsOf: at, Earnings: []rpc.EarningsInfo{info}})
+	if len(got) != 1 || got[0].ObservationID != info.Identity.ObservationID || got[0].AuthorityBinding != info.Identity.AuthorityBinding {
+		t.Fatal("identity transition dropped a valid opaque observation link")
+	}
+	info.Identity.ObservationID = opaqueEarningsIdentityObservationID(42, fingerprint)
+	if got := acceptedRuleTransitionIdentityAuthorities(&rpc.RulesResult{AsOf: at, Earnings: []rpc.EarningsInfo{info}}); len(got) != 0 {
+		t.Fatal("identity transition accepted a valid-shaped receipt that did not match its authority binding")
+	}
+	info.Identity.ObservationID = opaqueEarningsIdentityObservationID(41, fingerprint)
+	info.Identity.AuthorityBinding = rpc.BuildEarningsIdentityAuthorityBinding(info.Symbol, *info.Identity)
+	duplicate := info
+	duplicate.Symbol = "SYNTH2"
+	identityCopy := *info.Identity
+	duplicate.Identity = &identityCopy
+	duplicate.Identity.AuthorityRevision = 5
+	duplicate.Identity.AuthorityBinding = rpc.BuildEarningsIdentityAuthorityBinding(duplicate.Symbol, *duplicate.Identity)
+	if got := acceptedRuleTransitionIdentityAuthorities(&rpc.RulesResult{AsOf: at, Earnings: []rpc.EarningsInfo{info, duplicate}}); len(got) != 0 {
+		t.Fatal("identity transition accepted one opaque receipt for multiple symbols")
 	}
 }
 

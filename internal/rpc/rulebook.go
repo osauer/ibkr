@@ -1,6 +1,10 @@
 package rpc
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/osauer/ibkr/v2/internal/risk"
@@ -35,7 +39,7 @@ type EarningsInfo struct {
 	TimeOfDay string `json:"time_of_day,omitempty"`
 	// Estimated marks provider-flagged estimated (unconfirmed) dates.
 	Estimated bool `json:"estimated,omitempty"`
-	// Source is fetched | override | verified_terminal | unknown.
+	// Source is fetched | override | broker_identity | verified_terminal | unknown.
 	// Provider-level provenance lives in Providers; Terminal carries the
 	// exact-contract evidence when no future issuer earnings event applies.
 	Source string `json:"source"`
@@ -50,6 +54,7 @@ type EarningsInfo struct {
 	ObservedAt time.Time              `json:"observed_at,omitzero"`
 	Stale      bool                   `json:"stale,omitempty"`
 	Providers  []EarningsProviderInfo `json:"providers,omitempty"`
+	Identity   *EarningsIdentityInfo  `json:"identity,omitempty"`
 	Terminal   *EarningsTerminalInfo  `json:"terminal,omitempty"`
 }
 
@@ -61,9 +66,59 @@ const (
 	EarningsStatusFormatChange            = "format_change"
 	EarningsStatusTransportFailure        = "transport_failure"
 	EarningsStatusConflictingSources      = "conflicting_sources"
+	EarningsStatusNotApplicable           = "not_applicable"
 	EarningsStatusTerminalNonReporting    = "terminal_non_reporting"
 	EarningsStatusTerminalEvidenceExpired = "terminal_evidence_expired"
 )
+
+// EarningsIdentityInfo discloses the independent broker applicability read
+// without exposing the held contract ID or raw broker StockType.
+type EarningsIdentityInfo struct {
+	Outcome              string         `json:"outcome"`
+	NotApplicable        bool           `json:"not_applicable,omitempty"`
+	AttemptedAt          time.Time      `json:"attempted_at,omitzero"`
+	ProofObservedAt      time.Time      `json:"proof_observed_at,omitzero"`
+	ProofOutcome         string         `json:"proof_outcome,omitempty"`
+	AuthorityRevision    int64          `json:"authority_revision,omitempty"`
+	AuthorityFingerprint string         `json:"authority_fingerprint,omitempty"`
+	ObservationID        string         `json:"observation_id,omitempty"`
+	AuthorityBinding     string         `json:"authority_binding,omitempty"`
+	NextAttempt          *time.Time     `json:"next_attempt,omitempty"`
+	LastFailure          *SourceFailure `json:"last_failure,omitempty"`
+}
+
+// BuildEarningsIdentityAuthorityBinding binds one public earnings projection
+// to the exact symbol and opaque proof receipt it describes. The digest exposes
+// neither the raw database receipt ID nor broker identity fields; consumers can
+// recompute it to reject cross-symbol or cross-proof substitution.
+func BuildEarningsIdentityAuthorityBinding(symbol string, identity EarningsIdentityInfo) string {
+	if strings.TrimSpace(symbol) == "" || strings.TrimSpace(symbol) != symbol ||
+		identity.AuthorityRevision <= 0 || strings.TrimSpace(identity.AuthorityFingerprint) == "" ||
+		identity.ProofObservedAt.IsZero() || identity.ProofOutcome != EarningsStatusNotApplicable ||
+		strings.TrimSpace(identity.ObservationID) == "" {
+		return ""
+	}
+	payload, err := json.Marshal(struct {
+		Kind                 string    `json:"kind"`
+		Version              int       `json:"version"`
+		Symbol               string    `json:"symbol"`
+		AuthorityRevision    int64     `json:"authority_revision"`
+		AuthorityFingerprint string    `json:"authority_fingerprint"`
+		ProofObservedAt      time.Time `json:"proof_observed_at"`
+		ProofOutcome         string    `json:"proof_outcome"`
+		ObservationID        string    `json:"observation_id"`
+	}{
+		Kind: "earnings_identity_authority_binding", Version: 1,
+		Symbol: symbol, AuthorityRevision: identity.AuthorityRevision,
+		AuthorityFingerprint: identity.AuthorityFingerprint, ProofObservedAt: identity.ProofObservedAt.UTC(),
+		ProofOutcome: identity.ProofOutcome, ObservationID: identity.ObservationID,
+	})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
 
 // EarningsTerminalInfo is compiled, reviewed evidence that one exact broker
 // contract no longer has a future issuer earnings cycle. It is deliberately
@@ -83,7 +138,48 @@ type EarningsTerminalInfo struct {
 	AuthorityRevision    int64                       `json:"authority_revision"`
 	AuthorityReviewedAt  time.Time                   `json:"authority_reviewed_at"`
 	AuthorityFingerprint string                      `json:"authority_fingerprint"`
+	AuthorityBinding     string                      `json:"authority_binding,omitempty"`
 	Evidence             []EarningsEvidenceReference `json:"evidence"`
+}
+
+// BuildEarningsTerminalAuthorityBinding binds one public terminal projection
+// to the exact symbol and contract authority it describes. The digest excludes
+// issuer text and evidence prose while retaining every typed field needed to
+// reject cross-symbol or cross-contract substitution.
+func BuildEarningsTerminalAuthorityBinding(symbol string, terminal EarningsTerminalInfo) string {
+	if strings.TrimSpace(symbol) == "" || strings.TrimSpace(symbol) != symbol ||
+		terminal.ContractConID <= 0 || terminal.AuthorityRevision <= 0 ||
+		strings.TrimSpace(terminal.AuthorityFingerprint) == "" ||
+		strings.TrimSpace(terminal.EffectiveDate) == "" ||
+		strings.TrimSpace(terminal.Classification) == "" || terminal.VerifiedAt.IsZero() ||
+		terminal.AuthorityReviewedAt.IsZero() || terminal.RevalidateAfter.IsZero() {
+		return ""
+	}
+	payload, err := json.Marshal(struct {
+		Kind                 string    `json:"kind"`
+		Version              int       `json:"version"`
+		Symbol               string    `json:"symbol"`
+		ContractConID        int       `json:"contract_con_id"`
+		AuthorityRevision    int64     `json:"authority_revision"`
+		AuthorityFingerprint string    `json:"authority_fingerprint"`
+		EffectiveDate        string    `json:"effective_date"`
+		VerifiedAt           time.Time `json:"verified_at"`
+		AuthorityReviewedAt  time.Time `json:"authority_reviewed_at"`
+		RevalidateAfter      time.Time `json:"revalidate_after"`
+		Classification       string    `json:"classification"`
+	}{
+		Kind: "earnings_terminal_authority_binding", Version: 1,
+		Symbol: symbol, ContractConID: terminal.ContractConID,
+		AuthorityRevision: terminal.AuthorityRevision, AuthorityFingerprint: terminal.AuthorityFingerprint,
+		EffectiveDate: terminal.EffectiveDate, VerifiedAt: terminal.VerifiedAt.UTC(),
+		AuthorityReviewedAt: terminal.AuthorityReviewedAt.UTC(), RevalidateAfter: terminal.RevalidateAfter.UTC(),
+		Classification: terminal.Classification,
+	})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // EarningsEvidenceReference is one allowlisted primary-source document used

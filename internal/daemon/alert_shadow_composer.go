@@ -2273,7 +2273,7 @@ func alertShadowMapRulebook(scope alertShadowBrokerScope, result rpc.RulesResult
 		case risk.RuleStatusPass, risk.RuleStatusInfo:
 			continue
 		case risk.RuleStatusNotEvaluated:
-			if !alertShadowRulebookSafeNotEvaluated(row, result.Status, accountHealthStatus) {
+			if !alertShadowRulebookSafeNotEvaluated(row, result, accountHealthStatus) {
 				covered, worst, reason = false, rpc.AlertEvidenceError, alertShadowReasonCandidateInvalid
 			}
 			continue
@@ -2364,20 +2364,126 @@ func alertRulebookPresentationCode(id string) rpc.AlertPresentationCode {
 	}
 }
 
-func alertShadowRulebookSafeNotEvaluated(row risk.RuleRow, resultStatus, accountHealthStatus string) bool {
+func alertShadowRulebookSafeNotEvaluated(row risk.RuleRow, result rpc.RulesResult, accountHealthStatus string) bool {
 	switch row.ID {
 	case risk.RuleCatalystCoverage, risk.RuleOverwriteEarnings, risk.RuleEarningsSizeFreeze:
-		return row.Reason == risk.EarningsReasonTerminalNonReporting
+		return alertShadowRulebookSafeEarningsNotEvaluated(row, result)
 	case risk.RuleRedOnGreen, risk.RuleWinnerTrim:
 		return row.Reason == risk.RuleReasonOffSession
 	case risk.RuleGreenDayAction:
 		return row.Reason == risk.RuleReasonPnLUnavailable &&
-			resultStatus == "degraded" && accountHealthStatus == rpc.SourceStatusDegraded
+			result.Status == "degraded" && accountHealthStatus == rpc.SourceStatusDegraded
 	case risk.RuleHedgeIntegrity:
 		return row.Reason == risk.RuleReasonNoLongBook
 	default:
 		return false
 	}
+}
+
+type alertShadowEarningsAuthority uint8
+
+const (
+	alertShadowEarningsAuthorityInvalid alertShadowEarningsAuthority = iota
+	alertShadowEarningsAuthorityTerminal
+	alertShadowEarningsAuthorityBroker
+)
+
+// alertShadowRulebookSafeEarningsNotEvaluated verifies the same-result typed
+// authority behind every exempt name. A row reason is disclosure, not proof,
+// and cannot by itself recover an active alert episode.
+func alertShadowRulebookSafeEarningsNotEvaluated(row risk.RuleRow, result rpc.RulesResult) bool {
+	if result.AsOf.IsZero() || len(row.Exempt) == 0 || len(row.Offenders) != 0 {
+		return false
+	}
+	infos := make(map[string]rpc.EarningsInfo, len(result.Earnings))
+	duplicates := make(map[string]struct{})
+	for _, info := range result.Earnings {
+		symbol := strings.TrimSpace(info.Symbol)
+		if symbol == "" || symbol != info.Symbol {
+			continue
+		}
+		if _, exists := infos[symbol]; exists {
+			duplicates[symbol] = struct{}{}
+			continue
+		}
+		infos[symbol] = info
+	}
+
+	seen := make(map[string]struct{}, len(row.Exempt))
+	seenBrokerReceipts := make(map[string]struct{})
+	seenTerminalContracts := make(map[int]struct{})
+	hasTerminal, hasBroker := false, false
+	for _, exempt := range row.Exempt {
+		symbol := strings.TrimSpace(exempt.Symbol)
+		if symbol == "" || symbol != exempt.Symbol {
+			return false
+		}
+		if _, duplicate := seen[symbol]; duplicate {
+			return false
+		}
+		seen[symbol] = struct{}{}
+		if _, duplicate := duplicates[symbol]; duplicate {
+			return false
+		}
+		info, found := infos[symbol]
+		if !found {
+			return false
+		}
+		authority := alertShadowRulebookEarningsAuthorityFor(info, result.AsOf.UTC())
+		if authority == alertShadowEarningsAuthorityBroker {
+			if _, duplicate := seenBrokerReceipts[info.Identity.ObservationID]; duplicate {
+				return false
+			}
+			seenBrokerReceipts[info.Identity.ObservationID] = struct{}{}
+		} else if authority == alertShadowEarningsAuthorityTerminal {
+			if _, duplicate := seenTerminalContracts[info.Terminal.ContractConID]; duplicate {
+				return false
+			}
+			seenTerminalContracts[info.Terminal.ContractConID] = struct{}{}
+		}
+		switch row.Reason {
+		case risk.EarningsReasonTerminalNonReporting:
+			if authority != alertShadowEarningsAuthorityTerminal {
+				return false
+			}
+		case risk.EarningsReasonBrokerNonIssuer:
+			if authority != alertShadowEarningsAuthorityBroker {
+				return false
+			}
+		case risk.EarningsReasonNotApplicable:
+			if authority != alertShadowEarningsAuthorityTerminal && authority != alertShadowEarningsAuthorityBroker {
+				return false
+			}
+		default:
+			return false
+		}
+		hasTerminal = hasTerminal || authority == alertShadowEarningsAuthorityTerminal
+		hasBroker = hasBroker || authority == alertShadowEarningsAuthorityBroker
+	}
+
+	switch row.Reason {
+	case risk.EarningsReasonTerminalNonReporting:
+		return hasTerminal && !hasBroker
+	case risk.EarningsReasonBrokerNonIssuer:
+		return hasBroker && !hasTerminal
+	case risk.EarningsReasonNotApplicable:
+		return hasTerminal && hasBroker
+	default:
+		return false
+	}
+}
+
+func alertShadowRulebookEarningsAuthorityFor(info rpc.EarningsInfo, asOf time.Time) alertShadowEarningsAuthority {
+	if info.Stale || asOf.IsZero() {
+		return alertShadowEarningsAuthorityInvalid
+	}
+	if validRulebookTerminalEarningsAuthority(info, asOf) {
+		return alertShadowEarningsAuthorityTerminal
+	}
+	if validRulebookBrokerEarningsAuthority(info, asOf) {
+		return alertShadowEarningsAuthorityBroker
+	}
+	return alertShadowEarningsAuthorityInvalid
 }
 
 func alertShadowMapOrderIntegrity(scope alertShadowBrokerScope, input orderIntegrityEvaluation, observedAt time.Time, previous map[string]struct{}) (alertShadowSourceBatch, map[string]struct{}) {

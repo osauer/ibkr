@@ -711,6 +711,7 @@ func (s *earningsTerminalStore) terminalEarningsFor(name risk.NameInput, now tim
 		AuthorityFingerprint: stored.fingerprint,
 		Evidence:             projectEarningsTerminalReferences(record.Evidence),
 	}
+	match.Info.AuthorityBinding = rpc.BuildEarningsTerminalAuthorityBinding(record.Contract.Symbol, match.Info)
 	if !strings.EqualFold(strings.TrimSpace(name.Symbol), record.Contract.Symbol) || !sameStockSecurityType(name.StockSecType, record.Contract.SecType) {
 		match.Status = rpc.EarningsStatusConflictingSources
 		match.Reason = earningsTerminalReasonIdentityConflict

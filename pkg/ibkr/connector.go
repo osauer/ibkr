@@ -2636,19 +2636,16 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 		idx++
 	}
 
-	industry := ""
-	category := ""
-	subcategory := ""
 	timeZoneID := ""
 	tradingHours := ""
 	liquidHours := ""
 	if version >= 6 {
-		idx++ // contractMonth
-		industry = strings.TrimSpace(safeGet(fields, idx))
+		idx++                    // contractMonth
+		_ = safeGet(fields, idx) // industry: strict full-frame decoder owns classification
 		idx++
-		category = strings.TrimSpace(safeGet(fields, idx))
+		_ = safeGet(fields, idx) // category: strict full-frame decoder owns classification
 		idx++
-		subcategory = strings.TrimSpace(safeGet(fields, idx))
+		_ = safeGet(fields, idx) // subcategory: strict full-frame decoder owns classification
 		idx++
 		timeZoneID = safeGet(fields, idx)
 		idx++
@@ -2658,91 +2655,12 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 		idx++
 	}
 
-	// StockType is late in the versioned contract-details tail. Advance only
-	// through fields that the official decoder places before it, and leave it
-	// empty unless the entire prefix is structurally present. In particular, a
-	// malformed sec-id count must not shift arbitrary broker text into the
-	// identity field.
-	stockType := ""
-	tailOK := true
-	take := func() string {
-		if !tailOK || idx >= len(fields) {
-			tailOK = false
-			return ""
-		}
-		value := fields[idx]
-		idx++
-		return value
-	}
-	if version >= 8 {
-		_ = take() // evRule
-		_ = take() // evMultiplier
-	}
-	if version >= 7 {
-		countRaw := strings.TrimSpace(take())
-		count := 0
-		if tailOK && countRaw != "" {
-			var err error
-			count, err = strconv.Atoi(countRaw)
-			if err != nil || count < 0 || count > (len(fields)-idx)/2 {
-				tailOK = false
-			}
-		}
-		if tailOK {
-			for range count {
-				_ = take() // sec-id tag
-				_ = take() // sec-id value
-			}
-		}
-	}
-	if serverVersion >= minServerVerAggGroup {
-		_ = take()
-	}
-	if serverVersion >= minServerVerUnderlyingInfo {
-		_ = take()
-		_ = take()
-	}
-	if serverVersion >= minServerVerMarketRules {
-		_ = take()
-	}
-	if serverVersion >= minServerVerRealExpiration {
-		_ = take()
-	}
-	if serverVersion >= minServerVerStockType {
-		stockType = strings.TrimSpace(take())
-	}
-	if serverVersion >= minServerVerFractionalSize && serverVersion < minServerVerSizeRules {
-		_ = take() // deprecated sizeMinTick
-	}
-	if serverVersion >= minServerVerSizeRules {
-		_ = take() // minSize
-		_ = take() // sizeIncrement
-		_ = take() // suggestedSizeIncrement
-	}
-	if serverVersion >= minServerVerFundDataFields && strings.EqualFold(secType, "FUND") {
-		for range 17 {
-			_ = take()
-		}
-	}
-	if serverVersion >= minServerVerIneligibility {
-		countRaw := strings.TrimSpace(take())
-		count := 0
-		if tailOK && countRaw != "" {
-			var err error
-			count, err = strconv.Atoi(countRaw)
-			if err != nil || count < 0 || count > (len(fields)-idx)/2 {
-				tailOK = false
-			}
-		}
-		if tailOK {
-			for range count {
-				_ = take() // reason id
-				_ = take() // reason description
-			}
-		}
-	}
-	if !tailOK {
-		stockType = ""
+	industry, category, subcategory, stockType := "", "", "", ""
+	if classification, ok := parseContractDetailsClassification(fields, serverVersion); ok {
+		industry = classification.industry
+		category = classification.category
+		subcategory = classification.subcategory
+		stockType = classification.stockType
 	}
 
 	return &ContractDetailsLite{
@@ -2768,6 +2686,218 @@ func parseContractDetailsLite(fields []string, expectedReqID int, serverVersion 
 		LiquidHours:  liquidHours,
 		MinTick:      minTick,
 	}, true
+}
+
+type contractDetailsClassification struct {
+	industry    string
+	category    string
+	subcategory string
+	stockType   string
+}
+
+// parseContractDetailsClassification follows the official contractData
+// decoder from the message ID through every field after StockType. The
+// classification tuple is authoritative only when the entire versioned frame
+// is present, numeric/count/boolean fields have their declared wire types, and
+// no unconsumed field remains other than the encoding's terminal empty field.
+// The general contract parser remains tolerant so old partial fixtures can
+// still supply routing fields, but a partial or shifted frame can never supply
+// issuer classification.
+func parseContractDetailsClassification(fields []string, serverVersion int) (contractDetailsClassification, bool) {
+	cursor := contractDetailsWireCursor{fields: fields, ok: true}
+	messageID, ok := cursor.integer()
+	if !ok || messageID != msgContractData {
+		return contractDetailsClassification{}, false
+	}
+
+	version := 8
+	if serverVersion < minServerVerSizeRules {
+		version, ok = cursor.integer()
+		if !ok || version < 1 || version > 8 {
+			return contractDetailsClassification{}, false
+		}
+	}
+	if version >= 3 {
+		if _, ok = cursor.integer(); !ok { // reqID
+			return contractDetailsClassification{}, false
+		}
+	}
+
+	_ = cursor.string() // symbol
+	secType := cursor.string()
+	_ = cursor.string() // lastTradeDateOrContractMonth
+	if serverVersion >= minServerVerLastTradeDate {
+		_ = cursor.string() // lastTradeDate
+	}
+	if !cursor.number() { // strike
+		return contractDetailsClassification{}, false
+	}
+	_ = cursor.string()                // right
+	_ = cursor.string()                // exchange
+	_ = cursor.string()                // currency
+	_ = cursor.string()                // localSymbol
+	_ = cursor.string()                // marketName
+	_ = cursor.string()                // tradingClass
+	if _, ok = cursor.integer(); !ok { // conID
+		return contractDetailsClassification{}, false
+	}
+	if !cursor.number() { // minTick
+		return contractDetailsClassification{}, false
+	}
+	if serverVersion >= minServerVerMdSizeMultiplier && serverVersion < minServerVerSizeRules {
+		if _, ok = cursor.integer(); !ok { // deprecated mdSizeMultiplier
+			return contractDetailsClassification{}, false
+		}
+	}
+	_ = cursor.string() // multiplier is a protocol string
+	_ = cursor.string() // orderTypes
+	_ = cursor.string() // validExchanges
+	if version >= 2 {
+		if _, ok = cursor.integer(); !ok { // priceMagnifier
+			return contractDetailsClassification{}, false
+		}
+	}
+	if version >= 4 {
+		if _, ok = cursor.integer(); !ok { // underConID
+			return contractDetailsClassification{}, false
+		}
+	}
+	if version >= 5 {
+		_ = cursor.string() // longName
+		_ = cursor.string() // primaryExchange
+	}
+
+	classification := contractDetailsClassification{}
+	if version >= 6 {
+		_ = cursor.string() // contractMonth
+		classification.industry = strings.TrimSpace(cursor.string())
+		classification.category = strings.TrimSpace(cursor.string())
+		classification.subcategory = strings.TrimSpace(cursor.string())
+		_ = cursor.string() // timeZoneID
+		_ = cursor.string() // tradingHours
+		_ = cursor.string() // liquidHours
+	}
+	if version >= 8 {
+		_ = cursor.string()   // evRule
+		if !cursor.number() { // evMultiplier is double in current Java/C++ clients
+			return contractDetailsClassification{}, false
+		}
+	}
+	if version >= 7 && !cursor.stringPairs() { // secIdList
+		return contractDetailsClassification{}, false
+	}
+	if serverVersion >= minServerVerAggGroup {
+		if _, ok = cursor.integer(); !ok {
+			return contractDetailsClassification{}, false
+		}
+	}
+	if serverVersion >= minServerVerUnderlyingInfo {
+		_ = cursor.string() // underSymbol
+		_ = cursor.string() // underSecType
+	}
+	if serverVersion >= minServerVerMarketRules {
+		_ = cursor.string() // marketRuleIDs
+	}
+	if serverVersion >= minServerVerRealExpiration {
+		_ = cursor.string() // realExpirationDate
+	}
+	if serverVersion >= minServerVerStockType {
+		classification.stockType = strings.TrimSpace(cursor.string())
+	}
+	if serverVersion >= minServerVerFractionalSize && serverVersion < minServerVerSizeRules {
+		if !cursor.number() { // deprecated sizeMinTick
+			return contractDetailsClassification{}, false
+		}
+	}
+	if serverVersion >= minServerVerSizeRules {
+		for range 3 { // minSize, sizeIncrement, suggestedSizeIncrement
+			if !cursor.number() {
+				return contractDetailsClassification{}, false
+			}
+		}
+	}
+	if serverVersion >= minServerVerFundDataFields && strings.EqualFold(strings.TrimSpace(secType), "FUND") {
+		for range 7 { // name through management fee
+			_ = cursor.string()
+		}
+		for range 3 { // closed flags
+			if !cursor.boolean() {
+				return contractDetailsClassification{}, false
+			}
+		}
+		for range 7 { // amount through asset type
+			_ = cursor.string()
+		}
+	}
+	if serverVersion >= minServerVerIneligibility && !cursor.stringPairs() {
+		return contractDetailsClassification{}, false
+	}
+	if !cursor.complete() {
+		return contractDetailsClassification{}, false
+	}
+	return classification, true
+}
+
+type contractDetailsWireCursor struct {
+	fields []string
+	idx    int
+	ok     bool
+}
+
+func (c *contractDetailsWireCursor) string() string {
+	if !c.ok || c.idx >= len(c.fields) {
+		c.ok = false
+		return ""
+	}
+	value := c.fields[c.idx]
+	c.idx++
+	return value
+}
+
+func (c *contractDetailsWireCursor) integer() (int, bool) {
+	value := strings.TrimSpace(c.string())
+	if !c.ok {
+		return 0, false
+	}
+	if value == "" {
+		return 0, true
+	}
+	parsed, err := strconv.Atoi(value)
+	return parsed, err == nil
+}
+
+func (c *contractDetailsWireCursor) number() bool {
+	value := strings.TrimSpace(c.string())
+	if !c.ok || value == "" {
+		return c.ok
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	return err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0)
+}
+
+func (c *contractDetailsWireCursor) boolean() bool {
+	value := strings.TrimSpace(c.string())
+	return c.ok && (value == "" || value == "0" || value == "1")
+}
+
+func (c *contractDetailsWireCursor) stringPairs() bool {
+	count, ok := c.integer()
+	if !ok || count < 0 || count > (len(c.fields)-c.idx)/2 {
+		c.ok = false
+		return false
+	}
+	for range count {
+		_ = c.string()
+		_ = c.string()
+	}
+	return c.ok
+}
+
+func (c *contractDetailsWireCursor) complete() bool {
+	if !c.ok || c.idx == len(c.fields) {
+		return c.ok
+	}
+	return c.idx+1 == len(c.fields) && c.fields[c.idx] == ""
 }
 
 // Stop marks the Connector stopped, cancels its P&L subscriptions, and closes

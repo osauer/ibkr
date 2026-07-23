@@ -247,6 +247,18 @@ func cloneRulesResult(in *rpc.RulesResult) *rpc.RulesResult {
 			terminal.Evidence = append([]rpc.EarningsEvidenceReference(nil), in.Earnings[i].Terminal.Evidence...)
 			out.Earnings[i].Terminal = &terminal
 		}
+		if in.Earnings[i].Identity != nil {
+			identity := *in.Earnings[i].Identity
+			if in.Earnings[i].Identity.NextAttempt != nil {
+				value := *in.Earnings[i].Identity.NextAttempt
+				identity.NextAttempt = &value
+			}
+			if in.Earnings[i].Identity.LastFailure != nil {
+				value := *in.Earnings[i].Identity.LastFailure
+				identity.LastFailure = &value
+			}
+			out.Earnings[i].Identity = &identity
+		}
 	}
 	if in.PolicyFingerprint != nil {
 		value := *in.PolicyFingerprint
@@ -697,9 +709,11 @@ func rulesEarningsSourceHealth(infos []rpc.EarningsInfo, now time.Time) (rpc.Sou
 	status := rpc.SourceStatusOK
 	degraded := false
 	var lastFailure *rpc.SourceFailure
+	var nextAttempt *time.Time
 	var notes []string
+	informational := map[string]struct{}{}
 	for _, info := range infos {
-		resolved := info.Status == rpc.EarningsStatusDate || info.Status == rpc.EarningsStatusTerminalNonReporting
+		resolved := info.Status == rpc.EarningsStatusDate || info.Status == rpc.EarningsStatusTerminalNonReporting || info.Status == rpc.EarningsStatusNotApplicable
 		if info.Source == "unknown" || info.Stale || !resolved {
 			status = rpc.SourceStatusDegraded
 			degraded = true
@@ -712,10 +726,36 @@ func rulesEarningsSourceHealth(infos []rpc.EarningsInfo, now time.Time) (rpc.Sou
 			if failure != nil && (lastFailure == nil || failure.FailedAt.After(lastFailure.FailedAt)) {
 				copyFailure := *failure
 				lastFailure = &copyFailure
+				nextAttempt = cloneTimePointer(provider.NextAttempt)
+			}
+			if resolved && failure != nil {
+				note := fmt.Sprintf("retained provider issue: source=%s code=%s stage=%s retry=scheduled", provider.Provider, failure.Code, failure.Stage)
+				informational[note] = struct{}{}
 			}
 		}
+		if failure := func() *rpc.SourceFailure {
+			if info.Identity == nil {
+				return nil
+			}
+			return info.Identity.LastFailure
+		}(); failure != nil && (lastFailure == nil || failure.FailedAt.After(lastFailure.FailedAt)) {
+			copyFailure := *failure
+			lastFailure = &copyFailure
+			nextAttempt = cloneTimePointer(info.Identity.NextAttempt)
+		}
+		if resolved && info.Identity != nil && info.Identity.NotApplicable && info.Identity.LastFailure != nil {
+			failure := info.Identity.LastFailure
+			note := fmt.Sprintf("retained broker identity issue: code=%s stage=%s retry=scheduled", failure.Code, failure.Stage)
+			informational[note] = struct{}{}
+		}
 	}
-	return rpc.SourceHealth{Source: "earnings", Status: status, AsOf: now, LastFailure: lastFailure, Notes: notes}, degraded
+	infoNotes := make([]string, 0, len(informational))
+	for note := range informational {
+		infoNotes = append(infoNotes, note)
+	}
+	sort.Strings(infoNotes)
+	notes = append(notes, infoNotes...)
+	return rpc.SourceHealth{Source: "earnings", Status: status, AsOf: now, NextAttempt: nextAttempt, LastFailure: lastFailure, Notes: notes}, degraded
 }
 
 // mapRuleNames converts the positions snapshot into pure rule inputs. The
@@ -731,7 +771,7 @@ func mapRuleNames(pos *rpc.PositionsResult, pol risk.RulebookPolicy, baseCcy str
 		if stocksAuthoritative {
 			identity, ok := exactStocks[strings.ToUpper(strings.TrimSpace(g.Underlying))]
 			if ok && !identity.ambiguous && g.Stock != nil && g.Stock.ConID == identity.conID &&
-				sameStockSecurityType(g.Stock.SecType, identity.secType) {
+				sameRulebookStockSecurityType(g.Stock.SecType, identity.secType) {
 				n.StockConID = identity.conID
 				n.StockSecType = identity.secType
 			}
@@ -859,7 +899,7 @@ func rulebookExactStocksBySymbol(pos *rpc.PositionsResult) (map[string]rulebookE
 	for _, stock := range pos.Stocks {
 		symbol := strings.ToUpper(strings.TrimSpace(stock.Symbol))
 		secType := strings.ToUpper(strings.TrimSpace(stock.SecType))
-		if symbol == "" || stock.ConID <= 0 || !isStockSecurityType(secType) {
+		if symbol == "" || stock.ConID <= 0 || !isRulebookStockSecurityType(secType) {
 			if symbol != "" {
 				identity := identities[symbol]
 				identity.ambiguous = true
@@ -877,6 +917,19 @@ func rulebookExactStocksBySymbol(pos *rpc.PositionsResult) (map[string]rulebookE
 		identities[symbol] = rulebookExactStockIdentity{conID: stock.ConID, secType: secType}
 	}
 	return identities, true
+}
+
+func isRulebookStockSecurityType(secType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(secType)) {
+	case "STK", "STOCK", "ETF":
+		return true
+	default:
+		return false
+	}
+}
+
+func sameRulebookStockSecurityType(got, want string) bool {
+	return isRulebookStockSecurityType(got) && isRulebookStockSecurityType(want)
 }
 
 func legDesc(o rpc.PositionView) string {
@@ -950,7 +1003,7 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 	overrides := s.rulebookEarningsOverrides()
 	earnings := make(map[string]risk.EarningsInput, len(names))
 	infos := make([]rpc.EarningsInfo, 0, len(names))
-	var toFetch []string
+	var toFetch []earningsRefreshTarget
 	for _, n := range names {
 		sym := strings.ToUpper(n.Symbol)
 		if pol.IsHedgeSymbol(sym) {
@@ -963,12 +1016,20 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 		}
 		view, observed := earningsResolutionView{}, false
 		if s.earnings != nil {
-			view, observed = s.earnings.resolution(sym)
+			if len(n.Legs) == 0 {
+				view, observed = s.earnings.resolutionForIdentity(sym, n.StockConID, n.StockSecType)
+			} else {
+				// Position groups do not carry each option leg's exact underlying
+				// ConID. A stock identity proof may therefore exempt only a
+				// stock-only name; mixed groups use ordinary provider evidence.
+				view, observed = s.earnings.resolution(sym)
+			}
 		}
 		if observed {
 			info.Status = view.Status
 			info.Reason = view.Reason
 			info.Providers = view.Providers
+			info.Identity = view.Identity
 		}
 
 		if terminal, found := s.earningsTerminal.terminalEarningsFor(n, now); found {
@@ -994,7 +1055,17 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 				continue
 			}
 			earnings[sym] = risk.EarningsInput{Source: "verified_terminal", Reason: info.Reason}
-			toFetch = append(toFetch, sym)
+			toFetch = append(toFetch, earningsRefreshTarget{Symbol: sym, ConID: n.StockConID, SecType: n.StockSecType})
+			infos = append(infos, info)
+			continue
+		}
+
+		if hasOverride && observed && view.Identity != nil && view.Identity.NotApplicable {
+			info.Source = "broker_identity"
+			info.Status = rpc.EarningsStatusConflictingSources
+			info.Reason = earningsReasonConflicting
+			earnings[sym] = risk.EarningsInput{Source: "broker_identity", Reason: earningsReasonConflicting}
+			toFetch = append(toFetch, earningsRefreshTarget{Symbol: sym, ConID: n.StockConID, SecType: n.StockSecType})
 			infos = append(infos, info)
 			continue
 		}
@@ -1014,7 +1085,10 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 		}
 
 		if observed {
-			if view.Status == rpc.EarningsStatusDate {
+			if view.Status == rpc.EarningsStatusNotApplicable {
+				earnings[sym] = risk.EarningsInput{NotApplicable: true, Source: "broker_identity", Reason: earningsReasonBrokerNonIssuer}
+				info.Source = "broker_identity"
+			} else if view.Status == rpc.EarningsStatusDate {
 				entry := view.Entry
 				if d, err := time.ParseInLocation("2006-01-02", entry.Date, loc); err == nil {
 					e := risk.EarningsInput{Known: true, Date: d, TimeOfDay: entry.TimeOfDay,
@@ -1038,12 +1112,12 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 		// Aggregate freshness and provider retry readiness are different
 		// clocks. Always hand non-override names to the cache; kickRefresh
 		// cheaply filters them by each provider's durable NextAttempt.
-		toFetch = append(toFetch, sym)
+		toFetch = append(toFetch, earningsRefreshTarget{Symbol: sym, ConID: n.StockConID, SecType: n.StockSecType})
 		infos = append(infos, info)
 	}
 	// Async, bounded, off the snapshot path — this call returns immediately.
 	if allowRefresh && s.earnings != nil {
-		s.earnings.kickRefresh(context.WithoutCancel(ctx), toFetch)
+		s.earnings.kickRefreshTargets(context.WithoutCancel(ctx), toFetch)
 	}
 	return earnings, infos
 }
@@ -1140,10 +1214,122 @@ type ruleTransitionTerminalAuthority struct {
 	ContractConID        int       `json:"contract_con_id"`
 	AuthorityRevision    int64     `json:"authority_revision"`
 	AuthorityFingerprint string    `json:"authority_fingerprint"`
+	AuthorityBinding     string    `json:"authority_binding"`
 	AuthorityReviewedAt  time.Time `json:"authority_reviewed_at"`
 	VerifiedAt           time.Time `json:"verified_at"`
 	RevalidateAfter      time.Time `json:"revalidate_after"`
 	Classification       string    `json:"classification"`
+}
+
+// ruleTransitionIdentityAuthority links an accepted broker-nonissuer proof to
+// its exact append-only observation and state revision without exposing the
+// held contract identifier.
+type ruleTransitionIdentityAuthority struct {
+	AuthorityRevision    int64     `json:"authority_revision"`
+	AuthorityFingerprint string    `json:"authority_fingerprint"`
+	ObservationID        string    `json:"observation_id"`
+	AuthorityBinding     string    `json:"authority_binding"`
+	ObservedAt           time.Time `json:"observed_at"`
+	Outcome              string    `json:"outcome"`
+}
+
+func acceptedRuleTransitionIdentityAuthorities(res *rpc.RulesResult) []ruleTransitionIdentityAuthority {
+	out := make([]ruleTransitionIdentityAuthority, 0)
+	if res == nil || res.AsOf.IsZero() {
+		return out
+	}
+	type candidate struct {
+		symbol    string
+		authority ruleTransitionIdentityAuthority
+	}
+	candidates := make([]candidate, 0, len(res.Earnings))
+	receipts := make(map[string]candidate)
+	conflictedReceipts := make(map[string]bool)
+	for _, info := range res.Earnings {
+		if !validRulebookBrokerEarningsAuthority(info, res.AsOf.UTC()) {
+			continue
+		}
+		identity := info.Identity
+		authority := ruleTransitionIdentityAuthority{
+			AuthorityRevision: identity.AuthorityRevision, AuthorityFingerprint: identity.AuthorityFingerprint,
+			ObservationID: identity.ObservationID, AuthorityBinding: identity.AuthorityBinding,
+			ObservedAt: identity.ProofObservedAt.UTC(), Outcome: identity.ProofOutcome,
+		}
+		item := candidate{symbol: info.Symbol, authority: authority}
+		if previous, exists := receipts[authority.ObservationID]; exists && previous != item {
+			conflictedReceipts[authority.ObservationID] = true
+		}
+		receipts[authority.ObservationID] = item
+		candidates = append(candidates, item)
+	}
+
+	byRevision := make(map[int64]ruleTransitionIdentityAuthority)
+	conflicted := make(map[int64]bool)
+	for _, item := range candidates {
+		authority := item.authority
+		if conflictedReceipts[authority.ObservationID] || conflicted[authority.AuthorityRevision] {
+			continue
+		}
+		if previous, exists := byRevision[authority.AuthorityRevision]; exists && previous != authority {
+			delete(byRevision, authority.AuthorityRevision)
+			conflicted[authority.AuthorityRevision] = true
+			continue
+		}
+		byRevision[authority.AuthorityRevision] = authority
+	}
+	for _, authority := range byRevision {
+		out = append(out, authority)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].AuthorityRevision != out[j].AuthorityRevision {
+			return out[i].AuthorityRevision < out[j].AuthorityRevision
+		}
+		return out[i].AuthorityFingerprint < out[j].AuthorityFingerprint
+	})
+	return out
+}
+
+// validRulebookBrokerEarningsAuthority recognizes only the exact public
+// projection emitted by earningsCache. In particular, a retained proof remains
+// usable only for the cache's five-minute exact-contract retry contract.
+func validRulebookBrokerEarningsAuthority(info rpc.EarningsInfo, asOf time.Time) bool {
+	identity := info.Identity
+	if strings.TrimSpace(info.Symbol) == "" || strings.TrimSpace(info.Symbol) != info.Symbol || info.Stale ||
+		info.Source != "broker_identity" || info.Status != rpc.EarningsStatusNotApplicable || identity == nil ||
+		!identity.NotApplicable || identity.ProofOutcome != rpc.EarningsStatusNotApplicable ||
+		identity.AuthorityRevision <= 0 || !validAlertRegistryFingerprint(identity.AuthorityFingerprint) ||
+		!validOpaqueEarningsIdentityObservationID(identity.ObservationID) ||
+		!validAlertRegistryFingerprint(identity.AuthorityBinding) ||
+		identity.AuthorityBinding != rpc.BuildEarningsIdentityAuthorityBinding(info.Symbol, *identity) || asOf.IsZero() {
+		return false
+	}
+	attemptedAt := identity.AttemptedAt.UTC()
+	proofObservedAt := identity.ProofObservedAt.UTC()
+	if attemptedAt.IsZero() || proofObservedAt.IsZero() || attemptedAt.After(asOf) || proofObservedAt.After(asOf) || identity.NextAttempt == nil {
+		return false
+	}
+	nextAttempt := identity.NextAttempt.UTC()
+	switch identity.Outcome {
+	case earningsIdentityNotApplicable:
+		return identity.LastFailure == nil && !proofObservedAt.Before(attemptedAt) &&
+			nextAttempt.Equal(proofObservedAt.Add(earningsFreshWindow))
+	case earningsIdentityUnknown:
+		failure := identity.LastFailure
+		if failure == nil || !failure.Retryable || failure.Stage != rpc.SourceFailureStageWSHContractResolve ||
+			!validEarningsSourceFailure(*failure) {
+			return false
+		}
+		switch failure.Code {
+		case rpc.SourceFailureContractUnavailable, rpc.SourceFailureTimeout, rpc.SourceFailureGatewayUnavailable:
+		default:
+			return false
+		}
+		failedAt := failure.FailedAt.UTC()
+		return !failedAt.IsZero() && !failedAt.After(asOf) && !failedAt.Before(attemptedAt) &&
+			!proofObservedAt.After(attemptedAt) && nextAttempt.Equal(failedAt.Add(earningsContractResolutionRetry))
+	default:
+		return false
+	}
 }
 
 func acceptedRuleTransitionTerminalAuthorities(res *rpc.RulesResult) []ruleTransitionTerminalAuthority {
@@ -1156,26 +1342,19 @@ func acceptedRuleTransitionTerminalAuthorities(res *rpc.RulesResult) []ruleTrans
 	byConID := make(map[int]ruleTransitionTerminalAuthority)
 	conflicted := make(map[int]bool)
 	for _, info := range res.Earnings {
-		terminal := info.Terminal
-		if info.Source != "verified_terminal" || info.Status != rpc.EarningsStatusTerminalNonReporting || terminal == nil {
+		if !validRulebookTerminalEarningsAuthority(info, res.AsOf.UTC()) {
 			continue
 		}
+		terminal := info.Terminal
 		authority := ruleTransitionTerminalAuthority{
 			ContractConID:        terminal.ContractConID,
 			AuthorityRevision:    terminal.AuthorityRevision,
 			AuthorityFingerprint: terminal.AuthorityFingerprint,
+			AuthorityBinding:     terminal.AuthorityBinding,
 			AuthorityReviewedAt:  terminal.AuthorityReviewedAt.UTC(),
 			VerifiedAt:           terminal.VerifiedAt.UTC(),
 			RevalidateAfter:      terminal.RevalidateAfter.UTC(),
 			Classification:       terminal.Classification,
-		}
-		if authority.ContractConID <= 0 || authority.AuthorityRevision <= 0 ||
-			!validAlertRegistryFingerprint(authority.AuthorityFingerprint) ||
-			(authority.Classification != earningsTerminalClassEquityCancelled && authority.Classification != earningsTerminalClassIssuerDissolved) ||
-			authority.AuthorityReviewedAt.IsZero() || authority.VerifiedAt.IsZero() || authority.RevalidateAfter.IsZero() ||
-			authority.AuthorityReviewedAt.After(res.AsOf.UTC()) || authority.VerifiedAt.After(authority.AuthorityReviewedAt) ||
-			!authority.RevalidateAfter.After(res.AsOf.UTC()) {
-			continue
 		}
 		if conflicted[authority.ContractConID] {
 			continue
@@ -1197,6 +1376,35 @@ func acceptedRuleTransitionTerminalAuthorities(res *rpc.RulesResult) []ruleTrans
 		return out[i].AuthorityFingerprint < out[j].AuthorityFingerprint
 	})
 	return out
+}
+
+// validRulebookTerminalEarningsAuthority recognizes only a current terminal
+// projection whose safe digest binds the exact public symbol to the contract,
+// authority revision, fingerprint, timestamps, and closed classification.
+func validRulebookTerminalEarningsAuthority(info rpc.EarningsInfo, asOf time.Time) bool {
+	terminal := info.Terminal
+	if strings.TrimSpace(info.Symbol) == "" || strings.TrimSpace(info.Symbol) != info.Symbol || info.Stale || asOf.IsZero() ||
+		info.Source != "verified_terminal" || info.Status != rpc.EarningsStatusTerminalNonReporting || terminal == nil ||
+		terminal.ContractConID <= 0 || terminal.AuthorityRevision <= 0 ||
+		!validAlertRegistryFingerprint(terminal.AuthorityFingerprint) ||
+		!validAlertRegistryFingerprint(terminal.AuthorityBinding) ||
+		terminal.AuthorityBinding != rpc.BuildEarningsTerminalAuthorityBinding(info.Symbol, *terminal) {
+		return false
+	}
+	if terminal.Classification != earningsTerminalClassEquityCancelled && terminal.Classification != earningsTerminalClassIssuerDissolved {
+		return false
+	}
+	effective, err := time.Parse(time.DateOnly, terminal.EffectiveDate)
+	if err != nil {
+		return false
+	}
+	verifiedAt := terminal.VerifiedAt.UTC()
+	reviewedAt := terminal.AuthorityReviewedAt.UTC()
+	revalidateAfter := terminal.RevalidateAfter.UTC()
+	return !verifiedAt.IsZero() && !reviewedAt.IsZero() && !revalidateAfter.IsZero() &&
+		!effective.After(verifiedAt) && !verifiedAt.After(reviewedAt) && !reviewedAt.After(asOf) &&
+		revalidateAfter.After(asOf) && revalidateAfter.After(verifiedAt) &&
+		revalidateAfter.Sub(verifiedAt) <= 366*24*time.Hour
 }
 
 // journalRuleTransitions appends status changes as typed SQLite events so
@@ -1231,6 +1439,7 @@ func (s *Server) journalRuleTransitionsBound(res *rpc.RulesResult, binding ruleb
 		policyFingerprint = res.PolicyFingerprint.Key
 	}
 	terminalAuthorities := acceptedRuleTransitionTerminalAuthorities(res)
+	identityAuthorities := acceptedRuleTransitionIdentityAuthorities(res)
 	prevStatus := map[string]string{}
 	if prev != nil {
 		for _, r := range prev.Rules {
@@ -1263,6 +1472,7 @@ func (s *Server) journalRuleTransitionsBound(res *rpc.RulesResult, binding ruleb
 			"policy_id": res.PolicyID, "policy_version": res.PolicyVersion,
 			"policy_fingerprint":   policyFingerprint,
 			"terminal_authorities": terminalAuthorities,
+			"identity_authorities": identityAuthorities,
 		}
 		if enforceBinding {
 			entry["account"] = binding.scope.Account

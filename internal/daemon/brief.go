@@ -944,10 +944,54 @@ func briefMarketEventRows(events *rpc.MarketEventsResult, rules *rpc.RulesResult
 						len(syms), strings.Join(unknown, " and "), pluralNoun(len(unknown), "rule"), verb))
 				}
 			}
+			if applicability := briefEarningsApplicabilitySummary(rules); applicability != "" {
+				state.Detail += "; " + applicability
+			}
+			if evidenceInfo := briefEarningsEvidenceInfo(rules); evidenceInfo != "" {
+				state.Detail += "; " + evidenceInfo
+			}
 		}
 		rows = append(rows, rpc.BriefMarketEventRow{BriefRowState: state, Kind: kind, Count: len(syms), Symbols: syms})
 	}
 	return rows
+}
+
+func briefEarningsApplicabilitySummary(rules *rpc.RulesResult) string {
+	if rules == nil {
+		return ""
+	}
+	broker, terminal := 0, 0
+	for _, info := range rules.Earnings {
+		switch {
+		case info.Source == "broker_identity" && info.Status == rpc.EarningsStatusNotApplicable:
+			broker++
+		case info.Source == "verified_terminal" && info.Status == rpc.EarningsStatusTerminalNonReporting:
+			terminal++
+		}
+	}
+	parts := make([]string, 0, 2)
+	if broker > 0 {
+		parts = append(parts, fmt.Sprintf("%d broker-proven nonissuer", broker))
+	}
+	if terminal > 0 {
+		parts = append(parts, fmt.Sprintf("%d terminal/non-reporting", terminal))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "issuer earnings not applicable: " + strings.Join(parts, ", ")
+}
+
+func briefEarningsEvidenceInfo(rules *rpc.RulesResult) string {
+	if rules == nil {
+		return ""
+	}
+	for _, health := range rules.InputHealth {
+		if health.Source == "earnings" && health.Status == rpc.SourceStatusOK && len(health.Notes) > 0 {
+			return "earnings evidence informational issue: " + strings.Join(health.Notes, "; ")
+		}
+	}
+	return ""
 }
 
 // briefBorrowFeeRelevant returns nil when positions are unavailable, false for
@@ -1060,6 +1104,9 @@ func briefUnresolvedEarnings(rules *rpc.RulesResult) []string {
 	}
 	var unresolved []string
 	for _, earnings := range rules.Earnings {
+		if earnings.Status == rpc.EarningsStatusNotApplicable || earnings.Status == rpc.EarningsStatusTerminalNonReporting {
+			continue
+		}
 		if earnings.Date != "" && earnings.Source != "unknown" && (earnings.Status == "" || earnings.Status == rpc.EarningsStatusDate) {
 			continue
 		}

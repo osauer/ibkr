@@ -6,6 +6,16 @@ initial 12-rule surface shipped in v1.15.0; the current 14-rule contract folds
 in the July 2026 live-market, implementation-review, SQLite-authority, multi-provider
 earnings, terminal-evidence, canonical-refresh, and alert-production
 amendments described below.
+Updated: 2026-07-23 CEST
+Status: senior-reviewed 2026-07-07 (verdict: build with amendments — all
+amendments folded in below); shipped in v1.15.0. Rule 1's hedge-exemption
+semantics were amended post-ship after the first live-market run
+(2026-07-07); see the rule-1 semantics note. Rulebook v2 (2026-07-08, dual
+senior review against a live confirmed-stress tape): two never-false-pass
+fixes (rules 6/8 silent skips), regime-conditional thresholds for rules
+3/4/12, rule 2 hedge-premium tier + rule 12 act tier (atomic pair), rule 7
+short-put coverage, rule 1 provable lower bounds, new rules 13
+(exit_discipline) and 14 (fx_exposure), stock-leg underlying join.
 
 A daily, mechanical 14-rule checklist evaluated daemon-side against the live
 book. It is surfaced through CLI, MCP, the Canary SPA, daily-brief deltas,
@@ -104,6 +114,12 @@ contradiction:
    not-applicable/exempt result for rules 6-8, never a pass and never a
    ticker-wide ignore. A published date, manual override, identity mismatch,
    expired review, or malformed authority fails closed as `unknown`.
+7. Amendment (2026-07-23): an exact current broker identity observation may
+   independently prove that a stock-only holding is a nonissuer security. Its
+   typed `not_applicable` result joins reviewed terminal evidence as a trusted
+   negative for rules 6-8. It does not exempt option-bearing groups, and an
+   ordinary issuer without a usable date remains `unknown` regardless of option
+   or size relevance.
 
 These decisions govern evidence handling, advisory enforcement, and surface
 placement. They do not establish that the operator approved every numerical
@@ -191,6 +207,12 @@ Semantics notes:
 - Rules 6/7/8 report `unknown` when the earnings date is unknown or stale
   (staleness threshold in policy). Provider-flagged estimated dates
   evaluate normally but evidence discloses `estimated`. Manual overrides win
+- Rules 6/7/8 report `unknown` when an ordinary issuer's earnings date is
+  unknown or stale. That check happens before stock-only, option-side, or size
+  relevance, so absence of an option or a small holding cannot manufacture a
+  pass. A known-date name that is irrelevant to the individual rule may still
+  skip normally. Provider-flagged estimated dates evaluate normally but
+  evidence discloses `estimated`. Manual overrides win
   over ordinary provider resolution, but neither an override nor a published
   provider date may silently displace exact-contract terminal authority: that
   disagreement is `conflicting_sources`, with neither a usable date nor a
@@ -206,9 +228,11 @@ Semantics notes:
   `terminal_non_reporting`, never `pass`. Ticker reuse or a different listing
   receives ordinary provider resolution. The typed earnings projection carries
   the SQLite revision, a normalized-record SHA-256 fingerprint, effective and
-  verification timestamps, the mandatory review deadline, and allowlisted
-  primary-source references. A stock-only terminal holding is an explicit
-  Exempt/not-applicable row. If the same symbol group also contains options,
+  verification timestamps, the mandatory review deadline, and a deterministic
+  binding of the public symbol to the exact ConID, revision, fingerprint,
+  times, and classification. Allowlisted primary-source references remain
+  supporting detail, not the alert proof. A stock-only terminal holding is an
+  explicit Exempt/not-applicable row. If the same symbol group also contains options,
   the stock record cannot exempt them because the portfolio projection does
   not carry each option's exact underlying ConID; those legs use ordinary
   provider resolution or remain unknown. Other held names in the same snapshot
@@ -216,6 +240,16 @@ Semantics notes:
   stale, identity-conflicted, or date-conflicted exact terminal record is
   likewise recognized before option-side or size relevance in rules 6-8, but
   fails closed as `unknown` with no exemption, including for a stock-only name.
+- A broker `not_applicable` input follows the same stock-only boundary. It is
+  accepted only from an exact current positive ConID/`STK` identity whose
+  closed broker classification is `ETF`; arbitrary contract text is never
+  interpreted. The append-only typed identity observation and matching state
+  revision/fingerprint remain usable while that held identity still matches.
+  A temporary exact-contract lookup failure retains the proof and schedules a
+  five-minute retry; a definitive `COMMON`, unknown, or identity-mismatch
+  result supersedes it. Proof age alone does not invent an expiry. Mixed
+  stock-and-option groups use ordinary provider resolution because option
+  underlying ConIDs are not present on the portfolio projection.
 - Greeks gaps (rules 1, 4, 12): a leg with material notional (≥ policy
   floor, default 1% NLV) missing delta makes that name's rule-1/12 row
   `unknown` naming the leg; rule 4 goes `unknown` when uncomputable
@@ -296,9 +330,12 @@ pending/unavailable/stale and cannot clear a Rulebook alert episode. This is
 the acceptance criterion for the property test below. Alert recovery also
 requires the exact 14 rule IDs with their canonical numbers and exactly those
 five health sources. Missing, extra, duplicate, or unknown rows stay
-uncovered. `not_evaluated` is a trusted negative only for reviewed terminal
-evidence on rules 6–8, off-session tape on rules 9–10, or no long book on rule
-12; every other reason retains the prior episode.
+uncovered. On rules 6-8, `not_evaluated` is a trusted negative only when every
+exempt symbol has matching current typed authority in the same result:
+reviewed terminal evidence, exact broker nonissuer identity, or a disclosed
+per-symbol mixture of both. A row reason alone, missing/mismatched authority,
+or stale/future/malformed proof retains the prior episode. Off-session tape on
+rules 9-10 and no long book on rule 12 remain the other accepted reasons.
 
 ## Architecture
 
@@ -313,7 +350,7 @@ internal/daemon/rulebook_refresh_scheduler.go
                                   daemon-owned one-minute canonical refresh
 internal/daemon/rulebook_regime_stage.go
                                   regime stage bucket/latch/persist/kick
-internal/daemon/earnings_cache.go async fetch + LKG cache (fx_cache mirror)
+internal/daemon/earnings_cache.go async provider + broker-identity authority
 internal/daemon/earnings_wsh.go   typed IBKR WSH adapter + strict event parser
 internal/daemon/earnings_terminal.go
                                   exact-contract terminal evidence authority
@@ -351,11 +388,18 @@ web/app/*                         rules card + drill-in
   requested through serialized metadata/event reads and requires the account's
   WSH research entitlement. Matching dates form consensus; differing dates or
   incompatible published session halves remain `conflicting_sources`.
-- Persistence: daemon.db v2 current state plus immutable provider-outcome
-  observations. Each symbol stores aggregate resolution and per-provider
-  latest attempt, next retry, typed redacted failure, and last-good value.
-  State and outcome observations commit atomically before memory publication;
-  the provider fresh window is 24h and the retained-date TTL is 45d.
+- Persistence: daemon.db v3 current state plus immutable provider-outcome and
+  exact-contract identity observations. Each symbol stores aggregate resolution,
+  per-provider latest attempt/next retry/typed redacted failure/last-good value,
+  and the current broker identity attempt with any retained matching nonissuer
+  proof. One SQLite transaction appends the provider and identity observations,
+  binds the returned identity receipt and next state revision into the candidate
+  state, and compare-and-swap commits that state; builder, observation, or CAS
+  failure rolls the whole transaction back before memory publication. Accepted
+  identity proof projects the state revision/fingerprint, opaque observation
+  link, proof time/outcome, and a deterministic symbol-to-proof binding without
+  exposing the raw receipt ID or ConID. The provider fresh window is 24h and the
+  retained-date TTL is 45d.
   Manual override `features.rulebook.earnings_overrides` (map sym →
   YYYY-MM-DD or YYYY-MM-DDTamc/bmo, `null` clears) wins over fetch;
   platform-settings contract (access/source/reason) applies.
@@ -424,6 +468,22 @@ web/app/*                         rules card + drill-in
   Scope: "rulebook"}`. The Rulebook as-of time is disclosed in the warning's
   `Impact` prose; `DataWarning` has no separate `rules_as_of` field. No ninth
   severity word; `submit_eligible` is never affected.
+- Broker applicability reads independently append closed typed identity-outcome
+  observations. A successful exact nonissuer classification links its matching
+  state proof to that observation; a retryable exact-contract read may retain
+  the prior matching proof, while an issuer result or identity mismatch removes
+  it. The local immutable observation payload deliberately contains the exact
+  ConID/`STK` binding needed to verify that proof, but never raw broker
+  classification or upstream prose. The RPC identity projection, transition
+  evidence, and logs expose only the closed outcome plus opaque receipt linkage
+  and binding—not the raw receipt ID, ConID, broker classification, or prose.
+- **Preview causes:** the preview handler consults a short-TTL cached last
+  evaluation (45s, with `rules_as_of` echoed in the warning detail) — never
+  a fresh assembly per preview. When the drafted order would worsen a
+  currently breached rule (increase the breached metric; reduce/close never
+  warns), it appends `DataWarning{Code: "rule_<id>", Severity: <the rule's
+  own watch|act>, Scope: "rulebook"}`. No ninth severity word;
+  `submit_eligible` is never affected.
 - Policy: embedded default `rulebook-v2` (Version 2; every threshold —
   including the three regime sets — is part of `FingerprintKey`, so a
   threshold outside the fingerprint is impossible without failing the
@@ -452,6 +512,21 @@ web/app/*                         rules card + drill-in
   episodes; only a current, complete, account/positions-bound negative can
   recover them. The app owns inbox, unread, delivery attempts, receipts, and
   fixed presentation copy; neither side gains broker-write authority.
+- Evidence: rule-status transitions append as typed events to the daemon's
+  sole live authority, `~/.local/state/ibkr/daemon.db`, so threshold
+  calibration has data. Every transition payload carries sorted, deduplicated
+  authority lists for the applicability evidence the evaluation accepted:
+  `terminal_authorities` records terminal contract authority revision and
+  fingerprint, symbol-to-contract binding, review/verification/revalidation
+  times, and classification;
+  `identity_authorities` records broker proof revision and fingerprint, opaque
+  observation linkage and symbol-to-proof binding, proof time, and closed proof
+  outcome. Both fields are explicit empty lists when nothing of that class was
+  accepted. Neither list contains issuer or symbol text, CIK, source URLs,
+  evidence prose, raw broker classification, expired evidence, or conflicting
+  authority. The latched
+  regime bucket is a versioned state document in the same database. Retired
+  JSON/JSONL paths exist only as one-time cutover inputs and isolated test seams.
 - Settings: `features.rulebook.enabled` (default true, runtime) gates
   canonical evaluation, alert production, the SPA card, and preview causes;
   disabled leaves `ibkr rules` readable with `status: disabled`
@@ -467,6 +542,10 @@ web/app/*                         rules card + drill-in
 | Earnings dates/applicability | daemon multi-provider earnings resolution ∪ authoritative override ∪ exact-contract SQLite terminal evidence | `RulesResult.Earnings[]` with provider outcomes, terminal revision/fingerprint/provenance | same | typed `unknown`; conflicts/expired evidence have no usable date or exemption; stale LKG flagged |
 | Preview causes | daemon preview handler (scope-bound canonical result ≤75s) | `Warnings[].Code = rule_*`, `Scope = rulebook`; as-of in `Impact` | order preview surfaces | explicit unavailable advisory when canonical read cannot complete |
 | Alert episodes | daemon source-neutral alert authority | complete `RulesResult` + typed episode/occurrence contracts | Alerts inbox and Web Push | stale/incomplete evidence cannot clear an episode |
+| Rule thresholds | rulebook policy (embedded; TOML planned) × latched regime stage for rules 3/4/12 | `RulesResult.PolicyFingerprint` | all | embedded `rulebook-v2`; stage carried/never-seen ⇒ worse-of/calm with disclosure |
+| Rule verdicts | daemon `rules.snapshot` | `RulesResult.Rules []RuleRow` | CLI/MCP/SPA render only | per-row `unknown`/`not_evaluated`, result-level InputHealth |
+| Earnings dates/applicability | daemon multi-provider earnings resolution ∪ authoritative override ∪ exact-contract SQLite terminal evidence ∪ exact broker identity observations | `RulesResult.Earnings[]` with provider outcomes, terminal symbol-to-contract binding, or broker proof revision/fingerprint/opaque observation link and symbol-to-proof binding | same | typed `unknown`; conflicts, expired terminal evidence, or missing/mismatched applicability binding have no usable date or exemption; stale LKG flagged |
+| Preview causes | daemon preview handler (cached eval ≤45s) | `Warnings[].Code = rule_*`, `Scope = rulebook` | order preview surfaces | absent when rules disabled/stale beyond TTL |
 | Feature toggle + overrides | platform settings (runtime) | `features.rulebook.*` | settings surfaces + SPA | defaults on |
 
 ## SPA (authority-matrix row)
@@ -531,14 +610,23 @@ part of the Rulebook semantic contract.
   EUR names → unsupported); ET/DST table tests (BMO Monday after Friday
   expiry, AMC on expiry day, DST boundary week); cache
   load/save/TTL/override-precedence; refresher backoff + failure memory.
-- Terminal evidence: strict JSON/URL/permission and no-future-time validation;
+- Earnings applicability authority: terminal strict JSON/URL/permission and
+  no-future-time validation;
   exact ConID identity including ticker-reuse rejection; SQLite restart
   continuity and revision/fingerprint projection; per-ConID tombstone
   anti-rollback covering exact-old and bumped-wrapper resurrection attempts;
   legitimate newly verified reactivation; atomic immutable authority-change
-  observations; provider/date and override conflict; expiry degradation; pure
-  rules (including stock-only terminal names) assert exempt or `not_evaluated`,
-  never pass.
+  observations; provider/date and override conflict; expiry degradation; broker
+  identity outcome observations and exact current proof projection; retained
+  proof only for the typed retryable exact-contract five-minute retry contract;
+  atomic identity observation/state rollback on builder, append, or CAS failure;
+  issuer/identity-mismatch invalidation;
+  terminal symbol/ConID/revision/fingerprint/time/classification binding;
+  pure rules (including stock-only terminal and broker-proven nonissuer names) assert
+  exempt or `not_evaluated`, never pass. Alert recovery rejects reason-only,
+  wrong-symbol, stale, future, malformed, cross-bound, duplicate-receipt, or
+  duplicate-terminal-ConID applicability authority and accepts only valid
+  terminal, broker, or per-symbol mixed evidence.
 - Aggregation-consistency drift test: canary concentration and rule 1 read
   identical exposure values (review finding 6a).
 - Portfolio receipt gate: current completed empty snapshot is a trustworthy
@@ -560,8 +648,9 @@ part of the Rulebook semantic contract.
 
 - Revert files above; runtime state added: daemon.db earnings/settings/latch
   documents (including terminal evidence and retained per-ConID revocation
-  tombstones), immutable earnings/provider and terminal-authority change
-  observations, and rule-transition events. A rollback may ignore the rulebook
+  tombstones), immutable earnings/provider/identity and terminal-authority
+  change observations, and rule-transition events with `terminal_authorities`
+  and `identity_authorities`. A rollback may ignore the rulebook
   records, but must not delete or replace daemon.db. To revoke terminal evidence
   before a code rollback, import a reviewed empty v1 document and verify its
   advanced SQLite revision; removing the import path alone deliberately retains

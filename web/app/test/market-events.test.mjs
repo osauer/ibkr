@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { positionsHaveShortStock, relevantMarketEventHealth } from "../exposure-relevance.js";
 import { unknownEventRuleNote } from "../earnings-relevance.js";
+import { earningsApplicabilitySummary, earningsHealthNotes, ruleStatusLabel, rulesCountSummary } from "../rules-presentation.js";
 
 test("borrow source health follows stock exposure across both position projections", () => {
   const positions = { stocks: [{ symbol: "XYZ", sec_type: "STOCK", quantity: 100 }], by_underlying: [] };
@@ -51,4 +52,53 @@ test("unresolved earnings remain visible beside another known date", () => {
   });
   assert.match(note, /BBB \(Transport Failure\)/);
   assert.match(note, /other dates ahead: AAA 2026-08-01/);
+});
+
+test("broker nonissuer and terminal applicability are not rendered as unresolved", () => {
+  const note = unknownEventRuleNote({
+    rules: [{ id: "catalyst_coverage", number: 6, status: "unknown" }],
+    earnings: [
+      { symbol: "AAA", source: "broker_identity", status: "not_applicable", reason: "broker_nonissuer" },
+      { symbol: "BBB", source: "verified_terminal", status: "terminal_non_reporting" },
+      { symbol: "CCC", source: "unknown", status: "no_date_published" },
+    ],
+  });
+  assert.match(note, /CCC \(No Date Published\)/);
+  assert.doesNotMatch(note, /AAA|BBB|Broker Nonissuer|Terminal Non Reporting/);
+});
+
+test("rules summary never calls not-evaluated applicability rows all pass", () => {
+  const rules = {
+    breach_counts: { pass: 13, not_evaluated: 1 },
+    rules: [{ status: "not_evaluated", reason: "broker_nonissuer" }],
+  };
+  assert.equal(rulesCountSummary(rules), "1 not evaluated");
+  assert.doesNotMatch(rulesCountSummary(rules), /all pass/i);
+  assert.equal(rulesCountSummary({ rules: [{ status: "pass" }] }), "all pass");
+});
+
+test("not-evaluated rule labels distinguish broker and terminal classes", () => {
+  assert.equal(ruleStatusLabel("not_evaluated", "broker_nonissuer"), "broker nonissuer");
+  assert.equal(ruleStatusLabel("not_evaluated", "terminal_non_reporting"), "terminal/non-reporting");
+  assert.equal(ruleStatusLabel("not_evaluated", "earnings_not_applicable"), "issuer earnings not applicable");
+});
+
+test("Canary positively summarizes both earnings applicability classes", () => {
+  const summary = earningsApplicabilitySummary({ earnings: [
+    { source: "broker_identity", status: "not_applicable" },
+    { source: "verified_terminal", status: "terminal_non_reporting" },
+  ] });
+  assert.match(summary, /1 broker-proven nonissuer/);
+  assert.match(summary, /1 terminal\/non-reporting/);
+});
+
+test("Canary renders retained earnings evidence issues as informational", () => {
+  const note = earningsHealthNotes({ input_health: [{
+    source: "earnings",
+    status: "ok",
+    notes: ["retained broker identity issue: code=contract_unavailable stage=wsh_contract_resolve retry=scheduled"],
+  }] });
+  assert.match(note, /informational issue/);
+  assert.match(note, /contract_unavailable/);
+  assert.equal(earningsHealthNotes({ input_health: [{ source: "earnings", status: "degraded", notes: ["not_observed"] }] }), "");
 });

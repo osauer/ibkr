@@ -291,6 +291,28 @@ func TestStateCASObservationsAndAppendOnly(t *testing.T) {
 	if err != nil || !ok || eligible.ID != eligibleReceipt.ID || !eligible.DecisionEligible {
 		t.Fatalf("eligible observation = %+v ok=%v err=%v", eligible, ok, err)
 	}
+	exact, ok, err := s.ExactDecisionEligibleObservation(ctx, eligibleReceipt.ID, "market", "gateway", "quote", at.Add(time.Second))
+	if err != nil || !ok || exact.ID != eligibleReceipt.ID || !exact.DecisionEligible || !bytes.Equal(exact.Payload, []byte(`{"eligible":true}`)) {
+		t.Fatal("exact decision-eligible observation did not round trip")
+	}
+	for _, mismatch := range []struct {
+		id       int64
+		scope    string
+		source   string
+		kind     string
+		observed time.Time
+	}{
+		{id: receipt.ID, scope: "market", source: "gateway", kind: "quote", observed: at},
+		{id: eligibleReceipt.ID + 1, scope: "market", source: "gateway", kind: "quote", observed: at.Add(time.Second)},
+		{id: eligibleReceipt.ID, scope: "other", source: "gateway", kind: "quote", observed: at.Add(time.Second)},
+		{id: eligibleReceipt.ID, scope: "market", source: "other", kind: "quote", observed: at.Add(time.Second)},
+		{id: eligibleReceipt.ID, scope: "market", source: "gateway", kind: "other", observed: at.Add(time.Second)},
+		{id: eligibleReceipt.ID, scope: "market", source: "gateway", kind: "quote", observed: at.Add(2 * time.Second)},
+	} {
+		if _, ok, err := s.ExactDecisionEligibleObservation(ctx, mismatch.id, mismatch.scope, mismatch.source, mismatch.kind, mismatch.observed); err != nil || ok {
+			t.Fatal("exact decision-eligible reader accepted mismatched coordinates")
+		}
+	}
 	falseValue := false
 	research, err := s.ListObservations(ctx, ObservationQuery{ScopeKey: "market", DecisionEligible: &falseValue, Limit: 10})
 	if err != nil || len(research) != 1 || research[0].ID != receipt.ID {
@@ -311,6 +333,67 @@ func TestStateCASObservationsAndAppendOnly(t *testing.T) {
 		if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN (?,?)`, table+"_no_update", table+"_no_delete").Scan(&n); err != nil || n != 2 {
 			t.Errorf("append-only triggers %s=%d err=%v", table, n, err)
 		}
+	}
+}
+
+func TestReceiptBoundStateCASCommitsOrRollsBackAsOneMutation(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx := t.Context()
+	created, err := s.CompareAndSwapStateDocument(ctx, StateDocumentCAS{
+		ScopeKey: "market", Kind: "receipt-bound.current", JSON: []byte(`{"version":1}`),
+	})
+	if err != nil || created.Revision != 1 {
+		t.Fatal("receipt-bound state fixture creation failed")
+	}
+	at := time.Now().UTC()
+	payload := []byte(`{"typed":true}`)
+	expectedDigest := sha256.Sum256(payload)
+	input := ObservationInput{
+		ScopeKey: "market", Source: "gateway", Kind: "typed-proof", ObservedAt: at,
+		ContentType: "application/json", Payload: payload, DecisionEligible: true,
+	}
+	updated, receipts, err := s.CompareAndSwapStateDocumentWithBoundObservations(ctx, StateDocumentCAS{
+		ScopeKey: "market", Kind: "receipt-bound.current", ExpectedRevision: created.Revision,
+	}, []ObservationInput{input}, func(nextRevision int64, receipts []ObservationReceipt) ([]byte, error) {
+		if nextRevision != 2 || len(receipts) != 1 || receipts[0].ID <= 0 || receipts[0].PayloadSHA256 != expectedDigest {
+			return nil, errors.New("builder did not receive the exact receipt binding")
+		}
+		return fmt.Appendf(nil, `{"revision":%d,"observation_id":%d,"digest":"%x"}`,
+			nextRevision, receipts[0].ID, receipts[0].PayloadSHA256), nil
+	})
+	if err != nil || updated.Revision != 2 || len(receipts) != 1 {
+		t.Fatal("receipt-bound state and observation did not commit together")
+	}
+	if !bytes.Contains(updated.JSON, fmt.Appendf(nil, `"observation_id":%d`, receipts[0].ID)) ||
+		!bytes.Contains(updated.JSON, fmt.Appendf(nil, `"digest":"%x"`, expectedDigest)) {
+		t.Fatal("committed state did not bind the exact receipt")
+	}
+	exact, ok, err := s.ExactDecisionEligibleObservation(ctx, receipts[0].ID, input.ScopeKey, input.Source, input.Kind, input.ObservedAt)
+	if err != nil || !ok || exact.PayloadSHA256 != expectedDigest {
+		t.Fatal("bound observation was not committed with state")
+	}
+
+	before := countRows(t, s, "observations")
+	_, _, err = s.CompareAndSwapStateDocumentWithBoundObservations(ctx, StateDocumentCAS{
+		ScopeKey: "market", Kind: "receipt-bound.current", ExpectedRevision: 1,
+	}, []ObservationInput{input}, func(int64, []ObservationReceipt) ([]byte, error) {
+		return []byte(`{"must_not_commit":true}`), nil
+	})
+	if !errors.Is(err, ErrRevisionConflict) || countRows(t, s, "observations") != before {
+		t.Fatal("stale receipt-bound CAS did not roll its observation back")
+	}
+
+	_, _, err = s.CompareAndSwapStateDocumentWithBoundObservations(ctx, StateDocumentCAS{
+		ScopeKey: "market", Kind: "receipt-bound.current", ExpectedRevision: updated.Revision,
+	}, []ObservationInput{input}, func(int64, []ObservationReceipt) ([]byte, error) {
+		return nil, errors.New("synthetic builder failure")
+	})
+	if err == nil || countRows(t, s, "observations") != before {
+		t.Fatal("builder failure did not roll its observation back")
+	}
+	retained, ok, err := s.GetStateDocument(ctx, "market", "receipt-bound.current")
+	if err != nil || !ok || retained.Revision != updated.Revision || !bytes.Equal(retained.JSON, updated.JSON) {
+		t.Fatal("failed receipt-bound mutation changed current state")
 	}
 }
 

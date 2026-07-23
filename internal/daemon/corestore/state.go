@@ -106,6 +106,16 @@ WHERE scope_key=? AND kind=? AND revision=?`, next, update.JSON, digest[:], form
 }
 
 func validateStateCAS(update StateDocumentCAS) error {
+	if err := validateStateCASCoordinates(update); err != nil {
+		return err
+	}
+	if !json.Valid(update.JSON) {
+		return errorsf("state document must be valid JSON")
+	}
+	return nil
+}
+
+func validateStateCASCoordinates(update StateDocumentCAS) error {
 	if err := validateKey("scope key", update.ScopeKey, 512); err != nil {
 		return err
 	}
@@ -114,9 +124,6 @@ func validateStateCAS(update StateDocumentCAS) error {
 	}
 	if update.ExpectedRevision < 0 {
 		return errorsf("expected revision must not be negative")
-	}
-	if !json.Valid(update.JSON) {
-		return errorsf("state document must be valid JSON")
 	}
 	return nil
 }

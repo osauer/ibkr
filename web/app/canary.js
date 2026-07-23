@@ -1,5 +1,6 @@
 import { canaryProtectionCoverageFor, protectionCoverageBaseCurrency, protectionCoverageHasData, protectionCoverageHeadline, protectionCoverageLargestText, protectionCoverageStaleText } from "./protection-coverage.js";
 import { unknownEventRuleNote } from "./earnings-relevance.js";
+import { earningsApplicabilitySummary, earningsHealthNotes, ruleStatusLabel, rulesCountSummary } from "./rules-presentation.js";
 import { $, cleanDetail, firstNumber, labelize, normalizeSymbol, numberRead, parseDate, pct, quoteTimestamp, renderFreshnessTimestamp, shortTimeWithZone, signedClass, signedPct } from "./shared.js";
 import { state } from "./state.js";
 
@@ -8,12 +9,6 @@ const RULE_TONES = { act: "risk", watch: "warn", pass: "ok", info: "neutral", un
 function ruleTone(status) {
   return RULE_TONES[status] || "neutral";
 }
-
-function ruleStatusLabel(status) {
-  if (status === "not_evaluated") return "idle";
-  return status || "--";
-}
-
 
 // Rules card: advisory 14-rule daily checklist from snapshot.rules
 // (daemon-owned verdicts and ranking; this renderer adds no policy). The
@@ -29,12 +24,7 @@ function renderRulesCard(rules) {
     return;
   }
   card.hidden = false;
-  const counts = rules.breach_counts || {};
-  const summaryBits = [];
-  if (counts.act) summaryBits.push(`${counts.act} act`);
-  if (counts.watch) summaryBits.push(`${counts.watch} watch`);
-  if (counts.unknown) summaryBits.push(`${counts.unknown} unknown`);
-  $("canaryRulesCounts").textContent = summaryBits.length ? summaryBits.join(" · ") : "all pass";
+  $("canaryRulesCounts").textContent = rulesCountSummary(rules);
 
   const order = Array.isArray(rules.ranked) && rules.ranked.length === rules.rules.length
     ? rules.ranked
@@ -44,12 +34,12 @@ function renderRulesCard(rules) {
   let shown = 0;
   for (const ix of order) {
     const r = rules.rules[ix];
-    if (!r || r.status === "pass" || r.status === "not_evaluated") continue;
+    if (!r || r.status === "pass") continue;
     if (shown >= 3) break;
     shown++;
     const pill = document.createElement("span");
     pill.className = `severity-pill canary-rules__pill ${ruleTone(r.status)}`;
-    pill.textContent = `${r.number} · ${r.title}`;
+    pill.textContent = `${r.number} · ${r.title} · ${ruleStatusLabel(r.status, r.reason)}`;
     pill.title = r.evidence || "";
     brief.appendChild(pill);
   }
@@ -57,6 +47,10 @@ function renderRulesCard(rules) {
   const noteParts = [];
   const eventNote = unknownEventRuleNote(rules);
   if (eventNote) noteParts.push(eventNote);
+  const applicability = earningsApplicabilitySummary(rules);
+  if (applicability) noteParts.push(applicability);
+  const evidenceInfo = earningsHealthNotes(rules);
+  if (evidenceInfo) noteParts.push(evidenceInfo);
   const degraded = (rules.input_health || []).filter((h) => h.status && h.status !== "ok");
   if (rules.status === "degraded" && degraded.length) {
     noteParts.push(`Inputs degraded (${degraded.map((h) => `${h.source}: ${h.status}`).join(", ")}) — unknown rows are not passes.`);
@@ -84,7 +78,7 @@ function renderRulesGrid(rules, order) {
     const cardEl = document.createElement("div");
     cardEl.className = `detail-card ${ruleTone(r.status)}`;
     const label = document.createElement("span");
-    label.textContent = `Rule ${r.number} · ${ruleStatusLabel(r.status)}`;
+    label.textContent = `Rule ${r.number} · ${ruleStatusLabel(r.status, r.reason)}`;
     const title = document.createElement("b");
     title.textContent = r.title;
     const body = document.createElement("p");
@@ -1323,4 +1317,4 @@ function heldStressFlagLabel(value) {
   return cleanDetail(value);
 }
 
-export { RULE_TONES, canaryDriverLabel, canaryDriverPriority, canaryDriverRow, canaryDriverRows, canaryDriverTone, canaryEmptyDriverRow, canaryExplanationCards, canaryHasProvisionalOnlyMarketWarning, canaryInputCheckBlocksAction, canaryInputCheckSentence, canaryInputIssueLabels, canaryInputIssueSummary, canaryNeedsInputCheck, canaryRowNeedsAttention, canaryStageLabel, canarySummaryText, clusterInputLabel, detailCard, firstClause, gatewayDataStatus, heldStressEvidence, heldStressFlagLabel, heldStressItems, heldStressReasonLabel, heldStressReasonLabels, heldStressRow, heldStressSummary, heldStressTone, humanList, humanizeStalenessSeconds, indicatorAsOfLabel, indicatorStatusClass, latestRegimeRead, latestRegimeTimestamp, latestRegimeTimestampFallback, legacyRegimeTone, marketExplanation, marketHasDataGaps, marketQuoteCell, marketQuoteChangeClass, marketQuoteErrorLabel, marketQuoteFallback, marketQuoteInterruptedLine, marketQuoteSourceLine, marketRegimeLabel, marketRegimeStatusLine, marketSourceErrorLabel, marketSourceIssueLabels, normalizeRegimePosture, portfolioExplanation, protectionCoverageCanaryLine, quoteBySymbol, quoteChange, quoteChangePct, quotePrevClose, quotePrice, quoteTime, reconcileSignalPanelTimes, regimeAuthorityLabel, regimeAuthorityReasonLabel, regimeAuthorityStatusLine, regimeAuthorityView, regimeFallbackIndicators, regimeGovernedNote, regimeGovernorReasonLabel, regimePosture, regimePostureDetailTone, regimePresentationPosture, regimeStaleBudgetMinutes, regimeWeatherClass, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderHeldStress, renderMarketContext, renderMarketWeather, renderRegimeAuthorityTimestamp, renderRegimeDetail, renderRegimePanel, renderRegimeQualityRemarks, renderRulesCard, renderRulesGrid, renderSignedPercent, ruleStatusLabel, ruleTone, sourceHealthMentions, unknownEventRuleNote };
+export { RULE_TONES, canaryDriverLabel, canaryDriverPriority, canaryDriverRow, canaryDriverRows, canaryDriverTone, canaryEmptyDriverRow, canaryExplanationCards, canaryHasProvisionalOnlyMarketWarning, canaryInputCheckBlocksAction, canaryInputCheckSentence, canaryInputIssueLabels, canaryInputIssueSummary, canaryNeedsInputCheck, canaryRowNeedsAttention, canaryStageLabel, canarySummaryText, clusterInputLabel, detailCard, earningsApplicabilitySummary, earningsHealthNotes, firstClause, gatewayDataStatus, heldStressEvidence, heldStressFlagLabel, heldStressItems, heldStressReasonLabel, heldStressReasonLabels, heldStressRow, heldStressSummary, heldStressTone, humanList, humanizeStalenessSeconds, indicatorAsOfLabel, indicatorStatusClass, latestRegimeRead, latestRegimeTimestamp, latestRegimeTimestampFallback, legacyRegimeTone, marketExplanation, marketHasDataGaps, marketQuoteCell, marketQuoteChangeClass, marketQuoteErrorLabel, marketQuoteFallback, marketQuoteInterruptedLine, marketQuoteSourceLine, marketRegimeLabel, marketRegimeStatusLine, marketSourceErrorLabel, marketSourceIssueLabels, normalizeRegimePosture, portfolioExplanation, protectionCoverageCanaryLine, quoteBySymbol, quoteChange, quoteChangePct, quotePrevClose, quotePrice, quoteTime, reconcileSignalPanelTimes, regimeAuthorityLabel, regimeAuthorityReasonLabel, regimeAuthorityStatusLine, regimeAuthorityView, regimeFallbackIndicators, regimeGovernedNote, regimeGovernorReasonLabel, regimePosture, regimePostureDetailTone, regimePresentationPosture, regimeStaleBudgetMinutes, regimeWeatherClass, renderCanaryDetail, renderCanaryStatus, renderCanaryTimestamp, renderHeldStress, renderMarketContext, renderMarketWeather, renderRegimeAuthorityTimestamp, renderRegimeDetail, renderRegimePanel, renderRegimeQualityRemarks, renderRulesCard, renderRulesGrid, renderSignedPercent, ruleStatusLabel, rulesCountSummary, ruleTone, sourceHealthMentions, unknownEventRuleNote };

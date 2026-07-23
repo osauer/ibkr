@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,13 +28,15 @@ import (
 // never a guessed date.
 
 const (
-	earningsStoreFilename  = "earnings-dates.json"
-	earningsPersistVersion = 2
-	earningsLegacyVersion  = 1
-	earningsFreshWindow    = 24 * time.Hour
-	earningsTTL            = 45 * 24 * time.Hour
-	earningsFetchTimeout   = 8 * time.Second
-	earningsFailureRetry   = 15 * time.Minute
+	earningsStoreFilename              = "earnings-dates.json"
+	earningsPersistVersion             = 3
+	earningsPreviousPersistVersion     = 2
+	earningsProviderObservationVersion = 2
+	earningsLegacyVersion              = 1
+	earningsFreshWindow                = 24 * time.Hour
+	earningsTTL                        = 45 * 24 * time.Hour
+	earningsFetchTimeout               = 8 * time.Second
+	earningsFailureRetry               = 15 * time.Minute
 	// A temporary connector-inactive mark is not a provider verdict. Keep its
 	// durable retry inside the connector's bounded 12-hour mark lifetime so a
 	// restart cannot turn that session-local observation into the 45-day
@@ -44,7 +48,7 @@ const (
 	earningsNonRetryableFailureRetry = 24 * time.Hour
 	earningsFetchConcurrency         = 4
 	earningsAuthorityScope           = "market/events/earnings"
-	// Keep the established state kind: a v2 payload under the same key makes
+	// Keep the established state kind: a newer payload under the same key makes
 	// older binaries reject the authority instead of silently reading a stale
 	// sibling document.
 	earningsStateKind = "earnings_dates.current.v1"
@@ -57,6 +61,10 @@ const (
 	earningsNasdaqProvider          = "nasdaq"
 	earningsWSHProvider             = "ibkr_wsh"
 	earningsWSHObservationSource    = "ibkr.wsh_event_calendar"
+
+	earningsIdentityObservationVersion = 1
+	earningsIdentityObservationKind    = "earnings_dates.identity_outcome.v1"
+	earningsIdentityObservationSource  = "ibkr.contract_details"
 )
 
 const (
@@ -65,6 +73,13 @@ const (
 	earningsReasonRetainedLastGood = "retained_last_good"
 	earningsReasonConflicting      = "conflicting_sources"
 	earningsReasonDateElapsed      = "date_elapsed"
+	earningsReasonBrokerNonIssuer  = "broker_nonissuer"
+)
+
+const (
+	earningsIdentityNotApplicable = "not_applicable"
+	earningsIdentityIssuer        = "issuer"
+	earningsIdentityUnknown       = "unknown"
 )
 
 type earningsEntry struct {
@@ -78,7 +93,7 @@ type earningsEntry struct {
 }
 
 // earningsPersistEnvelopeV1 is deliberately pinned for the unpublished JSON
-// cutover importer. Never point it at the live v2 authority.
+// cutover importer. Never point it at the live v3 authority.
 type earningsPersistEnvelopeV1 struct {
 	Version int                      `json:"version"`
 	Entries map[string]earningsEntry `json:"entries"`
@@ -103,6 +118,38 @@ type earningsProviderState struct {
 	LastGood    *earningsEntry          `json:"last_good,omitempty"`
 }
 
+// earningsIdentityAttempt is independent broker contract-details evidence.
+// ConID and SecType bind the proof to one current held stock identity. Outcome
+// is deliberately closed and never retains the broker's raw StockType.
+type earningsIdentityAttempt struct {
+	ConID       int                `json:"con_id"`
+	SecType     string             `json:"sec_type"`
+	Outcome     string             `json:"outcome"`
+	AttemptedAt time.Time          `json:"attempted_at"`
+	CompletedAt time.Time          `json:"completed_at"`
+	NextAttempt *time.Time         `json:"next_attempt"`
+	LastFailure *rpc.SourceFailure `json:"last_failure,omitempty"`
+}
+
+type earningsIdentityState struct {
+	LastAttempt       earningsIdentityAttempt `json:"last_attempt"`
+	LastNotApplicable *earningsIdentityProof  `json:"last_not_applicable,omitempty"`
+}
+
+type earningsIdentityProof struct {
+	ConID                int       `json:"con_id"`
+	SecType              string    `json:"sec_type"`
+	ObservedAt           time.Time `json:"observed_at"`
+	AuthorityRevision    int64     `json:"authority_revision"`
+	AuthorityFingerprint string    `json:"authority_fingerprint"`
+	ObservationID        int64     `json:"observation_id"`
+}
+
+type earningsIdentityObservationPayload struct {
+	Version int                     `json:"version"`
+	Attempt earningsIdentityAttempt `json:"attempt"`
+}
+
 // earningsResolution is persisted as the exact cross-provider decision made
 // at commit time. Readers re-resolve against the current clock so TTL expiry
 // cannot leave a formerly valid date usable forever.
@@ -116,7 +163,21 @@ type earningsResolution struct {
 type earningsSymbolState struct {
 	Resolution earningsResolution               `json:"resolution"`
 	Providers  map[string]earningsProviderState `json:"providers"`
+	Identity   *earningsIdentityState           `json:"identity,omitempty"`
 	UpdatedAt  time.Time                        `json:"updated_at"`
+}
+
+// The v2 state shape is pinned for strict in-place migration. Keeping a
+// separate type prevents a version-2 document from smuggling future fields.
+type earningsSymbolStateV2 struct {
+	Resolution earningsResolution               `json:"resolution"`
+	Providers  map[string]earningsProviderState `json:"providers"`
+	UpdatedAt  time.Time                        `json:"updated_at"`
+}
+
+type earningsPersistEnvelopeV2 struct {
+	Version int                              `json:"version"`
+	Symbols map[string]earningsSymbolStateV2 `json:"symbols"`
 }
 
 // earningsResolutionView is the cache's typed rulebook integration surface.
@@ -127,6 +188,7 @@ type earningsResolutionView struct {
 	Entry     earningsEntry
 	Stale     bool
 	Providers []rpc.EarningsProviderInfo
+	Identity  *rpc.EarningsIdentityInfo
 }
 
 type earningsProviderFetchResult struct {
@@ -138,6 +200,20 @@ type earningsProviderFetchResult struct {
 // The error return is local-log-only. Implementations must put only stable,
 // allowlisted data in Result; raw upstream text never enters persistence/RPC.
 type earningsProviderFetcher func(context.Context, string) (earningsProviderFetchResult, error)
+
+type earningsIdentityFetchResult struct {
+	Outcome     string
+	Failure     *rpc.SourceFailure
+	RetainProof bool
+}
+
+type earningsIdentityFetcher func(context.Context, string, int) (earningsIdentityFetchResult, error)
+
+type earningsRefreshTarget struct {
+	Symbol  string
+	ConID   int
+	SecType string
+}
 
 type earningsCache struct {
 	mu       sync.Mutex
@@ -152,6 +228,7 @@ type earningsCache struct {
 
 	secondaryProvider string
 	secondaryFetch    earningsProviderFetcher
+	identityFetch     earningsIdentityFetcher
 }
 
 func newEarningsCache(dir string, logf func(string, ...any)) *earningsCache {
@@ -205,8 +282,18 @@ func (c *earningsCache) setSecondaryProvider(provider string, fetch earningsProv
 	return nil
 }
 
+func (c *earningsCache) setIdentityFetcher(fetch earningsIdentityFetcher) error {
+	if fetch == nil {
+		return errors.New("earnings identity fetch is nil")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.identityFetch = fetch
+	return nil
+}
+
 // UseCoreStore replaces any legacy JSON projection loaded by construction
-// with the current daemon.db document. Missing state initializes a cold v2
+// with the current daemon.db document. Missing state initializes a cold v3
 // document. Failure is returned before the authority pointer or in-memory
 // projection changes.
 func (c *earningsCache) UseCoreStore(store *corestore.Store) error {
@@ -278,6 +365,17 @@ func (c *earningsCache) get(sym string) (entry earningsEntry, stale, ok bool) {
 }
 
 func (c *earningsCache) resolution(sym string) (earningsResolutionView, bool) {
+	return c.resolutionWithIdentity(sym, 0, "")
+}
+
+// resolutionForIdentity projects broker applicability only when it is bound
+// to the caller's current exact stock identity. A changed or missing identity
+// invalidates the proof immediately without erasing provider outcomes.
+func (c *earningsCache) resolutionForIdentity(sym string, conID int, secType string) (earningsResolutionView, bool) {
+	return c.resolutionWithIdentity(sym, conID, secType)
+}
+
+func (c *earningsCache) resolutionWithIdentity(sym string, conID int, secType string) (earningsResolutionView, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	sym = strings.ToUpper(strings.TrimSpace(sym))
@@ -285,33 +383,37 @@ func (c *earningsCache) resolution(sym string) (earningsResolutionView, bool) {
 	if !ok {
 		return earningsResolutionView{}, false
 	}
-	resolved := resolveEarningsProviders(state.Providers, c.clock())
+	identity := state.Identity
+	if !earningsIdentityMatches(identity, conID, secType) {
+		identity = nil
+	}
+	resolved := resolveEarningsState(state.Providers, identity, c.clock())
 	view := earningsResolutionView{Status: resolved.Status, Reason: resolved.Reason, Stale: resolved.Stale}
 	if resolved.Entry != nil {
 		view.Entry = *resolved.Entry
 	}
 	view.Providers = projectEarningsProviders(state.Providers)
+	view.Identity = projectEarningsIdentity(sym, identity, c.clock())
 	return view, true
 }
 
-// kickRefresh asynchronously refreshes symbols with at least one due provider.
-// The request context is detached because the snapshot that triggered this
-// background work may finish before the bounded provider calls do.
-func (c *earningsCache) kickRefresh(ctx context.Context, syms []string) {
+func (c *earningsCache) kickRefreshTargets(ctx context.Context, targets []earningsRefreshTarget) {
 	now := c.clock()
-	var todo []string
+	var todo []earningsRefreshTarget
 	c.mu.Lock()
-	for _, sym := range syms {
-		sym = strings.ToUpper(strings.TrimSpace(sym))
+	for _, target := range targets {
+		sym := strings.ToUpper(strings.TrimSpace(target.Symbol))
 		if sym == "" || c.inflight[sym] {
 			continue
 		}
+		target.Symbol = sym
+		target.SecType = canonicalEarningsIdentitySecType(target.SecType)
 		state := c.symbols[sym]
-		if !c.anyProviderDueLocked(state, now) {
+		if !c.anyRefreshDueLocked(state, target, now) {
 			continue
 		}
 		c.inflight[sym] = true
-		todo = append(todo, sym)
+		todo = append(todo, target)
 	}
 	c.mu.Unlock()
 	if len(todo) == 0 {
@@ -328,13 +430,13 @@ func (c *earningsCache) providerNamesLocked() []string {
 	return providers
 }
 
-func (c *earningsCache) anyProviderDueLocked(state earningsSymbolState, now time.Time) bool {
+func (c *earningsCache) anyRefreshDueLocked(state earningsSymbolState, target earningsRefreshTarget, now time.Time) bool {
 	for _, provider := range c.providerNamesLocked() {
 		if earningsProviderDue(state.Providers[provider], now) {
 			return true
 		}
 	}
-	return false
+	return c.identityFetch != nil && earningsIdentityTargetValid(target) && earningsIdentityDue(state.Identity, target, now)
 }
 
 func earningsProviderDue(state earningsProviderState, now time.Time) bool {
@@ -347,14 +449,53 @@ func earningsProviderDue(state earningsProviderState, now time.Time) bool {
 	return !now.Before(*state.LastAttempt.NextAttempt)
 }
 
-func (c *earningsCache) refresh(ctx context.Context, syms []string) {
+func canonicalEarningsIdentitySecType(secType string) string {
+	switch strings.ToUpper(strings.TrimSpace(secType)) {
+	case "STK", "STOCK", "ETF":
+		return "STK"
+	default:
+		return ""
+	}
+}
+
+func earningsIdentityTargetValid(target earningsRefreshTarget) bool {
+	return target.ConID > 0 && canonicalEarningsIdentitySecType(target.SecType) == "STK"
+}
+
+func earningsIdentityMatches(state *earningsIdentityState, conID int, secType string) bool {
+	if state == nil || conID <= 0 || canonicalEarningsIdentitySecType(secType) != "STK" {
+		return false
+	}
+	attempt := state.LastAttempt
+	return attempt.ConID == conID && attempt.SecType == "STK"
+}
+
+func earningsIdentityProofMatches(state *earningsIdentityState, conID int, secType string) bool {
+	if state == nil || state.LastNotApplicable == nil || conID <= 0 || canonicalEarningsIdentitySecType(secType) != "STK" {
+		return false
+	}
+	proof := state.LastNotApplicable
+	return proof.ConID == conID && proof.SecType == "STK"
+}
+
+func earningsIdentityDue(state *earningsIdentityState, target earningsRefreshTarget, now time.Time) bool {
+	if !earningsIdentityTargetValid(target) {
+		return false
+	}
+	if !earningsIdentityMatches(state, target.ConID, target.SecType) {
+		return true
+	}
+	return state.LastAttempt.NextAttempt == nil || !now.Before(*state.LastAttempt.NextAttempt)
+}
+
+func (c *earningsCache) refresh(ctx context.Context, targets []earningsRefreshTarget) {
 	sem := make(chan struct{}, earningsFetchConcurrency)
 	var wg sync.WaitGroup
-	for _, sym := range syms {
+	for _, target := range targets {
 		sem <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-sem }()
-			c.refreshOne(ctx, sym)
+			c.refreshTarget(ctx, target)
 		})
 	}
 	wg.Wait()
@@ -367,11 +508,19 @@ type earningsCompletedProvider struct {
 }
 
 func (c *earningsCache) refreshOne(ctx context.Context, sym string) {
+	c.refreshTarget(ctx, earningsRefreshTarget{Symbol: sym})
+}
+
+func (c *earningsCache) refreshTarget(ctx context.Context, target earningsRefreshTarget) {
+	sym := strings.ToUpper(strings.TrimSpace(target.Symbol))
+	target.Symbol = sym
+	target.SecType = canonicalEarningsIdentitySecType(target.SecType)
 	c.mu.Lock()
 	now := c.clock()
 	state := cloneEarningsSymbolState(c.symbols[sym])
 	providers := c.providerNamesLocked()
 	secondaryProvider, secondaryFetch := c.secondaryProvider, c.secondaryFetch
+	identityFetch := c.identityFetch
 	c.mu.Unlock()
 
 	var completed []earningsCompletedProvider
@@ -398,30 +547,41 @@ func (c *earningsCache) refreshOne(ctx context.Context, sym string) {
 			localErr: err,
 		})
 	}
+	var completedIdentity *earningsIdentityAttempt
+	var identityErr error
+	retainIdentityProof := false
+	if identityFetch != nil && earningsIdentityTargetValid(target) && earningsIdentityDue(state.Identity, target, now) {
+		attemptedAt := c.clock()
+		result, err := identityFetch(ctx, sym, target.ConID)
+		completedAt := c.clock()
+		attempt := normalizeEarningsIdentityAttempt(target, result, attemptedAt, completedAt)
+		completedIdentity = &attempt
+		identityErr = err
+		retainIdentityProof = result.RetainProof
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	defer delete(c.inflight, sym)
-	if len(completed) == 0 {
+	if len(completed) == 0 && completedIdentity == nil {
 		return
 	}
-
-	// Merge into the newest committed symbol snapshot. Other symbols may have
-	// committed while provider calls were in flight; the store revision is
-	// global and is intentionally consumed only under this lock.
-	candidate := cloneEarningsSymbols(c.symbols)
-	symbolState := cloneEarningsSymbolState(candidate[sym])
-	if symbolState.Providers == nil {
-		symbolState.Providers = map[string]earningsProviderState{}
+	observations, err := earningsProviderObservations(sym, completed)
+	if err != nil {
+		c.logf("earnings provider outcome encode failed: %v", err)
+		return
+	}
+	identityObservationIndex := -1
+	if completedIdentity != nil {
+		observation, encodeErr := earningsIdentityObservation(*completedIdentity)
+		if encodeErr != nil {
+			c.logf("earnings broker identity outcome encode failed")
+			return
+		}
+		identityObservationIndex = 0
+		observations = append([]corestore.ObservationInput{observation}, observations...)
 	}
 	for _, item := range completed {
-		providerState := symbolState.Providers[item.provider]
-		providerState.LastAttempt = item.attempt
-		if item.attempt.Status == rpc.EarningsStatusDate && item.attempt.Entry != nil {
-			entry := *item.attempt.Entry
-			providerState.LastGood = &entry
-		}
-		symbolState.Providers[item.provider] = providerState
 		if item.localErr != nil {
 			code, stage, retryable := "", "", false
 			if item.attempt.LastFailure != nil {
@@ -432,17 +592,80 @@ func (c *earningsCache) refreshOne(ctx context.Context, sym string) {
 			c.logf("earnings provider %s outcome status=%s code=%s stage=%s retryable=%t", item.provider, item.attempt.Status, code, stage, retryable)
 		}
 	}
-	decisionAt := c.clock()
-	symbolState.Resolution = resolveEarningsProviders(symbolState.Providers, decisionAt)
-	symbolState.UpdatedAt = decisionAt
-	candidate[sym] = symbolState
-
-	observations, err := earningsProviderObservations(sym, completed)
-	if err != nil {
-		c.logf("earnings provider outcome encode failed: %v", err)
-		return
+	if completedIdentity != nil {
+		identityCopy := *completedIdentity
+		if identityErr != nil {
+			code, stage, retryable := "", "", false
+			if identityCopy.LastFailure != nil {
+				code = identityCopy.LastFailure.Code
+				stage = identityCopy.LastFailure.Stage
+				retryable = identityCopy.LastFailure.Retryable
+			}
+			c.logf("earnings broker identity outcome=%s code=%s stage=%s retryable=%t", identityCopy.Outcome, code, stage, retryable)
+		}
 	}
-	if err := c.store.commit(context.WithoutCancel(ctx), candidate, observations, decisionAt); err != nil {
+	decisionAt := c.clock()
+	candidate, err := c.store.commitBound(context.WithoutCancel(ctx), observations, decisionAt,
+		func(authorityRevision int64, receipts []corestore.ObservationReceipt) (map[string]earningsSymbolState, error) {
+			if authorityRevision > 0 && len(receipts) != len(observations) {
+				return nil, errors.New("earnings observation receipt count mismatch")
+			}
+			var identityReceipt *corestore.ObservationReceipt
+			if identityObservationIndex >= 0 {
+				if authorityRevision <= 0 || len(receipts) <= identityObservationIndex {
+					return nil, errors.New("earnings identity observation authority unavailable")
+				}
+				receipt := receipts[identityObservationIndex]
+				expectedDigest := sha256.Sum256(observations[identityObservationIndex].Payload)
+				if receipt.ID <= 0 || receipt.PayloadSHA256 != expectedDigest {
+					return nil, errors.New("earnings identity observation receipt invalid")
+				}
+				identityReceipt = &receipt
+			}
+
+			// Merge into the newest committed symbol snapshot. Other symbols may
+			// have committed while provider calls were in flight; the store revision
+			// is global and is intentionally consumed only under this lock.
+			candidate := cloneEarningsSymbols(c.symbols)
+			symbolState := cloneEarningsSymbolState(candidate[sym])
+			if symbolState.Providers == nil {
+				symbolState.Providers = map[string]earningsProviderState{}
+			}
+			for _, item := range completed {
+				providerState := symbolState.Providers[item.provider]
+				providerState.LastAttempt = item.attempt
+				if item.attempt.Status == rpc.EarningsStatusDate && item.attempt.Entry != nil {
+					entry := *item.attempt.Entry
+					providerState.LastGood = &entry
+				}
+				symbolState.Providers[item.provider] = providerState
+			}
+			if completedIdentity != nil {
+				identityCopy := *completedIdentity
+				identityState := &earningsIdentityState{LastAttempt: identityCopy}
+				switch {
+				case identityCopy.Outcome == earningsIdentityNotApplicable && identityCopy.LastFailure == nil:
+					if identityReceipt == nil {
+						return nil, errors.New("earnings identity observation receipt missing")
+					}
+					identityState.LastNotApplicable = &earningsIdentityProof{
+						ConID: identityCopy.ConID, SecType: identityCopy.SecType, ObservedAt: identityCopy.CompletedAt,
+						AuthorityRevision:    authorityRevision,
+						AuthorityFingerprint: earningsIdentityDigestFingerprint(identityReceipt.PayloadSHA256),
+						ObservationID:        identityReceipt.ID,
+					}
+				case retainIdentityProof && identityCopy.LastFailure != nil && earningsIdentityProofMatches(symbolState.Identity, identityCopy.ConID, identityCopy.SecType):
+					proof := *symbolState.Identity.LastNotApplicable
+					identityState.LastNotApplicable = &proof
+				}
+				symbolState.Identity = identityState
+			}
+			symbolState.Resolution = resolveEarningsState(symbolState.Providers, symbolState.Identity, decisionAt)
+			symbolState.UpdatedAt = decisionAt
+			candidate[sym] = symbolState
+			return candidate, nil
+		})
+	if err != nil {
 		// Publishing an uncommitted attempt would make a transient memory result
 		// outrun restart authority. SQLite health reports the authority failure.
 		c.logf("earnings provider authority commit failed")
@@ -491,6 +714,36 @@ func normalizeEarningsAttempt(provider, symbol string, result earningsProviderFe
 		attempt.LastFailure = &failure
 	}
 	next := earningsNextAttempt(status, attempt.LastFailure, completedAt)
+	attempt.NextAttempt = &next
+	return attempt
+}
+
+func normalizeEarningsIdentityAttempt(target earningsRefreshTarget, result earningsIdentityFetchResult, attemptedAt, completedAt time.Time) earningsIdentityAttempt {
+	if completedAt.Before(attemptedAt) {
+		completedAt = attemptedAt
+	}
+	outcome := strings.TrimSpace(result.Outcome)
+	if !validEarningsIdentityOutcome(outcome) {
+		outcome = earningsIdentityUnknown
+		result.Failure = &rpc.SourceFailure{Code: rpc.SourceFailureInvalidPayload, Stage: rpc.SourceFailureStageAuthorityPersist, Retryable: false}
+	}
+	attempt := earningsIdentityAttempt{
+		ConID: target.ConID, SecType: canonicalEarningsIdentitySecType(target.SecType), Outcome: outcome,
+		AttemptedAt: attemptedAt, CompletedAt: completedAt,
+	}
+	if result.Failure != nil {
+		failure := *result.Failure
+		failure.FailedAt = completedAt
+		if !validEarningsSourceFailure(failure) {
+			failure = rpc.SourceFailure{Code: rpc.SourceFailureInvalidPayload, Stage: rpc.SourceFailureStageAuthorityPersist, FailedAt: completedAt, Retryable: false}
+		}
+		attempt.LastFailure = &failure
+		attempt.Outcome = earningsIdentityUnknown
+	}
+	next := completedAt.Add(earningsFreshWindow)
+	if attempt.LastFailure != nil && attempt.LastFailure.Stage == rpc.SourceFailureStageWSHContractResolve {
+		next = completedAt.Add(earningsContractResolutionRetry)
+	}
 	attempt.NextAttempt = &next
 	return attempt
 }
@@ -624,18 +877,32 @@ func parseNasdaqEarnings(body []byte, providerSymbol string, now time.Time) (ear
 		Data *struct {
 			Announcement json.RawMessage `json:"announcement"`
 		} `json:"data"`
-		Status struct {
-			RCode int `json:"rCode"`
-		} `json:"status"`
+		Status json.RawMessage `json:"status"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqDecode, false, errors.New("nasdaq payload is not valid JSON"))
 	}
+	if len(payload.Status) == 0 || string(payload.Status) == "null" {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has no typed status"))
+	}
+	var status struct {
+		RCode json.RawMessage `json:"rCode"`
+	}
+	if err := json.Unmarshal(payload.Status, &status); err != nil || len(status.RCode) == 0 || string(status.RCode) == "null" {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has no typed status code"))
+	}
+	var rCode int
+	if err := json.Unmarshal(status.RCode, &rCode); err != nil {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has invalid status code"))
+	}
 	if payload.Data == nil {
-		if payload.Status.RCode == http.StatusBadRequest || payload.Status.RCode == http.StatusNotFound {
+		if rCode == http.StatusBadRequest || rCode == http.StatusNotFound {
 			return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusUnsupportedSecurity, "", "", false, errors.New("nasdaq reports unsupported security"))
 		}
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload has no data object"))
+	}
+	if rCode != http.StatusOK {
+		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq payload status is inconsistent with data"))
 	}
 	announcementRaw := payload.Data.Announcement
 	if len(announcementRaw) == 0 || string(announcementRaw) == "null" {
@@ -645,7 +912,6 @@ func parseNasdaqEarnings(body []byte, providerSymbol string, now time.Time) (ear
 	if err := json.Unmarshal(announcementRaw, &announcement); err != nil {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement has invalid type"))
 	}
-	announcement = strings.TrimSpace(announcement)
 	if announcement == "" {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusNoDatePublished, "", "", false, errors.New("nasdaq published no earnings date"))
 	}
@@ -653,7 +919,7 @@ func parseNasdaqEarnings(body []byte, providerSymbol string, now time.Time) (ear
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusFormatChange, rpc.SourceFailureInvalidPayload, rpc.SourceFailureStageNasdaqSchema, false, errors.New("nasdaq announcement format changed"))
 	}
 	prefix := nasdaqAnnouncementPrefix(providerSymbol)
-	if announcement == prefix {
+	if announcement == prefix || announcement == prefix+" " {
 		return earningsEntry{}, providerOutcomeError(rpc.EarningsStatusNoDatePublished, "", "", false, errors.New("nasdaq published no earnings date"))
 	}
 	dateText, ok := strings.CutPrefix(announcement, prefix+" ")
@@ -742,6 +1008,26 @@ func resolveEarningsProviders(providers map[string]earningsProviderState, now ti
 	return earningsResolution{Status: rpc.EarningsStatusTransportFailure, Reason: rpc.EarningsStatusTransportFailure}
 }
 
+func resolveEarningsState(providers map[string]earningsProviderState, identity *earningsIdentityState, now time.Time) earningsResolution {
+	providerResolution := resolveEarningsProviders(providers, now)
+	if !usableEarningsNotApplicable(identity, now) {
+		return providerResolution
+	}
+	if providerResolution.Status == rpc.EarningsStatusDate || providerResolution.Status == rpc.EarningsStatusConflictingSources {
+		return earningsResolution{Status: rpc.EarningsStatusConflictingSources, Reason: earningsReasonConflicting}
+	}
+	return earningsResolution{Status: rpc.EarningsStatusNotApplicable, Reason: earningsReasonBrokerNonIssuer}
+}
+
+func usableEarningsNotApplicable(identity *earningsIdentityState, now time.Time) bool {
+	if identity == nil || identity.LastNotApplicable == nil {
+		return false
+	}
+	proof := identity.LastNotApplicable
+	return proof.ConID > 0 && proof.SecType == "STK" && !proof.ObservedAt.IsZero() && !now.Before(proof.ObservedAt) &&
+		proof.AuthorityRevision > 0 && validAlertRegistryFingerprint(proof.AuthorityFingerprint) && proof.ObservationID > 0
+}
+
 func usableEarningsEntry(entry earningsEntry, now time.Time) bool {
 	if entry.ObservedAt.IsZero() || now.Before(entry.ObservedAt) || now.Sub(entry.ObservedAt) > earningsTTL {
 		return false
@@ -781,6 +1067,68 @@ func projectEarningsProviders(providers map[string]earningsProviderState) []rpc.
 	return out
 }
 
+func projectEarningsIdentity(symbol string, identity *earningsIdentityState, now time.Time) *rpc.EarningsIdentityInfo {
+	if identity == nil {
+		return nil
+	}
+	attempt := identity.LastAttempt
+	info := &rpc.EarningsIdentityInfo{
+		Outcome: attempt.Outcome, NotApplicable: usableEarningsNotApplicable(identity, now), AttemptedAt: attempt.AttemptedAt,
+		NextAttempt: cloneTimePointer(attempt.NextAttempt), LastFailure: cloneEarningsSourceFailure(attempt.LastFailure),
+	}
+	if info.NotApplicable {
+		proof := identity.LastNotApplicable
+		info.ProofObservedAt = proof.ObservedAt
+		info.AuthorityRevision = proof.AuthorityRevision
+		info.AuthorityFingerprint = proof.AuthorityFingerprint
+		info.ObservationID = opaqueEarningsIdentityObservationID(proof.ObservationID, proof.AuthorityFingerprint)
+		info.ProofOutcome = rpc.EarningsStatusNotApplicable
+		info.AuthorityBinding = rpc.BuildEarningsIdentityAuthorityBinding(symbol, *info)
+	}
+	return info
+}
+
+func earningsIdentityObservation(attempt earningsIdentityAttempt) (corestore.ObservationInput, error) {
+	payload, err := json.Marshal(earningsIdentityObservationPayload{Version: earningsIdentityObservationVersion, Attempt: attempt})
+	if err != nil {
+		return corestore.ObservationInput{}, fmt.Errorf("encode earnings identity observation: %w", err)
+	}
+	metadata, err := json.Marshal(struct {
+		Version int    `json:"version"`
+		Outcome string `json:"outcome"`
+	}{earningsIdentityObservationVersion, attempt.Outcome})
+	if err != nil {
+		return corestore.ObservationInput{}, fmt.Errorf("encode earnings identity metadata: %w", err)
+	}
+	return corestore.ObservationInput{
+		ScopeKey: earningsAuthorityScope, Source: earningsIdentityObservationSource,
+		Kind: earningsIdentityObservationKind, ObservedAt: attempt.CompletedAt,
+		ContentType: "application/json", Payload: payload, MetadataJSON: metadata, DecisionEligible: true,
+	}, nil
+}
+
+func earningsIdentityDigestFingerprint(digest [sha256.Size]byte) string {
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func opaqueEarningsIdentityObservationID(id int64, fingerprint string) string {
+	if id <= 0 || !validAlertRegistryFingerprint(fingerprint) {
+		return ""
+	}
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s:%d:%s", earningsIdentityObservationKind, id, fingerprint))
+	return "oid:sha256:" + hex.EncodeToString(sum[:])
+}
+
+func validOpaqueEarningsIdentityObservationID(value string) bool {
+	const prefix = "oid:sha256:"
+	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+sha256.Size*2 {
+		return false
+	}
+	raw := value[len(prefix):]
+	decoded, err := hex.DecodeString(raw)
+	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == raw
+}
+
 func earningsProviderObservations(sym string, completed []earningsCompletedProvider) ([]corestore.ObservationInput, error) {
 	observations := make([]corestore.ObservationInput, 0, len(completed))
 	for _, item := range completed {
@@ -789,7 +1137,7 @@ func earningsProviderObservations(sym string, completed []earningsCompletedProvi
 			Symbol   string                  `json:"symbol"`
 			Provider string                  `json:"provider"`
 			Attempt  earningsProviderAttempt `json:"attempt"`
-		}{earningsPersistVersion, sym, item.provider, item.attempt})
+		}{earningsProviderObservationVersion, sym, item.provider, item.attempt})
 		if err != nil {
 			return nil, fmt.Errorf("encode %s earnings observation: %w", item.provider, err)
 		}
@@ -797,7 +1145,7 @@ func earningsProviderObservations(sym string, completed []earningsCompletedProvi
 			Version  int    `json:"version"`
 			Provider string `json:"provider"`
 			Status   string `json:"status"`
-		}{earningsPersistVersion, item.provider, item.attempt.Status})
+		}{earningsProviderObservationVersion, item.provider, item.attempt.Status})
 		if err != nil {
 			return nil, fmt.Errorf("encode %s earnings metadata: %w", item.provider, err)
 		}
@@ -828,11 +1176,20 @@ func validEarningsProviderStatus(status string) bool {
 	}
 }
 
+func validEarningsIdentityOutcome(outcome string) bool {
+	switch outcome {
+	case earningsIdentityNotApplicable, earningsIdentityIssuer, earningsIdentityUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 func validEarningsSourceFailure(failure rpc.SourceFailure) bool {
 	return rpc.ValidSourceFailure(&failure) && !failure.FailedAt.IsZero()
 }
 
-// earningsStore persists v2 state across restarts. The JSON save/load methods
+// earningsStore persists v3 state across restarts. The JSON save/load methods
 // remain v1-only for the sealed legacy cutover path and isolated tests.
 type earningsStore struct {
 	dir       string
@@ -885,50 +1242,93 @@ func (s *earningsStore) useCoreStore(store *corestore.Store, now time.Time) (map
 			if err != nil {
 				return nil, fmt.Errorf("persist migrated earnings authority: %w", err)
 			}
-		case earningsPersistVersion:
+		case earningsPreviousPersistVersion:
 			loaded, err = decodeEarningsEnvelopeV2(doc.JSON, now)
 			if err != nil {
 				return nil, fmt.Errorf("decode earnings authority v2: %w", err)
 			}
+			raw, err := json.Marshal(earningsPersistEnvelope{Version: earningsPersistVersion, Symbols: loaded})
+			if err != nil {
+				return nil, fmt.Errorf("encode migrated earnings authority: %w", err)
+			}
+			doc, err = store.CompareAndSwapStateDocument(context.Background(), corestore.StateDocumentCAS{
+				ScopeKey: earningsAuthorityScope, Kind: earningsStateKind,
+				ExpectedRevision: doc.Revision, JSON: raw,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("persist migrated earnings authority: %w", err)
+			}
+		case earningsPersistVersion:
+			loaded, err = decodeEarningsEnvelopeV3(doc.JSON, now)
+			if err != nil {
+				return nil, fmt.Errorf("decode earnings authority v3: %w", err)
+			}
 		default:
 			return nil, fmt.Errorf("decode earnings authority: unsupported version %d", header.Version)
 		}
+	}
+	if err := validateEarningsIdentityProofObservations(context.Background(), store, loaded, doc.Revision); err != nil {
+		return nil, fmt.Errorf("validate earnings identity observation authority: %w", err)
 	}
 	s.authority = store
 	s.revision = doc.Revision
 	return loaded, nil
 }
 
-func (s *earningsStore) commit(ctx context.Context, symbols map[string]earningsSymbolState, observations []corestore.ObservationInput, now time.Time) error {
+func (s *earningsStore) commitBound(
+	ctx context.Context,
+	observations []corestore.ObservationInput,
+	now time.Time,
+	build func(authorityRevision int64, receipts []corestore.ObservationReceipt) (map[string]earningsSymbolState, error),
+) (map[string]earningsSymbolState, error) {
 	if s == nil {
-		return errors.New("earnings store: nil store")
+		return nil, errors.New("earnings store: nil store")
+	}
+	if len(observations) == 0 {
+		return nil, errors.New("earnings observations are required")
+	}
+	if build == nil {
+		return nil, errors.New("earnings state builder is required")
 	}
 	if s.authority == nil {
-		entries := resolvedEarningsEntries(symbols, now)
-		return s.save(entries)
-	}
-	if err := validateEarningsSymbols(symbols, now); err != nil {
-		return err
-	}
-	payload, err := json.Marshal(earningsPersistEnvelope{Version: earningsPersistVersion, Symbols: symbols})
-	if err != nil {
-		return fmt.Errorf("encode earnings authority: %w", err)
+		candidate, err := build(0, nil)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateEarningsSymbols(candidate, now); err != nil {
+			return nil, err
+		}
+		if err := s.save(resolvedEarningsEntries(candidate, now)); err != nil {
+			return nil, err
+		}
+		return candidate, nil
 	}
 	update := corestore.StateDocumentCAS{
 		ScopeKey: earningsAuthorityScope, Kind: earningsStateKind,
-		ExpectedRevision: s.revision, JSON: payload,
+		ExpectedRevision: s.revision,
 	}
-	var saved corestore.StateDocument
-	if len(observations) == 0 {
-		saved, err = s.authority.CompareAndSwapStateDocument(ctx, update)
-	} else {
-		saved, _, err = s.authority.CompareAndSwapStateDocumentWithObservations(ctx, update, observations)
-	}
+	var candidate map[string]earningsSymbolState
+	saved, _, err := s.authority.CompareAndSwapStateDocumentWithBoundObservations(ctx, update, observations,
+		func(authorityRevision int64, receipts []corestore.ObservationReceipt) ([]byte, error) {
+			var buildErr error
+			candidate, buildErr = build(authorityRevision, receipts)
+			if buildErr != nil {
+				return nil, buildErr
+			}
+			if err := validateEarningsSymbols(candidate, now); err != nil {
+				return nil, err
+			}
+			payload, err := json.Marshal(earningsPersistEnvelope{Version: earningsPersistVersion, Symbols: candidate})
+			if err != nil {
+				return nil, fmt.Errorf("encode earnings authority: %w", err)
+			}
+			return payload, nil
+		})
 	if err != nil {
-		return fmt.Errorf("commit earnings authority: %w", err)
+		return nil, fmt.Errorf("commit earnings authority: %w", err)
 	}
 	s.revision = saved.Revision
-	return nil
+	return candidate, nil
 }
 
 func (s *earningsStore) loadLegacy(now time.Time) (map[string]earningsEntry, error) {
@@ -978,6 +1378,29 @@ func decodeEarningsEnvelopeV1(data []byte, now time.Time, strict bool) (map[stri
 }
 
 func decodeEarningsEnvelopeV2(data []byte, now time.Time) (map[string]earningsSymbolState, error) {
+	var env earningsPersistEnvelopeV2
+	if err := decodeStrictMarketEventJSON(data, &env); err != nil {
+		return nil, fmt.Errorf("decode earnings authority: %w", err)
+	}
+	if env.Version != earningsPreviousPersistVersion {
+		return nil, fmt.Errorf("invalid earnings version %d", env.Version)
+	}
+	if env.Symbols == nil {
+		return nil, errors.New("earnings authority has no symbols map")
+	}
+	converted := make(map[string]earningsSymbolState, len(env.Symbols))
+	for symbol, state := range env.Symbols {
+		converted[symbol] = earningsSymbolState{
+			Resolution: state.Resolution, Providers: state.Providers, UpdatedAt: state.UpdatedAt,
+		}
+	}
+	if err := validateEarningsSymbols(converted, now); err != nil {
+		return nil, err
+	}
+	return cloneEarningsSymbols(converted), nil
+}
+
+func decodeEarningsEnvelopeV3(data []byte, now time.Time) (map[string]earningsSymbolState, error) {
 	var env earningsPersistEnvelope
 	if err := decodeStrictMarketEventJSON(data, &env); err != nil {
 		return nil, fmt.Errorf("decode earnings authority: %w", err)
@@ -994,35 +1417,102 @@ func decodeEarningsEnvelopeV2(data []byte, now time.Time) (map[string]earningsSy
 	return cloneEarningsSymbols(env.Symbols), nil
 }
 
+var errInvalidEarningsIdentityObservation = errors.New("invalid retained earnings identity observation")
+
+func validateEarningsIdentityProofObservations(ctx context.Context, store *corestore.Store, symbols map[string]earningsSymbolState, stateRevision int64) error {
+	for _, state := range symbols {
+		if state.Identity == nil || state.Identity.LastNotApplicable == nil {
+			continue
+		}
+		proof := state.Identity.LastNotApplicable
+		if store == nil || proof.AuthorityRevision <= 0 || proof.AuthorityRevision > stateRevision || proof.ObservationID <= 0 {
+			return errInvalidEarningsIdentityObservation
+		}
+		observation, found, err := store.ExactDecisionEligibleObservation(ctx, proof.ObservationID,
+			earningsAuthorityScope, earningsIdentityObservationSource, earningsIdentityObservationKind, proof.ObservedAt)
+		if err != nil {
+			return fmt.Errorf("%w: authority read failed", errInvalidEarningsIdentityObservation)
+		}
+		if !found || observation.ID != proof.ObservationID ||
+			!validEarningsIdentityProofObservation(*state.Identity, *proof, observation) {
+			return errInvalidEarningsIdentityObservation
+		}
+	}
+	return nil
+}
+
+func validEarningsIdentityProofObservation(state earningsIdentityState, proof earningsIdentityProof, observation corestore.Observation) bool {
+	if observation.ID != proof.ObservationID || observation.ScopeKey != earningsAuthorityScope ||
+		observation.Source != earningsIdentityObservationSource || observation.Kind != earningsIdentityObservationKind ||
+		observation.ContentType != "application/json" || !observation.DecisionEligible ||
+		!observation.ObservedAt.Equal(proof.ObservedAt) {
+		return false
+	}
+	payloadDigest := sha256.Sum256(observation.Payload)
+	if payloadDigest != observation.PayloadSHA256 || earningsIdentityDigestFingerprint(observation.PayloadSHA256) != proof.AuthorityFingerprint {
+		return false
+	}
+	var payload earningsIdentityObservationPayload
+	if decodeStrictMarketEventJSON(observation.Payload, &payload) != nil || payload.Version != earningsIdentityObservationVersion {
+		return false
+	}
+	attempt := payload.Attempt
+	if attempt.ConID != proof.ConID || attempt.SecType != "STK" || attempt.Outcome != earningsIdentityNotApplicable ||
+		attempt.AttemptedAt.IsZero() || attempt.CompletedAt.IsZero() || attempt.CompletedAt.Before(attempt.AttemptedAt) ||
+		!attempt.CompletedAt.Equal(proof.ObservedAt) || attempt.LastFailure != nil || attempt.NextAttempt == nil ||
+		!attempt.NextAttempt.Equal(attempt.CompletedAt.Add(earningsFreshWindow)) {
+		return false
+	}
+	if state.LastAttempt.LastFailure == nil && !sameEarningsIdentityProofAttempt(state.LastAttempt, attempt) {
+		return false
+	}
+	return true
+}
+
+func sameEarningsIdentityProofAttempt(a, b earningsIdentityAttempt) bool {
+	return a.ConID == b.ConID && a.SecType == b.SecType && a.Outcome == b.Outcome &&
+		a.AttemptedAt.Equal(b.AttemptedAt) && a.CompletedAt.Equal(b.CompletedAt) &&
+		a.NextAttempt != nil && b.NextAttempt != nil && a.NextAttempt.Equal(*b.NextAttempt) &&
+		a.LastFailure == nil && b.LastFailure == nil
+}
+
 func validateEarningsSymbols(symbols map[string]earningsSymbolState, now time.Time) error {
 	for symbol, state := range symbols {
 		canonical := strings.ToUpper(strings.TrimSpace(symbol))
 		if canonical == "" || canonical != symbol || state.Providers == nil || state.UpdatedAt.IsZero() || now.Before(state.UpdatedAt) {
-			return fmt.Errorf("invalid earnings symbol state %q", symbol)
+			return errors.New("invalid earnings symbol state")
 		}
 		if !validAggregateEarningsStatus(state.Resolution.Status) {
-			return fmt.Errorf("invalid earnings resolution for %q", symbol)
+			return errors.New("invalid earnings resolution")
 		}
-		recomputed := resolveEarningsProviders(state.Providers, state.UpdatedAt)
+		recomputed := resolveEarningsState(state.Providers, state.Identity, state.UpdatedAt)
 		if !sameEarningsResolution(state.Resolution, recomputed) {
-			return fmt.Errorf("inconsistent earnings resolution for %q", symbol)
+			return errors.New("inconsistent earnings resolution")
 		}
 		if state.Resolution.Status == rpc.EarningsStatusDate {
 			if state.Resolution.Entry == nil || validateEarningsRowShape(symbol, *state.Resolution.Entry) != nil {
-				return fmt.Errorf("invalid earnings resolution date for %q", symbol)
+				return errors.New("invalid earnings resolution date")
 			}
 		} else if state.Resolution.Entry != nil {
-			return fmt.Errorf("unresolved earnings state carries a date for %q", symbol)
+			return errors.New("unresolved earnings state carries a date")
 		}
 		for provider, providerState := range state.Providers {
 			if provider != earningsNasdaqProvider && provider != earningsWSHProvider {
-				return fmt.Errorf("invalid earnings provider %q", provider)
+				return errors.New("invalid earnings provider")
 			}
 			if err := validateEarningsProviderState(symbol, provider, providerState, now); err != nil {
 				return err
 			}
 			if state.UpdatedAt.Before(providerState.LastAttempt.CompletedAt) {
-				return fmt.Errorf("earnings resolution predates %s attempt for %q", provider, symbol)
+				return errors.New("earnings resolution predates provider attempt")
+			}
+		}
+		if state.Identity != nil {
+			if err := validateEarningsIdentityState(*state.Identity, now); err != nil {
+				return err
+			}
+			if state.UpdatedAt.Before(state.Identity.LastAttempt.CompletedAt) {
+				return errors.New("earnings resolution predates identity attempt")
 			}
 		}
 	}
@@ -1030,7 +1520,7 @@ func validateEarningsSymbols(symbols map[string]earningsSymbolState, now time.Ti
 }
 
 func validAggregateEarningsStatus(status string) bool {
-	return validEarningsProviderStatus(status) || status == rpc.EarningsStatusConflictingSources
+	return validEarningsProviderStatus(status) || status == rpc.EarningsStatusConflictingSources || status == rpc.EarningsStatusNotApplicable
 }
 
 func sameEarningsResolution(a, b earningsResolution) bool {
@@ -1043,32 +1533,75 @@ func sameEarningsResolution(a, b earningsResolution) bool {
 	return *a.Entry == *b.Entry
 }
 
-func validateEarningsProviderState(symbol, provider string, state earningsProviderState, now time.Time) error {
+func validateEarningsProviderState(symbol, _ string, state earningsProviderState, now time.Time) error {
 	attempt := state.LastAttempt
 	if !validEarningsProviderStatus(attempt.Status) || attempt.AttemptedAt.IsZero() || attempt.CompletedAt.IsZero() || attempt.CompletedAt.Before(attempt.AttemptedAt) || now.Before(attempt.CompletedAt) {
-		return fmt.Errorf("invalid %s earnings attempt for %q", provider, symbol)
+		return errors.New("invalid earnings provider attempt")
 	}
 	if attempt.NextAttempt == nil || attempt.NextAttempt.Before(attempt.CompletedAt) {
-		return fmt.Errorf("invalid %s earnings retry for %q", provider, symbol)
+		return errors.New("invalid earnings provider retry")
 	}
 	if attempt.Status == rpc.EarningsStatusDate {
 		if attempt.Entry == nil || validateEarningsRowShape(symbol, *attempt.Entry) != nil || attempt.LastFailure != nil {
-			return fmt.Errorf("invalid %s earnings date for %q", provider, symbol)
+			return errors.New("invalid earnings provider date")
 		}
 	} else if attempt.Entry != nil {
-		return fmt.Errorf("unresolved %s earnings attempt carries a date for %q", provider, symbol)
+		return errors.New("unresolved earnings provider attempt carries a date")
 	}
 	if attempt.Status == rpc.EarningsStatusTransportFailure || attempt.Status == rpc.EarningsStatusFormatChange {
 		if attempt.LastFailure == nil || !validEarningsSourceFailure(*attempt.LastFailure) || !attempt.LastFailure.FailedAt.Equal(attempt.CompletedAt) {
-			return fmt.Errorf("invalid %s earnings failure for %q", provider, symbol)
+			return errors.New("invalid earnings provider failure")
 		}
 	} else if attempt.LastFailure != nil {
-		return fmt.Errorf("semantic %s earnings outcome carries a failure for %q", provider, symbol)
+		return errors.New("semantic earnings provider outcome carries a failure")
 	}
 	if state.LastGood != nil {
 		if err := validateEarningsRowShape(symbol, *state.LastGood); err != nil || now.Before(state.LastGood.ObservedAt) {
-			return fmt.Errorf("invalid %s earnings last-good for %q", provider, symbol)
+			return errors.New("invalid earnings provider last-good")
 		}
+	}
+	return nil
+}
+
+func validateEarningsIdentityState(state earningsIdentityState, now time.Time) error {
+	attempt := state.LastAttempt
+	if attempt.ConID <= 0 || attempt.SecType != "STK" || !validEarningsIdentityOutcome(attempt.Outcome) ||
+		attempt.AttemptedAt.IsZero() || attempt.CompletedAt.IsZero() || attempt.CompletedAt.Before(attempt.AttemptedAt) || now.Before(attempt.CompletedAt) {
+		return errors.New("invalid earnings identity attempt")
+	}
+	if attempt.NextAttempt == nil {
+		return errors.New("invalid earnings identity retry")
+	}
+	wantNext := attempt.CompletedAt.Add(earningsFreshWindow)
+	if attempt.LastFailure != nil {
+		if attempt.Outcome != earningsIdentityUnknown || !validEarningsSourceFailure(*attempt.LastFailure) ||
+			!attempt.LastFailure.FailedAt.Equal(attempt.CompletedAt) {
+			return errors.New("invalid earnings identity failure")
+		}
+		if attempt.LastFailure.Stage == rpc.SourceFailureStageWSHContractResolve {
+			wantNext = attempt.CompletedAt.Add(earningsContractResolutionRetry)
+		}
+	} else if attempt.Outcome != earningsIdentityNotApplicable && attempt.Outcome != earningsIdentityIssuer && attempt.Outcome != earningsIdentityUnknown {
+		return errors.New("invalid earnings identity outcome")
+	}
+	if !attempt.NextAttempt.Equal(wantNext) {
+		return errors.New("invalid earnings identity retry")
+	}
+	if state.LastNotApplicable != nil {
+		proof := state.LastNotApplicable
+		if proof.ConID != attempt.ConID || proof.SecType != "STK" || proof.ObservedAt.IsZero() ||
+			now.Before(proof.ObservedAt) || proof.ObservedAt.After(attempt.CompletedAt) || proof.AuthorityRevision <= 0 ||
+			!validAlertRegistryFingerprint(proof.AuthorityFingerprint) || proof.ObservationID <= 0 {
+			return errors.New("invalid earnings identity proof")
+		}
+		if attempt.LastFailure != nil && (attempt.LastFailure.Stage != rpc.SourceFailureStageWSHContractResolve || !attempt.LastFailure.Retryable) {
+			return errors.New("invalid earnings identity proof retention")
+		}
+		if attempt.LastFailure == nil && (attempt.Outcome != earningsIdentityNotApplicable || !proof.ObservedAt.Equal(attempt.CompletedAt)) {
+			return errors.New("invalid earnings identity proof")
+		}
+	} else if attempt.Outcome == earningsIdentityNotApplicable && attempt.LastFailure == nil {
+		return errors.New("missing earnings identity proof")
 	}
 	return nil
 }
@@ -1078,7 +1611,7 @@ func validateEarningsRow(sym string, entry earningsEntry, now time.Time) error {
 		return err
 	}
 	if now.Before(entry.ObservedAt) {
-		return fmt.Errorf("invalid earnings row %q", sym)
+		return errors.New("invalid earnings row")
 	}
 	return nil
 }
@@ -1086,17 +1619,17 @@ func validateEarningsRow(sym string, entry earningsEntry, now time.Time) error {
 func validateEarningsRowShape(sym string, entry earningsEntry) error {
 	canonical := strings.ToUpper(strings.TrimSpace(sym))
 	if canonical == "" || canonical != sym || nasdaqSymbol(canonical) == "" || entry.ObservedAt.IsZero() {
-		return fmt.Errorf("invalid earnings row %q", sym)
+		return errors.New("invalid earnings row")
 	}
 	parsed, err := time.Parse(time.DateOnly, entry.Date)
 	if err != nil || parsed.Format(time.DateOnly) != entry.Date {
-		return fmt.Errorf("invalid earnings date for %q", sym)
+		return errors.New("invalid earnings date")
 	}
 	switch entry.TimeOfDay {
 	case "", "amc", "bmo":
 		return nil
 	default:
-		return fmt.Errorf("invalid earnings session for %q", sym)
+		return errors.New("invalid earnings session")
 	}
 }
 
@@ -1150,7 +1683,7 @@ func migrateEarningsV1(entries map[string]earningsEntry, now time.Time) map[stri
 		}
 		providers := map[string]earningsProviderState{earningsNasdaqProvider: provider}
 		symbols[symbol] = earningsSymbolState{
-			Resolution: resolveEarningsProviders(providers, now), Providers: providers, UpdatedAt: now,
+			Resolution: resolveEarningsState(providers, nil, now), Providers: providers, UpdatedAt: now,
 		}
 	}
 	return symbols
@@ -1159,7 +1692,7 @@ func migrateEarningsV1(entries map[string]earningsEntry, now time.Time) map[stri
 func resolvedEarningsEntries(symbols map[string]earningsSymbolState, now time.Time) map[string]earningsEntry {
 	entries := map[string]earningsEntry{}
 	for symbol, state := range symbols {
-		resolution := resolveEarningsProviders(state.Providers, now)
+		resolution := resolveEarningsState(state.Providers, state.Identity, now)
 		if resolution.Status == rpc.EarningsStatusDate && resolution.Entry != nil {
 			entries[symbol] = *resolution.Entry
 		}
@@ -1189,6 +1722,16 @@ func cloneEarningsSymbolState(in earningsSymbolState) earningsSymbolState {
 		copyState.LastAttempt.LastFailure = cloneEarningsSourceFailure(state.LastAttempt.LastFailure)
 		copyState.LastGood = cloneEarningsEntry(state.LastGood)
 		out.Providers[provider] = copyState
+	}
+	if in.Identity != nil {
+		identity := *in.Identity
+		identity.LastAttempt.NextAttempt = cloneTimePointer(in.Identity.LastAttempt.NextAttempt)
+		identity.LastAttempt.LastFailure = cloneEarningsSourceFailure(in.Identity.LastAttempt.LastFailure)
+		if in.Identity.LastNotApplicable != nil {
+			proof := *in.Identity.LastNotApplicable
+			identity.LastNotApplicable = &proof
+		}
+		out.Identity = &identity
 	}
 	return out
 }

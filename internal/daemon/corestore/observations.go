@@ -82,6 +82,73 @@ func (s *Store) CompareAndSwapStateDocumentWithObservations(ctx context.Context,
 	return saved, receipts, err
 }
 
+// CompareAndSwapStateDocumentWithBoundObservations appends immutable
+// observations, gives their uncommitted receipts to build, and publishes the
+// resulting state document under one transaction and one head advance. This is
+// the narrow path for state JSON that must name the exact observations created
+// by the same commit. A build error or stale state revision rolls every
+// observation back.
+//
+// build must be deterministic and must not call the Store. It receives the
+// revision the document will have and a copy of the receipts in input order.
+func (s *Store) CompareAndSwapStateDocumentWithBoundObservations(
+	ctx context.Context,
+	update StateDocumentCAS,
+	inputs []ObservationInput,
+	build func(nextRevision int64, receipts []ObservationReceipt) ([]byte, error),
+) (StateDocument, []ObservationReceipt, error) {
+	if err := validateStateCASCoordinates(update); err != nil {
+		return StateDocument{}, nil, err
+	}
+	if len(update.JSON) != 0 {
+		return StateDocument{}, nil, errorsf("bound state document JSON must be built from observation receipts")
+	}
+	if build == nil {
+		return StateDocument{}, nil, errorsf("bound state document builder is required")
+	}
+	if len(inputs) == 0 {
+		return StateDocument{}, nil, errorsf("at least one observation is required")
+	}
+	for _, input := range inputs {
+		if err := validateObservation(input); err != nil {
+			return StateDocument{}, nil, err
+		}
+	}
+
+	var saved StateDocument
+	var receipts []ObservationReceipt
+	err := s.criticalMutation(ctx, func(tx *sql.Tx) error {
+		now := time.Now().UTC()
+		var err error
+		receipts, err = appendObservationsTx(ctx, tx, inputs, now)
+		if err != nil {
+			return err
+		}
+		nextRevision := update.ExpectedRevision + 1
+		payload, err := build(nextRevision, append([]ObservationReceipt(nil), receipts...))
+		if err != nil {
+			return fmt.Errorf("build receipt-bound state document: %w", err)
+		}
+		if !json.Valid(payload) {
+			return errorsf("receipt-bound state document must be valid JSON")
+		}
+		update.JSON = append([]byte(nil), payload...)
+		saved, err = compareAndSwapStateTx(ctx, tx, update, now)
+		if err != nil {
+			return err
+		}
+		if saved.Revision != nextRevision {
+			return errorsf("receipt-bound state revision mismatch")
+		}
+		_, err = advanceHeadTx(ctx, tx, 0, now)
+		return err
+	})
+	if err != nil {
+		return StateDocument{}, nil, err
+	}
+	return saved, receipts, nil
+}
+
 func appendObservationsTx(ctx context.Context, tx *sql.Tx, inputs []ObservationInput, now time.Time) ([]ObservationReceipt, error) {
 	receipts := make([]ObservationReceipt, 0, len(inputs))
 	for _, input := range inputs {
@@ -154,6 +221,48 @@ FROM observations WHERE `+where+` ORDER BY observed_at_ms DESC, observation_id D
 	}
 	if err != nil {
 		return Observation{}, false, fmt.Errorf("latest observation: %w", err)
+	}
+	if err := decodeObservation(&out, observed, recorded, digest); err != nil {
+		return Observation{}, false, err
+	}
+	out.DecisionEligible = eligible
+	return out, true, nil
+}
+
+// ExactDecisionEligibleObservation returns one immutable observation only
+// when its receipt ID, authority coordinates, exact observation time, and
+// decision-eligibility all match. It is the narrow live-decision reader for a
+// state document that already names its evidence receipt; it never searches
+// for a newest or nearby substitute.
+func (s *Store) ExactDecisionEligibleObservation(ctx context.Context, receiptID int64, scopeKey, source, kind string, observedAt time.Time) (Observation, bool, error) {
+	if receiptID <= 0 {
+		return Observation{}, false, errorsf("observation receipt id is invalid")
+	}
+	for _, item := range []struct {
+		label string
+		value string
+		limit int
+	}{{"scope key", scopeKey, 512}, {"observation source", source, 128}, {"observation kind", kind, 128}} {
+		if err := validateKey(item.label, item.value, item.limit); err != nil {
+			return Observation{}, false, err
+		}
+	}
+	if observedAt.IsZero() {
+		return Observation{}, false, errorsf("observation time is required")
+	}
+	var out Observation
+	var observed, recorded string
+	var digest []byte
+	var eligible bool
+	err := s.db.QueryRowContext(ctx, `SELECT observation_id,scope_key,source,kind,observed_at,recorded_at,content_type,payload,payload_sha256,metadata_json,decision_eligible
+FROM observations WHERE observation_id=? AND scope_key=? AND source=? AND kind=? AND observed_at=? AND observed_at_ms=? AND decision_eligible=1`,
+		receiptID, scopeKey, source, kind, formatTime(observedAt), observedAt.UnixMilli()).Scan(
+		&out.ID, &out.ScopeKey, &out.Source, &out.Kind, &observed, &recorded, &out.ContentType, &out.Payload, &digest, &out.MetadataJSON, &eligible)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Observation{}, false, nil
+	}
+	if err != nil {
+		return Observation{}, false, fmt.Errorf("exact decision-eligible observation: %w", err)
 	}
 	if err := decodeObservation(&out, observed, recorded, digest); err != nil {
 		return Observation{}, false, err

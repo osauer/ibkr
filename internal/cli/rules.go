@@ -42,6 +42,8 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 	for _, h := range res.InputHealth {
 		if h.Status != "ok" {
 			fmt.Fprintf(env.Stdout, "  input %-9s %s %s\n", h.Source, h.Status, strings.Join(h.Notes, "; "))
+		} else if h.Source == "earnings" && len(h.Notes) > 0 {
+			fmt.Fprintf(env.Stdout, "  input %-9s ok (informational) %s\n", h.Source, strings.Join(h.Notes, "; "))
 		}
 	}
 	fmt.Fprintln(env.Stdout)
@@ -95,7 +97,11 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 		}
 	}
 	if shown == 0 {
-		fmt.Fprintf(env.Stdout, "All %d rules pass. Rerun with --all to see the full checklist.\n", len(res.Rules))
+		if notEvaluated := res.BreachCounts[risk.RuleStatusNotEvaluated]; notEvaluated > 0 {
+			fmt.Fprintf(env.Stdout, "%d rules were not evaluated; rerun with --all to see the full checklist.\n", notEvaluated)
+		} else {
+			fmt.Fprintf(env.Stdout, "All %d rules pass. Rerun with --all to see the full checklist.\n", len(res.Rules))
+		}
 	}
 	passes := res.BreachCounts[risk.RuleStatusPass]
 	fmt.Fprintf(env.Stdout, "\n%d act, %d watch, %d unknown, %d info, %d pass",
@@ -106,8 +112,12 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 	}
 	fmt.Fprintln(env.Stdout)
 	if len(res.Earnings) > 0 {
-		var unresolved, terminal []string
+		var unresolved, terminal, nonissuer []string
 		for _, e := range res.Earnings {
+			if e.Status == rpc.EarningsStatusNotApplicable {
+				nonissuer = append(nonissuer, fmt.Sprintf("%s (broker-proven nonissuer)", e.Symbol))
+				continue
+			}
 			if e.Status == rpc.EarningsStatusTerminalNonReporting {
 				review := ""
 				if e.Terminal != nil && !e.Terminal.RevalidateAfter.IsZero() {
@@ -126,6 +136,9 @@ func runRules(ctx context.Context, env *Env, args []string) int {
 		}
 		if len(terminal) > 0 {
 			fmt.Fprintf(env.Stdout, "Earnings not applicable: %s — exact-contract evidence and provenance are available in --json.\n", strings.Join(terminal, ", "))
+		}
+		if len(nonissuer) > 0 {
+			fmt.Fprintf(env.Stdout, "Issuer earnings not applicable: %s — exact broker identity is available in --json without exposing the contract identifier.\n", strings.Join(nonissuer, ", "))
 		}
 		if len(unresolved) > 0 {
 			fmt.Fprintf(env.Stdout, "Earnings unresolved: %s — set an authoritative override with `ibkr settings set features.rulebook.earnings_overrides.<SYM>=YYYY-MM-DD` if needed (rules 6-8 stay unknown, never pass).\n",
@@ -147,6 +160,8 @@ func earningsOutcomeLabel(reason string) string {
 		return "provider transport failed"
 	case rpc.EarningsStatusConflictingSources:
 		return "providers conflict"
+	case rpc.EarningsStatusNotApplicable:
+		return "broker-proven nonissuer"
 	case "date_elapsed":
 		return "published date elapsed"
 	case "not_observed", "":

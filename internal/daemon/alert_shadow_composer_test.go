@@ -309,6 +309,24 @@ func TestAlertShadowRulebookRequiresCanonicalUniverseAndReasons(t *testing.T) {
 		{risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting},
 		{risk.RuleOverwriteEarnings, risk.EarningsReasonTerminalNonReporting},
 		{risk.RuleEarningsSizeFreeze, risk.EarningsReasonTerminalNonReporting},
+		{risk.RuleCatalystCoverage, risk.EarningsReasonBrokerNonIssuer},
+		{risk.RuleOverwriteEarnings, risk.EarningsReasonBrokerNonIssuer},
+		{risk.RuleEarningsSizeFreeze, risk.EarningsReasonBrokerNonIssuer},
+		{risk.RuleCatalystCoverage, risk.EarningsReasonNotApplicable},
+		{risk.RuleOverwriteEarnings, risk.EarningsReasonNotApplicable},
+		{risk.RuleEarningsSizeFreeze, risk.EarningsReasonNotApplicable},
+	} {
+		t.Run("reject reason without authority "+tc.id+" "+tc.reason, func(t *testing.T) {
+			result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+			alertShadowTestSetEarningsNotEvaluated(&result, tc.id, tc.reason, "SYNTH1")
+			assertUncovered(t, result)
+		})
+	}
+
+	for _, tc := range []struct {
+		id     string
+		reason string
+	}{
 		{risk.RuleRedOnGreen, risk.RuleReasonOffSession},
 		{risk.RuleWinnerTrim, risk.RuleReasonOffSession},
 		{risk.RuleHedgeIntegrity, risk.RuleReasonNoLongBook},
@@ -327,6 +345,253 @@ func TestAlertShadowRulebookRequiresCanonicalUniverseAndReasons(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAlertShadowRulebookNotEvaluatedRequiresCurrentMatchingEarningsAuthority(t *testing.T) {
+	base := time.Date(2026, 7, 21, 11, 0, 0, 0, time.UTC)
+	assertCovered := func(t *testing.T, result rpc.RulesResult) {
+		t.Helper()
+		batch := alertShadowMapRulebook(alertShadowTestBrokerScope(t), result, base.Add(time.Second))
+		if !batch.Covered || batch.Status != alertShadowStatusCurrent {
+			t.Fatalf("current typed earnings authority was not trusted: %+v", batch)
+		}
+	}
+	assertUncovered := func(t *testing.T, result rpc.RulesResult) {
+		t.Helper()
+		batch := alertShadowMapRulebook(alertShadowTestBrokerScope(t), result, base.Add(time.Second))
+		if batch.Covered || batch.Status == alertShadowStatusCurrent || batch.Reason != alertShadowReasonCandidateInvalid {
+			t.Fatalf("invalid typed earnings authority was trusted: %+v", batch)
+		}
+	}
+
+	for _, id := range []string{risk.RuleCatalystCoverage, risk.RuleOverwriteEarnings, risk.RuleEarningsSizeFreeze} {
+		t.Run("valid terminal "+id, func(t *testing.T) {
+			result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+			alertShadowTestSetEarningsNotEvaluated(&result, id, risk.EarningsReasonTerminalNonReporting, "TERM1")
+			result.Earnings = []rpc.EarningsInfo{alertShadowTestTerminalEarnings("TERM1", base)}
+			assertCovered(t, result)
+		})
+		t.Run("valid broker "+id, func(t *testing.T) {
+			result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+			alertShadowTestSetEarningsNotEvaluated(&result, id, risk.EarningsReasonBrokerNonIssuer, "FUND1")
+			result.Earnings = []rpc.EarningsInfo{alertShadowTestBrokerEarnings("FUND1", base)}
+			assertCovered(t, result)
+		})
+		t.Run("valid retained broker "+id, func(t *testing.T) {
+			result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+			alertShadowTestSetEarningsNotEvaluated(&result, id, risk.EarningsReasonBrokerNonIssuer, "FUND1")
+			result.Earnings = []rpc.EarningsInfo{alertShadowTestRetainedBrokerEarnings("FUND1", base)}
+			assertCovered(t, result)
+		})
+		t.Run("valid mixed "+id, func(t *testing.T) {
+			result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+			alertShadowTestSetEarningsNotEvaluated(&result, id, risk.EarningsReasonNotApplicable, "TERM1", "FUND1")
+			result.Earnings = []rpc.EarningsInfo{
+				alertShadowTestBrokerEarnings("FUND1", base),
+				alertShadowTestTerminalEarnings("TERM1", base),
+			}
+			assertCovered(t, result)
+		})
+	}
+
+	t.Run("empty exempt list", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting)
+		result.Earnings = []rpc.EarningsInfo{alertShadowTestTerminalEarnings("TERM1", base)}
+		assertUncovered(t, result)
+	})
+	t.Run("wrong symbol", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting, "TERM1")
+		result.Earnings = []rpc.EarningsInfo{alertShadowTestTerminalEarnings("OTHER1", base)}
+		assertUncovered(t, result)
+	})
+	t.Run("stale terminal", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting, "TERM1")
+		info := alertShadowTestTerminalEarnings("TERM1", base)
+		info.Stale = true
+		result.Earnings = []rpc.EarningsInfo{info}
+		assertUncovered(t, result)
+	})
+	t.Run("expired terminal", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting, "TERM1")
+		info := alertShadowTestTerminalEarnings("TERM1", base)
+		info.Terminal.RevalidateAfter = base
+		info.Terminal.AuthorityBinding = rpc.BuildEarningsTerminalAuthorityBinding(info.Symbol, *info.Terminal)
+		result.Earnings = []rpc.EarningsInfo{info}
+		assertUncovered(t, result)
+	})
+	t.Run("future terminal review", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting, "TERM1")
+		info := alertShadowTestTerminalEarnings("TERM1", base)
+		info.Terminal.AuthorityReviewedAt = base.Add(time.Minute)
+		info.Terminal.AuthorityBinding = rpc.BuildEarningsTerminalAuthorityBinding(info.Symbol, *info.Terminal)
+		result.Earnings = []rpc.EarningsInfo{info}
+		assertUncovered(t, result)
+	})
+	t.Run("missing terminal authority binding", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting, "TERM1")
+		info := alertShadowTestTerminalEarnings("TERM1", base)
+		info.Terminal.AuthorityBinding = ""
+		result.Earnings = []rpc.EarningsInfo{info}
+		assertUncovered(t, result)
+	})
+	t.Run("terminal binding is symbol specific", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting, "TERM1")
+		info := alertShadowTestTerminalEarnings("OTHER1", base)
+		info.Symbol = "TERM1"
+		result.Earnings = []rpc.EarningsInfo{info}
+		assertUncovered(t, result)
+	})
+	t.Run("terminal binding rejects exact contract substitution", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting, "TERM1")
+		info := alertShadowTestTerminalEarnings("TERM1", base)
+		info.Terminal.ContractConID++
+		result.Earnings = []rpc.EarningsInfo{info}
+		assertUncovered(t, result)
+	})
+	t.Run("duplicate terminal contract across symbols", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting, "TERM1", "TERM2")
+		first := alertShadowTestTerminalEarnings("TERM1", base)
+		second := alertShadowTestTerminalEarnings("TERM2", base)
+		result.Earnings = []rpc.EarningsInfo{first, second}
+		assertUncovered(t, result)
+	})
+	t.Run("malformed terminal authority", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleCatalystCoverage, risk.EarningsReasonTerminalNonReporting, "TERM1")
+		info := alertShadowTestTerminalEarnings("TERM1", base)
+		info.Terminal.Classification = "future_classification"
+		info.Terminal.AuthorityFingerprint = "private-free-text"
+		result.Earnings = []rpc.EarningsInfo{info}
+		assertUncovered(t, result)
+	})
+	t.Run("stale broker proof", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleOverwriteEarnings, risk.EarningsReasonBrokerNonIssuer, "FUND1")
+		info := alertShadowTestBrokerEarnings("FUND1", base)
+		info.Stale = true
+		result.Earnings = []rpc.EarningsInfo{info}
+		assertUncovered(t, result)
+	})
+	t.Run("future broker proof", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleOverwriteEarnings, risk.EarningsReasonBrokerNonIssuer, "FUND1")
+		info := alertShadowTestBrokerEarnings("FUND1", base)
+		info.Identity.ProofObservedAt = base.Add(time.Minute)
+		result.Earnings = []rpc.EarningsInfo{info}
+		assertUncovered(t, result)
+	})
+	for _, tc := range []struct {
+		name   string
+		mutate func(*rpc.EarningsIdentityInfo)
+	}{
+		{name: "missing revision", mutate: func(info *rpc.EarningsIdentityInfo) { info.AuthorityRevision = 0 }},
+		{name: "bad fingerprint", mutate: func(info *rpc.EarningsIdentityInfo) { info.AuthorityFingerprint = "private-free-text" }},
+		{name: "missing observation", mutate: func(info *rpc.EarningsIdentityInfo) { info.ObservationID = "" }},
+		{name: "invalid observation", mutate: func(info *rpc.EarningsIdentityInfo) { info.ObservationID = "opaque-free-text" }},
+		{name: "wrong valid observation", mutate: func(info *rpc.EarningsIdentityInfo) {
+			info.ObservationID = "oid:" + opaqueIdentity("alert-rulebook-test-receipt", "OTHER1")
+		}},
+		{name: "missing authority binding", mutate: func(info *rpc.EarningsIdentityInfo) { info.AuthorityBinding = "" }},
+		{name: "wrong proof outcome", mutate: func(info *rpc.EarningsIdentityInfo) { info.ProofOutcome = earningsIdentityIssuer }},
+		{name: "issuer outcome", mutate: func(info *rpc.EarningsIdentityInfo) { info.Outcome = earningsIdentityIssuer }},
+	} {
+		t.Run("malformed broker "+tc.name, func(t *testing.T) {
+			result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+			alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleOverwriteEarnings, risk.EarningsReasonBrokerNonIssuer, "FUND1")
+			info := alertShadowTestBrokerEarnings("FUND1", base)
+			tc.mutate(info.Identity)
+			result.Earnings = []rpc.EarningsInfo{info}
+			assertUncovered(t, result)
+		})
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*rpc.EarningsInfo)
+	}{
+		{name: "entitlement failure", mutate: func(info *rpc.EarningsInfo) {
+			info.Identity.LastFailure.Code = rpc.SourceFailureNotEntitled
+		}},
+		{name: "metadata stage", mutate: func(info *rpc.EarningsInfo) {
+			info.Identity.LastFailure.Stage = rpc.SourceFailureStageWSHMetadata
+		}},
+		{name: "authority persist stage", mutate: func(info *rpc.EarningsInfo) {
+			info.Identity.LastFailure.Code = rpc.SourceFailureAuthorityWriteFailed
+			info.Identity.LastFailure.Stage = rpc.SourceFailureStageAuthorityPersist
+		}},
+		{name: "nonretryable failure", mutate: func(info *rpc.EarningsInfo) {
+			info.Identity.LastFailure.Retryable = false
+		}},
+		{name: "missing failure", mutate: func(info *rpc.EarningsInfo) {
+			info.Identity.LastFailure = nil
+		}},
+		{name: "future attempt", mutate: func(info *rpc.EarningsInfo) {
+			info.Identity.AttemptedAt = base.Add(time.Minute)
+		}},
+		{name: "future failure", mutate: func(info *rpc.EarningsInfo) {
+			failedAt := base.Add(time.Minute)
+			nextAttempt := failedAt.Add(earningsContractResolutionRetry)
+			info.Identity.LastFailure.FailedAt = failedAt
+			info.Identity.NextAttempt = &nextAttempt
+		}},
+		{name: "proof after retained attempt", mutate: func(info *rpc.EarningsInfo) {
+			info.Identity.ProofObservedAt = base.Add(-30 * time.Second)
+			info.Identity.AuthorityBinding = rpc.BuildEarningsIdentityAuthorityBinding(info.Symbol, *info.Identity)
+		}},
+		{name: "failure before attempt", mutate: func(info *rpc.EarningsInfo) {
+			info.Identity.AttemptedAt = base.Add(-30 * time.Second)
+		}},
+		{name: "missing next attempt", mutate: func(info *rpc.EarningsInfo) {
+			info.Identity.NextAttempt = nil
+		}},
+		{name: "wrong retry interval", mutate: func(info *rpc.EarningsInfo) {
+			nextAttempt := info.Identity.LastFailure.FailedAt.Add(earningsContractResolutionRetry + time.Second)
+			info.Identity.NextAttempt = &nextAttempt
+		}},
+	} {
+		t.Run("reject retained broker "+tc.name, func(t *testing.T) {
+			result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+			alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleOverwriteEarnings, risk.EarningsReasonBrokerNonIssuer, "FUND1")
+			info := alertShadowTestRetainedBrokerEarnings("FUND1", base)
+			tc.mutate(&info)
+			result.Earnings = []rpc.EarningsInfo{info}
+			assertUncovered(t, result)
+		})
+	}
+
+	t.Run("broker binding is symbol specific", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleOverwriteEarnings, risk.EarningsReasonBrokerNonIssuer, "FUND1")
+		info := alertShadowTestBrokerEarnings("OTHER1", base)
+		info.Symbol = "FUND1"
+		result.Earnings = []rpc.EarningsInfo{info}
+		assertUncovered(t, result)
+	})
+	t.Run("duplicate broker receipt across symbols", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleOverwriteEarnings, risk.EarningsReasonBrokerNonIssuer, "FUND1", "FUND2")
+		first := alertShadowTestBrokerEarnings("FUND1", base)
+		second := alertShadowTestBrokerEarnings("FUND2", base)
+		second.Identity.ObservationID = first.Identity.ObservationID
+		second.Identity.AuthorityBinding = rpc.BuildEarningsIdentityAuthorityBinding(second.Symbol, *second.Identity)
+		result.Earnings = []rpc.EarningsInfo{first, second}
+		assertUncovered(t, result)
+	})
+	t.Run("single authority cannot claim mixed reason", func(t *testing.T) {
+		result := alertShadowTestRulebook(base, risk.RuleStatusPass)
+		alertShadowTestSetEarningsNotEvaluated(&result, risk.RuleEarningsSizeFreeze, risk.EarningsReasonNotApplicable, "TERM1")
+		result.Earnings = []rpc.EarningsInfo{alertShadowTestTerminalEarnings("TERM1", base)}
+		assertUncovered(t, result)
+	})
 }
 
 func TestAlertShadowRulebookReagesCurrentInputsAtObservation(t *testing.T) {
@@ -1335,6 +1600,70 @@ func alertShadowTestRulebook(at time.Time, status string) rpc.RulesResult {
 		Rules:             rules,
 		InputHealth:       health,
 	}
+}
+
+func alertShadowTestSetEarningsNotEvaluated(result *rpc.RulesResult, id, reason string, symbols ...string) {
+	for i := range result.Rules {
+		if result.Rules[i].ID != id {
+			continue
+		}
+		result.Rules[i].Status = risk.RuleStatusNotEvaluated
+		result.Rules[i].Reason = reason
+		result.Rules[i].Offenders = nil
+		result.Rules[i].Exempt = nil
+		for _, symbol := range symbols {
+			result.Rules[i].Exempt = append(result.Rules[i].Exempt, risk.RuleOffender{Symbol: symbol})
+		}
+		return
+	}
+}
+
+func alertShadowTestTerminalEarnings(symbol string, at time.Time) rpc.EarningsInfo {
+	info := rpc.EarningsInfo{
+		Symbol: symbol, Source: "verified_terminal", Status: rpc.EarningsStatusTerminalNonReporting,
+		Terminal: &rpc.EarningsTerminalInfo{
+			ContractConID: 17, Classification: earningsTerminalClassEquityCancelled,
+			EffectiveDate: at.AddDate(0, -1, 0).Format(time.DateOnly),
+			VerifiedAt:    at.Add(-2 * time.Hour), RevalidateAfter: at.Add(24 * time.Hour),
+			AuthorityRevision: 7, AuthorityReviewedAt: at.Add(-time.Hour),
+			AuthorityFingerprint: "sha256:" + strings.Repeat("a", 64),
+		},
+	}
+	info.Terminal.AuthorityBinding = rpc.BuildEarningsTerminalAuthorityBinding(symbol, *info.Terminal)
+	return info
+}
+
+func alertShadowTestBrokerEarnings(symbol string, at time.Time) rpc.EarningsInfo {
+	proofObservedAt := at.Add(-2 * time.Hour)
+	nextAttempt := proofObservedAt.Add(earningsFreshWindow)
+	info := rpc.EarningsInfo{
+		Symbol: symbol, Source: "broker_identity", Status: rpc.EarningsStatusNotApplicable,
+		Identity: &rpc.EarningsIdentityInfo{
+			Outcome: earningsIdentityNotApplicable, NotApplicable: true,
+			AttemptedAt: proofObservedAt.Add(-time.Minute), ProofObservedAt: proofObservedAt,
+			ProofOutcome: rpc.EarningsStatusNotApplicable, AuthorityRevision: 8,
+			AuthorityFingerprint: "sha256:" + strings.Repeat("b", 64),
+			ObservationID:        "oid:" + opaqueIdentity("alert-rulebook-test-receipt", symbol),
+			NextAttempt:          &nextAttempt,
+		},
+	}
+	info.Identity.AuthorityBinding = rpc.BuildEarningsIdentityAuthorityBinding(symbol, *info.Identity)
+	return info
+}
+
+func alertShadowTestRetainedBrokerEarnings(symbol string, at time.Time) rpc.EarningsInfo {
+	info := alertShadowTestBrokerEarnings(symbol, at)
+	attemptedAt := at.Add(-2 * time.Minute)
+	failedAt := at.Add(-time.Minute)
+	nextAttempt := failedAt.Add(earningsContractResolutionRetry)
+	info.Identity.Outcome = earningsIdentityUnknown
+	info.Identity.AttemptedAt = attemptedAt
+	info.Identity.NextAttempt = &nextAttempt
+	info.Identity.LastFailure = &rpc.SourceFailure{
+		Code: rpc.SourceFailureContractUnavailable, Stage: rpc.SourceFailureStageWSHContractResolve,
+		FailedAt: failedAt, Retryable: true,
+	}
+	return info
 }
 
 func alertShadowTestRulebookPnLUnavailable(result *rpc.RulesResult) {

@@ -20,11 +20,88 @@ type wshEarningsClient interface {
 	FetchWSHEarnings(context.Context, string) (string, error)
 }
 
+type wshStockIdentityClient interface {
+	ResolveWSHStockIdentity(context.Context, string, int) (*ibkrlib.ContractDetailsLite, error)
+}
+
 var (
 	errWSHEarningsGatewayUnavailable = errors.New("ibkr WSH gateway unavailable")
 	errWSHEarningsRequestFailed      = errors.New("ibkr WSH request failed")
 	errWSHEarningsPayloadInvalid     = errors.New("ibkr WSH earnings payload invalid")
+	errEarningsIdentityRequestFailed = errors.New("ibkr earnings identity request failed")
 )
+
+// fetchEarningsIdentity is an exact contract-details read, deliberately
+// independent from WSH metadata/event entitlement and provider backoff.
+func (s *Server) fetchEarningsIdentity(ctx context.Context, sym string, conID int) (earningsIdentityFetchResult, error) {
+	now := time.Now().UTC()
+	if s != nil && s.now != nil {
+		now = s.now().UTC()
+	}
+	if s == nil {
+		return earningsIdentityFailure(rpc.SourceFailureGatewayUnavailable, now), errEarningsIdentityRequestFailed
+	}
+	return fetchEarningsIdentityFrom(ctx, sym, conID, now, s.gatewayConnector())
+}
+
+func fetchEarningsIdentityFrom(ctx context.Context, sym string, conID int, now time.Time, client wshStockIdentityClient) (earningsIdentityFetchResult, error) {
+	if client == nil || conID <= 0 {
+		return earningsIdentityFailure(rpc.SourceFailureGatewayUnavailable, now), errEarningsIdentityRequestFailed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, earningsFetchTimeout)
+	defer cancel()
+	detail, err := client.ResolveWSHStockIdentity(ctx, sym, conID)
+	if err != nil {
+		code := rpc.SourceFailureContractUnavailable
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = rpc.SourceFailureTimeout
+		}
+		var wshErr *ibkrlib.WSHError
+		if errors.As(err, &wshErr) && wshErr != nil {
+			switch wshErr.Kind {
+			case ibkrlib.WSHErrorTransport:
+				code = rpc.SourceFailureGatewayUnavailable
+			case ibkrlib.WSHErrorTimeout:
+				code = rpc.SourceFailureTimeout
+			}
+		}
+		return earningsIdentityFailure(code, now), sanitizedEarningsIdentityError(err)
+	}
+	if detail == nil || detail.ConID != conID || detail.SecType != "STK" {
+		result := earningsIdentityFailure(rpc.SourceFailureContractUnavailable, now)
+		result.RetainProof = false
+		return result, errEarningsIdentityRequestFailed
+	}
+	switch detail.StockType {
+	case "ETF":
+		return earningsIdentityFetchResult{Outcome: earningsIdentityNotApplicable}, nil
+	case "COMMON":
+		return earningsIdentityFetchResult{Outcome: earningsIdentityIssuer}, nil
+	default:
+		return earningsIdentityFetchResult{Outcome: earningsIdentityUnknown}, nil
+	}
+}
+
+func earningsIdentityFailure(code string, now time.Time) earningsIdentityFetchResult {
+	return earningsIdentityFetchResult{
+		Outcome:     earningsIdentityUnknown,
+		Failure:     &rpc.SourceFailure{Code: code, Stage: rpc.SourceFailureStageWSHContractResolve, FailedAt: now.UTC(), Retryable: true},
+		RetainProof: true,
+	}
+}
+
+func sanitizedEarningsIdentityError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(errEarningsIdentityRequestFailed, context.DeadlineExceeded)
+	}
+	if errors.Is(err, context.Canceled) {
+		return errors.Join(errEarningsIdentityRequestFailed, context.Canceled)
+	}
+	return errEarningsIdentityRequestFailed
+}
 
 // fetchWSHEarningsProvider is the approved secondary-provider hook for the
 // earnings cache. It deliberately projects raw broker JSON and errors into a

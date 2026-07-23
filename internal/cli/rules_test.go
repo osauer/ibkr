@@ -97,3 +97,37 @@ func TestRunRulesJSONPreservesHeadlineTier(t *testing.T) {
 		t.Fatalf("JSON lost headline tier: %+v", got.Rules)
 	}
 }
+
+func TestRunRulesRendersBrokerNonIssuerSeparatelyFromTerminalAndUnresolved(t *testing.T) {
+	now := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
+	conn := &rulesFakeConn{result: rpc.RulesResult{
+		AsOf: now, Enabled: true, Status: "ok", PolicyID: "rulebook-v2", PolicyVersion: 2,
+		Rules: []risk.RuleRow{{
+			ID: risk.RuleCatalystCoverage, Number: 6, Title: "Option outlives its catalyst",
+			Status: risk.RuleStatusNotEvaluated, Reason: risk.EarningsReasonBrokerNonIssuer,
+			Evidence: "exact broker identity exempts this security",
+			Exempt:   []risk.RuleOffender{{Symbol: "SYNTH1", Note: "exact broker identity proves a nonissuer security"}},
+		}},
+		Ranked:       []int{0},
+		BreachCounts: map[string]int{risk.RuleStatusNotEvaluated: 1},
+		InputHealth: []rpc.SourceHealth{{
+			Source: "earnings", Status: rpc.SourceStatusOK,
+			Notes: []string{"retained broker identity issue: code=contract_unavailable stage=wsh_contract_resolve retry=scheduled"},
+		}},
+		Earnings: []rpc.EarningsInfo{{
+			Symbol: "SYNTH1", Source: "broker_identity", Status: rpc.EarningsStatusNotApplicable,
+			Identity: &rpc.EarningsIdentityInfo{Outcome: "not_applicable", NotApplicable: true, AttemptedAt: now},
+		}},
+	}}
+	var stdout, stderr bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &stderr, Conn: conn}
+	if code := Run(context.Background(), env, "rules", nil); code != 0 {
+		t.Fatal("rules renderer failed")
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Issuer earnings not applicable: SYNTH1 (broker-proven nonissuer)") ||
+		!strings.Contains(out, "input earnings  ok (informational)") || !strings.Contains(out, "contract_unavailable") ||
+		strings.Contains(out, "Earnings unresolved:") || strings.Contains(out, "terminal/non-reporting") {
+		t.Fatal("broker nonissuer was not rendered as its distinct resolved class")
+	}
+}

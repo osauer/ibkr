@@ -57,7 +57,6 @@ func TestParseContractDetailsLiteDecodesTypedClassificationTail(t *testing.T) {
 
 func TestParseContractDetailsLiteStockTypeServerBoundary(t *testing.T) {
 	below := syntheticStockContractDetailsFields(minServerVerStockType-1, "")
-	below = append(below, "UNVERSIONED_TRAILER")
 	got, ok := parseContractDetailsLite(below, 41, minServerVerStockType-1)
 	if !ok {
 		t.Fatal("pre-stock-type frame was rejected")
@@ -70,6 +69,34 @@ func TestParseContractDetailsLiteStockTypeServerBoundary(t *testing.T) {
 	got, ok = parseContractDetailsLite(at, 41, minServerVerStockType)
 	if !ok || got.StockType != "TYPE_CODE" {
 		t.Fatalf("boundary stock type = %q ok=%v", got.StockType, ok)
+	}
+
+	for _, serverVersion := range []int{
+		minServerVerStockType,
+		minServerVerFractionalSize,
+		minServerVerSizeRules,
+		minServerVerFundDataFields,
+		minServerVerIneligibility,
+		maxClientVersion,
+	} {
+		t.Run(strconv.Itoa(serverVersion), func(t *testing.T) {
+			fields := syntheticStockContractDetailsFields(serverVersion, "TYPE_CODE")
+			fields = append(fields, "") // terminal wire delimiter is accepted
+			got, ok := parseContractDetailsLite(fields, 41, serverVersion)
+			if !ok || got.StockType != "TYPE_CODE" {
+				t.Fatalf("server %d stock type=%q ok=%v", serverVersion, got.StockType, ok)
+			}
+		})
+	}
+
+	for version := 1; version <= 8; version++ {
+		t.Run("message_version_"+strconv.Itoa(version), func(t *testing.T) {
+			fields := syntheticContractDetailsFieldsVersion(minServerVerStockType, version, "STK", "TYPE_CODE")
+			got, ok := parseContractDetailsLite(fields, 41, minServerVerStockType)
+			if !ok || got.StockType != "TYPE_CODE" {
+				t.Fatalf("message version %d stock type=%q ok=%v", version, got.StockType, ok)
+			}
+		})
 	}
 }
 
@@ -90,8 +117,8 @@ func TestParseContractDetailsLiteMalformedOrTruncatedTailCannotFabricateStockTyp
 	if got.StockType != "" {
 		t.Fatalf("malformed tail fabricated stock type %q", got.StockType)
 	}
-	if got.Industry != "INDUSTRY_CODE" || got.Category != "CATEGORY_CODE" || got.Subcategory != "SUBCATEGORY_CODE" {
-		t.Fatal("fixed-position classifications were lost with malformed later tail")
+	if got.Industry != "" || got.Category != "" || got.Subcategory != "" {
+		t.Fatal("malformed frame retained non-authoritative classifications")
 	}
 	shifted := append([]string(nil), valid...)
 	shifted[secIDCountIndex] = "2"
@@ -110,13 +137,123 @@ func TestParseContractDetailsLiteMalformedOrTruncatedTailCannotFabricateStockTyp
 	}
 }
 
+func TestParseContractDetailsLiteETFOnlyComesFromExactTypedStockTypeField(t *testing.T) {
+	for _, secType := range []string{"STK", "FUND"} {
+		t.Run(secType, func(t *testing.T) {
+			fields := syntheticContractDetailsFields(maxClientVersion, secType, "STOCK_TYPE_MARKER")
+			stockTypeIndex := syntheticFieldIndex(t, fields, "STOCK_TYPE_MARKER")
+
+			for index := range fields {
+				if index == stockTypeIndex {
+					continue
+				}
+				t.Run("replace_"+strconv.Itoa(index), func(t *testing.T) {
+					mutated := append([]string(nil), fields...)
+					mutated[stockTypeIndex] = ""
+					mutated[index] = "ETF"
+					got, ok := parseContractDetailsLite(mutated, 41, maxClientVersion)
+					if ok && got.StockType == "ETF" {
+						t.Fatalf("untrusted field %d became StockType", index)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestParseContractDetailsLiteShiftedETFNeverBecomesStockType(t *testing.T) {
+	fields := syntheticStockContractDetailsFields(maxClientVersion, "ETF")
+	stockTypeIndex := syntheticFieldIndex(t, fields, "ETF")
+
+	for index := range fields {
+		if index == stockTypeIndex {
+			continue
+		}
+		t.Run("delete_"+strconv.Itoa(index), func(t *testing.T) {
+			mutated := append([]string(nil), fields[:index]...)
+			mutated = append(mutated, fields[index+1:]...)
+			got, ok := parseContractDetailsLite(mutated, 41, maxClientVersion)
+			if ok && got.StockType == "ETF" {
+				t.Fatalf("missing field %d retained shifted StockType", index)
+			}
+		})
+	}
+	for index := 0; index <= len(fields); index++ {
+		t.Run("insert_"+strconv.Itoa(index), func(t *testing.T) {
+			mutated := make([]string, 0, len(fields)+1)
+			mutated = append(mutated, fields[:index]...)
+			mutated = append(mutated, "ETF")
+			mutated = append(mutated, fields[index:]...)
+			got, ok := parseContractDetailsLite(mutated, 41, maxClientVersion)
+			if ok && got.StockType == "ETF" {
+				t.Fatalf("extra field at %d retained shifted StockType", index)
+			}
+		})
+	}
+}
+
+func TestParseContractDetailsLiteTypedFundAndIneligibilitySuffixes(t *testing.T) {
+	fund := syntheticContractDetailsFields(maxClientVersion, "FUND", "FUND_TYPE_CODE")
+	got, ok := parseContractDetailsLite(fund, 41, maxClientVersion)
+	if !ok || got.StockType != "FUND_TYPE_CODE" {
+		t.Fatalf("valid FUND frame stock type=%q ok=%v", got.StockType, ok)
+	}
+
+	stock := syntheticStockContractDetailsFields(maxClientVersion, "TYPE_CODE")
+	stock[len(stock)-1] = "1" // ineligibility reason count
+	stock = append(stock, "ETF", "ETF")
+	got, ok = parseContractDetailsLite(stock, 41, maxClientVersion)
+	if !ok || got.StockType != "TYPE_CODE" {
+		t.Fatalf("typed ineligibility strings changed stock type=%q ok=%v", got.StockType, ok)
+	}
+}
+
+func TestParseContractDetailsLiteFundBooleanWireVocabulary(t *testing.T) {
+	base := syntheticContractDetailsFields(maxClientVersion, "FUND", "TYPE_CODE")
+	firstFundField := syntheticFieldIndex(t, base, "FUND_NAME_CODE")
+	firstBoolean := firstFundField + 7
+	for offset := range 3 {
+		for _, value := range []string{"", "0", "1"} {
+			t.Run("valid_"+strconv.Itoa(offset)+"_"+value, func(t *testing.T) {
+				fields := append([]string(nil), base...)
+				fields[firstBoolean+offset] = value
+				got, ok := parseContractDetailsLite(fields, 41, maxClientVersion)
+				if !ok || got.StockType != "TYPE_CODE" {
+					t.Fatalf("valid boolean %q cleared stock type=%q ok=%v", value, got.StockType, ok)
+				}
+			})
+		}
+		for _, value := range []string{"-1", "2", "true", "ETF"} {
+			t.Run("invalid_"+strconv.Itoa(offset)+"_"+value, func(t *testing.T) {
+				fields := append([]string(nil), base...)
+				fields[firstBoolean+offset] = value
+				got, ok := parseContractDetailsLite(fields, 41, maxClientVersion)
+				if ok && got.StockType != "" {
+					t.Fatalf("non-canonical boolean %q retained stock type %q", value, got.StockType)
+				}
+			})
+		}
+	}
+}
+
 func syntheticStockContractDetailsFields(serverVersion int, stockType string) []string {
+	return syntheticContractDetailsFields(serverVersion, "STK", stockType)
+}
+
+func syntheticContractDetailsFields(serverVersion int, secType, stockType string) []string {
+	return syntheticContractDetailsFieldsVersion(serverVersion, 8, secType, stockType)
+}
+
+func syntheticContractDetailsFieldsVersion(serverVersion, version int, secType, stockType string) []string {
 	fields := []string{strconv.Itoa(msgContractData)}
 	if serverVersion < minServerVerSizeRules {
-		fields = append(fields, "8")
+		fields = append(fields, strconv.Itoa(version))
+	}
+	if version >= 3 {
+		fields = append(fields, "41")
 	}
 	fields = append(fields,
-		"41", "SYNTH1", "STK", "", // reqID, symbol, secType, contract month
+		"SYNTH1", secType, "", // symbol, secType, contract month
 	)
 	if serverVersion >= minServerVerLastTradeDate {
 		fields = append(fields, "")
@@ -128,10 +265,26 @@ func syntheticStockContractDetailsFields(serverVersion int, stockType string) []
 		fields = append(fields, "")
 	}
 	fields = append(fields,
-		"1", "ORDER_CODE", "EXCHANGE_CODE", "1", "0", "SYNTHETIC NAME", "PRIMARY_CODE",
-		"", "INDUSTRY_CODE", "CATEGORY_CODE", "SUBCATEGORY_CODE", "UTC", "", "",
-		"", "0", "1", "ID_TAG", "ID_VALUE",
+		"1", "ORDER_CODE", "EXCHANGE_CODE",
 	)
+	if version >= 2 {
+		fields = append(fields, "1")
+	}
+	if version >= 4 {
+		fields = append(fields, "0")
+	}
+	if version >= 5 {
+		fields = append(fields, "SYNTHETIC NAME", "PRIMARY_CODE")
+	}
+	if version >= 6 {
+		fields = append(fields, "", "INDUSTRY_CODE", "CATEGORY_CODE", "SUBCATEGORY_CODE", "UTC", "", "")
+	}
+	if version >= 8 {
+		fields = append(fields, "", "0.5")
+	}
+	if version >= 7 {
+		fields = append(fields, "1", "ID_TAG", "ID_VALUE")
+	}
 	if serverVersion >= minServerVerAggGroup {
 		fields = append(fields, "0")
 	}
@@ -153,10 +306,28 @@ func syntheticStockContractDetailsFields(serverVersion int, stockType string) []
 	if serverVersion >= minServerVerSizeRules {
 		fields = append(fields, "0", "0", "0")
 	}
+	if serverVersion >= minServerVerFundDataFields && secType == "FUND" {
+		fields = append(fields,
+			"FUND_NAME_CODE", "FUND_FAMILY_CODE", "FUND_TYPE_CODE", "0", "0", "0", "0",
+			"0", "0", "0",
+			"0", "0", "0", "STATE_CODE", "TERRITORY_CODE", "POLICY_CODE", "ASSET_CODE",
+		)
+	}
 	if serverVersion >= minServerVerIneligibility {
 		fields = append(fields, "0")
 	}
 	return fields
+}
+
+func syntheticFieldIndex(t *testing.T, fields []string, marker string) int {
+	t.Helper()
+	for index, field := range fields {
+		if field == marker {
+			return index
+		}
+	}
+	t.Fatalf("marker %q missing from synthetic frame", marker)
+	return -1
 }
 
 func TestNormalizeEquityRoutingUsesSmartExchange(t *testing.T) {

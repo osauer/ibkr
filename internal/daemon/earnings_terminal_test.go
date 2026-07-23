@@ -61,6 +61,7 @@ func TestEarningsTerminalAuthorityPersistsExactContractAndRecovers(t *testing.T)
 	}, now)
 	if !found || match.Status != rpc.EarningsStatusTerminalNonReporting ||
 		match.Info.AuthorityRevision != 1 || !strings.HasPrefix(match.Info.AuthorityFingerprint, "sha256:") ||
+		match.Info.AuthorityBinding != rpc.BuildEarningsTerminalAuthorityBinding("ACMEQ", match.Info) ||
 		!match.Info.AuthorityReviewedAt.Equal(now) ||
 		len(match.Info.Evidence) != 2 {
 		t.Fatalf("terminal match = %+v found=%v", match, found)

@@ -715,6 +715,9 @@ func (s *Server) installEarningsCache() {
 	if err := cache.setSecondaryProvider(earningsWSHProvider, s.fetchWSHEarningsProvider); err != nil {
 		s.logger.Warnf("earnings cache: install IBKR WSH provider: %v", err)
 	}
+	if err := cache.setIdentityFetcher(s.fetchEarningsIdentity); err != nil {
+		s.logger.Warnf("earnings cache: install broker identity reader: %v", err)
+	}
 	s.earnings = cache
 }
 

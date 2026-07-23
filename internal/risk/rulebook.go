@@ -24,6 +24,8 @@ const (
 // reason without an explicit policy change.
 const (
 	EarningsReasonTerminalNonReporting = "terminal_non_reporting"
+	EarningsReasonBrokerNonIssuer      = "broker_nonissuer"
+	EarningsReasonNotApplicable        = "earnings_not_applicable"
 	RuleReasonOffSession               = "off_session"
 	RuleReasonNoLongBook               = "no_long_book"
 	RuleReasonPnLUnavailable           = "pnl_unavailable"
@@ -89,6 +91,10 @@ type RuleRow struct {
 // EarningsInput is the per-name earnings context mapped by the daemon.
 type EarningsInput struct {
 	Known bool
+	// NotApplicable marks fresh exact broker identity proving that this held
+	// contract is a nonissuer security. It is independent from reviewed
+	// terminal/non-reporting issuer evidence.
+	NotApplicable bool
 	// TerminalNonReporting marks reviewed exact-contract evidence that no
 	// future issuer earnings event applies. It is neither a known date nor an
 	// unknown: rules 6-8 disclose an exemption for the relevant name.
@@ -729,7 +735,18 @@ func (c *ruleContext) earningsFor(sym string) (EarningsInput, bool) {
 
 func (c *ruleContext) terminalEarningsFor(sym string) (EarningsInput, bool) {
 	e, found := c.in.Earnings[sym]
-	if !found || !e.TerminalNonReporting || e.Stale {
+	if !found || !e.TerminalNonReporting || e.Stale || e.Source != "verified_terminal" || e.Reason == "" {
+		return e, false
+	}
+	return e, true
+}
+
+func (c *ruleContext) brokerNonIssuerEarningsFor(name NameInput) (EarningsInput, bool) {
+	e, found := c.in.Earnings[name.Symbol]
+	// The broker proof identifies the held stock contract only. Without each
+	// option leg's exact underlying ConID, a mixed symbol group must use the
+	// ordinary issuer-event evidence path.
+	if len(name.Legs) != 0 || !found || !e.NotApplicable || e.Stale || e.Source != "broker_identity" || e.Reason != EarningsReasonBrokerNonIssuer {
 		return e, false
 	}
 	return e, true
@@ -751,12 +768,46 @@ func (c *ruleContext) unresolvedTerminalEarningsFor(sym string) (EarningsInput, 
 	return e, true
 }
 
+func (c *ruleContext) unresolvedBrokerEarningsFor(name NameInput) (EarningsInput, bool) {
+	e, found := c.in.Earnings[name.Symbol]
+	if !found || e.Source != "broker_identity" {
+		return e, false
+	}
+	if _, accepted := c.brokerNonIssuerEarningsFor(name); accepted {
+		return e, false
+	}
+	return e, true
+}
+
 func unresolvedTerminalEarningsOffender(sym string) RuleOffender {
 	return RuleOffender{Symbol: sym, Note: "exact-contract terminal authority is unresolved; no date or exemption is usable"}
 }
 
+func unresolvedBrokerEarningsOffender(sym string) RuleOffender {
+	return RuleOffender{Symbol: sym, Note: "exact-contract broker identity authority is unresolved; no date or exemption is usable"}
+}
+
+func unresolvedIssuerEarningsOffender(sym string, e EarningsInput) RuleOffender {
+	return RuleOffender{Symbol: sym, Note: "ordinary issuer earnings date " + earningsGapWord(e)}
+}
+
 func terminalEarningsExemption(sym string) RuleOffender {
 	return RuleOffender{Symbol: sym, Note: "exact contract is verified terminal/non-reporting; no future issuer earnings event applies"}
+}
+
+func brokerNonIssuerEarningsExemption(sym string) RuleOffender {
+	return RuleOffender{Symbol: sym, Note: "exact broker identity proves a nonissuer security; issuer earnings do not apply"}
+}
+
+func earningsExemptionReason(terminal, broker int) string {
+	switch {
+	case broker > 0 && terminal == 0:
+		return EarningsReasonBrokerNonIssuer
+	case terminal > 0 && broker == 0:
+		return EarningsReasonTerminalNonReporting
+	default:
+		return EarningsReasonNotApplicable
+	}
 }
 
 func (c *ruleContext) catalystCoverage() RuleRow {
@@ -767,17 +818,37 @@ func (c *ruleContext) catalystCoverage() RuleRow {
 	var offenders, unknowns, exempt []RuleOffender
 	earningsDrove := false
 	assessed := 0
+	terminalExempt, brokerExempt := 0, 0
 	for _, n := range c.in.Names {
 		if c.earningsExempt(n.Symbol) {
 			continue
 		}
 		if _, terminal := c.terminalEarningsFor(n.Symbol); terminal {
 			exempt = append(exempt, terminalEarningsExemption(n.Symbol))
+			terminalExempt++
+			continue
+		}
+		if _, nonissuer := c.brokerNonIssuerEarningsFor(n); nonissuer {
+			exempt = append(exempt, brokerNonIssuerEarningsExemption(n.Symbol))
+			brokerExempt++
 			continue
 		}
 		if _, unresolved := c.unresolvedTerminalEarningsFor(n.Symbol); unresolved {
 			earningsDrove = true
 			unknowns = append(unknowns, unresolvedTerminalEarningsOffender(n.Symbol))
+			continue
+		}
+		if _, unresolved := c.unresolvedBrokerEarningsFor(n); unresolved {
+			earningsDrove = true
+			unknowns = append(unknowns, unresolvedBrokerEarningsOffender(n.Symbol))
+			continue
+		}
+		if e, ok := c.earningsFor(n.Symbol); !ok {
+			// Unknown ordinary issuers are unresolved before option relevance.
+			// Absence of a long option is not evidence that earnings do not
+			// apply to the held name.
+			earningsDrove = true
+			unknowns = append(unknowns, unresolvedIssuerEarningsOffender(n.Symbol, e))
 			continue
 		}
 		hasLong := false
@@ -849,11 +920,11 @@ func (c *ruleContext) catalystCoverage() RuleRow {
 			row.Reason = "earnings_unknown"
 		}
 		row.Offenders = unknowns
-		row.Evidence = fmt.Sprintf("%d name(s) with long options not assessable (missing earnings date or underlying).", len(unknowns))
+		row.Evidence = fmt.Sprintf("%d name(s) not assessable (missing earnings date or option underlying).", len(unknowns))
 	case assessed == 0 && len(exempt) > 0:
 		row.Status = RuleStatusNotEvaluated
-		row.Reason = EarningsReasonTerminalNonReporting
-		row.Evidence = fmt.Sprintf("%d exact terminal/non-reporting contract(s) have no future issuer earnings catalyst.", len(exempt))
+		row.Reason = earningsExemptionReason(terminalExempt, brokerExempt)
+		row.Evidence = fmt.Sprintf("%d exact contract(s) are exempt from issuer earnings catalyst checks.", len(exempt))
 	default:
 		row.Status = RuleStatusPass
 		row.Evidence = "Every OTM long option outlives its name's next earnings (or no OTM longs held)."
@@ -868,16 +939,33 @@ func (c *ruleContext) overwriteEarnings() RuleRow {
 	}
 	var actOffenders, watchOffenders, unknowns, exempt []RuleOffender
 	assessed := 0
+	terminalExempt, brokerExempt := 0, 0
 	for _, n := range c.in.Names {
 		if c.earningsExempt(n.Symbol) {
 			continue
 		}
 		if _, terminal := c.terminalEarningsFor(n.Symbol); terminal {
 			exempt = append(exempt, terminalEarningsExemption(n.Symbol))
+			terminalExempt++
+			continue
+		}
+		if _, nonissuer := c.brokerNonIssuerEarningsFor(n); nonissuer {
+			exempt = append(exempt, brokerNonIssuerEarningsExemption(n.Symbol))
+			brokerExempt++
 			continue
 		}
 		if _, unresolved := c.unresolvedTerminalEarningsFor(n.Symbol); unresolved {
 			unknowns = append(unknowns, unresolvedTerminalEarningsOffender(n.Symbol))
+			continue
+		}
+		if _, unresolved := c.unresolvedBrokerEarningsFor(n); unresolved {
+			unknowns = append(unknowns, unresolvedBrokerEarningsOffender(n.Symbol))
+			continue
+		}
+		if e, ok := c.earningsFor(n.Symbol); !ok {
+			// Resolve ordinary issuer applicability before short-option
+			// relevance so a stock-only name cannot pass by omission.
+			unknowns = append(unknowns, unresolvedIssuerEarningsOffender(n.Symbol, e))
 			continue
 		}
 		hasShort := false
@@ -982,11 +1070,11 @@ func (c *ruleContext) overwriteEarnings() RuleRow {
 		row.Status = RuleStatusUnknown
 		row.Reason = "earnings_unknown"
 		row.Offenders = unknowns
-		row.Evidence = fmt.Sprintf("%d name(s) with short options have no usable earnings date.", len(unknowns))
+		row.Evidence = fmt.Sprintf("%d name(s) have no usable earnings date for the overwrite check.", len(unknowns))
 	case assessed == 0 && len(exempt) > 0:
 		row.Status = RuleStatusNotEvaluated
-		row.Reason = EarningsReasonTerminalNonReporting
-		row.Evidence = fmt.Sprintf("%d exact terminal/non-reporting contract(s) have no future issuer earnings print.", len(exempt))
+		row.Reason = earningsExemptionReason(terminalExempt, brokerExempt)
+		row.Evidence = fmt.Sprintf("%d exact contract(s) are exempt from issuer earnings print checks.", len(exempt))
 	default:
 		row.Status = RuleStatusPass
 		row.Evidence = "No short option spans a known earnings print."
@@ -1003,16 +1091,33 @@ func (c *ruleContext) earningsSizeFreeze() RuleRow {
 	row.Threshold = new(float64(freeze))
 	var offenders, unknowns, exempt []RuleOffender
 	assessed := 0
+	terminalExempt, brokerExempt := 0, 0
 	for _, n := range c.in.Names {
 		if c.earningsExempt(n.Symbol) {
 			continue
 		}
 		if _, terminal := c.terminalEarningsFor(n.Symbol); terminal {
 			exempt = append(exempt, terminalEarningsExemption(n.Symbol))
+			terminalExempt++
+			continue
+		}
+		if _, nonissuer := c.brokerNonIssuerEarningsFor(n); nonissuer {
+			exempt = append(exempt, brokerNonIssuerEarningsExemption(n.Symbol))
+			brokerExempt++
 			continue
 		}
 		if _, unresolved := c.unresolvedTerminalEarningsFor(n.Symbol); unresolved {
 			unknowns = append(unknowns, unresolvedTerminalEarningsOffender(n.Symbol))
+			continue
+		}
+		if _, unresolved := c.unresolvedBrokerEarningsFor(n); unresolved {
+			unknowns = append(unknowns, unresolvedBrokerEarningsOffender(n.Symbol))
+			continue
+		}
+		if e, ok := c.earningsFor(n.Symbol); !ok {
+			// Resolve ordinary issuer applicability before the size threshold.
+			// A small holding is not proof that issuer earnings do not apply.
+			unknowns = append(unknowns, unresolvedIssuerEarningsOffender(n.Symbol, e))
 			continue
 		}
 		assessed++
@@ -1063,11 +1168,11 @@ func (c *ruleContext) earningsSizeFreeze() RuleRow {
 		row.Status = RuleStatusUnknown
 		row.Reason = "earnings_unknown"
 		row.Offenders = unknowns
-		row.Evidence = fmt.Sprintf("%d oversized name(s) have no usable earnings date to check against.", len(unknowns))
+		row.Evidence = fmt.Sprintf("%d name(s) have no usable earnings date for the pre-earnings size check.", len(unknowns))
 	case assessed == 0 && len(exempt) > 0:
 		row.Status = RuleStatusNotEvaluated
-		row.Reason = EarningsReasonTerminalNonReporting
-		row.Evidence = fmt.Sprintf("%d exact terminal/non-reporting contract(s) have no pre-earnings freeze window.", len(exempt))
+		row.Reason = earningsExemptionReason(terminalExempt, brokerExempt)
+		row.Evidence = fmt.Sprintf("%d exact contract(s) are exempt from issuer pre-earnings freeze checks.", len(exempt))
 	default:
 		row.Status = RuleStatusPass
 		row.Evidence = "No oversized name inside the pre-earnings freeze window."

@@ -21,6 +21,7 @@ function unknownEventRuleNote(rules = {}) {
     .sort((a, b) => String(a.date).localeCompare(String(b.date)))
     .map((entry) => `${earningsSymbol(entry.symbol)} ${entry.date}`);
   const unresolved = (rules.earnings || [])
+    .filter((entry) => entry.status !== "not_applicable" && entry.status !== "terminal_non_reporting")
     .filter((entry) => !entry.date || entry.source === "unknown" || (entry.status && entry.status !== "date"))
     .map((entry) => `${earningsSymbol(entry.symbol)} (${earningsLabel(entry.reason || entry.status)})`);
   if (unresolved.length > 0) {

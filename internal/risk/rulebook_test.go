@@ -20,6 +20,7 @@ func etDate(y int, m time.Month, d int) time.Time {
 func healthyInputs() RuleInputs {
 	now := etDate(2026, 7, 7)
 	nowEarnings := EarningsInput{Known: true, Date: etDate(2026, 7, 22), TimeOfDay: "amc", SessionsUntil: new(11), Source: "fetched"}
+	bbEarnings := EarningsInput{Known: true, Date: etDate(2026, 7, 30), TimeOfDay: "amc", SessionsUntil: new(17), Source: "fetched"}
 	msftEarnings := EarningsInput{Known: true, Date: etDate(2026, 7, 29), TimeOfDay: "amc", SessionsUntil: new(16), Source: "fetched"}
 	return RuleInputs{
 		AsOf:            now,
@@ -71,7 +72,7 @@ func healthyInputs() RuleInputs {
 				},
 			},
 		},
-		Earnings:          map[string]EarningsInput{"NOW": nowEarnings, "MSFT": msftEarnings, "BB": {Known: false}},
+		Earnings:          map[string]EarningsInput{"NOW": nowEarnings, "MSFT": msftEarnings, "BB": bbEarnings},
 		NonBaseNLVBase:    new(230000.0),
 		NonBaseCurrencies: []string{"USD"},
 	}
@@ -341,6 +342,106 @@ func TestTerminalNonReportingIsExplicitlyNotApplicable(t *testing.T) {
 		}
 		if len(row.Exempt) != 1 || row.Exempt[0].Symbol != "ACMEQ" || !strings.Contains(row.Exempt[0].Note, "exact contract") {
 			t.Errorf("%s exemptions = %+v", id, row.Exempt)
+		}
+	}
+}
+
+func TestBrokerNonIssuerIsExplicitlyNotEvaluatedNeverPass(t *testing.T) {
+	in := healthyInputs()
+	in.Names = []NameInput{{
+		Symbol: "SYNTH1", ExposureBase: 150000, ExposureBaseComplete: true,
+	}}
+	in.Earnings = map[string]EarningsInput{"SYNTH1": {
+		NotApplicable: true, Source: "broker_identity", Reason: EarningsReasonBrokerNonIssuer,
+	}}
+	ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+	for _, id := range []string{RuleCatalystCoverage, RuleOverwriteEarnings, RuleEarningsSizeFreeze} {
+		row := rowByID(t, ev, id)
+		if row.Status != RuleStatusNotEvaluated || row.Reason != EarningsReasonBrokerNonIssuer || len(row.Exempt) != 1 {
+			t.Errorf("%s did not disclose the broker nonissuer exemption", id)
+		}
+	}
+}
+
+func TestBrokerNonIssuerStockProofCannotExemptMixedOptionGroup(t *testing.T) {
+	in := healthyInputs()
+	in.Names = []NameInput{{
+		Symbol: "SYNTH1", ExposureBase: 150000, ExposureBaseComplete: true,
+		Legs: []LegInput{
+			{Desc: "synthetic long", Right: "C", Strike: 12, Expiry: etDate(2026, 8, 21), DTE: 45,
+				Quantity: 1, Multiplier: 100, Underlying: new(10.0), MarketValueBase: 100},
+			{Desc: "synthetic short", Right: "C", Strike: 15, Expiry: etDate(2026, 8, 21), DTE: 45,
+				Quantity: -1, Multiplier: 100, Underlying: new(10.0), MarketValueBase: -50},
+		},
+	}}
+	in.Earnings = map[string]EarningsInput{"SYNTH1": {
+		NotApplicable: true, Source: "broker_identity", Reason: EarningsReasonBrokerNonIssuer,
+	}}
+	ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+	for _, id := range []string{RuleCatalystCoverage, RuleOverwriteEarnings, RuleEarningsSizeFreeze} {
+		row := rowByID(t, ev, id)
+		if row.Status != RuleStatusUnknown || len(row.Exempt) != 0 {
+			t.Errorf("%s let a stock identity proof exempt option legs: %+v", id, row)
+		}
+	}
+}
+
+// A COMMON broker identity remains an ordinary issuer in the daemon; with a
+// typed no-date provider outcome it reaches risk as unknown, never exempt.
+func TestCommonIssuerWithNoDateNeverPassesRelevantRules(t *testing.T) {
+	in := healthyInputs()
+	in.Names = []NameInput{{
+		Symbol: "SYNTH1", ExposureBase: 150000, ExposureBaseComplete: true,
+		Legs: []LegInput{
+			{Desc: "synthetic long", Right: "C", Strike: 12, Expiry: etDate(2026, 8, 21), DTE: 45,
+				Quantity: 1, Multiplier: 100, Underlying: new(10.0), MarketValueBase: 100},
+			{Desc: "synthetic short", Right: "C", Strike: 15, Expiry: etDate(2026, 8, 21), DTE: 45,
+				Quantity: -1, Multiplier: 100, Underlying: new(10.0), MarketValueBase: -50},
+		},
+	}}
+	in.Earnings = map[string]EarningsInput{"SYNTH1": {Source: "fetched", Reason: "no_date_published"}}
+	ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+	for _, id := range []string{RuleCatalystCoverage, RuleOverwriteEarnings, RuleEarningsSizeFreeze} {
+		row := rowByID(t, ev, id)
+		if row.Status == RuleStatusPass || row.Status == RuleStatusNotEvaluated {
+			t.Errorf("%s treated an issuer with unknown earnings as resolved", id)
+		}
+	}
+}
+
+func TestOrdinaryIssuerStockOnlyUnknownOrStaleFailsClosed(t *testing.T) {
+	cases := []struct {
+		name     string
+		earnings EarningsInput
+	}{
+		{name: "not published", earnings: EarningsInput{Source: "fetched", Reason: "no_date_published"}},
+		{name: "stale date", earnings: EarningsInput{Known: true, Stale: true, Date: etDate(2026, 7, 30), Source: "fetched"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := healthyInputs()
+			in.Names = []NameInput{{Symbol: "COMMON1", ExposureBase: 150000, ExposureBaseComplete: true}}
+			in.Earnings = map[string]EarningsInput{"COMMON1": tc.earnings}
+			ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+			for _, id := range []string{RuleCatalystCoverage, RuleOverwriteEarnings, RuleEarningsSizeFreeze} {
+				row := rowByID(t, ev, id)
+				if row.Status != RuleStatusUnknown || row.Reason != "earnings_unknown" || len(row.Offenders) != 1 {
+					t.Errorf("%s = %+v, want one earnings_unknown offender", id, row)
+				}
+			}
+		})
+	}
+}
+
+func TestOrdinaryIssuerBelowSizeWithoutDateFailsClosed(t *testing.T) {
+	in := healthyInputs()
+	in.Names = []NameInput{{Symbol: "COMMON1", ExposureBase: 1000, ExposureBaseComplete: true}}
+	in.Earnings = map[string]EarningsInput{"COMMON1": {Source: "fetched", Reason: "no_date_published"}}
+	ev := EvaluateRulebook(in, DefaultRulebookPolicy())
+	for _, id := range []string{RuleCatalystCoverage, RuleOverwriteEarnings, RuleEarningsSizeFreeze} {
+		row := rowByID(t, ev, id)
+		if row.Status != RuleStatusUnknown || row.Reason != "earnings_unknown" {
+			t.Errorf("%s = %s/%s, want unknown/earnings_unknown below the size threshold", id, row.Status, row.Reason)
 		}
 	}
 }
