@@ -509,6 +509,34 @@ fi
 echo "    $shape_check"
 
 echo "  [8] chain SPY 1-wide..."
+# Step 7 deliberately runs regime into a live breadth fan-out to reproduce
+# v0.27.5 contention. That same fan-out — hundreds of S&P 500 contract-details
+# lookups — otherwise starves this chain read's spot snapshot (observed 10.5 s
+# vs a 0 s settled read), blowing the daemon's 50 s chain deadline on a race no
+# real `ibkr chain` caller hits: nobody fires a chain read into a full breadth
+# refresh. Wait for the fan-out to drain so the read sees the settled gateway a
+# real caller would, then assert the same wire contract. If it has not drained
+# within the bound we proceed anyway, so a genuinely contended gateway still
+# fails loudly rather than being masked.
+echo "    waiting up to 45s for the breadth fan-out to drain before the chain read..."
+for _ in $(seq 1 45); do
+    status_check="$(timeout 5 "$BIN" status --json 2>/dev/null || true)"
+    if printf '%s' "$status_check" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    tasks = d.get("background_tasks") or []
+    for t in tasks:
+        if isinstance(t, dict) and t.get("name") == "breadth-spx":
+            sys.exit(1)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+' 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
 expiries="$("$BIN" chain SPY 2>/dev/null | awk '/^[[:space:]]+20[0-9]{2}-[0-9]{2}-[0-9]{2}/ {print $1}' | head -3 | tail -1)"
 if [[ -z "$expiries" ]]; then
     echo "release-smoke: FAIL: could not list SPY expiries via 'ibkr chain SPY'" >&2
