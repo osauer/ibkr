@@ -61,8 +61,8 @@ refreshable in-memory views do not.
   post-trade reconciliation.
 - `internal/risk` is the pure evaluation library behind advisory verdicts:
   thresholds and fingerprints, canary signal types, option math, the daily
-  trading rulebook, and risk-constitution evaluation. It does no I/O and owns
-  no broker state.
+  [trading rulebook](design/trading-rulebook.md), and risk-constitution
+  evaluation. It does no I/O and owns no broker state.
 - `internal/rpc` defines the typed method names and request/response structs
   that daemon, CLI, app, and MCP adapters share. Add fields here first; teach
   surfaces to render them second.
@@ -350,8 +350,10 @@ state; only an exact identical-wire 15-second retry boundary survives so a
 bounce cannot duplicate the same broker request immediately.
 
 For operator and builder reference, use [Sensors](sensors.md) for measurement,
-freshness, last-good, and dependency semantics; [Trading Policy](policies.md)
-for the human decision and system-control model; and [Storage](database.md) for
-state, evidence, SQLite relationships, query boundaries, durability, and
-recovery. These pages are generated to public HTML from their Markdown sources
-by the same deterministic chain as this page.
+freshness, last-good, and dependency semantics; the
+[Trading Rulebook](design/trading-rulebook.md) for the compiled discipline
+model and its evidence contract; [Trading Policy](policies.md) for the human
+decision and system-control model; and [Storage](database.md) for state,
+evidence, SQLite relationships, query boundaries, durability, and recovery.
+The public pages are generated to HTML from their Markdown sources by the same
+deterministic chain as this page.

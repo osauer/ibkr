@@ -58,7 +58,8 @@ app, and SPA code are adapters and must not re-create daemon or risk policy.
 - Account, order, rulebook, proposal, opportunity, or protection investigation:
   load `.agents/skills/ibkr-harness/SKILL.md`; start with read-only `ibkr ... --json`
   status/settings/trading/rules/proposals/orders surfaces, then inspect code only
-  for gaps the artifacts expose.
+  for gaps the artifacts expose. For Rulebook semantics and authority, read
+  `docs/design/trading-rulebook.md`.
 - Risk-policy, enforcement, pre-trade, or post-trade reporting change: use
   `docs/templates/risk-policy-contract.md` as a checklist or task-local copy,
   then use `docs/templates/daemon-cli-trading-contract.md`. Do not invent

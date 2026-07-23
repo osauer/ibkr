@@ -131,8 +131,8 @@ connectors, the external-source clients, refreshable views, schedulers,
 post-trade reconciliation.</li>
 <li><code>internal/risk</code> is the pure evaluation library behind advisory verdicts:
 thresholds and fingerprints, canary signal types, option math, the daily
-trading rulebook, and risk-constitution evaluation. It does no I/O and owns
-no broker state.</li>
+<a href="https://github.com/osauer/ibkr/blob/main/docs/design/trading-rulebook.md">trading rulebook</a>, and risk-constitution
+evaluation. It does no I/O and owns no broker state.</li>
 <li><code>internal/rpc</code> defines the typed method names and request/response structs
 that daemon, CLI, app, and MCP adapters share. Add fields here first; teach
 surfaces to render them second.</li>
@@ -533,11 +533,13 @@ before persistence. Restart discards runtime entitlement, failure, and backoff
 state; only an exact identical-wire 15-second retry boundary survives so a
 bounce cannot duplicate the same broker request immediately.</p>
 <p>For operator and builder reference, use <a href="sensors.html">Sensors</a> for measurement,
-freshness, last-good, and dependency semantics; <a href="policies.html">Trading Policy</a>
-for the human decision and system-control model; and <a href="database.html">Storage</a> for
-state, evidence, SQLite relationships, query boundaries, durability, and
-recovery. These pages are generated to public HTML from their Markdown sources
-by the same deterministic chain as this page.</p>
+freshness, last-good, and dependency semantics; the
+<a href="https://github.com/osauer/ibkr/blob/main/docs/design/trading-rulebook.md">Trading Rulebook</a> for the compiled discipline
+model and its evidence contract; <a href="policies.html">Trading Policy</a> for the human
+decision and system-control model; and <a href="database.html">Storage</a> for state,
+evidence, SQLite relationships, query boundaries, durability, and recovery.
+The public pages are generated to HTML from their Markdown sources by the same
+deterministic chain as this page.</p>
   </main>
   <footer>
     <div class="wrap"><a href="index.html">ibkr</a><a href="https://github.com/osauer/ibkr">GitHub</a><a href="https://github.com/osauer/ibkr/blob/main/PRIVACY.md">Privacy</a><a href="https://github.com/osauer/ibkr/blob/main/SECURITY.md">Security</a></div>

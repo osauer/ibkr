@@ -1,25 +1,45 @@
 # Trading Rulebook
 
-Updated: 2026-07-08 17:40 CEST
-Status: senior-reviewed 2026-07-07 (verdict: build with amendments — all
-amendments folded in below); shipped in v1.15.0. Rule 1's hedge-exemption
-semantics were amended post-ship after the first live-market run
-(2026-07-07); see the rule-1 semantics note. Rulebook v2 (2026-07-08, dual
-senior review against a live confirmed-stress tape): two never-false-pass
-fixes (rules 6/8 silent skips), regime-conditional thresholds for rules
-3/4/12, rule 2 hedge-premium tier + rule 12 act tier (atomic pair), rule 7
-short-put coverage, rule 1 provable lower bounds, new rules 13
-(exit_discipline) and 14 (fx_exposure), stock-leg underlying join.
+Updated: 2026-07-23 07:48 CEST
+Status: implemented, advisory, and active as compiled `rulebook-v2`. The
+initial 12-rule surface shipped in v1.15.0; the current 14-rule contract folds
+in the July 2026 live-market, implementation-review, SQLite-authority, multi-provider
+earnings, terminal-evidence, canonical-refresh, and alert-production
+amendments described below.
 
 A daily, mechanical 14-rule checklist evaluated daemon-side against the live
-book, surfaced as advisory breaches in CLI/MCP/SPA and as non-blocking causes
-on order previews. Distilled from a discretionary-trader review of the
-account on 2026-07-06; the behavioral target is "hardest trade first", not
-"most comfortable trade first".
+book. It is surfaced through CLI, MCP, the Canary SPA, daily-brief deltas,
+history, source-neutral alerts, and non-blocking order-preview causes. The
+initial heuristic set came from a discretionary-trader review on 2026-07-06;
+that provenance and subsequent engineering reviews do not by themselves prove
+operator approval of every compiled threshold. The behavioral target is
+"hardest trade first", not "most comfortable trade first".
+
+## Why this layer exists
+
+The Rulebook is the desk's **mechanical discipline layer**. It is deliberately
+separate from adjacent surfaces:
+
+- Regime and Canary answer whether market stress exists and whether it matters
+  to the held portfolio.
+- The risk constitution answers whether capital, drawdown, evidence, and
+  reconciliation remain inside the operator-approved policy.
+- Protection proposals answer which current positions have executable
+  reduce-only candidates.
+- The Rulebook answers which repeatable operating mistakes are present now:
+  concentration, oversized option premium, cash and carry pressure, catalyst
+  mismatch, tape-relative weakness, hedge sizing, exit discipline, and
+  structural FX exposure.
+
+That distinction is the reason to keep it. A Rulebook row that merely
+duplicates another surface, cannot name its current evidence, or has no
+repeatable operator response should be removed or redesigned rather than kept
+as another warning. Rulebook verdicts remain advisory evidence; they never
+authorize or block a broker write.
 
 ## Scope
 
-- Goal: encode rules 1–14 (below) as a versioned policy evaluated by the
+- Goal: encode rules 1–14 (below) as a versioned model evaluated by the
   daemon; advisory-only. The hardest-first ranking is a property of the
   output, not a rule row. Still out of scope after v2: rule 12(b)
   (regime-aware wing-sell preview cause), carried-forward greeks for
@@ -29,14 +49,15 @@ account on 2026-07-06; the behavioral target is "hardest trade first", not
   pre-market the affected legs conservatively take the stricter non-hedge
   path), an fx_exposure act tier + preview cause (watch-only until the TOML
   policy loader ships), and the TOML loader itself.
-- User-facing surfaces: `ibkr rules [--json]`, MCP `ibkr_rules`, SPA rules
-  card on the overview beside the canary hero with in-place drill-in, and
-  advisory `rule_*` warnings on `ibkr order preview`.
-- Owner layers: rulebook policy (embedded default + operator TOML,
-  protection-policy manager semantics), earnings state (daemon.db),
-  manual earnings overrides + feature toggle (runtime platform settings),
-  rule evaluation (daemon), rendering (CLI/MCP/SPA adapters, no policy
-  duplication).
+- User-facing surfaces: `ibkr rules [--json]`, `ibkr rules history`, MCP
+  `ibkr_rules`, the SPA Rules card, daily-brief Rulebook deltas,
+  source-neutral alert episodes/inbox delivery, and advisory `rule_*` warnings
+  on `ibkr order preview`.
+- Owner layers: compiled `rulebook-v2` policy (`internal/risk`; an operator
+  Rulebook TOML loader remains planned, not shipped), earnings and regime
+  state (`daemon.db`), manual earnings overrides + feature toggle (runtime
+  platform settings), canonical evaluation and alert lifecycle (daemon), and
+  rendering (CLI/MCP/app/SPA adapters, no policy duplication).
 - Existing behavior: canary signals already cover margin cushion, gross/net
   exposure, and single-name exposure; proposals already run theta_hygiene
   and risk_reduction buckets. The rulebook does not replace these; it
@@ -47,27 +68,33 @@ account on 2026-07-06; the behavioral target is "hardest trade first", not
 Three surfaces measure overlapping metrics with different bars, by design:
 the **canary** is regime×portfolio alerting (compiled thresholds, push
 alerts), **proposals** are executable protection orders (protection-policy
-TOML), the **rulebook** is the operator's daily discipline checklist
-(rulebook TOML). Same measurements, different questions. Containment so this
-never drifts into contradiction:
+TOML), and the **rulebook** is a compiled advisory discipline model
+(`rulebook-v2`; an operator TOML loader is not shipped). Same
+measurements, different questions. Containment so this never drifts into
+contradiction:
 
 - One aggregation: rule evaluation consumes the same
   `PositionsPortfolio`/`PositionGroup`/`UnderlyingExposure` values the canary
   reads; a Go test asserts observed values are identical across both
   consumers. Bars may differ; observations may not.
-- The rulebook TOML ships with comments cross-referencing the sibling
-  thresholds (canary single-name watch 35 compiled; protection
-  risk-reduction target 25) and which surface owns which question.
+- The compiled Rulebook policy and risk-constitution sibling pin identify
+  `rulebook-v2` version 2. The sibling pin currently compares ID/version, not the
+  Rulebook fingerprint; it detects version drift but is not threshold-level
+  approval provenance. The design cross-references the sibling thresholds
+  (canary single-name watch 35 compiled; protection risk-reduction target 25)
+  and which surface owns which question. A future operator TOML must preserve
+  those disclosures and version/fingerprint semantics.
 - Every rendered breach shows observed value next to threshold, so two
   surfaces disagreeing on severity still visibly agree on the number.
 
-## Decisions locked with the operator (2026-07-07)
+## Recorded implementation decisions (not threshold approval)
 
 1. Earnings dates: free web fetch (Nasdaq per-symbol endpoint) + manual
    override; unknown renders as `unknown`, never a false pass.
 2. Enforcement: advisory + preview causes. No hard blocks in v1.
 3. SPA: compact card on the overview + drill-in. No new tab.
-4. Hook: read-only `ibkr orders` allowlisted explicitly (see Hook section).
+4. Hook: read-only `ibkr orders` allowlisted explicitly (see Agent hook
+   boundary).
 5. Amendment (2026-07-21): earnings resolution combines Nasdaq with the
    subscription-gated IBKR Wall Street Horizon feed. Provider outcomes remain
    independent; conflicting published dates are `unknown`, and an override is
@@ -77,6 +104,10 @@ never drifts into contradiction:
    not-applicable/exempt result for rules 6-8, never a pass and never a
    ticker-wide ignore. A published date, manual override, identity mismatch,
    expired review, or malformed authority fails closed as `unknown`.
+
+These decisions govern evidence handling, advisory enforcement, and surface
+placement. They do not establish that the operator approved every numerical
+threshold in the compiled model.
 
 ## The 14 rules
 
@@ -90,9 +121,9 @@ regime-conditionality notes).
 | # | Rule id | Check | Default threshold | Status when breached |
 |---|---|---|---|---|
 | 1 | `single_name_exposure` | per-name exposure / NLV; rule-12-sized short hedge exposure exempt (see notes); provable lower-bound breaches under greeks gaps (see notes) | > 40% | act; watch ≥ 30% |
-| 2 | `option_line_premium` | single option line market value / NLV; rule-12-classified hedge legs use the hedge tier | > 5% (hedge tier > 15%) | watch; act > 10% (hedge tier act > 25%) |
-| 3 | `cash_sell_only` | total cash / NLV | < −25 / 0 / +10% by regime | act ("sell-only mode") |
-| 4 | `extrinsic_budget` | Σ long-option extrinsic / NLV, excluding rule-12-classified hedge legs (hedge extrinsic disclosed in notes) | > 10/15 · 7.5/12 · 5/10 by regime | watch; act at the higher bar |
+| 2 | `option_line_premium` | single option line market value / NLV; rule-12-classified hedge legs use the hedge tier | watch ≥ 5%; hedge watch ≥ 15% | act > 10%; hedge act > 25% |
+| 3 | `cash_sell_only` | total cash / NLV | < −25 / 0 / +10% by regime | act (advisory "sell-only posture", not an order gate) |
+| 4 | `extrinsic_budget` | Σ long-option extrinsic / NLV, excluding rule-12-classified hedge legs (hedge extrinsic disclosed in notes) | watch ≥ 10 / 7.5 / 5% by regime | act > 15 / 12 / 10% by regime |
 | 5 | `expiry_runway` | long option DTE < 14 unless ≥70-delta ITM or hedge leg | < 14 DTE | watch; act < 7 DTE |
 | 6 | `catalyst_coverage` | OTM long option expiring before the name's next earnings; legs with no underlying spot are named unknowns, never skipped | expiry < earnings | watch |
 | 7 | `overwrite_earnings` | short option spanning earnings: short calls act; short puts watch, act on assignment notional (≥ 10% NLV line, ≥ 20% name) | see ET semantics below | act / watch |
@@ -102,12 +133,17 @@ regime-conditionality notes).
 | 11 | `green_day_action` | account daily P&L > 0 while any act-severity rule open | portfolio tape | info (nudge, never act) |
 | 12 | `hedge_integrity` | hedge short-delta / gross long delta outside the regime band | 25–35 / 30–50 / 40–70% by regime | watch; act > 2× band top |
 | 13 | `exit_discipline` | long option line unrealized loss / premium paid; rule-12-classified hedge legs exempt (decay is the cost of protection) | ≥ 40% | watch; act ≥ 60% |
-| 14 | `fx_exposure` | Σ non-base-currency NLV / NLV | > 60% | watch only (see notes) |
+| 14 | `fx_exposure` | Σ non-base-currency NLV / NLV | ≥ 60% | watch only (see notes) |
 
 Row status enum: `pass | info | watch | act | unknown | not_evaluated`.
 `info` renders neutral; it exists so rule 11 never inflates severity. The
 five non-pass states are load-bearing: **no input condition may ever
 produce `pass` by absence of data.**
+
+Rules 1–8 and 12–13 are portfolio-discipline controls in this advisory model.
+Rules 9–10 are tactical tape heuristics, rule 11 is a behavioral nudge, and
+rule 14 is a structural visibility condition. None is an enforced risk-policy
+limit; rule 3's sell-only wording describes a posture, not a broker control.
 
 Semantics notes:
 
@@ -125,11 +161,8 @@ Semantics notes:
   delta and are never classified hedge.
 - Rule 1 hedge exemption (post-ship amendments, 2026-07-07, from the first
   live-market run): a policy-hedge index name carrying net-short delta is
-  the hedge, not concentration — rule 12 owns its sizing, and ranking it
-  here buried the real offenders (40 SPY 710 puts ≈ $722k short
-  delta-dollars, 234% of NLV, outranked every real name while rule 12
-  already flagged the same position over-band; with the hedge noise gone,
-  MSFT at 119% of NLV surfaced as the true top offender). The exemption
+  the hedge, not concentration — rule 12 owns its sizing, and ranking the same
+  hedge again here can bury the actual single-name offenders. The exemption
   covers only what rule 12 can actually size: legs passing the shared
   `rule12HedgeLeg` predicate (long put on a hedge-listed underlying with
   delta and underlying present), capped at the name's net-short exposure,
@@ -149,6 +182,12 @@ Semantics notes:
   market-data subscriptions** (100-slot budget). Option-only names:
   `not_evaluated` with reason `no_stock_leg_tape`. Off-session:
   `not_evaluated`.
+- Daily P&L is part of account-source health for rule 11. During the US equity
+  regular session, missing, malformed, or stale Daily P&L degrades account
+  health and fails portfolio-dependent rows closed. Outside that session,
+  absence is typed `not_due`; the other rules continue on complete
+  account/position evidence and rule 11 alone is
+  `not_evaluated/pnl_unavailable`.
 - Rules 6/7/8 report `unknown` when the earnings date is unknown or stale
   (staleness threshold in policy). Provider-flagged estimated dates
   evaluate normally but evidence discloses `estimated`. Manual overrides win
@@ -186,8 +225,9 @@ Semantics notes:
   per-name offenders (worst first), exempted/unknown legs where relevant,
   and data-quality notes.
 
-Rulebook v2 semantics (2026-07-08 dual senior review — trading-semantics
-and Go-implementation lenses, both "implement with amendments"):
+Rulebook v2 implementation-review findings (2026-07-08, trading-semantics
+and Go-implementation lenses; engineering review, not operator policy
+approval):
 
 - **Partial data may indict, never acquit.** Rule 1 computes a provable
   per-name minimum when material legs miss delta: known legs are already in
@@ -227,8 +267,8 @@ and Go-implementation lenses, both "implement with amendments"):
   deltas shrink, not lost premium. Averaging down resets the basis and
   clears the fence — documented deliberately; the order-preview cause on
   adding to a flagged line is the guard.
-- **Rule 14 fx_exposure is watch-only in v2.** At structurally high
-  non-base exposure (this book: ~90% USD vs EUR base) a permanent act and
+- **Rule 14 fx_exposure is watch-only in v2.** On a structurally high
+  non-base-currency book, a permanent act and
   an every-USD-order preview cause would be pure alarm fatigue — a warning
   with a 100% base rate trains the operator to ignore `rule_*` causes.
   Never-false-pass corroboration: an empty `CurrencyExposure` report only
@@ -269,6 +309,8 @@ internal/risk/option_math.go      intrinsic/extrinsic/spread helpers hoisted
                                   from proposal_engine (shared, one copy)
 internal/daemon/rulebook.go       input assembly, rules.snapshot handler,
                                   cached-eval provider for preview causes
+internal/daemon/rulebook_refresh_scheduler.go
+                                  daemon-owned one-minute canonical refresh
 internal/daemon/rulebook_regime_stage.go
                                   regime stage bucket/latch/persist/kick
 internal/daemon/earnings_cache.go async fetch + LKG cache (fx_cache mirror)
@@ -283,14 +325,16 @@ internal/app/live/service.go      snapshot.rules sibling section (SSE)
 web/app/*                         rules card + drill-in
 ```
 
-- **Placement (review finding 1):** canary is computed adapter-side
-  (`internal/cli`), so rules do NOT attach to `CanaryResult`. Rules are a
-  daemon RPC (`rules.snapshot`) and a **sibling section** of the app live
-  snapshot (`Rules *rpc.RulesResult` beside `Canary`), riding the existing
-  SSE event. `BuildCanaryFingerprint`, push-alert dedupe, and the
-  `ibkr_canary` payload are untouched.
-- Evaluation is stateless and on-demand; the pure core lives in
-  `internal/risk` with table tests. No new scheduler for evaluation.
+- **Placement:** Canary and Rulebook share pure evaluators but remain separate
+  typed results. The daemon now runs the canonical Canary and Rulebook
+  cadences; CLI/MCP/app readers reuse those daemon-owned inputs and contracts.
+  Rules do not attach to `CanaryResult`: `rules.snapshot` remains a sibling
+  section of the app live snapshot (`Rules *rpc.RulesResult` beside
+  `Canary`), riding the existing SSE event.
+- The pure Rulebook evaluator is stateless and lives in `internal/risk` with
+  table tests. Production evaluation is daemon-owned: a complete canonical
+  evaluation runs every minute independently of the app, and interactive
+  readers may publish an earlier result through the same single-flight path.
 - **Earnings fetches are strictly off the snapshot path.** `rules.snapshot`
   only observes cache state and kicks an async refresher: bounded concurrency
   (≤4), an 8s provider budget, and durable per-provider outcome/backoff state.
@@ -369,13 +413,17 @@ web/app/*                         rules card + drill-in
   contains no issuer, symbol, evidence URL, or operator prose. This authority
   history reconstructs the revision/fingerprint and contract-disposition chain;
   rule-transition events separately identify evaluation changes.
-- **Preview causes:** the preview handler consults a short-TTL cached last
-  evaluation (45s, with `rules_as_of` echoed in the warning detail) — never
-  a fresh assembly per preview. When the drafted order would worsen a
-  currently breached rule (increase the breached metric; reduce/close never
-  warns), it appends `DataWarning{Code: "rule_<id>", Severity: <the rule's
-  own watch|act>, Scope: "rulebook"}`. No ninth severity word;
-  `submit_eligible` is never affected.
+- **Canonical cache and preview causes:** daemon, CLI, app, and preview readers
+  reuse a broker-scope-, connector-, and connector-generation-bound result for
+  up to 75 seconds. An expired preview read performs a bounded canonical
+  evaluation; contention or interruption returns an explicit
+  `rulebook_unavailable` advisory instead of silently dropping warnings. When
+  a drafted order would worsen a currently breached rule (increase the
+  breached metric; reduce/close never warns), it appends
+  `DataWarning{Code: "rule_<id>", Severity: <the rule's own watch|act>,
+  Scope: "rulebook"}`. The Rulebook as-of time is disclosed in the warning's
+  `Impact` prose; `DataWarning` has no separate `rules_as_of` field. No ninth
+  severity word; `submit_eligible` is never affected.
 - Policy: embedded default `rulebook-v2` (Version 2; every threshold —
   including the three regime sets — is part of `FingerprintKey`, so a
   threshold outside the fingerprint is impossible without failing the
@@ -384,9 +432,13 @@ web/app/*                         rules card + drill-in
   manager semantics, 30s reload) is **planned, not shipped** — v1 doc
   described it aspirationally; corrected 2026-07-08. Until it lands,
   threshold changes are code changes.
-- Evidence: rule-status transitions append as typed events to the daemon's
-  sole live authority, `~/.local/state/ibkr/daemon.db`, so threshold
-  calibration has data. Every transition payload also carries a sorted,
+- Evidence: rule-status transitions append as typed analytical events to the
+  daemon's sole live database, `~/.local/state/ibkr/daemon.db`, so threshold
+  calibration can use the observations that landed. Transition history is
+  best-effort observability, not policy-critical continuity: an append failure
+  is logged and can leave a gap without suppressing the current canonical
+  result. It therefore cannot prove post-trade adherence or broker causality.
+  Every transition payload also carries a sorted,
   deduplicated `terminal_authorities` list for the exact terminal evidence the
   evaluation accepted: contract ConID, authority revision and fingerprint,
   review/verification/revalidation times, and classification only. The field
@@ -395,18 +447,26 @@ web/app/*                         rules card + drill-in
   authority. The latched regime bucket is a versioned state document in the
   same database. Retired JSON/JSONL paths exist only as one-time cutover
   inputs and isolated test seams.
+- Alerts: the daemon maps complete, unfiltered Rulebook snapshots into the
+  source-neutral alert authority. Current watch/act rows open or escalate
+  episodes; only a current, complete, account/positions-bound negative can
+  recover them. The app owns inbox, unread, delivery attempts, receipts, and
+  fixed presentation copy; neither side gains broker-write authority.
 - Settings: `features.rulebook.enabled` (default true, runtime) gates
-  evaluation + SPA card + preview causes; disabled leaves `ibkr rules`
-  readable with `status: disabled` (stock_protection pattern).
+  canonical evaluation, alert production, the SPA card, and preview causes;
+  disabled leaves `ibkr rules` readable with `status: disabled`
+  (stock_protection pattern). This is a product feature toggle, not a
+  rule-scoped policy exception, threshold approval, or broker-write control.
 
 ## Authority
 
 | Concept | Authoritative source | Typed field/contract | Renderer/tool | Fallback |
 |---|---|---|---|---|
-| Rule thresholds | rulebook policy (embedded; TOML planned) × latched regime stage for rules 3/4/12 | `RulesResult.PolicyFingerprint` | all | embedded `rulebook-v2`; stage carried/never-seen ⇒ worse-of/calm with disclosure |
-| Rule verdicts | daemon `rules.snapshot` | `RulesResult.Rules []RuleRow` | CLI/MCP/SPA render only | per-row `unknown`/`not_evaluated`, result-level InputHealth |
+| Rule thresholds | compiled Rulebook model (operator TOML planned) × latched regime stage for rules 3/4/12 | `RulesResult.PolicyFingerprint` | all | embedded `rulebook-v2`; sibling ID/version pin is not fingerprint-level approval; stage carried/never-seen ⇒ worse-of/calm with disclosure |
+| Rule verdicts | daemon canonical evaluation + `rules.snapshot` | `RulesResult.Rules []RuleRow` | CLI/MCP/SPA, brief delta, history | per-row `unknown`/`not_evaluated`, result-level InputHealth |
 | Earnings dates/applicability | daemon multi-provider earnings resolution ∪ authoritative override ∪ exact-contract SQLite terminal evidence | `RulesResult.Earnings[]` with provider outcomes, terminal revision/fingerprint/provenance | same | typed `unknown`; conflicts/expired evidence have no usable date or exemption; stale LKG flagged |
-| Preview causes | daemon preview handler (cached eval ≤45s) | `Warnings[].Code = rule_*`, `Scope = rulebook` | order preview surfaces | absent when rules disabled/stale beyond TTL |
+| Preview causes | daemon preview handler (scope-bound canonical result ≤75s) | `Warnings[].Code = rule_*`, `Scope = rulebook`; as-of in `Impact` | order preview surfaces | explicit unavailable advisory when canonical read cannot complete |
+| Alert episodes | daemon source-neutral alert authority | complete `RulesResult` + typed episode/occurrence contracts | Alerts inbox and Web Push | stale/incomplete evidence cannot clear an episode |
 | Feature toggle + overrides | platform settings (runtime) | `features.rulebook.*` | settings surfaces + SPA | defaults on |
 
 ## SPA (authority-matrix row)
@@ -422,11 +482,6 @@ severity pills, ranked hardest-first) + `#canaryRulesToggle` expanding
 card shows observed vs threshold. Money strings arrive daemon-rendered with
 real currency (the compat test bans a `"USD"` literal in app.js). Read-only.
 
-Sequencing (review finding 14): the in-flight SPA polish working set
-(app.js/index.html/styles.css/app_compat_test.go/app-browser-smoke.mjs/
-service.go) is committed **before** rules-card work begins; new ids land in
-`browser_script_ids_test.go` in the same change.
-
 ## Safety invariants (unchanged)
 
 - Advisory only: no rulebook state may alter `submit_eligible`, blockers,
@@ -438,17 +493,14 @@ service.go) is committed **before** rules-card work begins; new ids land in
   today") and when not (`ibkr_canary` for regime×portfolio alerting,
   `ibkr_proposals` for executable protection orders).
 
-## Hook (re-scoped after review finding 2)
+## Agent hook boundary
 
-At HEAD the repo hook already allowed all read-only `orders` forms; the
-operator's block came from the stale deployed plugin cache (1.14.0, old
-broad matcher). Landed 2026-07-07: bare `ibkr orders` moved from
-fall-through-allow to the explicit read-only allowlist (intent now
-documented in the matcher), plus `hooks/ibkr-pre-tool-use_test.sh` — a
-19-case table-driven behavior test wired into `make check` via
-`hook-behavior-check`, covering false-block (read paths) and false-allow
-(compound/subshell writes, frozen place) directions. Remaining step is
-human: plugin-cache redeploy at next plugin release.
+The broker hook explicitly allowlists Rulebook and other read-only
+investigations while keeping broker writes, settings writes, and destructive
+maintenance on their separate gated paths. The table-driven
+`hooks/ibkr-pre-tool-use_test.sh` is wired into `make check` and covers both
+false-block and false-allow directions. Hook deployment/version history is not
+part of the Rulebook semantic contract.
 
 ## Verification
 
@@ -469,10 +521,11 @@ human: plugin-cache redeploy at next plugin release.
   not_evaluated, hedge classification incl. suppression, rule-1 hedge
   exemption incl. residual and no-sizeable-legs cases, ranking, greeks
   floors); hoisted option-math helpers keep proposal-engine tests green.
-- Doc drift: `TestDesignDocDisclosesRule1HedgeExemption` (`internal/risk`)
-  pins this file's rule-1 hedge-exemption wording to the shared predicate,
-  so a semantics change fails the hermetic suite until this doc is updated
-  (trading-paper-smoke drift-guard precedent).
+- Doc drift: `internal/risk` tests pin the rule-1 hedge-exemption wording,
+  canonical one-minute/75-second freshness contract, compiled-policy
+  authority, rule-14 boundary, and top-level discoverability links. A semantic
+  or ownership change therefore fails the hermetic suite until the design and
+  navigation move with it.
 - Earnings: recorded-fixture parse tests (normal, estimated, malformed,
   missing-date, human-format dates); symbol-normalization tests (BRK.B,
   EUR names → unsupported); ET/DST table tests (BMO Monday after Friday
@@ -493,8 +546,9 @@ human: plugin-cache redeploy at next plugin release.
   Rulebook episodes; a later current scoped negative may recover them.
 - Preview causes: worsen logic incl. reduce/close exemption; TTL staleness;
   severity vocabulary unchanged (no new words).
-- Contract: CLI JSON golden for `ibkr rules --json`; MCP parity test;
-  `make docs-regen` for MCP + config references.
+- Contract: CLI JSON preservation test; generic CLI↔MCP command parity;
+  Rulebook MCP provenance-description test; SQLite Rulebook-history
+  round-trip; `make docs-regen` for generated MCP and public HTML references.
 - SPA: browser_script_ids_test additions; app-browser-smoke exercises card,
   drill-in, and InputHealth-degraded rendering.
 - Live gate: full `make smoke` + before/after artifacts per the
@@ -512,5 +566,7 @@ human: plugin-cache redeploy at next plugin release.
   before a code rollback, import a reviewed empty v1 document and verify its
   advanced SQLite revision; removing the import path alone deliberately retains
   authority.
-- User-visible on rollback: rules card, `ibkr rules`, and advisory `rule_*`
-  preview warnings disappear; no trading-path change either way.
+- User-visible on rollback: the rules card, current `ibkr rules` result,
+  advisory `rule_*` preview warnings, new Rulebook alert production, and new
+  brief state deltas disappear. Retained history/evidence is not deleted; no
+  trading-path change occurs either way.

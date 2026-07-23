@@ -217,6 +217,40 @@ func TestHistoryIndexRulesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRulesHistorySQLiteRoundTrip(t *testing.T) {
+	store := openMarketTestCoreStore(t)
+	s := &Server{coreStore: store, logger: NewLogger(&bytes.Buffer{}, "error")}
+	pol := risk.DefaultRulebookPolicy()
+	asOf := time.Now().UTC()
+	s.journalRuleTransitions(&rpc.RulesResult{
+		AsOf:          asOf,
+		PolicyID:      pol.ID,
+		PolicyVersion: pol.Version,
+		PolicyFingerprint: &rpc.Fingerprint{
+			Version: rpc.RulebookPolicyFingerprintVersion,
+			Key:     pol.FingerprintKey(),
+		},
+		Rules: []risk.RuleRow{{
+			ID: risk.RuleOptionLinePremium, Status: risk.RuleStatusWatch,
+			Evidence: "hedge tier drives the current state",
+		}},
+	})
+
+	got, err := s.handleRulesHistory(&rpc.Request{})
+	if err != nil {
+		t.Fatalf("rules history: %v", err)
+	}
+	if got.Count != 1 || got.TotalCount != 1 || len(got.Entries) != 1 {
+		t.Fatalf("rules history counts = count %d total %d entries %d", got.Count, got.TotalCount, len(got.Entries))
+	}
+	entry := got.Entries[0]
+	if entry.Rule != risk.RuleOptionLinePremium || entry.Status != risk.RuleStatusWatch ||
+		entry.Evidence != "hedge tier drives the current state" ||
+		entry.PolicyFingerprint != pol.FingerprintKey() {
+		t.Fatalf("SQLite rule transition did not round-trip: %+v", entry)
+	}
+}
+
 func TestHistoryIndexParamValidation(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	s := &Server{logger: NewLogger(&bytes.Buffer{}, "error")}

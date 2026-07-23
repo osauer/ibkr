@@ -515,8 +515,14 @@ func (c *ruleContext) optionLinePremium() RuleRow {
 	normal := tierStatus(worst, watch, act)
 	hedge := tierStatus(hedgeWorst, hWatch, hAct)
 	status := normal
-	if statusWeight(hedge) > statusWeight(normal) {
+	hedgeWins := statusWeight(hedge) > statusWeight(normal)
+	if hedgeWins {
 		status = hedge
+		// Observed and Threshold are the generic renderer contract. When the
+		// hedge tier drives the verdict, they must describe that tier rather
+		// than pairing a hedge breach with the normal 5% control.
+		row.Observed = new(round1(hedgeWorst))
+		row.Threshold = new(hWatch)
 	}
 	row.Status = status
 	// The headline names the offender of the tier that produced the status,
@@ -526,7 +532,7 @@ func (c *ruleContext) optionLinePremium() RuleRow {
 	switch {
 	case status == RuleStatusPass:
 		row.Evidence = fmt.Sprintf("Largest option line %.1f%% of NLV, under the %.0f%% cap.", round1(worst), watch)
-	case statusWeight(hedge) > statusWeight(normal):
+	case hedgeWins:
 		row.Evidence = fmt.Sprintf("%s holds %.1f%% of NLV in one hedge line (hedge tier %.0f%%/%.0f%%).", hedgeOff[0].Leg, hedgeOff[0].Observed, hWatch, hAct)
 	default:
 		row.Evidence = fmt.Sprintf("%s holds %.1f%% of NLV in one option line (cap %.0f%%).", normalOff[0].Leg, normalOff[0].Observed, watch)
@@ -554,7 +560,7 @@ func tierStatus(observed, watch, act float64) string {
 }
 
 func (c *ruleContext) cashSellOnly() RuleRow {
-	row := RuleRow{ID: RuleCashSellOnly, Number: 3, Title: "Negative cash sell-only mode", Unit: "% NLV"}
+	row := RuleRow{ID: RuleCashSellOnly, Number: 3, Title: "Negative cash sell-only posture", Unit: "% NLV"}
 	if !c.in.Account.Healthy || !c.hasNLV || c.in.CashBase == nil {
 		row.Status = RuleStatusUnknown
 		row.Reason = nonEmpty(c.in.Account.Reason, "cash_unavailable")
@@ -569,7 +575,7 @@ func (c *ruleContext) cashSellOnly() RuleRow {
 		r.Threshold = new(limit)
 		if ratio < limit {
 			r.Status = RuleStatusAct
-			r.Evidence = fmt.Sprintf("Cash at %.1f%% of NLV is below %.0f%% — sell-only until the debit shrinks (margin interest is negative carry too).", round1(ratio), limit)
+			r.Evidence = fmt.Sprintf("Cash at %.1f%% of NLV is below %.0f%% — take an advisory sell-only posture until the debit shrinks (margin interest is negative carry too).", round1(ratio), limit)
 		} else {
 			r.Status = RuleStatusPass
 			r.Evidence = fmt.Sprintf("Cash at %.1f%% of NLV, above the %.0f%% floor.", round1(ratio), limit)

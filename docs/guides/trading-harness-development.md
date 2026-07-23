@@ -89,9 +89,10 @@ Ask for one kind of work at a time:
   scenarios. Separate policy, measurement, enforcement, and reporting.`
 - **Implement:** `Implement policy version <fingerprint>. Do not change policy.
   Preserve <invariants>. Done means <tests, redacted artifact, smoke tier>.`
-- **Live investigate:** `Use $ibkr-harness read-only to compare the current
-  rulebook, canary, positions, and data quality. Return insufficient data rather
-  than guessing.`
+- **Live investigate:** read the
+  [Rulebook authority](../design/trading-rulebook.md), then ask:
+  `Use $ibkr-harness read-only to compare the current rulebook, canary,
+  positions, and data quality. Return insufficient data rather than guessing.`
 - **Render/QA:** `Refresh the embedded Canary app and verify the displayed
   contract in the in-app Browser. Browser QA is read-only.`
 

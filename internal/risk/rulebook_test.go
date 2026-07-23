@@ -661,20 +661,34 @@ func TestOptionLinePremiumHedgeTier(t *testing.T) {
 	if !strings.Contains(r.Evidence, "hedge") {
 		t.Errorf("hedge-tier verdict must say so: %s", r.Evidence)
 	}
+	if r.Observed == nil || *r.Observed != 15.5 {
+		t.Errorf("hedge-tier observed = %v, want 15.5", r.Observed)
+	}
+	if r.Threshold == nil || *r.Threshold != pol.HedgeLineWatchPct {
+		t.Errorf("hedge-tier threshold = %v, want %.1f", r.Threshold, pol.HedgeLineWatchPct)
+	}
 
 	in = base()
 	in.Names[3].Legs[0].MarketValueBase = 66000 // 26.9% > hedge act 25
 	ev = EvaluateRulebook(in, pol)
-	if got := rowByID(t, ev, RuleOptionLinePremium).Status; got != RuleStatusAct {
-		t.Errorf("26.9%% hedge line = %s, want act", got)
+	r = rowByID(t, ev, RuleOptionLinePremium)
+	if r.Status != RuleStatusAct {
+		t.Errorf("26.9%% hedge line = %s, want act", r.Status)
+	}
+	if r.Observed == nil || *r.Observed != 26.9 || r.Threshold == nil || *r.Threshold != pol.HedgeLineWatchPct {
+		t.Errorf("hedge-tier act row observed/threshold = %v/%v, want 26.9/%.1f", r.Observed, r.Threshold, pol.HedgeLineWatchPct)
 	}
 
 	in = base()
 	in.Names[3].Legs[0].Delta = nil // unclassifiable: normal tier, no relief
 	in.Names[3].GreeksGapNotionalBase = 38000
 	ev = EvaluateRulebook(in, pol)
-	if got := rowByID(t, ev, RuleOptionLinePremium).Status; got != RuleStatusAct {
-		t.Errorf("15.5%% unclassifiable hedge line = %s, want normal-tier act", got)
+	r = rowByID(t, ev, RuleOptionLinePremium)
+	if r.Status != RuleStatusAct {
+		t.Errorf("15.5%% unclassifiable hedge line = %s, want normal-tier act", r.Status)
+	}
+	if r.Observed == nil || *r.Observed != 15.5 || r.Threshold == nil || *r.Threshold != pol.OptionLineWatchPct {
+		t.Errorf("unclassifiable normal-tier observed/threshold = %v/%v, want 15.5/%.1f", r.Observed, r.Threshold, pol.OptionLineWatchPct)
 	}
 
 	// A joined (stock-leg-mark) underlying never classifies a hedge — the
@@ -682,8 +696,12 @@ func TestOptionLinePremiumHedgeTier(t *testing.T) {
 	in = base()
 	in.Names[3].Legs[0].UnderlyingSource = UnderlyingSourceStockLegMark
 	ev = EvaluateRulebook(in, pol)
-	if got := rowByID(t, ev, RuleOptionLinePremium).Status; got != RuleStatusAct {
-		t.Errorf("15.5%% hedge line with derived underlying = %s, want normal-tier act (no classification from joined spots)", got)
+	r = rowByID(t, ev, RuleOptionLinePremium)
+	if r.Status != RuleStatusAct {
+		t.Errorf("15.5%% hedge line with derived underlying = %s, want normal-tier act (no classification from joined spots)", r.Status)
+	}
+	if r.Observed == nil || *r.Observed != 15.5 || r.Threshold == nil || *r.Threshold != pol.OptionLineWatchPct {
+		t.Errorf("derived-spot normal-tier observed/threshold = %v/%v, want 15.5/%.1f", r.Observed, r.Threshold, pol.OptionLineWatchPct)
 	}
 
 	// Tie case: both tiers at watch, hedge line carrying the larger impact —
@@ -701,6 +719,26 @@ func TestOptionLinePremiumHedgeTier(t *testing.T) {
 	}
 	if !strings.Contains(r.Evidence, "BB") || !strings.Contains(r.Evidence, "cap 5") {
 		t.Errorf("tie-case headline must name the normal-tier offender with its own cap, got: %s", r.Evidence)
+	}
+	if r.Observed == nil || *r.Observed != 8.2 || r.Threshold == nil || *r.Threshold != pol.OptionLineWatchPct {
+		t.Errorf("tie-case normal-tier observed/threshold = %v/%v, want 8.2/%.1f", r.Observed, r.Threshold, pol.OptionLineWatchPct)
+	}
+}
+
+func TestFXExposureWatchBoundary(t *testing.T) {
+	pol := DefaultRulebookPolicy()
+	in := healthyInputs()
+	in.NonBaseNLVBase = new(*in.NLVBase * pol.FXExposureWatchPct / 100)
+
+	r := rowByID(t, EvaluateRulebook(in, pol), RuleFXExposure)
+	if r.Status != RuleStatusWatch {
+		t.Fatalf("FX exposure exactly %.0f%% = %s, want watch", pol.FXExposureWatchPct, r.Status)
+	}
+
+	in.NonBaseNLVBase = new(*in.NLVBase * (pol.FXExposureWatchPct - 0.1) / 100)
+	r = rowByID(t, EvaluateRulebook(in, pol), RuleFXExposure)
+	if r.Status != RuleStatusPass {
+		t.Fatalf("FX exposure just below the %.0f%% boundary = %s, want pass", pol.FXExposureWatchPct, r.Status)
 	}
 }
 
@@ -1003,6 +1041,56 @@ func TestDesignDocDisclosesRule1HedgeExemption(t *testing.T) {
 	} {
 		if !strings.Contains(doc, pin) {
 			t.Errorf("docs/design/trading-rulebook.md no longer states %q — rule-1 hedge-exemption semantics changed without updating the design doc", pin)
+		}
+	}
+}
+
+func TestDesignDocTracksRulebookRuntimeContract(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("../../docs/design/trading-rulebook.md")
+	if err != nil {
+		t.Fatalf("read design doc: %v", err)
+	}
+	doc := strings.Join(strings.Fields(string(data)), " ")
+	for _, pin := range []string{
+		"compiled `rulebook-v2`",
+		"one-minute canonical refresh",
+		"up to 75 seconds",
+		"≥ 60%",
+		"source-neutral alert",
+	} {
+		if !strings.Contains(doc, pin) {
+			t.Errorf("docs/design/trading-rulebook.md missing current runtime contract %q", pin)
+		}
+	}
+	for _, stale := range []string{
+		"No new scheduler",
+		"cached eval ≤45s",
+		"operator-tunable thresholds",
+	} {
+		if strings.Contains(doc, stale) {
+			t.Errorf("docs/design/trading-rulebook.md retained stale runtime claim %q", stale)
+		}
+	}
+}
+
+func TestRulebookDesignDocDiscoverable(t *testing.T) {
+	t.Parallel()
+
+	for path, link := range map[string]string{
+		"../../README.md":            "(docs/design/trading-rulebook.md)",
+		"../../docs/architecture.md": "(design/trading-rulebook.md)",
+		"../../docs/index.html":      `href="sensors.html#rulebook"`,
+		"../../docs/sensors.md":      "(design/trading-rulebook.md)",
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("read %s: %v", path, err)
+			continue
+		}
+		if !strings.Contains(string(data), link) {
+			t.Errorf("%s must link the Rulebook authority as %q", path, link)
 		}
 	}
 }

@@ -161,6 +161,27 @@ func TestOpportunitiesToolIsReadOnlyDiscovery(t *testing.T) {
 	}
 }
 
+func TestRulesToolDescribesPolicyAndTerminalProvenance(t *testing.T) {
+	t.Parallel()
+	tool, ok := lookupTool("ibkr_rules")
+	if !ok {
+		t.Fatal("missing ibkr_rules tool")
+	}
+	desc := strings.ToLower(tool.Description)
+	for _, want := range []string{
+		"compiled model is not itself proof",
+		"verified_terminal",
+		"terminal_non_reporting",
+		"never pass",
+		"symbol-wide exemption",
+		"conflicting or expired terminal evidence stays unknown",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("ibkr_rules description missing %q", want)
+		}
+	}
+}
+
 func TestNormalizeMCPPreviewOrderTypeRejectsLMTTrailContradiction(t *testing.T) {
 	t.Parallel()
 	if _, err := normalizeMCPPreviewOrderType("LMT", true, false); err == nil || !strings.Contains(err.Error(), "cannot include trail") {

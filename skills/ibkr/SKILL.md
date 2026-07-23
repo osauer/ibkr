@@ -44,9 +44,10 @@ portfolio, risk limits, and process clocks, run `ibkr brief --json`. The brief
 is a read surface for agents: agent-origin text renders never stamp the
 morning/EOD artefact, and JSON mode never stamps for any origin.
 
-If the user asks "what should I fix today", which of their own trading rules
-they are breaking, or wants the daily discipline checklist, run
-`ibkr rules --json`. It returns the advisory 14-rule rulebook (per-name
+If the user asks "what should I fix today", which checks in the compiled
+discipline model are open, or wants the daily discipline checklist, run
+`ibkr rules --json`. It returns the advisory 14-rule
+[Rulebook](../../docs/design/trading-rulebook.md) (per-name
 exposure cap, option-line premium cap, sell-only cash floor, extrinsic
 budget, expiry runway, earnings catalyst/overwrite/size-freeze checks, tape
 rules, green-day nudge, hedge band, exit discipline on long-option losses,
@@ -54,8 +55,9 @@ FX exposure) ranked hardest-first, with per-name earnings context and
 result-level input health. Statuses pass/info/watch/act/
 unknown/not_evaluated: `unknown` means an input was missing and must never be
 read as pass. Verdicts are advisory — nothing here blocks or authorizes an
-order; use `ibkr canary` for the regime × portfolio alert and
-`ibkr proposals` for executable protective candidates.
+order, and the compiled model is not proof that every threshold has operator
+approval. Use `ibkr canary` for the regime × portfolio alert and `ibkr
+proposals` for executable protective candidates.
 
 If the user asks whether a held or requested stock/ETF has borrow, Reg SHO,
 LULD, or halt context, run `ibkr market-events --json` with `--symbol` when
@@ -160,6 +162,7 @@ simulate trade execution.
 | `ibkr regime` | Broad-market stress lifecycle: equity vol, credit, funding, FX carry, SPX gamma with SPY context, and SPX breadth in one call | [schemas.md#regime](schemas.md#regime) |
 | `ibkr canary` | Portfolio-aware action/readiness snapshot, source health, fingerprints, and planner readiness | [schemas.md#canary](schemas.md#canary) |
 | `ibkr brief` | Typed five-section daily operator brief; agent renders and all JSON reads never stamp | — |
+| `ibkr rules` | Advisory compiled 14-rule discipline model, current evidence, and state-transition history | — |
 | `ibkr market-events` | Held or requested stock/ETF market-event flags: borrow inventory, extreme borrow fee, Nasdaq Reg SHO, LULD, and halt context | [schemas.md#market-events](schemas.md#market-events) |
 | `ibkr proposals status\|list\|refresh` | Daemon-owned protection proposals, read paths only (`preview`/`submit`/`ignore` are gated verbs outside this skill allowlist) | [schemas.md#proposals-status](schemas.md#proposals-status), [schemas.md#proposals-list](schemas.md#proposals-list) |
 | `ibkr backtest research-opportunity` | Offline scored opportunity research diagnostics; not a daemon opportunity feed or broker-action surface | — |
@@ -217,6 +220,12 @@ broker-data command and is not exposed as an MCP tool.
 - `ibkr canary [--details] [--view full|alert] [--json]` — portfolio-aware action/readiness snapshot for scheduled or manual risk checks. It consumes live account, positions, exposures, concentration, option-Greek coverage, margin, daily P&L, `ibkr regime`, and market-event context, then emits top-level `action`, `market_confirmation`, `portfolio_fit`, `input_health`, `direction`, `severity`, `planner_mode_hint`, `planner_readiness`, `signals[]`, `source_health[]`, `source_fingerprints`, and stable `fingerprint`. Treat `planner_readiness: "blocked"` and data-quality signals as hard gates before discussing major portfolio action. `source_fingerprints.account`, `.positions`, `.regime`, and `.market_events` are semantic-bucket hashes for monitor dedupe and orchestration provenance. `--details` expands the text evidence rows; `--view alert --json` returns the compact alert payload. This command is read-only: it does not select hedges, size trades, preview orders, or execute.
   - **MCP params**: `view` (`"full" | "alert"`; default `"full"`).
   - **CLI-only flags**: `--details`, `--json`.
+- `ibkr rules [--all] [--symbol SYM] [--json]` — current compiled advisory
+  Rulebook snapshot, including input health, policy identity, all typed rows,
+  hardest-first ranking, offenders, exemptions, and earnings provenance.
+  `ibkr rules history [--since YYYY-MM-DD|RFC3339] [--until
+  YYYY-MM-DD|RFC3339] [--rule ID] [--limit N] [--json]` returns persisted
+  evaluator state transitions; it is not trade-causality or broker evidence.
 - `ibkr market-events [--symbol SYM[,SYM...]] [SYM ...] [--json]` — single-name market-event context for held or requested stock/ETF symbols. Explicit symbols evaluate those names; omitting symbols evaluates held stock/ETF underlyings from the daemon positions snapshot. JSON returns `flags[]`, `by_symbol`, `source_health[]`, `warning_details[]`, `fingerprint`, and `not_execution`. Unknown source health is unavailable evidence, not inactive. `borrow_inventory_tight` and `borrow_fee_extreme` only modify existing short buy-to-cover reductions; `halt_regulatory_or_news` and active `luld_pause` are hard blockers; `reg_sho_threshold` is regulatory context. V1 never creates buy-add/open-exposure recommendations.
   - **MCP params**: `symbol` (optional single or comma-separated symbols), `symbols` (optional array; omit both for held underlyings).
   - **CLI-only flags**: `--json`.

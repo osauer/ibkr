@@ -2,7 +2,7 @@
 
 **Status:** Implemented; legacy `history.db` design retired
 
-**Created:** 2026-07-20 · **Updated:** 2026-07-20
+**Created:** 2026-07-20 · **Updated:** 2026-07-23
 
 **Owner:** osauer
 
@@ -38,6 +38,10 @@ runtime producer or consumer opens them.
   event updates commit in one transaction where required.
 - A critical database error fails the authoritative operation and never
   activates a file fallback or mirror write.
+- Rulebook transition events are analytical observability rather than
+  policy-critical continuity. Their producer logs an append failure and may
+  leave a history gap while the current canonical snapshot still advances;
+  `rules.history` therefore cannot prove trade causality or adherence.
 
 ## Clean semantic epoch
 
@@ -73,7 +77,7 @@ The public request/result shapes remain stable:
 | Method | Authoritative data | Notes |
 |---|---|---|
 | `regime.history` | Post-cutover regime decision events | Seven-day default window; optional stage filter; newest first. |
-| `rules.history` | Post-cutover rule transition events | Optional rule filter; advisory/read-only. |
+| [`rules.history`](trading-rulebook.md) | Post-cutover Rulebook state-transition events | Optional rule filter; advisory/read-only; records evaluator state, not trade causality or broker evidence. |
 | `canary.history` | Post-cutover canary decision events | Optional severity/action filters; advisory/read-only. |
 | `recon.equity` | Current statement-equity projection plus retained capital events | Ninety-day default window; newest first; Flex XML remains original broker evidence. |
 | Order open/history/status reads | Authoritative order events and projections | No journal freshness proof or scan fallback exists after attach. |

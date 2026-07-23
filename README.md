@@ -6,7 +6,7 @@
 [![Go reference](https://pkg.go.dev/badge/github.com/osauer/ibkr/v2.svg)](https://pkg.go.dev/github.com/osauer/ibkr/v2)
 [![license](https://img.shields.io/github/license/osauer/ibkr)](LICENSE)
 
-[MCP tools](docs/reference/mcp-tools.md) · [MCP resources](docs/reference/mcp-resources.md) · [Configuration](docs/reference/config.md) · [Sensors](docs/sensors.md) · [Trading policy](docs/policies.md) · [Storage](docs/database.md) · [Architecture](docs/architecture.md) · [Platform settings](docs/design/platform-settings.md) · [Agentic use](docs/guides/agentic-use.md) · [Mobile app](web/app/README.md)
+[MCP tools](docs/reference/mcp-tools.md) · [MCP resources](docs/reference/mcp-resources.md) · [Configuration](docs/reference/config.md) · [Sensors](docs/sensors.md) · [Rulebook](docs/design/trading-rulebook.md) · [Trading policy](docs/policies.md) · [Storage](docs/database.md) · [Architecture](docs/architecture.md) · [Platform settings](docs/design/platform-settings.md) · [Agentic use](docs/guides/agentic-use.md) · [Mobile app](web/app/README.md)
 
 **Agentic portfolio analysis and trading-research workflows for IBKR MCP, TWS, and IB Gateway.**
 
@@ -254,6 +254,8 @@ References:
 
 - [Configuration reference](docs/reference/config.md) for TOML sections and `IBKR_*` environment variables.
 - [Trading policy](docs/policies.md) for who decides risk boundaries, how ibkr evaluates them, what is advisory today, and which actions still require a human.
+- [Trading Rulebook](docs/design/trading-rulebook.md) for the compiled advisory
+  discipline model, its evidence contract, ownership, freshness, and limits.
 - [Storage](docs/database.md) for how the daemon preserves state and evidence with SQLite, including data relationships, query boundaries, durability, recovery, and current limits.
 - [Sensors](docs/sensors.md) for Gamma, Regime, Canary, Rulebook, market-event authority, freshness, last-good behavior, and fail-closed checks.
 - [Experimental trading config](docs/guides/trading-preview.md) for the inactive `config.toml.trading` pattern and release-channel expectations.

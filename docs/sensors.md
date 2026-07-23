@@ -300,6 +300,9 @@ inputs are account and positions evidence, per-name earnings evidence, the
 classified Regime stage, and current SPY tape where a rule needs it. The pure
 evaluator returns all 14 rows in stable order plus a hardest-first ranking,
 breach counts, offenders, observed values, thresholds, and evidence.
+The detailed [Trading Rulebook](design/trading-rulebook.md) is the semantic
+authority; compiled v2 is an advisory model, not proof that every threshold has
+operator approval.
 
 Row outcomes are `pass`, `info`, `watch`, `act`, `unknown`, or
 `not_evaluated`. Missing or partial input cannot create a false pass. Provider
@@ -400,6 +403,8 @@ an order.
 
 - [Architecture](architecture.md): process, source, RPC, and runtime ownership.
 - [Trading Policy](policies.md): who chooses limits and what remains advisory.
+- [Trading Rulebook](design/trading-rulebook.md): canonical rule, input-health,
+  preview, alert, and authority semantics.
 - [Storage](database.md): last-good documents, observations, evidence, and
   recovery boundaries.
 - [Concepts](concepts.md): deeper interpretation of calendars, Gamma, Regime,

@@ -1,6 +1,6 @@
 # Operator Ergonomics and Exception-Driven Governance (Phase 2.1)
 
-Updated: 2026-07-18 19:35 CEST
+Updated: 2026-07-23 08:15 CEST
 Status: design approved by the operator (interviews 2026-07-16, consolidated
 greenlight 2026-07-18). Implemented same day: the backfill backtest (decision
 4/5 mechanics), risk-policy v3 (auto-extend, R3/R4, divergence gate), and the
@@ -335,10 +335,13 @@ fixture), then `make app-refresh` on the real host.
   `reconcileReportAssessment`: the write gate returns its first blocker,
   the brief's one-tap row exposes the ordered list. Explicit `--report`
   behavior is untouched.
-- **Rules deltas** diff the current rulebook snapshot against the row set
+- **[Rulebook state deltas](trading-rulebook.md)** diff the current Rulebook
+  snapshot against the row set
   persisted at the last *stamped* brief (a runtime-owned daemon.db state
   document written only by `brief.ack`); first run discloses "no delta
-  baseline yet". The shared unreconciled-clock arithmetic moved to
+  baseline yet". This is a status-snapshot comparison, not post-trade adherence
+  or broker evidence: marks, Regime, earnings, and source health can move it
+  without a trade. The shared unreconciled-clock arithmetic moved to
   `risk.EvaluateUnreconciledClock` (override can only extend; zero
   last-reconcile fabricates no deadline) and feeds both evaluation and the
   brief's typed `deadline`/`days_remaining`.
@@ -431,7 +434,7 @@ verbatim — that split is unchanged.
 - **Review** — post-trade of the last completed session, statement-authoritative
   where the overnight Flex statement is available. Rows: Session P&L (equity +
   daily P&L headline); attribution by underlying (the existing movers basis plus
-  the disclosed residual); process coherence (the rulebook-adherence delta with
+  the disclosed residual); process coherence (the Rulebook state delta with
   act transitions, proposals offered-vs-acted from the trade-proposal-outcomes
   journal, and overrides used); capital events (latch engagement and
   adjusted-peak provenance); reconcile / auto-extend / one-tap sign-off (the tap

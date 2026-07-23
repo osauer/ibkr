@@ -19,7 +19,7 @@ not writable through `settings.update`. Its optional
 `[rulebook].terminal_evidence_file` is a private startup import into a separate
 typed daemon.db state document; rule snapshots serve only the committed SQLite
 revision. Ownership, validation, revocation, and expiry semantics live in
-`docs/design/trading-rulebook.md`.
+the [Trading Rulebook](trading-rulebook.md).
 
 This document owns semantics and ownership, not the key list. The writable
 keys, types, and per-key descriptions are enumerated in the generated

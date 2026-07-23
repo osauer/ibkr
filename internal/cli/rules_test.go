@@ -68,3 +68,32 @@ func TestRunRulesRendersTerminalContractAsExemptNotPass(t *testing.T) {
 		}
 	}
 }
+
+func TestRunRulesJSONPreservesHeadlineTier(t *testing.T) {
+	observed, threshold := 15.5, 15.0
+	conn := &rulesFakeConn{result: rpc.RulesResult{
+		AsOf: time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC), Enabled: true, Status: "ok",
+		PolicyID: "rulebook-v2", PolicyVersion: 2,
+		Rules: []risk.RuleRow{{
+			ID: risk.RuleOptionLinePremium, Number: 2, Title: "Single option line premium",
+			Status: risk.RuleStatusWatch, Unit: "% NLV", Observed: &observed, Threshold: &threshold,
+			Evidence: "A hedge line drives the 15%/25% tier.",
+		}},
+		Ranked:       []int{0},
+		BreachCounts: map[string]int{risk.RuleStatusWatch: 1},
+	}}
+	var stdout, stderr bytes.Buffer
+	env := &Env{Stdout: &stdout, Stderr: &stderr, Conn: conn}
+	if code := Run(context.Background(), env, "rules", []string{"--json"}); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+
+	var got rpc.RulesResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	if len(got.Rules) != 1 || got.Rules[0].Observed == nil || *got.Rules[0].Observed != observed ||
+		got.Rules[0].Threshold == nil || *got.Rules[0].Threshold != threshold {
+		t.Fatalf("JSON lost headline tier: %+v", got.Rules)
+	}
+}

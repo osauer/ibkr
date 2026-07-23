@@ -77,6 +77,7 @@ semantics and response schemas remain in the existing project references:
 
 - [command catalog](../../../skills/ibkr/SKILL.md)
 - [response schemas](../../../skills/ibkr/schemas.md)
+- [Rulebook design and authority](../../../docs/design/trading-rulebook.md)
 
 Open those files when a command shape, flag, or field-level contract matters.
 

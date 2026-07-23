@@ -29,9 +29,10 @@ type RegimeThresholds struct {
 	HedgeBandMaxPct   float64 `toml:"hedge_band_max_pct" json:"hedge_band_max_pct"`
 }
 
-// RulebookPolicy carries the operator-tunable thresholds for the daily trading
-// rulebook. It owns rulebook verdict thresholds, not the source observations
-// that callers map into RuleInputs.
+// RulebookPolicy carries the compiled thresholds for the daily trading
+// rulebook. The TOML tags reserve the planned operator policy loader; no such
+// loader is shipped today. It owns rulebook verdict thresholds, not the source
+// observations that callers map into RuleInputs.
 type RulebookPolicy struct {
 	ID      string `toml:"id" json:"id"`
 	Version int    `toml:"version" json:"version"`

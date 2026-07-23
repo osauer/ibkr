@@ -198,9 +198,9 @@ Delivery health is a downstream result, not a producer in that universe.
 - **Regime** opens from producer-qualified stress states only. `data_quality`,
   stale or unavailable authority, overdue required evidence, and invalid
   `not_due` claims cannot open or recover an episode.
-- **Rulebook** uses the complete unfiltered rules snapshot. Watch and act rows
-  open episodes; only current account-and-positions-backed evidence may clear
-  them.
+- **[Rulebook](trading-rulebook.md)** uses the complete unfiltered rules
+  snapshot. Watch and act rows open episodes; only current
+  account-and-positions-backed evidence may clear them.
 - **Protection and order integrity** operate only inside their declared
   journal and complete open-order/portfolio coverage. Manual TWS orders and
   unmatched non-journaled API orders are detected as outside authority, not

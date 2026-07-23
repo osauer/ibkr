@@ -831,6 +831,18 @@ func TestBriefRulesDeltaAndReload(t *testing.T) {
 	if delta.Status != rpc.BriefStatusAttention || !strings.Contains(delta.Detail, "worsened to act") {
 		t.Fatalf("act transition must render attention: %+v", delta.BriefRowState)
 	}
+	observed, threshold := 15.5, 15.0
+	stable := &rpc.RulesResult{
+		PolicyFingerprint: &rpc.Fingerprint{Key: "sha256:old"},
+		Rules: []risk.RuleRow{
+			{ID: "kept", Status: risk.RuleStatusPass, Observed: &observed, Threshold: &threshold},
+			{ID: "removed", Status: risk.RuleStatusWatch},
+		},
+	}
+	if got := s.briefRulesDelta(stable); got.Status != rpc.BriefStatusOK || len(got.Transitions) != 0 ||
+		len(got.Added) != 0 || len(got.Removed) != 0 || got.RulebookFingerprintChanged {
+		t.Fatalf("typed evidence-only change must not be reported as a state delta: %+v", got)
+	}
 	if got := (&Server{briefState: &briefStateStore{path: filepath.Join(dir, "missing.json")}}).briefRulesDelta(current); got.Detail != "no delta baseline yet" {
 		t.Fatalf("no-baseline detail=%q", got.Detail)
 	}
