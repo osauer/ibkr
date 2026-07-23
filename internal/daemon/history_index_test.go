@@ -145,8 +145,15 @@ func TestHistoryIndexRegimeRoundTrip(t *testing.T) {
 	if e.SessionKey != nyTradingSessionKey(nyTime(now)) {
 		t.Fatalf("session key = %q, want writer's %q", e.SessionKey, nyTradingSessionKey(nyTime(now)))
 	}
-	if e.At.UnixMilli() != now.UnixMilli() {
-		t.Fatalf("at = %v, want journal write time %v", e.At, now)
+	// journalRegimeDecision stamps its own publication time, so `now` and the
+	// stored timestamp are two independent clock reads. Comparing them at
+	// millisecond granularity fails whenever they straddle a millisecond
+	// boundary (observed: now=…45.146981, stored=…45.147004 — 23µs apart, one
+	// millisecond apart after truncation). Assert what the round-trip actually
+	// owes us: a real write time at or shortly after the write, not a zero
+	// value, an epoch default, or some other field.
+	if delta := e.At.Sub(now); delta < 0 || delta > time.Minute {
+		t.Fatalf("at = %v, want a journal write time at or shortly after %v (delta %v)", e.At, now, delta)
 	}
 	if got.Index.IngestedBytes == 0 || got.Index.JournalBytes != got.Index.IngestedBytes {
 		t.Fatalf("index health = %+v, want fully ingested", got.Index)
