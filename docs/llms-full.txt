@@ -1,6 +1,6 @@
 # ibkr canary full context
 
-Updated: 2026-07-20 14:04 CEST
+Updated: 2026-07-23 12:30 CEST
 
 `ibkr canary` is a local platform for running an agentic trading desk on Interactive Brokers (IBKR), aimed at individual traders. It ships as a Go CLI, daemon, clean-room TWS protocol implementation, stdio MCP server, Claude Desktop MCP Bundle, Claude Code plugin, and Canary app. AI agents get the full market-data surface plus portfolio context; the risk side stays advisory and operator-controlled: a risk-regime dashboard, scheduled canary stress checks, a 14-rule discipline rulebook, an operator-authored risk policy, and daily broker-statement reconciliation.
 
