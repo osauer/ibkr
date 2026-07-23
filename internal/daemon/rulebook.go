@@ -715,7 +715,7 @@ func rulesEarningsSourceHealth(infos []rpc.EarningsInfo, now time.Time) (rpc.Sou
 	for _, info := range infos {
 		resolved := info.Status == rpc.EarningsStatusDate || info.Status == rpc.EarningsStatusTerminalNonReporting || info.Status == rpc.EarningsStatusNotApplicable
 		wshEntitlementOnly := earningsWSHNotEntitledOnly(info)
-		if info.Source == "unknown" || info.Stale || (!resolved && !(info.Status == rpc.EarningsStatusNoDatePublished && wshEntitlementOnly)) {
+		if info.Source == "unknown" || info.Stale || (!resolved && !((info.Status == rpc.EarningsStatusNoDatePublished || info.Status == rpc.EarningsStatusUnsupportedSecurity) && wshEntitlementOnly)) {
 			status = rpc.SourceStatusDegraded
 			degraded = true
 			notes = append(notes, info.Symbol+": "+nonEmptyString(info.Reason, nonEmptyString(info.Status, "not_observed")))
@@ -760,14 +760,14 @@ func rulesEarningsSourceHealth(infos []rpc.EarningsInfo, now time.Time) (rpc.Sou
 }
 
 func earningsWSHNotEntitledOnly(info rpc.EarningsInfo) bool {
-	if info.Status != rpc.EarningsStatusDate && info.Status != rpc.EarningsStatusNoDatePublished {
+	if info.Status != rpc.EarningsStatusDate && info.Status != rpc.EarningsStatusNoDatePublished && info.Status != rpc.EarningsStatusUnsupportedSecurity {
 		return false
 	}
 	seenNasdaq, seenWSH := false, false
 	for _, provider := range info.Providers {
 		switch provider.Provider {
 		case earningsNasdaqProvider:
-			if provider.Status != rpc.EarningsStatusDate && provider.Status != rpc.EarningsStatusNoDatePublished {
+			if provider.Status != rpc.EarningsStatusDate && provider.Status != rpc.EarningsStatusNoDatePublished && provider.Status != rpc.EarningsStatusUnsupportedSecurity {
 				return false
 			}
 			seenNasdaq = true
@@ -1128,7 +1128,7 @@ func (s *Server) assembleEarnings(ctx context.Context, names []risk.NameInput, p
 				}
 			} else {
 				earnings[sym] = risk.EarningsInput{Known: false, Source: "fetched", Reason: nonEmptyString(view.Reason, view.Status)}
-				if view.Status == rpc.EarningsStatusNoDatePublished {
+				if view.Status == rpc.EarningsStatusNoDatePublished || view.Status == rpc.EarningsStatusUnsupportedSecurity {
 					info.Source = "fetched"
 				}
 			}

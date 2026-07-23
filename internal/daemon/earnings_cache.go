@@ -1204,8 +1204,8 @@ func resolveEarningsProviders(providers map[string]earningsProviderState, now ti
 		}
 		return earningsResolution{Status: rpc.EarningsStatusDate, Reason: reason, Entry: &chosen, Stale: stale}
 	}
-	if earningsNasdaqNoDateWithWSHNotEntitled(providers) {
-		return earningsResolution{Status: rpc.EarningsStatusNoDatePublished, Reason: rpc.EarningsStatusNoDatePublished}
+	if status, ok := earningsNasdaqObservedWithWSHNotEntitled(providers); ok {
+		return earningsResolution{Status: status, Reason: status}
 	}
 
 	if statuses[rpc.EarningsStatusFormatChange] > 0 {
@@ -1227,17 +1227,25 @@ func resolveEarningsProviders(providers map[string]earningsProviderState, now ti
 }
 
 func earningsNasdaqNoDateWithWSHNotEntitled(providers map[string]earningsProviderState) bool {
+	status, ok := earningsNasdaqObservedWithWSHNotEntitled(providers)
+	return ok && status == rpc.EarningsStatusNoDatePublished
+}
+
+func earningsNasdaqObservedWithWSHNotEntitled(providers map[string]earningsProviderState) (string, bool) {
 	if len(providers) != 2 {
-		return false
+		return "", false
 	}
 	nasdaq, hasNasdaq := providers[earningsNasdaqProvider]
 	wsh, hasWSH := providers[earningsWSHProvider]
-	if !hasNasdaq || !hasWSH || nasdaq.LastAttempt.Status != rpc.EarningsStatusNoDatePublished || wsh.LastAttempt.Status != rpc.EarningsStatusTransportFailure {
-		return false
+	if !hasNasdaq || !hasWSH || (nasdaq.LastAttempt.Status != rpc.EarningsStatusNoDatePublished && nasdaq.LastAttempt.Status != rpc.EarningsStatusUnsupportedSecurity) || wsh.LastAttempt.Status != rpc.EarningsStatusTransportFailure {
+		return "", false
 	}
 	failure := wsh.LastAttempt.LastFailure
-	return failure != nil && failure.Code == rpc.SourceFailureNotEntitled && !failure.Retryable &&
-		(failure.Stage == rpc.SourceFailureStageWSHMetadata || failure.Stage == rpc.SourceFailureStageWSHEvent)
+	if failure == nil || failure.Code != rpc.SourceFailureNotEntitled || failure.Retryable ||
+		(failure.Stage != rpc.SourceFailureStageWSHMetadata && failure.Stage != rpc.SourceFailureStageWSHEvent) {
+		return "", false
+	}
+	return nasdaq.LastAttempt.Status, true
 }
 
 func resolveEarningsState(providers map[string]earningsProviderState, identity *earningsIdentityState, now time.Time) earningsResolution {

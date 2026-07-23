@@ -661,6 +661,18 @@ func TestNasdaqNoDateWithExactWSHNotEntitledRemainsUnknownButHealthy(t *testing.
 	if degraded || health.Status != rpc.SourceStatusOK || health.LastFailure == nil {
 		t.Fatalf("typed no-date entitlement health = %+v degraded=%v", health, degraded)
 	}
+	unsupported := make(map[string]earningsProviderState, len(base))
+	maps.Copy(unsupported, base)
+	nasdaq := unsupported[earningsNasdaqProvider]
+	nasdaq.LastAttempt.Status = rpc.EarningsStatusUnsupportedSecurity
+	unsupported[earningsNasdaqProvider] = nasdaq
+	if got := resolveEarningsProviders(unsupported, now); got.Status != rpc.EarningsStatusUnsupportedSecurity {
+		t.Fatalf("exact unsupported entitlement tuple = %s", got.Status)
+	}
+	info = rpc.EarningsInfo{Status: rpc.EarningsStatusUnsupportedSecurity, Source: "fetched", Providers: projectEarningsProviders(unsupported)}
+	if health, degraded := rulesEarningsSourceHealth([]rpc.EarningsInfo{info}, now); degraded || health.Status != rpc.SourceStatusOK {
+		t.Fatalf("typed unsupported entitlement health = %+v degraded=%v", health, degraded)
+	}
 	for _, mutate := range []func(map[string]earningsProviderState){
 		func(p map[string]earningsProviderState) {
 			p[earningsWSHProvider] = earningsProviderState{LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusTransportFailure, LastFailure: &rpc.SourceFailure{Code: rpc.SourceFailureNotEntitled, Stage: "other", Retryable: false}}}
