@@ -1030,6 +1030,46 @@ func TestEarningsNasdaqParserContractV2NoDateRefreshesAndPersistsV3Deadline(t *t
 	}
 }
 
+func TestDecodeEarningsV4UpgradesOnlyLegacyWSHNotEntitledAggregate(t *testing.T) {
+	now := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
+	next := now.Add(earningsFreshWindow)
+	providers := map[string]earningsProviderState{
+		earningsNasdaqProvider: {LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusNoDatePublished, AttemptedAt: now, CompletedAt: now, NextAttempt: &next, ParserContractVersion: earningsNasdaqParserContract}},
+		earningsWSHProvider:    {LastAttempt: earningsProviderAttempt{Status: rpc.EarningsStatusTransportFailure, AttemptedAt: now, CompletedAt: now, NextAttempt: &next, LastFailure: &rpc.SourceFailure{Code: rpc.SourceFailureNotEntitled, Stage: rpc.SourceFailureStageWSHMetadata, Retryable: false, FailedAt: now}}},
+	}
+	legacy := earningsSymbolState{Resolution: earningsResolution{Status: rpc.EarningsStatusTransportFailure, Reason: rpc.EarningsStatusTransportFailure}, Providers: providers, UpdatedAt: now}
+	decode := func(state earningsSymbolState) (map[string]earningsSymbolState, error) {
+		raw, err := json.Marshal(earningsPersistEnvelope{Version: earningsPersistVersion, Symbols: map[string]earningsSymbolState{"SYNTH1": state}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return decodeEarningsEnvelopeV4(raw, now)
+	}
+	loaded, err := decode(legacy)
+	if err != nil || loaded["SYNTH1"].Resolution.Status != rpc.EarningsStatusNoDatePublished ||
+		loaded["SYNTH1"].Providers[earningsWSHProvider].LastAttempt.NextAttempt == nil || !loaded["SYNTH1"].Providers[earningsWSHProvider].LastAttempt.NextAttempt.Equal(next) {
+		t.Fatalf("legacy tuple upgrade failed: loaded=%+v err=%v", loaded, err)
+	}
+	for _, mutate := range []func(*rpc.SourceFailure){
+		func(f *rpc.SourceFailure) { f.Stage = "other" },
+		func(f *rpc.SourceFailure) { f.Retryable = true },
+		func(f *rpc.SourceFailure) { f.Code = rpc.SourceFailureInvalidPayload },
+	} {
+		state := legacy
+		state.Providers = map[string]earningsProviderState{}
+		maps.Copy(state.Providers, providers)
+		failure := *state.Providers[earningsWSHProvider].LastAttempt.LastFailure
+		mutate(&failure)
+		wsh := state.Providers[earningsWSHProvider]
+		wsh.LastAttempt.LastFailure = &failure
+		state.Providers[earningsWSHProvider] = wsh
+		state.Resolution = earningsResolution{Status: rpc.EarningsStatusNoDatePublished, Reason: rpc.EarningsStatusNoDatePublished}
+		if _, err := decode(state); err == nil {
+			t.Fatal("non-exact legacy tuple was accepted")
+		}
+	}
+}
+
 func TestEarningsLegacyParserRefreshCommitFailureIsMemoryThrottled(t *testing.T) {
 	base := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	now := base.Add(time.Hour)

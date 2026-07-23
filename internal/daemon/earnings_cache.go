@@ -1793,7 +1793,11 @@ func validateEarningsSymbols(symbols map[string]earningsSymbolState, now time.Ti
 		}
 		recomputed := resolveEarningsState(state.Providers, state.Identity, state.UpdatedAt)
 		if !sameEarningsResolution(state.Resolution, recomputed) {
-			return errors.New("inconsistent earnings resolution")
+			if !legacyWSHNotEntitledAggregate(state.Resolution, state.Providers, recomputed) {
+				return errors.New("inconsistent earnings resolution")
+			}
+			state.Resolution = recomputed
+			symbols[symbol] = state
 		}
 		if state.Resolution.Status == rpc.EarningsStatusDate {
 			if state.Resolution.Entry == nil || validateEarningsRowShape(symbol, *state.Resolution.Entry) != nil {
@@ -1823,6 +1827,12 @@ func validateEarningsSymbols(symbols map[string]earningsSymbolState, now time.Ti
 		}
 	}
 	return nil
+}
+
+func legacyWSHNotEntitledAggregate(stored earningsResolution, providers map[string]earningsProviderState, recomputed earningsResolution) bool {
+	return stored.Status == rpc.EarningsStatusTransportFailure && stored.Reason == rpc.EarningsStatusTransportFailure &&
+		stored.Entry == nil && !stored.Stale && recomputed.Status == rpc.EarningsStatusNoDatePublished &&
+		earningsNasdaqNoDateWithWSHNotEntitled(providers)
 }
 
 func validAggregateEarningsStatus(status string) bool {
