@@ -510,6 +510,7 @@ type Server struct {
 	orderPreviewQuote            func(context.Context, rpc.ContractParams, time.Duration) (rpc.OrderQuoteSnapshot, error)
 	orderPreviewPositionImpact   func(context.Context, rpc.ContractParams, string, int) (rpc.OrderPositionImpact, error)
 	orderRiskAuthorityForTest    func(context.Context, rpc.TradingStatus, rpc.ContractParams, string, int) (orderPositionAuthority, error)
+	orderFXRateForTest           func(context.Context, string, string, time.Duration) (float64, time.Time, error)
 	orderContractResolverForTest func(context.Context, rpc.ContractParams, time.Duration) (rpc.ContractParams, error)
 	orderPreviewWhatIf           func(context.Context, rpc.OrderDraft) (rpc.OrderWhatIfResult, error)
 	purgeRefreshPositions        func() ([]*ibkrlib.RawPosition, error)

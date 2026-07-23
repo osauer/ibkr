@@ -46,8 +46,11 @@ func TestRenderOrderPreviewShowsTokenAndSubmitEligibility(t *testing.T) {
 			DataType:     rpc.MarketDataLive,
 			QuoteQuality: "firm",
 		},
-		Position: rpc.OrderPositionImpact{Before: 0, After: 10, Effect: rpc.OrderPositionEffectOpen},
-		Notional: 1001.20,
+		Position:         rpc.OrderPositionImpact{Before: 0, After: 10, Effect: rpc.OrderPositionEffectOpen},
+		Notional:         1001.20,
+		NotionalCurrency: "USD",
+		NotionalBase:     921.10,
+		BaseCurrency:     "EUR",
 		WhatIf: rpc.OrderWhatIfResult{
 			Status:            rpc.OrderWhatIfStatusUnavailable,
 			RequiredForSubmit: true,
@@ -60,6 +63,8 @@ func TestRenderOrderPreviewShowsTokenAndSubmitEligibility(t *testing.T) {
 		"Submit eligible false",
 		"WhatIf         unavailable (required=true)",
 		"Token ID       tok_123",
+		"Notional       1001.20 USD",
+		"Notional (base) 921.10 EUR",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("order preview missing %q:\n%s", want, got)

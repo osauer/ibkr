@@ -34,7 +34,7 @@ type brokerWriteTransactionBinding struct {
 	riskPortfolioAccount       string
 	riskBaseCurrency           string
 	riskBaseCurrencyProvenance ibkrlib.AccountBaseCurrencyProvenance
-	riskNotional               float64
+	riskNotional               orderNotionalAuthority
 	testOnly                   bool
 }
 

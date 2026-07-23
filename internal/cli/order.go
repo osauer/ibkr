@@ -306,7 +306,14 @@ func renderOrderPreviewText(env *Env, res *rpc.OrderPreviewResult) {
 	statusRow(env, out, "Endpoint", fmt.Sprintf("%s client %d", res.Endpoint, res.ClientID))
 	statusRow(env, out, "Draft", formatOrderDraftSummary(res.Draft))
 	statusRow(env, out, "Strategy", res.Draft.Strategy)
-	statusRow(env, out, "Notional", fmt.Sprintf("%.2f", res.Notional))
+	notional := fmt.Sprintf("%.2f", res.Notional)
+	if res.NotionalCurrency != "" {
+		notional += " " + res.NotionalCurrency
+	}
+	statusRow(env, out, "Notional", notional)
+	if res.BaseCurrency != "" {
+		statusRow(env, out, "Notional (base)", fmt.Sprintf("%.2f %s", res.NotionalBase, res.BaseCurrency))
+	}
 	statusRow(env, out, "Position", fmt.Sprintf("%.4g -> %.4g (%s)", res.Position.Before, res.Position.After, res.Position.Effect))
 	statusRow(env, out, "Quote", formatOrderPreviewQuote(res.Quote))
 	statusRow(env, out, "WhatIf", fmt.Sprintf("%s (required=%v)", res.WhatIf.Status, res.WhatIf.RequiredForSubmit))

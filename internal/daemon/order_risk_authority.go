@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -19,6 +20,28 @@ type orderPositionAuthority struct {
 	BaseCurrency           string
 	BaseCurrencyProvenance ibkrlib.AccountBaseCurrencyProvenance
 	TestOnly               bool
+}
+
+const (
+	orderFXSourceIdentity          = "currency_identity"
+	orderFXSourceExactSessionQuote = "ibkr.tws.exact_fx_quote"
+	orderFXQuoteBudget             = 3 * time.Second
+)
+
+// orderNotionalAuthority is the typed measurement used by the account-base
+// max_notional gate. QuoteNotional remains in the contract currency for user
+// disclosure; BaseNotional is the value actually compared with the configured
+// account-currency cap. Cross-currency evidence must come from an exact-session
+// TWS CASH/IDEALPRO quote, never a streaming ledger inference or stale FX cache.
+type orderNotionalAuthority struct {
+	QuoteNotional    float64   `json:"quote_notional"`
+	ContractCurrency string    `json:"contract_currency"`
+	BaseNotional     float64   `json:"base_notional"`
+	BaseCurrency     string    `json:"base_currency"`
+	BasePerContract  float64   `json:"base_per_contract"`
+	EvidenceAt       time.Time `json:"evidence_at"`
+	DataType         string    `json:"data_type"`
+	Source           string    `json:"source"`
 }
 
 // orderPreviewBrokerAuthority binds every production preview read to one
@@ -322,18 +345,133 @@ func riskSecTypeConsistent(want, got string) bool {
 	return (want == "ETF" && got == "STK") || (want == "STK" && got == "ETF")
 }
 
-func validateOrderRiskAuthority(cfg config.Trading, draft rpc.OrderDraft, position rpc.OrderPositionImpact, notional float64, baseCurrency string) error {
+func (s *Server) captureOrderNotionalAuthority(ctx context.Context, authority *orderPreviewBrokerAuthority, quoteNotional float64, contractCurrency, baseCurrency string, timeout time.Duration) (orderNotionalAuthority, error) {
+	contractCurrency = strings.ToUpper(strings.TrimSpace(contractCurrency))
+	baseCurrency = strings.ToUpper(strings.TrimSpace(baseCurrency))
+	if !positiveFinite(quoteNotional) || contractCurrency == "" || baseCurrency == "" {
+		return orderNotionalAuthority{}, fmt.Errorf("%w: complete order notional currency evidence is unavailable", ErrTradingDisabled)
+	}
+	now := s.orderNow()
+	if contractCurrency == baseCurrency {
+		return orderNotionalAuthority{
+			QuoteNotional: quoteNotional, ContractCurrency: contractCurrency,
+			BaseNotional: quoteNotional, BaseCurrency: baseCurrency, BasePerContract: 1,
+			EvidenceAt: now, Source: orderFXSourceIdentity,
+		}, nil
+	}
+
+	budget := min(timeout, orderFXQuoteBudget)
+	if budget <= 0 {
+		budget = orderFXQuoteBudget
+	}
+	if s.orderFXRateForTest != nil {
+		rate, at, err := s.orderFXRateForTest(ctx, baseCurrency, contractCurrency, budget)
+		if err != nil {
+			return orderNotionalAuthority{}, fmt.Errorf("%w: current typed FX evidence unavailable: %v", ErrTradingDisabled, err)
+		}
+		return newCrossCurrencyOrderNotionalAuthority(quoteNotional, contractCurrency, baseCurrency, rate, at, rpc.MarketDataLive)
+	}
+	if authority == nil || authority.connector == nil || !s.orderPreviewBrokerAuthorityCurrent(authority) {
+		return orderNotionalAuthority{}, fmt.Errorf("%w: current typed FX evidence unavailable for %s/%s", ErrTradingDisabled, baseCurrency, contractCurrency)
+	}
+
+	resolveCtx, cancelResolve := context.WithTimeout(ctx, budget)
+	defer cancelResolve()
+	resolved, err := authority.connector.ResolveOrderContractForSession(resolveCtx, authority.session, ibkrlib.Contract{
+		Symbol: contractCurrency, SecType: "CASH", Exchange: "IDEALPRO",
+		PrimaryExch: "IDEALPRO", Currency: baseCurrency,
+	}, budget)
+	if err != nil {
+		return orderNotionalAuthority{}, fmt.Errorf("%w: exact-session FX contract resolution failed for %s/%s: %v", ErrTradingDisabled, baseCurrency, contractCurrency, err)
+	}
+	fxContract := rpc.ContractParams{
+		ConID: resolved.Contract.ConID, Symbol: resolved.Contract.Symbol, SecType: resolved.Contract.SecType,
+		Exchange: resolved.Contract.Exchange, PrimaryExch: resolved.Contract.PrimaryExch, Currency: resolved.Contract.Currency,
+		LocalSymbol: resolved.Contract.LocalSymbol, TradingClass: resolved.Contract.TradingClass, MinTick: resolved.MinTick,
+	}
+	quote, err := s.previewExactSessionQuote(ctx, authority, fxContract, budget)
+	if err != nil {
+		return orderNotionalAuthority{}, fmt.Errorf("%w: current exact-session FX quote unavailable for %s/%s: %v", ErrTradingDisabled, baseCurrency, contractCurrency, err)
+	}
+	rate := conservativeOrderFXRate(quote)
+	result, err := newCrossCurrencyOrderNotionalAuthority(quoteNotional, contractCurrency, baseCurrency, rate, quote.AsOf, quote.DataType)
+	if err != nil {
+		return orderNotionalAuthority{}, err
+	}
+	if !s.orderPreviewBrokerAuthorityCurrent(authority) {
+		return orderNotionalAuthority{}, brokerWriteTransactionDriftError()
+	}
+	return result, nil
+}
+
+func newCrossCurrencyOrderNotionalAuthority(quoteNotional float64, contractCurrency, baseCurrency string, rate float64, at time.Time, dataType string) (orderNotionalAuthority, error) {
+	if !positiveFinite(rate) || at.IsZero() || !validOrderFXDataType(dataType) {
+		return orderNotionalAuthority{}, fmt.Errorf("%w: current typed FX evidence unavailable for %s/%s", ErrTradingDisabled, baseCurrency, contractCurrency)
+	}
+	return orderNotionalAuthority{
+		QuoteNotional: quoteNotional, ContractCurrency: contractCurrency,
+		BaseNotional: quoteNotional * rate, BaseCurrency: baseCurrency, BasePerContract: rate,
+		EvidenceAt: at.UTC(), DataType: dataType, Source: orderFXSourceExactSessionQuote,
+	}, nil
+}
+
+func validOrderFXDataType(dataType string) bool {
+	switch dataType {
+	case rpc.MarketDataLive, rpc.MarketDataFrozen, rpc.MarketDataDelayed, rpc.MarketDataDelayedFrozen:
+		return true
+	default:
+		return false
+	}
+}
+
+// conservativeOrderFXRate chooses the ask for a direct
+// ContractCurrency/BaseCurrency quote when available. That is the
+// conservative conversion for an absolute order cap; midpoint/last cannot
+// understate the amount when a positive ask is present.
+func conservativeOrderFXRate(quote rpc.OrderQuoteSnapshot) float64 {
+	switch {
+	case quote.Ask != nil && positiveFinite(*quote.Ask):
+		return *quote.Ask
+	case quote.Last != nil && positiveFinite(*quote.Last):
+		return *quote.Last
+	case quote.Mark != nil && positiveFinite(*quote.Mark):
+		return *quote.Mark
+	case quote.Midpoint != nil && positiveFinite(*quote.Midpoint):
+		return *quote.Midpoint
+	case quote.Bid != nil && positiveFinite(*quote.Bid):
+		return *quote.Bid
+	default:
+		return 0
+	}
+}
+
+func validateOrderRiskAuthority(cfg config.Trading, draft rpc.OrderDraft, position rpc.OrderPositionImpact, notional orderNotionalAuthority, baseCurrency string) error {
 	cfg = cfg.WithDefaults()
 	contractCurrency := strings.ToUpper(strings.TrimSpace(draft.Contract.Currency))
 	baseCurrency = strings.ToUpper(strings.TrimSpace(baseCurrency))
-	if contractCurrency == "" || baseCurrency == "" || contractCurrency != baseCurrency {
+	if contractCurrency == "" || baseCurrency == "" ||
+		!strings.EqualFold(contractCurrency, notional.ContractCurrency) ||
+		!strings.EqualFold(baseCurrency, notional.BaseCurrency) ||
+		!positiveFinite(notional.QuoteNotional) || !positiveFinite(notional.BaseNotional) ||
+		!positiveFinite(notional.BasePerContract) || notional.EvidenceAt.IsZero() {
 		return fmt.Errorf("risk-increasing order currency %q cannot be compared with account-base max_notional currency %q without current typed FX evidence", contractCurrency, baseCurrency)
+	}
+	if contractCurrency == baseCurrency {
+		if notional.Source != orderFXSourceIdentity || math.Abs(notional.BasePerContract-1) > 1e-12 || notional.DataType != "" {
+			return fmt.Errorf("same-currency order notional lacks identity FX evidence")
+		}
+	} else if notional.Source != orderFXSourceExactSessionQuote || !validOrderFXDataType(notional.DataType) {
+		return fmt.Errorf("cross-currency order notional lacks exact-session FX evidence")
+	}
+	wantBase := notional.QuoteNotional * notional.BasePerContract
+	if math.Abs(wantBase-notional.BaseNotional) > max(1e-8, math.Abs(wantBase)*1e-9) {
+		return fmt.Errorf("order base notional does not match typed FX evidence")
 	}
 	if strings.EqualFold(draft.Contract.SecType, "OPT") && draft.Quantity > cfg.MaxOptionContracts {
 		return fmt.Errorf("option quantity %d exceeds [trading].max_option_contracts %d", draft.Quantity, cfg.MaxOptionContracts)
 	}
-	if notional > cfg.MaxNotional {
-		return fmt.Errorf("order notional %.2f %s exceeds [trading].max_notional %.2f %s", notional, baseCurrency, cfg.MaxNotional, baseCurrency)
+	if notional.BaseNotional > cfg.MaxNotional {
+		return fmt.Errorf("order notional %.2f %s exceeds [trading].max_notional %.2f %s", notional.BaseNotional, baseCurrency, cfg.MaxNotional, baseCurrency)
 	}
 	riskEffect := position.Effect
 	if strings.EqualFold(draft.Action, rpc.OrderActionSell) && isRiskReducing(riskEffect) {
@@ -408,8 +546,8 @@ func (s *Server) bindPreviewOrderRiskAuthority(ctx context.Context, binding *bro
 	expectedBase := payload.BaseCurrency
 	expectedBaseProvenance := payload.BaseCurrencyProvenance
 	expectedImpact := payload.Position
-	// Focused test fixtures that mint payloads directly predate the v3
-	// authority fields. Production v3 tokens are minted only by previewOrder
+	// Focused test fixtures that mint payloads directly predate the v4
+	// authority fields. Production v4 tokens are minted only by previewOrder
 	// and always carry all three; this compatibility branch is reachable only
 	// through an explicit in-process position seam.
 	if current.TestOnly && expectedGeneration == 0 && expectedAccount == "" && expectedBase == "" {
@@ -426,7 +564,28 @@ func (s *Server) bindPreviewOrderRiskAuthority(ctx context.Context, binding *bro
 		current.BaseCurrencyProvenance != expectedBaseProvenance {
 		return fmt.Errorf("%w: portfolio risk authority changed after preview; preview again", ErrTradingDisabled)
 	}
-	if err := validateOrderRiskAuthority(cfg, draft, current.Impact, payload.Notional, current.BaseCurrency); err != nil {
+	signedNotional := payload.NotionalAuthority
+	if current.TestOnly && signedNotional.QuoteNotional == 0 {
+		signedNotional = orderNotionalAuthority{
+			QuoteNotional: payload.Notional, ContractCurrency: draft.Contract.Currency,
+			BaseNotional: payload.Notional, BaseCurrency: current.BaseCurrency, BasePerContract: 1,
+			EvidenceAt: s.orderNow(), Source: orderFXSourceIdentity,
+		}
+	}
+	if err := validateOrderRiskAuthority(cfg, draft, current.Impact, signedNotional, current.BaseCurrency); err != nil {
+		return fmt.Errorf("%w: signed preview risk authority is invalid: %v", ErrTradingDisabled, err)
+	}
+	var fxAuthority *orderPreviewBrokerAuthority
+	if !binding.testOnly {
+		fxAuthority = &orderPreviewBrokerAuthority{
+			connector: binding.connector, connectorEpoch: binding.connectorEpoch, session: binding.session,
+		}
+	}
+	currentNotional, err := s.captureOrderNotionalAuthority(ctx, fxAuthority, signedNotional.QuoteNotional, draft.Contract.Currency, current.BaseCurrency, orderFXQuoteBudget)
+	if err != nil {
+		return err
+	}
+	if err := validateOrderRiskAuthority(cfg, draft, current.Impact, currentNotional, current.BaseCurrency); err != nil {
 		return fmt.Errorf("%w: current trading controls reject the order: %v", ErrTradingDisabled, err)
 	}
 	binding.riskBound = true
@@ -436,6 +595,6 @@ func (s *Server) bindPreviewOrderRiskAuthority(ctx context.Context, binding *bro
 	binding.riskPortfolioAccount = current.Health.Account
 	binding.riskBaseCurrency = current.BaseCurrency
 	binding.riskBaseCurrencyProvenance = current.BaseCurrencyProvenance
-	binding.riskNotional = payload.Notional
+	binding.riskNotional = currentNotional
 	return nil
 }

@@ -1209,6 +1209,82 @@ func TestBindPreviewOrderRiskAuthorityRejectsBaseCurrencyDriftAtRedemption(t *te
 	}
 }
 
+func TestOrderPreviewConvertsCrossCurrencyNotionalToAccountBase(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 95})
+	srv.orderPreviewQuote = fixedPreviewQuote(99, 101)
+	impact := rpc.OrderPositionImpact{Before: 0, After: 1, Effect: rpc.OrderPositionEffectOpen}
+	srv.orderRiskAuthorityForTest = func(context.Context, rpc.TradingStatus, rpc.ContractParams, string, int) (orderPositionAuthority, error) {
+		return orderPositionAuthority{
+			Impact: impact, Generation: 7, TestOnly: true,
+			Health:                 ibkrlib.PortfolioStreamHealth{Account: "DU1234567", ProjectionGeneration: 7},
+			BaseCurrency:           "EUR",
+			BaseCurrencyProvenance: ibkrlib.AccountBaseCurrencyValueSuffix,
+		}, nil
+	}
+	srv.orderFXRateForTest = func(context.Context, string, string, time.Duration) (float64, time.Time, error) {
+		return 0.90, srv.orderNow(), nil
+	}
+	limit := 100.0
+	res, err := srv.previewOrder(context.Background(), rpc.OrderPreviewParams{
+		Action: "buy", Contract: rpc.ContractParams{Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+		Quantity: 1, LimitPrice: &limit,
+	})
+	if err != nil {
+		t.Fatalf("cross-currency preview: %v", err)
+	}
+	if res.Notional != 100 || res.NotionalCurrency != "USD" || res.NotionalBase != 90 || res.BaseCurrency != "EUR" || res.FXRate != 0.90 {
+		t.Fatalf("cross-currency notional result = %+v", res)
+	}
+	payload, err := srv.orderTokens.verify(res.PreviewToken)
+	if err != nil {
+		t.Fatalf("verify cross-currency token: %v", err)
+	}
+	if payload.NotionalAuthority.BaseNotional != 90 ||
+		payload.NotionalAuthority.Source != orderFXSourceExactSessionQuote ||
+		payload.NotionalAuthority.BaseCurrency != "EUR" {
+		t.Fatalf("signed FX authority = %+v", payload.NotionalAuthority)
+	}
+}
+
+func TestBindPreviewOrderRiskAuthorityRefreshesFXAtRedemption(t *testing.T) {
+	t.Parallel()
+	srv := newOrderPreviewTestServer(t, config.Trading{Mode: config.TradingModePaper, MaxNotional: 92})
+	impact := rpc.OrderPositionImpact{Before: 0, After: 1, Effect: rpc.OrderPositionEffectOpen}
+	srv.orderRiskAuthorityForTest = func(context.Context, rpc.TradingStatus, rpc.ContractParams, string, int) (orderPositionAuthority, error) {
+		return orderPositionAuthority{
+			Impact: impact, Generation: 7, TestOnly: true,
+			Health:                 ibkrlib.PortfolioStreamHealth{Account: "DU1234567", ProjectionGeneration: 7},
+			BaseCurrency:           "EUR",
+			BaseCurrencyProvenance: ibkrlib.AccountBaseCurrencyValueSuffix,
+		}, nil
+	}
+	srv.orderFXRateForTest = func(context.Context, string, string, time.Duration) (float64, time.Time, error) {
+		return 0.95, srv.orderNow(), nil
+	}
+	draft := rpc.OrderDraft{
+		Action: rpc.OrderActionBuy, Quantity: 1,
+		Contract: rpc.ContractParams{ConID: 1, Symbol: "AAPL", SecType: "STK", Currency: "USD"},
+	}
+	payload := orderPreviewTokenPayload{
+		Position: impact, PortfolioGeneration: 7, PortfolioAccount: "DU1234567",
+		BaseCurrency: "EUR", BaseCurrencyProvenance: ibkrlib.AccountBaseCurrencyValueSuffix,
+		Notional: 100,
+		NotionalAuthority: orderNotionalAuthority{
+			QuoteNotional: 100, ContractCurrency: "USD", BaseNotional: 90, BaseCurrency: "EUR",
+			BasePerContract: 0.90, EvidenceAt: srv.orderNow(), DataType: rpc.MarketDataLive, Source: orderFXSourceExactSessionQuote,
+		},
+	}
+	binding := brokerWriteTransactionBinding{testOnly: true}
+	err := srv.bindPreviewOrderRiskAuthority(context.Background(), &binding, rpc.TradingStatus{Account: "DU1234567", Mode: rpc.AccountModePaper}, payload, draft)
+	if !errors.Is(err, ErrTradingDisabled) || !strings.Contains(err.Error(), "max_notional") {
+		t.Fatalf("FX-refreshed redemption err = %v, want current base-cap rejection", err)
+	}
+	if binding.riskBound {
+		t.Fatal("FX-refreshed cap rejection unexpectedly produced a risk binding")
+	}
+}
+
 func TestCaptureWireOrderPositionAuthorityUsesRedeemedSessionBaseCurrency(t *testing.T) {
 	t.Parallel()
 	srv := &Server{}

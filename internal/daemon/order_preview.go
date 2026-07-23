@@ -23,8 +23,8 @@ import (
 )
 
 const (
-	orderPreviewTokenVersion = 3
-	orderPreviewTokenPrefix  = "ibkrp3"
+	orderPreviewTokenVersion = 4
+	orderPreviewTokenPrefix  = "ibkrp4"
 	orderPreviewTokenTTL     = 10 * time.Minute
 	orderPreviewKeyBytes     = 32
 	orderPreviewDefaultWait  = 5 * time.Second
@@ -53,6 +53,7 @@ type orderPreviewTokenPayload struct {
 	BaseCurrencyProvenance   ibkrlib.AccountBaseCurrencyProvenance `json:"base_currency_provenance"`
 	TradingControlGeneration uint64                                `json:"trading_control_generation"`
 	Notional                 float64                               `json:"notional"`
+	NotionalAuthority        orderNotionalAuthority                `json:"notional_authority"`
 	WhatIf                   rpc.OrderWhatIfResult                 `json:"what_if"`
 	WhatIfStatus             string                                `json:"what_if_status,omitempty"`
 	Replace                  orderPreviewReplaceTarget             `json:"replace"`
@@ -435,7 +436,11 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 			return nil, err
 		}
 	}
-	if err := validateOrderRiskAuthority(cfg, draft, position, notional, positionAuthority.BaseCurrency); err != nil {
+	notionalAuthority, err := s.captureOrderNotionalAuthority(ctx, previewAuthority, notional, contract.Currency, positionAuthority.BaseCurrency, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateOrderRiskAuthority(cfg, draft, position, notionalAuthority, positionAuthority.BaseCurrency); err != nil {
 		return nil, errBadRequest(err.Error())
 	}
 	var whatIf rpc.OrderWhatIfResult
@@ -469,6 +474,7 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		BaseCurrencyProvenance:   positionAuthority.BaseCurrencyProvenance,
 		TradingControlGeneration: tradingControlGeneration,
 		Notional:                 notional,
+		NotionalAuthority:        notionalAuthority,
 		WhatIf:                   whatIf,
 		WhatIfStatus:             whatIf.Status,
 		Replace:                  replaceTargetFromView(replaceView),
@@ -543,6 +549,13 @@ func (s *Server) previewOrder(ctx context.Context, p rpc.OrderPreviewParams) (*r
 		Quote:                 quote,
 		Position:              position,
 		Notional:              notional,
+		NotionalCurrency:      notionalAuthority.ContractCurrency,
+		NotionalBase:          notionalAuthority.BaseNotional,
+		BaseCurrency:          notionalAuthority.BaseCurrency,
+		FXRate:                notionalAuthority.BasePerContract,
+		FXEvidenceAt:          notionalAuthority.EvidenceAt,
+		FXDataType:            notionalAuthority.DataType,
+		FXSource:              notionalAuthority.Source,
 		MaxNotional:           maxNotional,
 		WhatIf:                whatIf,
 		Warnings:              warnings,

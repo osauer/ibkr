@@ -3276,19 +3276,29 @@ type OrderPreviewResult struct {
 	// Executable is retained for older clients and is equivalent to
 	// SubmitEligible. A minted preview token is not executable unless an
 	// accepted broker WhatIf result is bound into the token.
-	Executable  bool                `json:"executable"`
-	Mode        string              `json:"mode"`
-	Account     string              `json:"account"`
-	Endpoint    string              `json:"endpoint"`
-	ClientID    int                 `json:"client_id"`
-	Draft       OrderDraft          `json:"draft"`
-	Quote       OrderQuoteSnapshot  `json:"quote"`
-	Position    OrderPositionImpact `json:"position"`
-	Notional    float64             `json:"notional"`
-	MaxNotional float64             `json:"max_notional,omitempty"`
-	WhatIf      OrderWhatIfResult   `json:"what_if"`
-	Warnings    []DataWarning       `json:"warnings,omitempty"`
-	AsOf        time.Time           `json:"as_of"`
+	Executable bool                `json:"executable"`
+	Mode       string              `json:"mode"`
+	Account    string              `json:"account"`
+	Endpoint   string              `json:"endpoint"`
+	ClientID   int                 `json:"client_id"`
+	Draft      OrderDraft          `json:"draft"`
+	Quote      OrderQuoteSnapshot  `json:"quote"`
+	Position   OrderPositionImpact `json:"position"`
+	Notional   float64             `json:"notional"`
+	// Notional is expressed in NotionalCurrency. NotionalBase is the same
+	// amount converted through current typed FX evidence for comparison with
+	// MaxNotional, which is always denominated in BaseCurrency.
+	NotionalCurrency string            `json:"notional_currency,omitempty"`
+	NotionalBase     float64           `json:"notional_base,omitempty"`
+	BaseCurrency     string            `json:"base_currency,omitempty"`
+	FXRate           float64           `json:"fx_rate,omitempty"` // BaseCurrency per NotionalCurrency.
+	FXEvidenceAt     time.Time         `json:"fx_evidence_at,omitzero"`
+	FXDataType       string            `json:"fx_data_type,omitempty"`
+	FXSource         string            `json:"fx_source,omitempty"`
+	MaxNotional      float64           `json:"max_notional,omitempty"`
+	WhatIf           OrderWhatIfResult `json:"what_if"`
+	Warnings         []DataWarning     `json:"warnings,omitempty"`
+	AsOf             time.Time         `json:"as_of"`
 }
 
 // OrderPlaceParams redeems a submit-eligible preview token for a broker
