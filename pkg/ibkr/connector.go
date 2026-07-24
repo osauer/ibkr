@@ -3110,16 +3110,17 @@ func (c *Connector) SubscribeMarketDataWithContract(ctx context.Context, contrac
 }
 
 // SubscribeMarketDataWithContractForSession creates a short-lived,
-// non-sharing subscription for one exact positive-ConID contract on binding's
-// physical socket. The unique key prevents a symbol/route cache entry from a
-// different contract or socket satisfying a broker-write preview.
+// non-sharing subscription for one exact positive-ConID contract, or one
+// explicit CASH/IDEALPRO currency pair, on binding's physical socket. The
+// unique key prevents a symbol/route cache entry from a different contract or
+// socket satisfying broker-write evidence.
 func (c *Connector) SubscribeMarketDataWithContractForSession(ctx context.Context, binding ConnectorSessionBinding, contract Contract, fields []string) (string, error) {
 	if c == nil || !c.SessionCurrent(binding) {
 		return "", fmt.Errorf("broker session changed before exact quote request")
 	}
 	contract = normalizeMarketDataContract(contract)
-	if contract.ConID <= 0 {
-		return "", fmt.Errorf("exact quote contract requires positive ConID")
+	if contract.ConID <= 0 && !isExplicitSessionFXContract(contract) {
+		return "", fmt.Errorf("exact quote contract requires positive ConID or explicit CASH/IDEALPRO pair")
 	}
 	baseKey := MarketDataKeyForContract(contract)
 	if baseKey == "" {
@@ -3158,6 +3159,15 @@ func (c *Connector) SubscribeMarketDataWithContractForSession(ctx context.Contex
 		return "", fmt.Errorf("broker session changed during exact quote request")
 	}
 	return key, nil
+}
+
+func isExplicitSessionFXContract(contract Contract) bool {
+	return contract.ConID == 0 &&
+		strings.EqualFold(strings.TrimSpace(contract.SecType), "CASH") &&
+		strings.EqualFold(strings.TrimSpace(contract.Exchange), "IDEALPRO") &&
+		strings.TrimSpace(contract.Symbol) != "" &&
+		strings.TrimSpace(contract.Currency) != "" &&
+		!strings.EqualFold(strings.TrimSpace(contract.Symbol), strings.TrimSpace(contract.Currency))
 }
 
 // UnsubscribeMarketDataForSession removes only the exact subscription created

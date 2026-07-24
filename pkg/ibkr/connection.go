@@ -5190,8 +5190,8 @@ func (c *Connection) requestMarketDataWithContractForEpoch(ctx context.Context, 
 	if err := c.requireServerVersion("RequestMarketData"); err != nil {
 		return 0, err
 	}
-	if contract.ConID <= 0 {
-		return 0, fmt.Errorf("exact market-data contract requires positive ConID")
+	if contract.ConID <= 0 && !isExplicitSessionFXContract(contract) {
+		return 0, fmt.Errorf("exact market-data contract requires positive ConID or explicit CASH/IDEALPRO pair")
 	}
 	if contract.Symbol == "" {
 		return 0, fmt.Errorf("contract symbol is required for market data")

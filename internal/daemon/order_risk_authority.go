@@ -375,21 +375,11 @@ func (s *Server) captureOrderNotionalAuthority(ctx context.Context, authority *o
 		return orderNotionalAuthority{}, fmt.Errorf("%w: current typed FX evidence unavailable for %s/%s", ErrTradingDisabled, baseCurrency, contractCurrency)
 	}
 
-	resolveCtx, cancelResolve := context.WithTimeout(ctx, budget)
-	defer cancelResolve()
-	resolved, err := authority.connector.ResolveOrderContractForSession(resolveCtx, authority.session, ibkrlib.Contract{
+	fxContract := rpc.ContractParams{
 		Symbol: contractCurrency, SecType: "CASH", Exchange: "IDEALPRO",
 		PrimaryExch: "IDEALPRO", Currency: baseCurrency,
-	}, budget)
-	if err != nil {
-		return orderNotionalAuthority{}, fmt.Errorf("%w: exact-session FX contract resolution failed for %s/%s: %v", ErrTradingDisabled, baseCurrency, contractCurrency, err)
 	}
-	fxContract := rpc.ContractParams{
-		ConID: resolved.Contract.ConID, Symbol: resolved.Contract.Symbol, SecType: resolved.Contract.SecType,
-		Exchange: resolved.Contract.Exchange, PrimaryExch: resolved.Contract.PrimaryExch, Currency: resolved.Contract.Currency,
-		LocalSymbol: resolved.Contract.LocalSymbol, TradingClass: resolved.Contract.TradingClass, MinTick: resolved.MinTick,
-	}
-	quote, err := s.previewExactSessionQuote(ctx, authority, fxContract, budget)
+	quote, err := s.previewExactSessionFXQuote(ctx, authority, fxContract, budget)
 	if err != nil {
 		return orderNotionalAuthority{}, fmt.Errorf("%w: current exact-session FX quote unavailable for %s/%s: %v", ErrTradingDisabled, baseCurrency, contractCurrency, err)
 	}

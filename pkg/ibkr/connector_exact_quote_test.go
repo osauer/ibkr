@@ -70,6 +70,51 @@ func TestExactSessionOptionQuoteCarriesCanonicalIdentityAndClearsUnderlyingPrima
 	assertField(t, marketData, 14, contract.TradingClass, "marketData tradingClass")
 }
 
+func TestExactSessionFXQuoteUsesExplicitPairWithoutPositiveConID(t *testing.T) {
+	conn, connector, oldSocket, _, _ := newQueuedInstructionReconnectFixture(t)
+	binding, ok := connector.CaptureSession()
+	if !ok {
+		t.Fatal("capture exact FX quote session")
+	}
+	key, err := connector.SubscribeMarketDataWithContractForSession(context.Background(), binding, Contract{
+		Symbol: "USD", SecType: "CASH", Exchange: "IDEALPRO", PrimaryExch: "IDEALPRO", Currency: "EUR",
+	}, []string{"BID", "ASK"})
+	if err != nil {
+		t.Fatalf("subscribe exact FX pair: %v", err)
+	}
+	if key == "" {
+		t.Fatal("exact FX subscription returned empty key")
+	}
+	frames := decodeOutboundFrames(t, conn, oldSocket.Bytes())
+	marketData := findOutboundFrame(t, frames, reqMktData)
+	assertField(t, marketData, 3, "0", "marketData conID")
+	assertField(t, marketData, 4, "USD", "marketData symbol")
+	assertField(t, marketData, 5, "CASH", "marketData secType")
+	assertField(t, marketData, 10, "IDEALPRO", "marketData exchange")
+	assertField(t, marketData, 11, "IDEALPRO", "marketData primaryExchange")
+	assertField(t, marketData, 12, "EUR", "marketData currency")
+}
+
+func TestExactSessionQuoteRejectsOtherZeroConIDContracts(t *testing.T) {
+	_, connector, _, _, _ := newQueuedInstructionReconnectFixture(t)
+	binding, ok := connector.CaptureSession()
+	if !ok {
+		t.Fatal("capture exact quote session")
+	}
+	for name, contract := range map[string]Contract{
+		"stock":            {Symbol: "SPY", SecType: "STK", Exchange: "SMART", Currency: "USD"},
+		"cash wrong venue": {Symbol: "USD", SecType: "CASH", Exchange: "SMART", Currency: "EUR"},
+		"cash same legs":   {Symbol: "EUR", SecType: "CASH", Exchange: "IDEALPRO", Currency: "EUR"},
+		"cash missing leg": {Symbol: "USD", SecType: "CASH", Exchange: "IDEALPRO"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := connector.SubscribeMarketDataWithContractForSession(context.Background(), binding, contract, nil); err == nil {
+				t.Fatalf("zero-ConID contract unexpectedly accepted: %+v", contract)
+			}
+		})
+	}
+}
+
 func TestExactSessionQuoteCleanupReleasesRetiredSlotWithoutSuccessorCancel(t *testing.T) {
 	conn, connector, oldSocket, newSocket, _ := newQueuedInstructionReconnectFixture(t)
 	binding, ok := connector.CaptureSession()

@@ -1112,6 +1112,27 @@ func (s *Server) previewExactSessionQuote(ctx context.Context, authority *orderP
 	if authority == nil || authority.connector == nil || contract.ConID <= 0 || !s.orderPreviewBrokerAuthorityCurrent(authority) {
 		return rpc.OrderQuoteSnapshot{}, fmt.Errorf("%w: exact broker quote authority is unavailable", ErrTradingDisabled)
 	}
+	return s.previewExactSessionContractQuote(ctx, authority, contract, timeout)
+}
+
+// previewExactSessionFXQuote captures one direct CASH/IDEALPRO pair from the
+// same physical session as the order preview. Currency-pair identity is fully
+// specified by Symbol/Currency/SecType/Exchange; unlike stocks and options it
+// does not need a contract-details round trip or positive ConID before market
+// data can be requested.
+func (s *Server) previewExactSessionFXQuote(ctx context.Context, authority *orderPreviewBrokerAuthority, contract rpc.ContractParams, timeout time.Duration) (rpc.OrderQuoteSnapshot, error) {
+	if authority == nil || authority.connector == nil ||
+		!strings.EqualFold(strings.TrimSpace(contract.SecType), "CASH") ||
+		!strings.EqualFold(strings.TrimSpace(contract.Exchange), "IDEALPRO") ||
+		strings.TrimSpace(contract.Symbol) == "" || strings.TrimSpace(contract.Currency) == "" ||
+		strings.EqualFold(strings.TrimSpace(contract.Symbol), strings.TrimSpace(contract.Currency)) ||
+		!s.orderPreviewBrokerAuthorityCurrent(authority) {
+		return rpc.OrderQuoteSnapshot{}, fmt.Errorf("%w: exact broker FX quote authority is unavailable", ErrTradingDisabled)
+	}
+	return s.previewExactSessionContractQuote(ctx, authority, contract, timeout)
+}
+
+func (s *Server) previewExactSessionContractQuote(ctx context.Context, authority *orderPreviewBrokerAuthority, contract rpc.ContractParams, timeout time.Duration) (rpc.OrderQuoteSnapshot, error) {
 	quoteCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	key, err := authority.connector.SubscribeMarketDataWithContractForSession(quoteCtx, authority.session, *previewIBKRContract(contract), defaultGenericTicks)
