@@ -28,6 +28,22 @@ const (
 	orderFXQuoteBudget             = 3 * time.Second
 )
 
+// orderFXBasePriority is the conventional major-FX base-currency ordering
+// accepted by IBKR's CASH/IDEALPRO contracts. The lower-ranked currency is
+// the wire symbol and the higher-ranked currency is the wire quote currency.
+// Keep this deliberately limited to the same G10-major set accepted by
+// pkg/ibkr.FxPair; an unknown pair fails closed instead of guessing a route.
+var orderFXBasePriority = map[string]int{
+	"EUR": 0,
+	"GBP": 1,
+	"AUD": 2,
+	"NZD": 3,
+	"USD": 4,
+	"CAD": 5,
+	"CHF": 6,
+	"JPY": 7,
+}
+
 // orderNotionalAuthority is the typed measurement used by the account-base
 // max_notional gate. QuoteNotional remains in the contract currency for user
 // disclosure; BaseNotional is the value actually compared with the configured
@@ -375,15 +391,15 @@ func (s *Server) captureOrderNotionalAuthority(ctx context.Context, authority *o
 		return orderNotionalAuthority{}, fmt.Errorf("%w: current typed FX evidence unavailable for %s/%s", ErrTradingDisabled, baseCurrency, contractCurrency)
 	}
 
-	fxContract := rpc.ContractParams{
-		Symbol: contractCurrency, SecType: "CASH", Exchange: "IDEALPRO",
-		PrimaryExch: "IDEALPRO", Currency: baseCurrency,
+	fxContract, inverted, err := canonicalOrderFXContract(contractCurrency, baseCurrency)
+	if err != nil {
+		return orderNotionalAuthority{}, fmt.Errorf("%w: current typed FX evidence unavailable for %s/%s: %v", ErrTradingDisabled, baseCurrency, contractCurrency, err)
 	}
 	quote, err := s.previewExactSessionFXQuote(ctx, authority, fxContract, budget)
 	if err != nil {
 		return orderNotionalAuthority{}, fmt.Errorf("%w: current exact-session FX quote unavailable for %s/%s: %v", ErrTradingDisabled, baseCurrency, contractCurrency, err)
 	}
-	rate := conservativeOrderFXRate(quote)
+	rate := conservativeOrderFXRate(quote, inverted)
 	result, err := newCrossCurrencyOrderNotionalAuthority(quoteNotional, contractCurrency, baseCurrency, rate, quote.AsOf, quote.DataType)
 	if err != nil {
 		return orderNotionalAuthority{}, err
@@ -392,6 +408,25 @@ func (s *Server) captureOrderNotionalAuthority(ctx context.Context, authority *o
 		return orderNotionalAuthority{}, brokerWriteTransactionDriftError()
 	}
 	return result, nil
+}
+
+func canonicalOrderFXContract(contractCurrency, baseCurrency string) (rpc.ContractParams, bool, error) {
+	contractCurrency = strings.ToUpper(strings.TrimSpace(contractCurrency))
+	baseCurrency = strings.ToUpper(strings.TrimSpace(baseCurrency))
+	contractRank, contractOK := orderFXBasePriority[contractCurrency]
+	baseRank, baseOK := orderFXBasePriority[baseCurrency]
+	if !contractOK || !baseOK || contractCurrency == baseCurrency {
+		return rpc.ContractParams{}, false, fmt.Errorf("unsupported major-currency pair")
+	}
+	inverted := contractRank > baseRank
+	symbol, currency := contractCurrency, baseCurrency
+	if inverted {
+		symbol, currency = baseCurrency, contractCurrency
+	}
+	return rpc.ContractParams{
+		Symbol: symbol, SecType: "CASH", Exchange: "IDEALPRO",
+		PrimaryExch: "IDEALPRO", Currency: currency,
+	}, inverted, nil
 }
 
 func newCrossCurrencyOrderNotionalAuthority(quoteNotional float64, contractCurrency, baseCurrency string, rate float64, at time.Time, dataType string) (orderNotionalAuthority, error) {
@@ -414,25 +449,21 @@ func validOrderFXDataType(dataType string) bool {
 	}
 }
 
-// conservativeOrderFXRate chooses the ask for a direct
-// ContractCurrency/BaseCurrency quote when available. That is the
-// conservative conversion for an absolute order cap; midpoint/last cannot
-// understate the amount when a positive ask is present.
-func conservativeOrderFXRate(quote rpc.OrderQuoteSnapshot) float64 {
-	switch {
-	case quote.Ask != nil && positiveFinite(*quote.Ask):
-		return *quote.Ask
-	case quote.Last != nil && positiveFinite(*quote.Last):
-		return *quote.Last
-	case quote.Mark != nil && positiveFinite(*quote.Mark):
-		return *quote.Mark
-	case quote.Midpoint != nil && positiveFinite(*quote.Midpoint):
-		return *quote.Midpoint
-	case quote.Bid != nil && positiveFinite(*quote.Bid):
-		return *quote.Bid
-	default:
+// conservativeOrderFXRate converts one unit of contract currency into account
+// base currency without understating the absolute order cap. A direct
+// ContractCurrency/BaseCurrency quote uses the ask. An inverse
+// BaseCurrency/ContractCurrency quote uses 1/bid.
+func conservativeOrderFXRate(quote rpc.OrderQuoteSnapshot, inverted bool) float64 {
+	if inverted {
+		if quote.Bid == nil || !positiveFinite(*quote.Bid) {
+			return 0
+		}
+		return 1 / *quote.Bid
+	}
+	if quote.Ask == nil || !positiveFinite(*quote.Ask) {
 		return 0
 	}
+	return *quote.Ask
 }
 
 func validateOrderRiskAuthority(cfg config.Trading, draft rpc.OrderDraft, position rpc.OrderPositionImpact, notional orderNotionalAuthority, baseCurrency string) error {

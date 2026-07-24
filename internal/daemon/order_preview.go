@@ -1129,10 +1129,16 @@ func (s *Server) previewExactSessionFXQuote(ctx context.Context, authority *orde
 		!s.orderPreviewBrokerAuthorityCurrent(authority) {
 		return rpc.OrderQuoteSnapshot{}, fmt.Errorf("%w: exact broker FX quote authority is unavailable", ErrTradingDisabled)
 	}
-	return s.previewExactSessionContractQuote(ctx, authority, contract, timeout)
+	return s.previewExactSessionContractQuoteWithReady(ctx, authority, contract, timeout, func(q *rpc.Quote) bool {
+		return q.Bid != nil && q.Ask != nil
+	})
 }
 
 func (s *Server) previewExactSessionContractQuote(ctx context.Context, authority *orderPreviewBrokerAuthority, contract rpc.ContractParams, timeout time.Duration) (rpc.OrderQuoteSnapshot, error) {
+	return s.previewExactSessionContractQuoteWithReady(ctx, authority, contract, timeout, nil)
+}
+
+func (s *Server) previewExactSessionContractQuoteWithReady(ctx context.Context, authority *orderPreviewBrokerAuthority, contract rpc.ContractParams, timeout time.Duration, ready func(*rpc.Quote) bool) (rpc.OrderQuoteSnapshot, error) {
 	quoteCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	key, err := authority.connector.SubscribeMarketDataWithContractForSession(quoteCtx, authority.session, *previewIBKRContract(contract), defaultGenericTicks)
@@ -1148,11 +1154,14 @@ func (s *Server) previewExactSessionContractQuote(ctx context.Context, authority
 	started := time.Now()
 	if err := pollMarketData(quoteCtx, authority.connector, key, started.Add(timeout), func(data *ibkrlib.MarketData) bool {
 		fillQuoteMarketData(q, data)
-		ready := q.Bid != nil || q.Ask != nil || q.Last != nil || q.Mark != nil
-		if ready {
+		hasPrice := q.Bid != nil || q.Ask != nil || q.Last != nil || q.Mark != nil
+		if hasPrice {
 			q.DataType = quoteDataTypeName(authority.connector.MarketDataTypeForSymbol(key), true, false)
 		}
-		return ready
+		if ready != nil {
+			return ready(q)
+		}
+		return hasPrice
 	}); err != nil {
 		return rpc.OrderQuoteSnapshot{}, fmt.Errorf("%w: exact contract quote unavailable: %v", ErrTradingDisabled, err)
 	}

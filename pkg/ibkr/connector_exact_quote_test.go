@@ -70,14 +70,14 @@ func TestExactSessionOptionQuoteCarriesCanonicalIdentityAndClearsUnderlyingPrima
 	assertField(t, marketData, 14, contract.TradingClass, "marketData tradingClass")
 }
 
-func TestExactSessionFXQuoteUsesExplicitPairWithoutPositiveConID(t *testing.T) {
+func TestExactSessionFXQuoteUsesCanonicalExplicitPairWithoutPositiveConID(t *testing.T) {
 	conn, connector, oldSocket, _, _ := newQueuedInstructionReconnectFixture(t)
 	binding, ok := connector.CaptureSession()
 	if !ok {
 		t.Fatal("capture exact FX quote session")
 	}
 	key, err := connector.SubscribeMarketDataWithContractForSession(context.Background(), binding, Contract{
-		Symbol: "USD", SecType: "CASH", Exchange: "IDEALPRO", PrimaryExch: "IDEALPRO", Currency: "EUR",
+		Symbol: "EUR", SecType: "CASH", Exchange: "IDEALPRO", PrimaryExch: "IDEALPRO", Currency: "USD",
 	}, []string{"BID", "ASK"})
 	if err != nil {
 		t.Fatalf("subscribe exact FX pair: %v", err)
@@ -88,11 +88,11 @@ func TestExactSessionFXQuoteUsesExplicitPairWithoutPositiveConID(t *testing.T) {
 	frames := decodeOutboundFrames(t, conn, oldSocket.Bytes())
 	marketData := findOutboundFrame(t, frames, reqMktData)
 	assertField(t, marketData, 3, "0", "marketData conID")
-	assertField(t, marketData, 4, "USD", "marketData symbol")
+	assertField(t, marketData, 4, "EUR", "marketData symbol")
 	assertField(t, marketData, 5, "CASH", "marketData secType")
 	assertField(t, marketData, 10, "IDEALPRO", "marketData exchange")
 	assertField(t, marketData, 11, "IDEALPRO", "marketData primaryExchange")
-	assertField(t, marketData, 12, "EUR", "marketData currency")
+	assertField(t, marketData, 12, "USD", "marketData currency")
 }
 
 func TestExactSessionQuoteRejectsOtherZeroConIDContracts(t *testing.T) {

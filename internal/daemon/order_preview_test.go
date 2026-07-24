@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1244,6 +1245,54 @@ func TestOrderPreviewConvertsCrossCurrencyNotionalToAccountBase(t *testing.T) {
 		payload.NotionalAuthority.Source != orderFXSourceExactSessionQuote ||
 		payload.NotionalAuthority.BaseCurrency != "EUR" {
 		t.Fatalf("signed FX authority = %+v", payload.NotionalAuthority)
+	}
+}
+
+func TestCanonicalOrderFXContractAndConservativeRate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		contractCurrency string
+		baseCurrency     string
+		wantSymbol       string
+		wantCurrency     string
+		wantInverted     bool
+	}{
+		{name: "EUR into USD is direct", contractCurrency: "EUR", baseCurrency: "USD", wantSymbol: "EUR", wantCurrency: "USD"},
+		{name: "USD into EUR is inverse", contractCurrency: "USD", baseCurrency: "EUR", wantSymbol: "EUR", wantCurrency: "USD", wantInverted: true},
+		{name: "USD into JPY is direct", contractCurrency: "USD", baseCurrency: "JPY", wantSymbol: "USD", wantCurrency: "JPY"},
+		{name: "JPY into USD is inverse", contractCurrency: "JPY", baseCurrency: "USD", wantSymbol: "USD", wantCurrency: "JPY", wantInverted: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			contract, inverted, err := canonicalOrderFXContract(tc.contractCurrency, tc.baseCurrency)
+			if err != nil {
+				t.Fatalf("canonicalOrderFXContract: %v", err)
+			}
+			if contract.Symbol != tc.wantSymbol || contract.Currency != tc.wantCurrency ||
+				contract.SecType != "CASH" || contract.Exchange != "IDEALPRO" ||
+				contract.PrimaryExch != "IDEALPRO" || inverted != tc.wantInverted {
+				t.Fatalf("contract=%+v inverted=%v", contract, inverted)
+			}
+		})
+	}
+
+	bid, ask := 1.08, 1.10
+	quote := rpc.OrderQuoteSnapshot{Bid: &bid, Ask: &ask}
+	if got := conservativeOrderFXRate(quote, false); got != ask {
+		t.Fatalf("direct rate=%v, want ask=%v", got, ask)
+	}
+	if got, want := conservativeOrderFXRate(quote, true), 1/bid; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("inverse rate=%v, want 1/bid=%v", got, want)
+	}
+}
+
+func TestCanonicalOrderFXContractRejectsUnsupportedPairs(t *testing.T) {
+	t.Parallel()
+	for _, tc := range [][2]string{{"USD", "USD"}, {"SEK", "EUR"}, {"USD", ""}} {
+		if contract, inverted, err := canonicalOrderFXContract(tc[0], tc[1]); err == nil {
+			t.Fatalf("pair %q/%q unexpectedly accepted as %+v inverted=%v", tc[0], tc[1], contract, inverted)
+		}
 	}
 }
 
